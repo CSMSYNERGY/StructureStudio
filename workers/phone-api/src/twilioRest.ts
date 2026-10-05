@@ -139,12 +139,16 @@ export interface TwilioRecording {
   status: string;
   duration: string | null;
   date_created: string;
+  /**
+   * How it was made: RecordVerb (<Record>, a voicemail), StartCallRecordingAPI (a call
+   * recording), DialVerb, Conference, ... The sweep files RecordVerb only (cron/sweep.ts).
+   */
   source?: string;
 }
 
 /**
  * Recordings created on or after `since` (a UTC date; Twilio filters by day), newest first,
- * up to `max`. Pages are followed with next_page_uri.
+ * up to `max`. Pages are followed with next_page_uri until there are no more or `max` is reached.
  */
 export async function listRecordings(env: Env, since: string, max = 200): Promise<TwilioRecording[]> {
   const out: TwilioRecording[] = [];
@@ -168,11 +172,56 @@ export async function deleteRecording(env: Env, recordingSid: string): Promise<v
   throw new TwilioError("delete recording", res.status, await codeOf(res));
 }
 
-/** The recording's audio as an MP3 stream. A Range header is passed through for seeking. */
-export async function recordingMedia(env: Env, recordingSid: string, range: string | null): Promise<Response> {
-  return call(env, "fetch recording", `/Recordings/${encodeURIComponent(recordingSid)}.mp3`, {
+/**
+ * The recording's audio as an MP3 stream. A Range header is passed through for seeking.
+ * `channels` 2 asks for both channels of a dual-channel call recording (RequestedChannels=2):
+ * the transcriber needs them apart. Without it Twilio mixes them to one, which is what playback
+ * wants (both people in both ears) and what a voicemail always is.
+ */
+export async function recordingMedia(env: Env, recordingSid: string, range: string | null, channels: 1 | 2 = 1): Promise<Response> {
+  const q = channels === 2 ? "?RequestedChannels=2" : "";
+  return call(env, "fetch recording", `/Recordings/${encodeURIComponent(recordingSid)}.mp3${q}`, {
     headers: range ? { Range: range } : {},
   });
+}
+
+// ── Call recordings (src/recording.ts) ──────────────────────────────────────────────
+//
+// Started, paused, resumed and stopped through the REST API on one call leg (the customer's),
+// never by a TwiML `record` attribute: that is how one recording follows the call through hold,
+// transfers and a device switch, and how nothing records a call that did not hear the notice.
+
+export interface StartedRecording {
+  sid: string;
+  status: string;
+  /** 2 for a dual-channel recording; null when Twilio does not say. */
+  channels: number | null;
+}
+
+/** Start recording a live call. Fields are Twilio's (RecordingChannels, RecordingStatusCallback, ...). */
+export async function startRecording(env: Env, callSid: string, fields: Record<string, string | string[]>): Promise<StartedRecording> {
+  const res = await call(env, "start recording", `/Calls/${encodeURIComponent(callSid)}/Recordings.json`, form(fields));
+  if (!res.ok) throw new TwilioError("start recording", res.status, await codeOf(res));
+  const body = (await res.json().catch(() => ({}))) as { sid?: string; status?: string; channels?: number | string | null };
+  if (!body.sid) throw new TwilioError("start recording (no sid)", res.status, 0);
+  const ch = Number.parseInt(String(body.channels ?? ""), 10);
+  return { sid: String(body.sid), status: String(body.status ?? ""), channels: Number.isFinite(ch) ? ch : null };
+}
+
+/** Pause, resume or stop a call recording: Status paused | in-progress | stopped (PauseBehavior skip). */
+export async function updateRecording(env: Env, callSid: string, recordingSid: string, fields: Record<string, string>): Promise<void> {
+  const res = await call(env, "update recording",
+    `/Calls/${encodeURIComponent(callSid)}/Recordings/${encodeURIComponent(recordingSid)}.json`, form(fields));
+  if (!res.ok) throw new TwilioError("update recording", res.status, await codeOf(res));
+}
+
+/** Every recording on one call (one page of 50 is far more than a call ever has). */
+export async function listCallRecordings(env: Env, callSid: string): Promise<TwilioRecording[]> {
+  const res = await call(env, "list call recordings", `/Calls/${encodeURIComponent(callSid)}/Recordings.json?PageSize=50`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new TwilioError("list call recordings", res.status, await codeOf(res));
+  const body = (await res.json()) as { recordings?: TwilioRecording[] };
+  return body.recordings ?? [];
 }
 
 // ── Conferences (hold and warm transfer, plan 9C design b) ──────────────────────────
@@ -413,16 +462,22 @@ export interface TwilioRecordingCost {
   sid: string;
   duration: number | null;
   price: number | null;
+  /** The call it is a recording of, and how it was made (StartCallRecordingAPI for a call recording, RecordVerb for a voicemail). */
+  callSid: string | null;
+  source: string | null;
 }
 
-/** A recording's duration and price. Null when it is gone (retention deletes them). */
+/** A recording's duration and price, and whose it is. Null when it is gone (retention deletes them). */
 export async function fetchRecording(env: Env, recordingSid: string): Promise<TwilioRecordingCost | null> {
   const res = await call(env, "fetch recording", `/Recordings/${encodeURIComponent(recordingSid)}.json`);
   if (res.status === 404) return null;
   if (!res.ok) throw new TwilioError("fetch recording", res.status, await codeOf(res));
-  const r = (await res.json()) as { sid?: string; duration?: string | number | null; price?: string | null };
+  const r = (await res.json()) as { sid?: string; duration?: string | number | null; price?: string | null; call_sid?: string | null; source?: string | null };
   const d = Number.parseInt(String(r.duration ?? ""), 10);
-  return { sid: String(r.sid ?? recordingSid), duration: Number.isFinite(d) ? d : null, price: priceMicros(r.price) };
+  return {
+    sid: String(r.sid ?? recordingSid), duration: Number.isFinite(d) ? d : null, price: priceMicros(r.price),
+    callSid: r.call_sid ? String(r.call_sid) : null, source: r.source ? String(r.source) : null,
+  };
 }
 
 /**

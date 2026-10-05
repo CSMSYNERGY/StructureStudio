@@ -16,9 +16,11 @@
 // floor_cents is the one cents field: it is compared with the wallet's balance_cents.
 //
 // ── WHAT "CHARGING IS ON" MEANS ─────────────────────────────────────────────────────────
-// Mirrors wallet_usage_gate / phone_usage_armed in migration 259 — change them together.
+// Mirrors wallet_usage_gate / phone_usage_armed in migrations 259 and 263 — change them together.
 // A tenant's meter is armed when the markup is set AND armed_at is set AND (the meter's
-// usage_prices row is active OR the tenant is in pilot_client_ids). The env rail
+// usage_prices row is active OR the tenant is in pilot_client_ids). The pilot half counts for
+// the four PHONE_METERS only (263): the call recording and transcript meters (call_recording,
+// call_transcription) charge only once their own row is active, pilot or not. The env rail
 // PHONE_USAGE_METERS=on sits on top of that and is checked by the callers (the phone-api
 // worker and _shared/usageGate.ts), not by the database.
 //
@@ -366,10 +368,12 @@ export interface PhoneUsageReport {
     daysCovered: number;
     daysExpected: number;
     days: number;
-    /** Our cost on the days Twilio's totals cover — the like-for-like side of the gap. */
+    /** Our cost on the days Twilio's totals cover — the like-for-like side of the gap. Leaves
+     *  out call transcripts (Workers AI and Claude, never on Twilio's bill); keeps call
+     *  recordings, which Twilio bills. */
     ourCostCoveredMicros: number;
-    /** Twilio's bill − what we matched to a call or text, over the covered days. null with no
-     *  Twilio rows for the month. */
+    /** Twilio's bill − what we matched to a call, text or call recording, over the covered
+     *  days. null with no Twilio rows for the month. */
     gapMicros: number | null;
   };
   rowCount: number;
@@ -449,7 +453,9 @@ export function summarizePhoneUsage(input: {
     else if (r.source === "sms") { t.texts++; if (out) t.textsOut++; else t.textsIn++; }
     const units = numOrNull(r.units);
     if (units != null) {
-      if (r.unit === "minute") t.minutes += units;
+      // Call minutes are calls' only: a recording and its transcript are per minute too
+      // (migration 263), but they are the same minutes again, not more talk.
+      if (r.unit === "minute" && r.source === "call") t.minutes += units;
       else if (r.unit === "segment") t.segments += units;
     }
     const cost = numOrNull(r.cost_micros);
@@ -459,8 +465,10 @@ export function summarizePhoneUsage(input: {
       else if (r.cost_source === "mixed") t.costMixedMicros += cost;
       else t.costTwilioMicros += cost;
       // occurred_at comes back as an offset timestamp; normalise to the UTC day Twilio uses.
+      // A transcript's cost (Workers AI and Claude) is never on Twilio's bill, so it stays out of
+      // the like-for-like side; a recording's is (Twilio's "recordings" category).
       const t0 = Date.parse(r.occurred_at);
-      if (Number.isFinite(t0) && coveredDays.has(new Date(t0).toISOString().slice(0, 10))) ourCostCovered += cost;
+      if (r.source !== "transcription" && Number.isFinite(t0) && coveredDays.has(new Date(t0).toISOString().slice(0, 10))) ourCostCovered += cost;
     }
     switch (r.state) {
       case "charged":
@@ -471,8 +479,13 @@ export function summarizePhoneUsage(input: {
         t.counts.shadow++;
         // No markup = nothing can be priced, and the column says so (null) rather than $0.
         // A shadow row with no cost is not something the worker writes; it adds nothing.
+        // The ceiling holds calls (per minute) and texts (per segment) only, as in the worker
+        // (usageCharge.ts ceilingFor): a recording or transcript line has none.
         if (settings.markup == null) t._shadowUnpriced++;
-        else t.wouldChargeMicros = (t.wouldChargeMicros ?? 0) + (previewChargeMicros(cost, units, r.unit ?? null, settings) ?? 0);
+        else {
+          const capUnit = r.source === "call" || r.source === "sms" ? r.unit ?? null : null;
+          t.wouldChargeMicros = (t.wouldChargeMicros ?? 0) + (previewChargeMicros(cost, units, capUnit, settings) ?? 0);
+        }
         break;
       }
       case "exempt": t.counts.exempt++; t.absorbedMicros += cost ?? 0; break;

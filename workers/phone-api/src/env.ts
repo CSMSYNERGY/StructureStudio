@@ -25,6 +25,17 @@ export interface Env {
   VOICEMAIL_RETENTION_DAYS?: string;
   /** "on" adds Twilio transcription to voicemail (<Record transcribe>). Anything else: off. */
   TRANSCRIBE?: string;
+  /**
+   * Call recording's kill switch (src/recording.ts). Exactly "on" lets a business that turned
+   * recording on have its calls announced and recorded. Anything else: no announcement, no
+   * recording, whatever the business chose. Recordings already made are still played and expired.
+   */
+  CALL_RECORDING?: string;
+  /**
+   * Exactly "on" transcribes and summarises recorded calls (cron/transcribe.ts, Workers AI and the
+   * phone-call-summary edge function), for businesses that left transcripts on. Anything else: off.
+   */
+  CALL_TRANSCRIBE?: string;
 
   // ── Supabase ───────────────────────────────────────────────────────────────────────
   SUPABASE_URL?: string;
@@ -76,6 +87,8 @@ export interface Env {
 
   // ── bindings ──────────────────────────────────────────────────────────────────────
   CF_VERSION_METADATA?: { id: string; tag?: string; timestamp?: string };
+  /** Workers AI: speech to text for recorded calls (Deepgram nova-3, cron/transcribe.ts). */
+  AI?: Ai;
 }
 
 /** The slice of ExecutionContext the handlers use, so tests can pass a plain object. */

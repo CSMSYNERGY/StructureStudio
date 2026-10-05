@@ -30,9 +30,11 @@ const SESSION = {
   access_token: `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: USER.id, role: "authenticated", email: USER.email, exp: EXP })}.c3R1Yg`,
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
-// The sales_rep preset as effectiveAccess resolves it: every settings_* area is "none".
+// The sales_rep preset as effectiveAccess resolves it, every settings_* area "none", WITH PHONE
+// SWITCHED OFF: phone is a Settings area (SETTINGS_AREAS, Phone is gated on it), so a rep's phone
+// 'own' rightly opens Settings to Phone and My Profile. This person holds no Settings area at all.
 const SALES_REP = {
-  designer: "edit", designs: "edit", contacts: "edit", phone: "own", inventory: "view", orders: "edit", commissions: "own",
+  designer: "edit", designs: "edit", contacts: "edit", phone: "none", inventory: "view", orders: "edit", commissions: "own",
   change_orders: "none", change_order_approve: "none", build_schedule: "none", delivery_schedule: "none", repairs: "none",
   reports: "none", projects: "none", settings_structures: "none", settings_options: "none", settings_branding: "none",
   settings_crm: "none", settings_quickbooks: "none", settings_email: "none", settings_team: "none", settings_billing: "none",

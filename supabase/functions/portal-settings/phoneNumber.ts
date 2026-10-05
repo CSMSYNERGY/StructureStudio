@@ -5,8 +5,10 @@
 //     texting reuses the same number once registration clears"). Bought through Twilio with
 //     portal-sms's own purchase helper (_shared/twilioTrustHub.ts purchaseNumber), recorded as
 //     an ordinary sms_numbers row that is NOT registered for texting and is attached to NO
-//     messaging service. The one-number-per-builder rule stays: it is the tenant's number, and
-//     the texting setup must adopt it rather than buy a second.
+//     messaging service. The texting setup adopts a builder's first number rather than buy a
+//     second. Since migration 266 a builder may have up to ten (per-person numbers, Carolyn
+//     09-30): a later one joins the builder's texting setup straight away when texting is already
+//     on (attachToTexting below), and stays calling-only otherwise.
 //   * CONNECTING A NUMBER FOR CALLS: point its voice webhooks at the phone-api Worker, which is
 //     what "voice_enabled" on sms_numbers records.
 //
@@ -245,15 +247,21 @@ export type Bought = { sid: string; phoneNumber: string };
  * ⚠️ ANY UNRECORDED NUMBER IS ADOPTED, NOT ONLY THE ONE PICKED THIS TIME (review SSB-4). A
  * number that was bought is gone from Twilio's search results, so the builder can only pick a
  * DIFFERENT one on the next press; matching on the pick alone bought that one too and left the
- * first rented forever, invisible to the one-number count. The caller has already checked this
- * tenant has no live sms_numbers row, so every FriendlyName=client_id number Twilio lists is
- * one we pay for and have not recorded: the builder's own pick wins if it is among them,
- * otherwise the first of them is kept and the new pick is ignored.
+ * first rented forever. Every FriendlyName=client_id number Twilio lists that is NOT one of the
+ * tenant's live sms_numbers rows (`recorded`) is one we pay for and have not recorded: the
+ * builder's own pick wins if it is among them, otherwise the first of them is kept and the new
+ * pick is ignored.
+ *
+ * ⚠️ `recorded` MATTERS SINCE A TENANT CAN HOLD MORE THAN ONE NUMBER (migration 266). Before, the
+ * caller refused any tenant with a live number, so everything Twilio listed was unrecorded. Now
+ * the tenant's own recorded numbers carry the same FriendlyName, and "adopting" one of them would
+ * record it twice (sms_numbers_live_unique refuses) and never buy the second number at all.
  *
  * Of those numbers, this returns the one to adopt, or null (none: buy the pick).
  */
-export function pickOrphan(already: Bought[], wanted: string): Bought | null {
-  const real = (already ?? []).filter((n) => n && n.sid && n.phoneNumber);
+export function pickOrphan(already: Bought[], wanted: string, recorded: string[] = []): Bought | null {
+  const ours = new Set((recorded ?? []).map(String));
+  const real = (already ?? []).filter((n) => n && n.sid && n.phoneNumber && !ours.has(n.phoneNumber));
   return real.find((n) => n.phoneNumber === wanted) ?? real[0] ?? null;
 }
 
@@ -286,13 +294,16 @@ export type BuyOutcome =
  *   sms-inbound through the number's own SmsUrl instead (numberSmsConfig), which the handler
  *   sets right after this returns.
  *
- *   1. Adopt any unrecorded number first (pickOrphan).
+ *   1. Adopt any unrecorded number first (pickOrphan; `recorded` = the tenant's live numbers, which
+ *      are never "unrecorded").
  *   2. Take the wallet hold on sms_number_monthly under numberHoldKey(THE NUMBER KEPT), portal-sms's
  *      meter and key: the number bills monthly at Twilio from the moment it is bought, so the
  *      first month is held here exactly as the texting purchase holds it. An adopted number was
  *      held under its own key by the press that bought it, so re-holding answers
  *      `hold_replayed` (already paid; the caller maps that to holdId null) instead of charging
- *      twice. A refused hold (no funds, meter down) buys nothing.
+ *      twice. A refused hold (no funds, meter down) buys nothing. Months 2 and on are the
+ *      phone-api Worker's daily cron (workers/phone-api/src/cron/numberFee.ts), on this meter
+ *      under its own per-month key, so the first month is never charged twice.
  *   3. Buy, unless adopting. A failed purchase releases the hold.
  *   4. Record the sms_numbers row. If THAT fails after a FRESH purchase, the number is released
  *      at Twilio and the hold released, so nothing stays rented that nobody recorded. An adopted
@@ -301,7 +312,7 @@ export type BuyOutcome =
  *   5. Capture the hold.
  */
 export async function buyCallingNumber(
-  opts: { clientId: string; wanted: string },
+  opts: { clientId: string; wanted: string; recorded?: string[] },
   deps: {
     findPurchasedNumbers: (clientId: string) => Promise<Bought[]>;
     purchaseNumber: (o: { phoneNumber: string; clientId: string }) => Promise<Bought>;
@@ -318,7 +329,7 @@ export async function buyCallingNumber(
   } catch (e) {
     return { ok: false, kind: "lookup_failed", error: e };
   }
-  const orphan = pickOrphan(already, opts.wanted);
+  const orphan = pickOrphan(already, opts.wanted, opts.recorded ?? []);
   const target = orphan ? orphan.phoneNumber : opts.wanted;
 
   const held = await deps.hold(numberHoldKey(opts.clientId, target));
@@ -382,44 +393,112 @@ export const SWITCH_WARNINGS = {
   offStuck: "Calling is off, but your number couldn't be moved to voicemail just now, so callers hear that it can't take calls. Press \"Send calls to voicemail\" to try again.",
   offUnchecked: "Calling is off, but your number couldn't be checked just now. Reload this page to see where its calls go.",
   onNotReconnected: "Calling is on, but your number didn't reconnect. Press \"Connect this number for calls\" to try again.",
+  // More than one number (migration 266): the same, said of the ones that didn't move.
+  offStuckSome: "Calling is off, but some of your numbers couldn't be moved to voicemail just now, so their callers hear that they can't take calls. Press \"Send calls to voicemail\" to try again.",
+  onNotReconnectedSome: "Calling is on, but some of your numbers didn't reconnect. Press \"Connect this number for calls\" on each of them to try again.",
 } as const;
 
 /**
  * phone_status_set, in the order it has to happen:
  *   1. The column first, both ways. OFF is also the safety control, so it lands before anything
  *      that can fail; ON only makes the Worker willing to answer.
- *   2. Then the number follows (numberActionForSwitch): off moves a connected number to
- *      voicemail, on reconnects one the switch moved. A failure there does not undo the switch:
- *      the answer says what is left, and voiceReady tells the screen which way calls go.
+ *   2. Then EVERY number follows (numberActionForSwitch), one at a time: off moves each connected
+ *      number to voicemail, on reconnects each one the switch moved. A failure on one does not
+ *      stop the others or undo the switch: the answer says what is left, and each number's
+ *      voiceReady tells the screen which way its calls go. (Migration 266: a business can have
+ *      more than one number, and a number left pointing at the Worker while calling is off drops
+ *      its callers with no voicemail, review SSB-2.)
+ * `number` is the first number's state, what a portal bundle from before 266 reads.
  * The dependencies are injected so a test drives the whole order without a database or Twilio.
  */
 export async function switchCalling(on: boolean, deps: {
   writeStatus: (on: boolean) => Promise<{ ok: true } | { ok: false; noRow: true } | { ok: false; error: unknown }>;
-  readNumber: () => Promise<{ row: SwitchNumber | null } | { error: unknown }>;
+  readNumbers: () => Promise<{ rows: SwitchNumber[] } | { error: unknown }>;
   toVoicemail: (n: SwitchNumber) => Promise<boolean>;
   connect: (n: SwitchNumber) => Promise<boolean>;
 }): Promise<
   | { ok: false; noRow: true }
   | { ok: false; error: unknown }
-  | { ok: true; phoneStatus: "on" | "off"; number: { voiceReady: boolean } | null; warning: string | null }
+  | {
+    ok: true; phoneStatus: "on" | "off"; number: { voiceReady: boolean } | null;
+    numbers: { id: string; voiceReady: boolean }[]; warning: string | null;
+  }
 > {
   const w = await deps.writeStatus(on);
   if (!w.ok) return w;
   const phoneStatus = on ? "on" : "off";
-  const read = await deps.readNumber();
+  const read = await deps.readNumbers();
   if ("error" in read) {
-    return { ok: true, phoneStatus, number: null, warning: on ? null : SWITCH_WARNINGS.offUnchecked };
+    return { ok: true, phoneStatus, number: null, numbers: [], warning: on ? null : SWITCH_WARNINGS.offUnchecked };
   }
-  const n = read.row;
-  const act = numberActionForSwitch(on, n);
-  if (!n) return { ok: true, phoneStatus, number: null, warning: null };
-  if (act === "to_voicemail") {
-    const moved = await deps.toVoicemail(n);
-    return { ok: true, phoneStatus, number: { voiceReady: !moved }, warning: moved ? null : SWITCH_WARNINGS.offStuck };
+  const rows = (read.rows ?? []).filter(Boolean);
+  const many = rows.length > 1;
+  const numbers: { id: string; voiceReady: boolean }[] = [];
+  let stuck = false, notBack = false;
+  for (const n of rows) {
+    const act = numberActionForSwitch(on, n);
+    if (act === "to_voicemail") {
+      const moved = await deps.toVoicemail(n);
+      if (!moved) stuck = true;
+      numbers.push({ id: n.id, voiceReady: !moved });
+    } else if (act === "connect") {
+      const back = await deps.connect(n);
+      if (!back) notBack = true;
+      numbers.push({ id: n.id, voiceReady: back });
+    } else {
+      numbers.push({ id: n.id, voiceReady: n.voice_enabled === true });
+    }
   }
-  if (act === "connect") {
-    const back = await deps.connect(n);
-    return { ok: true, phoneStatus, number: { voiceReady: back }, warning: back ? null : SWITCH_WARNINGS.onNotReconnected };
-  }
-  return { ok: true, phoneStatus, number: { voiceReady: n.voice_enabled === true }, warning: null };
+  const warning = stuck ? (many ? SWITCH_WARNINGS.offStuckSome : SWITCH_WARNINGS.offStuck)
+    : notBack ? (many ? SWITCH_WARNINGS.onNotReconnectedSome : SWITCH_WARNINGS.onNotReconnected)
+    : null;
+  return { ok: true, phoneStatus, number: numbers[0] ? { voiceReady: numbers[0].voiceReady } : null, numbers, warning };
 }
+
+// ── A later number joins texting (migration 266) ─────────────────────────────────────────
+
+export type TextingAttachOutcome =
+  | { ok: true; attached: boolean }
+  | { ok: false; step: "sid" | "check" | "attach" | "clear_sms_url" | "record"; error: unknown };
+
+/**
+ * A builder whose texting is already on (sms_registrations 'active', its Messaging Service known)
+ * gets another number into that service, so the number can text once its own carrier
+ * registration clears (twilio-events moves the row to 'registered'; until then smsSend never sends
+ * from it). portal-sms's adoption (adoptNumber.ts) in miniature, with the same _shared Twilio
+ * helpers in the same order, and WITHOUT its two other writes: client_settings.sms_number stays the
+ * main number (automatic texts stay on it), and the registration is not moved (it is already
+ * active).
+ *   1. In the service already? (a retry after Twilio acted and we did not record it)
+ *   2. If not, attach it.
+ *   3. Clear the number's own SmsUrl: the service's inbound URL (sms-inbound) takes its texts now.
+ *   4. LAST, the row's messaging_service_sid: that column is what marks it as no longer
+ *      calling-only, so a failure before it leaves a row the next press finishes.
+ * Every step is safe to repeat. No network or database of its own; the caller injects both.
+ */
+export async function attachToTexting(
+  o: { serviceSid: string; numberSid: string },
+  deps: {
+    inService: (serviceSid: string, numberSid: string) => Promise<boolean>;
+    attach: (serviceSid: string, numberSid: string) => Promise<void>;
+    clearSmsUrl: (numberSid: string) => Promise<void>;
+    record: (patch: { messaging_service_sid: string; twilio_sid: string }) => Promise<{ error: unknown }>;
+  },
+): Promise<TextingAttachOutcome> {
+  if (!/^PN[0-9a-f]{32}$/i.test(o.numberSid) || !/^MG[0-9a-f]{32}$/i.test(o.serviceSid)) {
+    return { ok: false, step: "sid", error: { message: "not a number sid and a service sid" } };
+  }
+  let there: boolean;
+  try { there = await deps.inService(o.serviceSid, o.numberSid); } catch (e) { return { ok: false, step: "check", error: e }; }
+  if (!there) {
+    try { await deps.attach(o.serviceSid, o.numberSid); } catch (e) { return { ok: false, step: "attach", error: e }; }
+  }
+  try { await deps.clearSmsUrl(o.numberSid); } catch (e) { return { ok: false, step: "clear_sms_url", error: e }; }
+  const r = await deps.record({ messaging_service_sid: o.serviceSid, twilio_sid: o.numberSid });
+  if (r.error) return { ok: false, step: "record", error: r.error };
+  return { ok: true, attached: !there };
+}
+
+/** What the builder is told when a new number could not join texting (it still takes calls). */
+export const TEXTING_JOIN_FAILED =
+  "It takes calls now, but it couldn't be added to your texting setup just now. Press \"Use this number for texting too\" to try again.";

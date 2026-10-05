@@ -21,6 +21,9 @@
 // interpolation in the HTML -- element text and attribute values alike. The text and
 // subject halves are not HTML and take raw values; subjects are flattened to one line
 // so a value carrying a newline can never smuggle in an extra header.
+//
+// ⚠️ Importers, ALL of which must be redeployed together when this changes (_shared
+//    bundles PER function): portal-settings, submit-estimate, customer-accept.
 
 export interface EmailContent {
   subject: string;
@@ -29,11 +32,17 @@ export interface EmailContent {
 }
 
 export interface EstimateEmailInput {
-  /** Per-tenant subject/intro overrides — client_settings.email_template_copy (138).
-   *  Untyped jsonb by nature; tenantCopy() validates and drops anything unusable. */
+  /** Per-tenant wording — client_settings.email_template_copy (138): subject, opening line,
+   *  closing message, button text and the photo switch. Untyped jsonb by nature; tenantCopy()
+   *  validates and drops anything unusable. */
   templateCopy?: unknown;
-  /** Used only by the {customer} token in tenant copy. */
+  /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
   customerName?: string;
+  /** The building's photo: the builder's own style photo, and only when that style's "show on
+   *  estimate" switch is on (callers use tenantStylePhotoUrl). Drawn above the detail rows when
+   *  it is an https:// address and the builder hasn't switched the photo off in their wording.
+   *  Absent renders nothing, so a caller that passes none sends exactly what it always did. */
+  pictureUrl?: string | null;
 
   businessName: string;
   logoUrl?: string | null;
@@ -100,12 +109,12 @@ export interface AcceptanceEmailInput {
 }
 
 export interface InvoiceEmailInput {
-  /** Per-tenant subject/intro overrides — client_settings.email_template_copy (138), read
-   *  under the "invoice" kind (the wording screen offers that tab alongside estimate/quote).
-   *  Untyped jsonb by nature; tenantCopy() validates and drops anything unusable, so absent
-   *  or unusable copy keeps the shipped wording byte for byte. */
+  /** Per-tenant wording — client_settings.email_template_copy (138), read under the "invoice"
+   *  kind (the wording screen offers that tab alongside estimate/quote). Untyped jsonb by
+   *  nature; tenantCopy() validates and drops anything unusable, so absent or unusable copy
+   *  keeps the shipped wording byte for byte. An invoice has no photo. */
   templateCopy?: unknown;
-  /** Used only by the {customer} token in tenant copy. */
+  /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
   customerName?: string;
 
   businessName: string;
@@ -127,6 +136,9 @@ export interface InvoiceEmailInput {
 export interface TestEmailInput {
   businessName: string;
   fromAddress: string;
+  /** The sender's own email signature (My Profile; cleaned by _shared/emailSignature.ts), so a
+   *  test shows how their emails will end. Plain text: escaped here, line breaks kept. */
+  signature?: string | null;
 }
 
 export interface InvoiceRequestEmailInput {
@@ -270,38 +282,173 @@ function textFooter(input: { businessName: string; phone?: string | null; websit
   return lines;
 }
 
-/** Per-tenant SUBJECT / INTRO overrides (migration 138).
+/** Per-tenant WORDING for the document emails (migration 138; widened 2026-10-04).
  *
- * ⚠️ COPY ONLY, NEVER HTML. A builder edits the two things that are genuinely theirs — the
- * subject line and the opening sentence. Everything structural (the branded header, the
- * detail rows, the CTA, the PDF links, the footer) stays owned by this file, because those
- * are the parts of the email that DO something and a wording edit has no business near
- * them. It is also the difference between a template feature and an injection surface
- * pointed at a customer's inbox.
+ * ⚠️ COPY ONLY, NEVER HTML. A builder edits the things that are genuinely theirs: the subject
+ * line, the opening sentence, a closing message under the links, the words on the button, and
+ * whether their building's photo shows. Everything structural (the branded header, the detail
+ * rows, where the button GOES, the PDF links, the footer) stays owned by this file, because
+ * those are the parts of the email that DO something and a wording edit has no business near
+ * them. It is also the difference between a template feature and an injection surface pointed
+ * at a customer's inbox. Carolyn asked for "a template that they can edit, you know, for images
+ * and all of that stuff too" (2026-08-21); her GHL one is a picture, the details, then a "View
+ * Shed Quote" button. Structured blocks give her that without free HTML.
+ *
+ * Every field is plain text. The one-line fields (subject, intro, button) have their
+ * whitespace collapsed, so nothing header-shaped survives; the closing message keeps its line
+ * breaks, which the HTML half draws as <br> after escaping. `picture` is only ever stored as
+ * false (the photo is on unless the builder switches it off), and only for estimate and quote.
  *
  * Tokens are substituted here and the VALUES are escaped by the caller for the HTML path,
  * so a tenant cannot smuggle markup through {business} either. An unknown token is left
  * verbatim rather than blanked: a stray "{foo}" reads as a typo the builder can see and
  * fix, where an empty gap reads as our bug.
  */
-export type TemplateCopy = { subject?: string; intro?: string };
+export type TemplateCopy = {
+  subject?: string;
+  intro?: string;
+  /** Under the button and the PDF links. Line breaks kept. */
+  closing?: string;
+  /** The button's words. Where it goes is never the builder's to change. */
+  button?: string;
+  /** false = leave the building photo out. Absent = show it (when there is one). */
+  picture?: boolean;
+};
+
+/** The three kinds the wording screen has a tab for. */
+export const TEMPLATE_KINDS = ["estimate", "quote", "invoice"] as const;
+export type TemplateKind = typeof TEMPLATE_KINDS[number];
+
+/** The longest each field may be, in characters (code points). The editor's boxes stop at the
+ *  same lengths, so what is saved is what was typed. */
+export const TEMPLATE_LIMITS = { subject: 300, intro: 300, closing: 1000, button: 40 } as const;
+type CopyField = keyof typeof TEMPLATE_LIMITS;
+const COPY_FIELDS: CopyField[] = ["subject", "intro", "closing", "button"];
+/** How a refusal names each field, in the editor's own words. */
+const FIELD_WORDS: Record<CopyField, string> = {
+  subject: "subject",
+  intro: "opening line",
+  closing: "closing message",
+  button: "button text",
+};
+
+/**
+ * One field as it is stored and sent: "" when there is nothing usable. Control characters go
+ * (a tab or a line break counts as a space in the one-line fields), a lone half of an emoji
+ * becomes U+FFFD because jsonb refuses one (_shared/emailSignature.ts has the same rule), and
+ * the result is cut to the field's limit. It does NOT judge markup: tenantCopy drops a field
+ * with < or > quietly, and cleanTemplateCopy refuses it out loud.
+ */
+function copyField(field: CopyField, v: unknown): string {
+  if (typeof v !== "string") return "";
+  let s = v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+  if (field === "closing") {
+    s = s.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "").trim();
+  } else {
+    s = s.replace(/[\u0000-\u0008\u000E-\u001F\u007F]/g, "").replace(/\s+/g, " ").trim();
+  }
+  const max = TEMPLATE_LIMITS[field];
+  // .length counts UTF-16 units, never fewer than code points, so only a long one pays for the split.
+  if (s.length > max) s = Array.from(s).slice(0, max).join("").trimEnd();
+  return s;
+}
 
 export function tenantCopy(raw: unknown, kind: string): TemplateCopy {
   if (!raw || typeof raw !== "object") return {};
   const byKind = (raw as Record<string, unknown>)[kind];
   if (!byKind || typeof byKind !== "object") return {};
   const o = byKind as Record<string, unknown>;
-  const take = (v: unknown) => {
-    const t = typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+  const out: TemplateCopy = {};
+  for (const f of COPY_FIELDS) {
+    const t = copyField(f, o[f]);
     // Anything with a tag in it is a builder pasting HTML in; drop the whole field rather
     // than half-escaping it into gibberish, so the shipped wording shows instead.
-    return t && !/[<>]/.test(t) ? t.slice(0, 300) : "";
-  };
-  const out: TemplateCopy = {};
-  const sub = take(o.subject), intro = take(o.intro);
-  if (sub) out.subject = sub;
-  if (intro) out.intro = intro;
+    if (t && !/[<>]/.test(t)) out[f] = t;
+  }
+  if (o.picture === false && kind !== "invoice") out.picture = false;
   return out;
+}
+
+/**
+ * The wording as email_save_template stores it, and as email_preview_template renders it:
+ * { copy } keyed by kind, holding only the fields that say something, or { error } with the
+ * sentence to show. Markup is refused LOUDLY here rather than stripped: a builder who pasted it
+ * needs to be told, not to have it silently vanish and wonder which half saved. tenantCopy
+ * applies the same rules again on the way out, so a row written before a rule existed is held
+ * to it too.
+ */
+export function cleanTemplateCopy(raw: unknown): { copy: Partial<Record<TemplateKind, TemplateCopy>> } | { error: string } {
+  if (!raw || typeof raw !== "object") return { error: "Nothing to save." };
+  const copy: Partial<Record<TemplateKind, TemplateCopy>> = {};
+  for (const kind of TEMPLATE_KINDS) {
+    const v = (raw as Record<string, unknown>)[kind];
+    if (!v || typeof v !== "object") continue;
+    const o = v as Record<string, unknown>;
+    const out: TemplateCopy = {};
+    for (const f of COPY_FIELDS) {
+      const t = copyField(f, o[f]);
+      if (!t) continue;
+      if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${kind} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
+      out[f] = t;
+    }
+    if (o.picture === false && kind !== "invoice") out.picture = false;
+    if (Object.keys(out).length) copy[kind] = out;
+  }
+  return { copy };
+}
+
+/**
+ * An address an email may draw as the building photo, or null: https:// only (a customer's mail
+ * app shows a broken-image box, or a "load remote content" warning, for anything else), no
+ * spaces or quote marks, at most 2,048 characters.
+ */
+export function emailPictureUrl(url: unknown): string | null {
+  const u = typeof url === "string" ? url.trim() : "";
+  if (!u || u.length > 2048 || !/^https:\/\/[^\s"'<>\\]+$/i.test(u)) return null;
+  try {
+    return new URL(u).protocol === "https:" ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The style photo a document email may show, or null. ONLY the builder's own upload: an address
+ * under THIS tenant's folder in the public branding or fixtures bucket, the same guard
+ * submit-estimate's imgAttachments puts on the estimate's line photos, so a tampered or copied
+ * catalog row can't put somebody else's picture (or a tracking pixel) in a customer's inbox. The
+ * parsed address must still sit under that folder, so "../" can't climb out of it.
+ *
+ * The caller checks the style's own show_image_on_estimate switch; this checks the address.
+ */
+export function tenantStylePhotoUrl(url: unknown, supabaseUrl: string, clientId: string): string | null {
+  const u = emailPictureUrl(url);
+  const base = String(supabaseUrl ?? "").replace(/\/+$/, "");
+  if (!u || !base || !clientId) return null;
+  const prefixes = ["branding", "fixtures"].map((b) => `${base}/storage/v1/object/public/${b}/${clientId}/`);
+  if (!prefixes.some((p) => u.startsWith(p))) return null;
+  try {
+    const href = new URL(u).href;
+    return prefixes.some((p) => href.startsWith(p)) ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The closing message as an HTML block (escaped, line by line), or "" with none. It opens
+ *  with its own line break so it can be appended after the links unconditionally. */
+function closingBlock(closing: string): string {
+  return closing
+    ? `
+            <p style="margin:18px 0 0 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(closing).replace(/\n/g, "<br>")}</p>`
+    : "";
+}
+
+/** Adds the closing message to the text half: one blank line above it, never two. */
+function pushClosing(text: string[], closing: string): void {
+  if (!closing) return;
+  if (text[text.length - 1] !== "") text.push("");
+  text.push(closing);
 }
 
 export function fillTokens(tpl: string, vals: Record<string, string>): string {
@@ -335,10 +482,30 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   if (building) rows.push(detailRow("Building", esc(building)));
   if (showTotal) rows.push(detailRow(`${Word} total`, esc(money)));
 
+  // Tenant copy, if they wrote any. Values are escaped for the HTML path; the plain-text
+  // path below uses the raw ones. `building` is oneLine()'d only here, in the token map:
+  // it is assembled from caller-supplied style/size labels with a bare trim(), and a
+  // tenant subject containing {building} would otherwise put a CR/LF straight back into
+  // a Subject header — the one thing tenantCopy() already strips from the template. The
+  // detail row and the plain-text line keep the raw value; a break there is only ugly.
+  const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
+  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
+  // The builder's button words, filled. Blank once filled (a lone {customer} with no name on the
+  // design) falls back to ours rather than drawing an empty button.
+  const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
+  const closing = copy.closing ? fillTokens(copy.closing, tokens).trim() : "";
+  // The building photo: above the details, the way her GHL quote email has it. Absent unless the
+  // caller passed a usable https:// address AND the builder hasn't switched it off.
+  const picture = copy.picture === false ? null : emailPictureUrl(input.pictureUrl);
+  const pictureHtml = picture
+    ? `
+            <img src="${esc(picture)}" alt="${esc(building || name)}" width="536" style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:8px;margin:0 0 16px 0;" />`
+    : "";
+
   // The quote CTA said "Sign" until 2026-09-15. The signature moved to the INVOICE on
   // 2026-08-26 (migration 136); what the quote page asks for now is a click to accept.
   const cta = input.estimateUrl
-    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Accept Your Quote" : "View & Accept Your Estimate")
+    ? ctaButton(input.estimateUrl, buttonText || (word === "quote" ? "View & Accept Your Quote" : "View & Accept Your Estimate"))
     : "";
   const pdfLink = input.pdfUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a></p>`
@@ -349,14 +516,6 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     ? `<p style="margin:${input.pdfUrl ? "8px" : "18px"} 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your ${word} (PDF)</a></p>`
     : "";
 
-  // Tenant copy, if they wrote any. Values are escaped for the HTML path; the plain-text
-  // path below uses the raw ones. `building` is oneLine()'d only here, in the token map:
-  // it is assembled from caller-supplied style/size labels with a bare trim(), and a
-  // tenant subject containing {building} would otherwise put a CR/LF straight back into
-  // a Subject header — the one thing tenantCopy() already strips from the template. The
-  // detail row and the plain-text line keep the raw value; a break there is only ugly.
-  const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
-  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
   const introRaw = copy.intro
     ? fillTokens(copy.intro, tokens)
     : `Thank you for designing your building with ${name}. Your ${word} is ready.`;
@@ -364,11 +523,13 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     ? esc(introRaw)
     : `Thank you for designing your building with ${esc(name)}. Your ${word} is ready.`;
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${introHtml}</p>
+  // pictureHtml and the closing block are "" when absent, so an email with neither is the
+  // same bytes it was before they existed (emailTemplates.golden.test.ts).
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${introHtml}</p>${pictureHtml}
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
-            ${cta}${pdfLink}${formalPdfLink}`;
+            ${cta}${pdfLink}${formalPdfLink}${closingBlock(closing)}`;
 
   const text: string[] = [
     name,
@@ -381,10 +542,13 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   if (showTotal) text.push(`${Word} total: ${money}`);
   text.push("");
   if (input.estimateUrl) {
-    text.push(word === "quote" ? `View & accept your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
+    text.push(buttonText
+      ? `${buttonText}: ${input.estimateUrl}`
+      : word === "quote" ? `View & accept your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
   }
   if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
   if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
+  pushClosing(text, closing);
   text.push(...textFooter(input));
 
   return {
@@ -535,23 +699,26 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
 
   const toSign = !!input.signUrl;
   const rows = [detailRow("Invoice #", esc(num)), detailRow("Amount due", esc(money))];
-  const cta = toSign
-    ? ctaButton(input.signUrl!, "Review & Sign Your Invoice")
-    : input.invoiceUrl
-    ? ctaButton(input.invoiceUrl, "View Invoice")
-    : "";
-  // Demoted, not dropped: some customers just want the paperwork.
-  const pdfLink = toSign && input.invoiceUrl
-    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.invoiceUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View the invoice (PDF)</a></p>`
-    : "";
   // Tenant copy, if they wrote any (migration 138). Same contract as the estimate email:
-  // COPY ONLY, and the HTML half escapes it — the structural half above stays ours.
+  // COPY ONLY, and the HTML half escapes it — the structural half stays ours. The button
+  // text changes the button's words, never where it goes.
   //
   // Every token the wording screen advertises is supplied, with "" for the ones an invoice
   // has no value for: fillTokens leaves an UNKNOWN token verbatim on purpose, so omitting
   // {building} here would ship a literal "{building}" to a customer's inbox.
   const copy = tenantCopy(input.templateCopy, "invoice");
   const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? "") };
+  const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
+  const closing = copy.closing ? fillTokens(copy.closing, tokens).trim() : "";
+  const cta = toSign
+    ? ctaButton(input.signUrl!, buttonText || "Review & Sign Your Invoice")
+    : input.invoiceUrl
+    ? ctaButton(input.invoiceUrl, buttonText || "View Invoice")
+    : "";
+  // Demoted, not dropped: some customers just want the paperwork.
+  const pdfLink = toSign && input.invoiceUrl
+    ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.invoiceUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View the invoice (PDF)</a></p>`
+    : "";
   const introRaw = copy.intro
     ? fillTokens(copy.intro, tokens)
     : toSign
@@ -568,7 +735,7 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
               ${rows.join("\n")}
             </table>
             ${cta}
-            ${pdfLink}`;
+            ${pdfLink}${closingBlock(closing)}`;
 
   const text: string[] = [
     name,
@@ -579,8 +746,9 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
     `Amount due: ${money}`,
     "",
   ];
-  if (toSign) text.push(`Review and sign your invoice: ${input.signUrl}`);
-  if (input.invoiceUrl) text.push(`${toSign ? "Invoice (PDF)" : "View your invoice"}: ${input.invoiceUrl}`);
+  if (toSign) text.push(`${buttonText || "Review and sign your invoice"}: ${input.signUrl}`);
+  if (input.invoiceUrl) text.push(`${toSign ? "Invoice (PDF)" : buttonText || "View your invoice"}: ${input.invoiceUrl}`);
+  pushClosing(text, closing);
   text.push(...textFooter(input));
 
   return {
@@ -665,12 +833,87 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
   };
 }
 
+/** The made-up customer and document the wording screen's Preview shows. Everything else in a
+ *  preview is the builder's own: their name, logo, phone, website, terms and style photo. */
+export const PREVIEW_SAMPLE = {
+  customerName: "Alex Smith",
+  number: "1001",
+  total: 12500,
+  styleLabel: "Lofted Barn",
+  sizeLabel: "12x24",
+} as const;
+
+export interface TemplatePreviewInput {
+  kind: TemplateKind;
+  /** The wording for THIS kind, as the editor holds it (cleanTemplateCopy has passed it). */
+  copy: TemplateCopy;
+  businessName: string;
+  logoUrl?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  quoteTerms?: string | null;
+  /** Their first style photo that is switched on for quotes (tenantStylePhotoUrl), if any. */
+  pictureUrl?: string | null;
+  /** That style's name, so the photo and the Building row agree. */
+  styleLabel?: string | null;
+  /** True when invoices are signed on the customer page (StructureStudio invoicing): the button
+   *  then asks for a signature, as the real email does. False: it opens the invoice. */
+  invoiceToSign?: boolean;
+}
+
+/**
+ * The email the wording screen previews: the real estimateEmail / invoiceEmail with the sample
+ * customer and document above, so what the builder sees is what the customer would get, bar
+ * the numbers. Every link points at "#": the preview is drawn in a sandboxed frame where links
+ * can't open anyway, and a sample must never lead anywhere real.
+ */
+export function templatePreviewEmail(p: TemplatePreviewInput): EmailContent {
+  const templateCopy = { [p.kind]: p.copy };
+  const shared = {
+    templateCopy,
+    customerName: PREVIEW_SAMPLE.customerName,
+    businessName: p.businessName,
+    logoUrl: p.logoUrl ?? null,
+    phone: p.phone ?? null,
+    website: p.website ?? null,
+    quoteTerms: p.quoteTerms ?? null,
+  };
+  if (p.kind === "invoice") {
+    return invoiceEmail({
+      ...shared,
+      invoiceNumber: PREVIEW_SAMPLE.number,
+      total: PREVIEW_SAMPLE.total,
+      invoiceUrl: "#",
+      signUrl: p.invoiceToSign ? "#" : null,
+    });
+  }
+  return estimateEmail({
+    ...shared,
+    estimateNumber: PREVIEW_SAMPLE.number,
+    total: PREVIEW_SAMPLE.total,
+    styleLabel: (p.styleLabel && String(p.styleLabel).trim()) || PREVIEW_SAMPLE.styleLabel,
+    sizeLabel: PREVIEW_SAMPLE.sizeLabel,
+    estimateUrl: "#",
+    pdfUrl: "#",
+    formalPdfUrl: "#",
+    docWord: p.kind === "quote" ? "quote" : "estimate",
+    pictureUrl: p.pictureUrl ?? null,
+  });
+}
+
 export function testEmail(input: TestEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const from = oneLine(input.fromAddress);
+  const signature = String(input.signature ?? "").replace(/\r\n?/g, "\n").trim();
+  // The sender's signature, the way their conversation emails end: inside the card, under the
+  // message, drawn the way the quote terms are (escaped, line by line).
+  const signatureHtml = signature
+    ? `
+            <p style="margin:16px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;">${esc(signature).replace(/\n/g, "<br>")}</p>`
+    : "";
 
   const bodyHtml = `<p style="margin:0 0 14px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">This is a test message confirming that email sending for ${esc(name)} is working.</p>
-            <p style="margin:0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">It was sent from <strong style="color:#1F2937;">${esc(from)}</strong>. If it landed in your inbox with that sender showing, your sending domain is set up correctly.</p>`;
+            <p style="margin:0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">It was sent from <strong style="color:#1F2937;">${esc(from)}</strong>. If it landed in your inbox with that sender showing, your sending domain is set up correctly.</p>${signatureHtml}`;
 
   const text = [
     name,
@@ -678,6 +921,8 @@ export function testEmail(input: TestEmailInput): EmailContent {
     `This is a test message confirming that email sending for ${name} is working.`,
     `It was sent from ${from}. If it landed in your inbox with that sender showing, your sending domain is set up correctly.`,
   ];
+  // "-- " (dash, dash, space) is the line mail programs recognise as the start of a signature.
+  if (signature) text.push("", "-- ", signature);
 
   return {
     subject: `Test email from ${name}`,

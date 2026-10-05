@@ -5,8 +5,8 @@
 // ⚠️ PUBLIC REPO: every number, SID and id here is fake (555-01xx, zero-padded SIDs).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  backoffMinutes, callBillability, chargeFor, DEFAULT_SETTINGS, displayNumber, runUsageCharges, settingsFrom, smsMemo,
-  type ChargeRow,
+  backoffMinutes, callBillability, chargeFor, DEFAULT_SETTINGS, displayNumber, idemFor, meterFor, recordingMemo, runUsageCharges,
+  settingsFrom, smsMemo, type ChargeRow,
 } from "../src/cron/usageCharge";
 import { fetchCallCost, listUsageDaily, priceMicros } from "../src/twilioRest";
 import { adminClient } from "../src/db";
@@ -1137,5 +1137,108 @@ describe("twilioRest additions", () => {
       { category: "calls-inbound", count: 3, usage: 7, priceMicros: 60000, priceUnit: "usd" },
       { category: "calls-globalconference", count: 1, usage: 4, priceMicros: null, priceUnit: "usd" },
     ]);
+  });
+});
+
+// ── Call recordings and their transcripts (migration 263) ───────────────────────────
+
+describe("call recordings and transcripts: their own lines, their own meters", () => {
+  const REC = uuid(901);
+  const recRow = (over: Record<string, unknown> = {}) => ({
+    id: REC, client_id: CLIENT, recording_sid: RE(9), status: "completed", duration_s: 150, completed_at: ago(10), deleted_at: null,
+    transcript_status: "done", summary_status: "done", stt_cost_micros: 31200, llm_cost_micros: 2400,
+    phone_calls: { direction: "out", from_e164: BUSINESS_NUMBER, to_e164: CUSTOMER }, ...over,
+  });
+  const recCharge = (source: "recording" | "transcription", over: Partial<ChargeRow> = {}) =>
+    ({ ...charge("call", REC), source, ...over }) as ChargeRow;
+  const withRecordings = (net: FakeNet, rows: Record<string, unknown>[]) => {
+    net.rest("GET", "phone_call_recordings", (s) => {
+      const ids = inFilter(s, "id");
+      return rows.filter((r) => !ids || ids.includes(String(r.id)));
+    });
+    return net;
+  };
+
+  it("the meters and keys", () => {
+    expect(meterFor("recording", "in")).toBe("call_recording");
+    expect(meterFor("recording", "out")).toBe("call_recording");
+    expect(meterFor("transcription", "in")).toBe("call_transcription");
+    expect(idemFor({ source: "recording", source_id: REC })).toBe(`usage:recording:${REC}`);
+    expect(idemFor({ source: "transcription", source_id: REC })).toBe(`usage:transcription:${REC}`);
+    expect(recordingMemo("recording", { direction: "in", from_e164: CUSTOMER, to_e164: BUSINESS_NUMBER }, 3))
+      .toBe("Call recording, call from (555) 555-0142 · 3 min");
+  });
+
+  it("a recording, armed: Twilio's price × the markup, one line keyed usage:recording:<id>", async () => {
+    const row = recCharge("recording");
+    const net = withRecordings(world({ queue: [row], recordings: [{ sid: RE(9), duration: 150, price: "-0.00750" }] }), [recRow()]);
+    const out = await runIt();
+    expect(out).toMatchObject({ ran: true, charged: 1 });
+    expect(debits(net)[0]).toEqual({
+      p_client_id: CLIENT, p_meter_kind: "call_recording", p_charge_micros: 15000, p_cost_micros: 7500,
+      p_ref_type: "phone_call_recording", p_ref_id: REC, p_memo: "Call recording, call to (555) 555-0142 · 3 min",
+      p_usage: { units: 3, unit: "minute", direction: "out" }, p_idem: `usage:recording:${REC}`,
+    });
+    expect(rowPatch(net, row.id)).toMatchObject({ state: "charged", cost_micros: 7500, cost_source: "twilio", units: 3, unit: "minute" });
+    expect(net.rpcCalls("phone_usage_armed")[0].json).toEqual({ p_client_id: CLIENT, p_meter: "call_recording" });
+  });
+
+  it("shadow until its own meter is armed (the call meters being armed changes nothing)", async () => {
+    const row = recCharge("recording");
+    const net = withRecordings(world({
+      queue: [row], recordings: [{ sid: RE(9), duration: 150, price: "-0.00750" }],
+      armed: (_c, meter) => meter !== "call_recording",
+    }), [recRow()]);
+    await runIt();
+    expect(debits(net)).toEqual([]);
+    expect(rowPatch(net, row.id)).toMatchObject({ state: "shadow", cost_micros: 7500, charge_micros: 15000 });
+  });
+
+  it("unpriced: pending while fresh, then an estimate at $0.0025 a minute once fallback_after_hours have passed", async () => {
+    let row = recCharge("recording");
+    let net = withRecordings(world({ queue: [row], recordings: [{ sid: RE(9), duration: 150, price: null }] }), [recRow()]);
+    await runIt();
+    expect(rowPatch(net, row.id)).toMatchObject({ last_error: "the recording is not priced yet" });
+    expect(debits(net)).toEqual([]);
+    row = recCharge("recording");
+    net = withRecordings(world({ queue: [row], recordings: [{ sid: RE(9), duration: 150, price: null }] }), [recRow({ completed_at: ago(7 * 60) })]);
+    await runIt();
+    expect(debits(net)[0]).toMatchObject({ p_cost_micros: 3 * 2500, p_charge_micros: 15000 });
+    expect(rowPatch(net, row.id)).toMatchObject({ cost_source: "estimate" });
+  });
+
+  it("a transcript and summary: the two estimates together, one line keyed usage:transcription:<id>", async () => {
+    const row = recCharge("transcription", { direction: "in" });
+    const net = withRecordings(world({ queue: [row] }), [recRow()]);
+    await runIt();
+    expect(debits(net)[0]).toMatchObject({
+      p_meter_kind: "call_transcription", p_cost_micros: 33600, p_charge_micros: 67200, p_ref_type: "phone_call_recording",
+      p_idem: `usage:transcription:${REC}`, p_memo: "Call transcript and summary, call to (555) 555-0142 · 3 min",
+    });
+    expect(rowPatch(net, row.id)).toMatchObject({ state: "charged", cost_source: "estimate", cost_detail: { stt_micros: 31200, llm_micros: 2400, summary: "done" } });
+    expect(twilioGets(net)).toEqual([]); // nothing to ask Twilio
+  });
+
+  it("a transcript whose summary is still being written waits", async () => {
+    const row = recCharge("transcription");
+    const net = withRecordings(world({ queue: [row] }), [recRow({ summary_status: "working" })]);
+    await runIt();
+    expect(debits(net)).toEqual([]);
+    expect(rowPatch(net, row.id)).toMatchObject({ last_error: "the transcript or summary is not finished" });
+  });
+
+  it("a call's own line never includes its call recording (callCost stays voicemail-only)", async () => {
+    const row = charge("call", uuid(902));
+    const net = world({
+      queue: [row], calls: [callRow(uuid(902), { client_call_sid: CA(1), twilio_call_sid: CA(2) })],
+      legs: [
+        { sid: CA(1), status: "completed", duration: 150, price: "-0.00400", direction: "inbound", from: APP, to: CUSTOMER },
+        { sid: CA(2), status: "completed", duration: 150, price: "-0.04200", parent: CA(1), direction: "outbound-dial", from: BUSINESS_NUMBER, to: CUSTOMER },
+      ],
+    });
+    await runIt();
+    expect(net.reads("phone_call_recordings")).toEqual([]);
+    expect(twilioGets(net).some((g) => g.includes("/Recordings"))).toBe(false);
+    expect(debits(net)[0]).toMatchObject({ p_cost_micros: 46000 });
   });
 });

@@ -13,7 +13,7 @@
 //
 // Lifted by stable anchors from BOTH twins, which must be byte-identical (the wallSlab_test /
 // selfCheckPanel_test technique). calDraftRoof is an arrow inside the component, so it is
-// lifted with the one constant it reads.
+// lifted with the two constants it reads.
 
 import { assert, assertEquals } from "jsr:@std/assert";
 
@@ -34,6 +34,8 @@ function lift(src: string, file: string, start: string, end: string): string {
 
 const REGIONS: Array<[string, string]> = [
   ["const CAL_WING_KEYS = ", ";\n"],
+  // The three front step words a recessed porch keeps (2026-10-03), from the porch region.
+  ["const D3_PORCH_STEP_FRONT = ", ";\n"],
   ["const calDraftRoof = (stored, drafted) => {", "\n    return roof;\n  };"],
 ];
 const blocks = REGIONS.map(([a, b]) => ({
@@ -96,6 +98,43 @@ Deno.test("⚠️ the porch's posts, roof pitch and steps follow the attach heig
   for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!has(quiet, k), `${k} survived: ${JSON.stringify(quiet)}`);
 });
 
+Deno.test("⚠️ a recessed porch keeps its steps along its front, and their count, under a draft silent on them (2026-10-03)", () => {
+  // No draft is asked about a recessed porch's steps, so they are the builder's: a draft with no type
+  // that reports the recessed porch keeps them, and the projecting porch's own framing still goes.
+  const stored = { type: "gable", porchDepthFt: 4, porchSteps: "center", porchStepCount: 3 };
+  assertEquals(calDraftRoof(stored, { porchDepthFt: 5 }), { type: "gable", porchDepthFt: 5, porchSteps: "center", porchStepCount: 3 });
+  // A draft that gives front steps brings its own.
+  assertEquals(calDraftRoof(stored, { porchDepthFt: 5, porchSteps: "left" }).porchSteps, "left");
+  // A projecting porch's front steps carry onto the recessed porch an untyped draft reports, as switching
+  // the kind on the panel does; its posts and pitch do not.
+  const fromDeck = calDraftRoof({ type: "gable", porchOutFt: 6, porchPosts: 4, porchPitch: 0.25, porchSteps: "right", porchStepCount: 2 }, { porchDepthFt: 4 });
+  assertEquals(fromDeck, { type: "gable", porchDepthFt: 4, porchSteps: "right", porchStepCount: 2 });
+  // A flight off an end of a deck has nowhere to go on a recessed porch: it goes, with its count.
+  const side = calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { porchDepthFt: 4 });
+  for (const k of ["porchSteps", "porchStepCount", "porchOutFt"]) assert(!has(side, k), `${k} survived: ${JSON.stringify(side)}`);
+  // A typed draft replaces the roof: front steps it gives are all there is ...
+  assertEquals(calDraftRoof(stored, { type: "gable", porchDepthFt: 4, porchSteps: "right" }), { type: "gable", porchDepthFt: 4, porchSteps: "right" });
+  // ... and one silent on them takes the stored recessed porch's back, with their count (2026-10-04): a
+  // regenerated walk-around never erases them.
+  assertEquals(calDraftRoof(stored, { type: "gable", porchDepthFt: 4 }), { type: "gable", porchDepthFt: 4, porchSteps: "center", porchStepCount: 3 });
+  // Never a projecting porch's front steps, which the draft was asked about, nor a flight off a deck's end.
+  assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "right", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }), { type: "gable", porchDepthFt: 4 });
+  assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }), { type: "gable", porchDepthFt: 4 });
+});
+
+Deno.test("⚠️ a flight off an end of the deck, and its count, survive a draft silent on the steps (2026-10-04)", () => {
+  // The prompt tells the model to leave a side flight out, so it is the builder's: a redraft of the
+  // projecting porch, typed or not, keeps it.
+  const stored = { type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 };
+  assertEquals(calDraftRoof(stored, { type: "gable", porchOutFt: 6 }), { type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 });
+  assertEquals(calDraftRoof(stored, { porchOutFt: 5 }), { type: "gable", porchOutFt: 5, porchSteps: "leftSide", porchStepCount: 2 });
+  assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "rightSide" }, { type: "gable", porchOutFt: 6 }).porchSteps, "rightSide");
+  // A draft that gives front steps brings its own, and the side flight's count goes with it.
+  assertEquals(calDraftRoof(stored, { type: "gable", porchOutFt: 6, porchSteps: "center" }), { type: "gable", porchOutFt: 6, porchSteps: "center" });
+  // A typed draft with no porch has none, steps included.
+  assertEquals(calDraftRoof(stored, { type: "gable" }), { type: "gable" });
+});
+
 Deno.test("⚠️ the porch's step count follows its steps: a redraft brings its own or none (2026-09-28)", () => {
   const stored = { type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 };
   // Not builder-only: a typed draft replaces the roof, and the count goes with the stored steps.
@@ -149,6 +188,19 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { type: "gable", porchOutFt: 6, porchSteps: "right" }],
     [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { porchOutFt: 5 }],
     [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { pitch: 0.5 }],
+    // A recessed porch's front steps (2026-10-03): kept under an untyped draft, a side flight dropped.
+    [{ type: "gable", porchDepthFt: 4, porchSteps: "center", porchStepCount: 3 }, { porchDepthFt: 5 }],
+    [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "right" }, { porchDepthFt: 4 }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { porchDepthFt: 4 }],
+    [{ type: "gable", porchDepthFt: 4, porchSteps: "center" }, { type: "gable", porchDepthFt: 4, porchSteps: "left" }],
+    // ...and taken back by a typed draft silent on them, from a recessed porch only (2026-10-04).
+    [{ type: "gable", porchDepthFt: 4, porchSteps: "center", porchStepCount: 3 }, { type: "gable", porchDepthFt: 5 }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "right", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }],
+    // A flight off an end of a deck stays under a draft silent on the steps, typed or not (2026-10-04).
+    [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchOutFt: 6 }],
+    [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { porchOutFt: 5 }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchOutFt: 6, porchSteps: "center" }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 }, { type: "gable", pitch: 0.5 }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, centerEaveFt: 16 }, { type: "gable", wingSide: "left", wingWidthFt: 6 }],
     [{ type: "gable", front: "eave" }, { type: "gable" }],

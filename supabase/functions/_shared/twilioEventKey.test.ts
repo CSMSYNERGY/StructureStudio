@@ -8,7 +8,7 @@
 // The payloads are shaped like the rows stored in sms_registration_events.detail: `timestamp`
 // and `updateddate` arrive as JSON numbers (epoch ms).
 
-import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget } from "./twilioEventKey.ts";
+import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget, numberVerdictEffect } from "./twilioEventKey.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
   if (!cond) throw new Error(`${name}${detail ? `: ${detail}` : ""}`);
@@ -108,4 +108,30 @@ Deno.test("anything that is not a US number or a PN SID is null, never a guess",
   check("wrong SID type", t.sid === null, String(t.sid));
   const e = numberEventTarget(null);
   check("null payload", e.sid === null && e.phone === null);
+});
+
+// Migration 266: a business with two numbers, both in its Messaging Service. Only the main
+// texting number's verdict is about the business's texting. (Fake 555-01xx numbers.)
+const MAIN_E164 = "+18165550100";
+const EXTRA_E164 = "+18165550101";
+const verdict = (status: string, eventPhone: string | null, mainNumber: string | null, numberMatched = true) =>
+  numberVerdictEffect({ status, numberMatched, eventPhone, mainNumber });
+
+Deno.test("two numbers, the second refused: nothing beyond its own row, and it is logged", () => {
+  check("the main number refused needs attention", verdict("failed", MAIN_E164, MAIN_E164) === "attention");
+  check("the second number refused does not", verdict("failed", EXTRA_E164, MAIN_E164) === "extra_failed");
+  check("even when no row took it", verdict("failed", EXTRA_E164, MAIN_E164, false) === "extra_failed");
+});
+
+Deno.test("two numbers: only the main one registering turns texting on or clears its note", () => {
+  check("the main number registered", verdict("registered", MAIN_E164, MAIN_E164) === "activate");
+  check("the second number registered", verdict("registered", EXTRA_E164, MAIN_E164) === "none");
+  check("no row moved", verdict("registered", MAIN_E164, MAIN_E164, false) === "none");
+  check("pending is never a verdict", verdict("pending_registration", MAIN_E164, MAIN_E164) === "none");
+});
+
+Deno.test("no main number on record, or no phone to compare: read as every event was before 266", () => {
+  check("no main number, refused", verdict("failed", EXTRA_E164, null) === "attention");
+  check("blank main number, registered", verdict("registered", EXTRA_E164, "  ") === "activate");
+  check("no phone in the event or the row", verdict("failed", null, MAIN_E164) === "attention");
 });

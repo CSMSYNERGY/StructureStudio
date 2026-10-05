@@ -17,9 +17,13 @@
 // texted first, which sms-inbound records as consent to reply). The newest message in the thread
 // may be one of ours: that is still a reply. Refused once the number is saved as a contact (reply
 // from their thread then). Someone limited to their own customers saves the contact first.
+//
+// WHICH NUMBER (migration 266): the business number this customer last texted with, else the
+// sender's own number, else the main one (smsSend.ts replyFromNumber, the portal's rule), checked
+// again by sendTenantSms before anything is sent.
 
 import type { Ctx, Env } from "../env";
-import { sendTenantSms, type SmsOutcome } from "../../../../supabase/functions/_shared/smsSend.ts";
+import { replyFromNumber, sendTenantSms, type SmsOutcome } from "../../../../supabase/functions/_shared/smsSend.ts";
 import { requireCaller } from "../context";
 import { must } from "../db";
 import { ApiError, ok, readJson, UUID_RE, type ErrorCode } from "../http";
@@ -140,6 +144,11 @@ export async function sendSms(env: Env, ec: Ctx, req: Request): Promise<Response
     ? `${env.SUPABASE_URL.replace(/\/+$/, "")}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
     : null;
 
+  // The thread is the contact's when there is one, else this number's texts with no contact.
+  const fromNumber = await replyFromNumber(c.admin, c.ctx.client_id, contactId
+    ? { contactId, userId: c.userId }
+    : { customerE164: to, userId: c.userId });
+
   const out = await sendTenantSms(c.admin, c.ctx.client_id, {
     toPhone,
     body: text,
@@ -147,6 +156,7 @@ export async function sendSms(env: Env, ec: Ctx, req: Request): Promise<Response
     shortCode: null,
     sentBy: c.userId,
     statusCallback,
+    fromNumber,
     // A person typed this and pressed Send: it goes now, at any hour (portal rule since 09-29).
     // Consent and STOP still refuse. Stated explicitly, as every caller must (the wiring test).
     bypassQuietHours: true,

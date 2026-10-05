@@ -7,10 +7,14 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 // redeploying every consumer, and this function is one of them.
 import { canEdit, effectiveAccess } from "../_shared/access.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
+import { repReplyTo } from "../_shared/repReplyTo.ts";
+import { changeOrderEmail, estimateEmail, tenantStylePhotoUrl } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
-import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
+import { buildFormalEstimatePdf, pdfCustomerFrom } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+// The customer block, the logo and the per-builder validity on the quote documents (2026-10-05).
+import { fetchPdfLogo, pdfLogoSources } from "../_shared/pdfLogo.ts";
+import { readQuoteValidDays } from "../_shared/quoteValidity.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
@@ -389,6 +393,33 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // quote goes out at full price rather than honouring an unverified discount.
     console.warn("submit-estimate: staff check failed:", (e as Error).message);
   }
+
+  // WHO A CUSTOMER'S REPLY TO THIS EMAIL IS COPIED TO (2026-10-05; the rule is
+  // _shared/repReplyTo.ts). callerUserId is the verified session's person, so a rep submitting
+  // from the portal's designer gets the customer's answer in their own inbox as well as on the
+  // record. repReplyTo names them only as a member of THIS tenant who is not a CSM Synergy
+  // operator on a customer's account (an operator in view-as has no membership here); a member
+  // with no usable address gets no copy rather than a colleague's. For anyone else, and for a
+  // shopper's own submit (no session at all), the copy goes to the rep the customer is
+  // assigned to, or to nobody. Membership, not mayPrice: who wrote the quote decides whose inbox,
+  // not what they were allowed to price. Asked only when an email is actually built, and a failed
+  // lookup costs the copy, never the quote.
+  //
+  // `recipient` is where this email goes: the email in the REQUEST, which on a shopper's submit is
+  // whatever they typed. The assigned rep is named only when it is the contact's own address,
+  // because the design is linked to its contact by phone first: a stranger typing a known
+  // customer's number beside their own email must not get back that customer's rep's address.
+  const quoteReplyTo = (recipient: string) => repReplyTo(supabase, clientId, {
+    senderUserId: callerUserId,
+    shortCode: String(designId),
+    recipient,
+    onError: (why) => {
+      logEdgeError({
+        fn: "submit-estimate", req, clientId, code: "reply_to_lookup_failed", severity: "warn",
+        message: `reply copy lookup failed: ${why}`, context: { designId: String(designId) },
+      }).catch(() => {});
+    },
+  });
 
   // 2d. PER-TENANT SUBMIT CAP — see RATE_* at module scope for why this exists and why it
   // refuses rather than dropping quietly. Placed HERE deliberately: after the beta pre-flight
@@ -827,6 +858,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       console.warn("style-image self-heal error:", (e as Error).message);
     }
   }
+  // The same photo for the quote email (2026-10-04): above the details, the way the builder's
+  // own CRM quote email has it. Same switch and same own-folder rule as the line photo, plus
+  // https only (_shared/emailTemplates.ts). Read after the self-heal, so a migrated data: image
+  // shows from its first send. null: no photo, which is every email before this change.
+  const emailStylePhoto = styleShowImage ? tenantStylePhotoUrl(styleImageUrl, supabaseUrl, clientId) : null;
   // Building is line 1. Paint + roof used to ride in this name/description; they are now their
   // own line items (2 = Paint Colors, 3 = Roof) pushed immediately below, so any charge on them
   // shows as a real line rather than buried text.
@@ -1962,10 +1998,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // and the designer's preview does the same, which is the property that actually matters.
     //
     // ⚠ QuickBooks: these arrive as kind "layout_item" with item_key "shutters"/"flowerBox".
-    // qboInvoice falls back to the tenant's kind-level `layout_item||` mapping, which is how
-    // these maps are normally set up — but a tenant who mapped every item_key individually and
-    // set no kind-level default will get a loud "unmapped: layout_item:shutters" and a Retry
-    // button, not a silent wrong invoice.
+    // Neither can be mapped on its own yet (no layout item exists for either key, so the grid has
+    // no row for them and save_item_map refuses the key), and there is no kind-level
+    // `layout_item||` default to catch them: 066's key-shape CHECK refuses that row. So
+    // qboInvoice bills them as the tenant's `fallback` item, and a tenant with no fallback gets a
+    // loud "unmapped: layout_item:shutters" and a Retry button, not a silent wrong invoice.
     for (const spec of [
       { itemKey: "shutters", name: "Shutters", on: "shutters", cid: "shutterColorId", clab: "shutterColorLabel" },
       { itemKey: "flowerBox", name: "Flower Box", on: "flowerBox", cid: "flowerBoxColorId", clab: "flowerBoxColorLabel" },
@@ -2358,7 +2395,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const fmt = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
   const issueAnchor = new Date(Date.now() - 12 * 60 * 60 * 1000);
   const today = fmt(issueAnchor);
-  const exp = new Date(issueAnchor.getTime() + 30 * 24 * 60 * 60 * 1000);
+  // How long the quote stays good for: Settings → Company, client_settings.quote_valid_days
+  // (migration 269). The ONE number behind the CRM estimate's expiry date here and the "Valid
+  // until" line on both PDFs below (the SS quote and the CRM-mode formal estimate), so the three
+  // cannot disagree. Its own tolerant read (_shared/quoteValidity.ts): a failed read, or this
+  // function reaching the database ahead of 269, gives 30, which is what every quote said before.
+  const { days: quoteValidDays } = await readQuoteValidDays(supabase, clientId);
+  const exp = new Date(issueAnchor.getTime() + quoteValidDays * 24 * 60 * 60 * 1000);
   const expiryFormatted = fmt(exp);
 
   let formattedPhone = "";
@@ -2781,6 +2824,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const planImg = tenantStorageUrl(planImageUrl);
     const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
+    // Sheet 1's letterhead logo: only ever this tenant's folder in our own storage (pdfLogo.ts);
+    // a pasted logo from another site stays in emails only. Fetched inside buildQuotePdf, beside
+    // the plan PDF, so a slow logo costs at most its own 3 s and never the quote.
+    const logoSources = pdfLogoSources(businessLogoUrl, supabaseUrl, clientId);
+    // "Prepared for": the customer as the designer's contact form has them right now (none for a
+    // legacy six-character code: the PDF's public key is derived from the code alone).
+    const pdfCustomer = pdfCustomerFrom(contact, designId);
 
     // THE QUOTE PDF, built from a snapshot and uploaded to its fixed path. Declared here, CALLED
     // BELOW THE PERSIST (review, 2026-09-17): the document is uploaded only after the write it
@@ -2799,6 +2849,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           },
           estimateNumber: ssQuoteNumber,
           dateIso: today,
+          validityDays: quoteValidDays,
+          customer: pdfCustomer,
           // deno-lint-ignore no-explicit-any
           lines: (Array.isArray(snap?.lines) ? snap.lines : []).map((l: any) => ({ ...l, desc: deHtml(l.desc) })),
           discount: snap?.discount,
@@ -2808,6 +2860,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           discountRows: snap?.discounts?.rows ?? null,
           quoteTerms: quoteTerms || null,
           planPdfUrl: planUrl,
+          logoSources,
           onSheetSkipped: (r) => skippedSheets.push(r),
         });
         // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
@@ -3200,6 +3253,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         })
         : estimateEmail({
           templateCopy: settings.email_template_copy,
+          // The {customer} token's name, and the building's photo (its own "Image on estimate"
+          // switch, and only this builder's own upload, as for the line photos above).
+          customerName: String(contact?.name ?? "").trim(),
+          pictureUrl: emailStylePhoto,
           businessName,
           logoUrl: businessLogoUrl || null,
           phone: businessPhone || null,
@@ -3216,6 +3273,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           quoteTerms: quoteTerms || null,
           docWord: "quote",
         });
+      const replyTo = await quoteReplyTo(intendedTo);
       const outcome = await sendTenantEmail(supabase, clientId, {
         kind: changeOrder ? "change_order" : "estimate",
         shortCode: designId,
@@ -3223,6 +3281,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         subject: content.subject,
         html: content.html,
         text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
       emailed = outcome.sent;
       if (!outcome.sent) emailReason = outcome.reason || "failed";
@@ -3620,15 +3679,24 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           try {
             // deHtml is at module scope (see its comment there) — shared with the SS-mode
             // quote so the two documents cannot de-render the same snapshot differently.
+            // The same letterhead logo, customer block and validity as the SS quote, so the two
+            // modes print the same form. The logo has its own 3 s budget and degrades to the text
+            // letterhead; nothing about it can stop the email below.
+            const logoNote = (r: string) => console.warn("formal estimate PDF:", r);
+            const logo = await fetchPdfLogo(pdfLogoSources(businessLogoUrl, supabaseUrl, clientId), logoNote);
             const pdfBytes = await buildFormalEstimatePdf({
               business: {
                 name: businessName,
                 phone: businessPhone || null,
                 website: businessWebsite || null,
                 address: businessAddress,
+                logo,
               },
               estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,
               dateIso: today,          // same issue date as the GHL estimate (step 8)
+              validityDays: quoteValidDays, // and the same expiry as the GHL estimate (step 8)
+              customer: pdfCustomerFrom(contact, designId),
+              onLogoSkipped: logoNote,
               lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
               discount: estimateLines.discount,
               quoteTerms: quoteTerms || null,
@@ -3654,7 +3722,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // (recording the pre-redirect recipient as intended_email), the dark guards,
           // and the email_sends ledger — and it never throws.
           const content = estimateEmail({
-          templateCopy: settings.email_template_copy,
+            templateCopy: settings.email_template_copy,
+            customerName: String(contact?.name ?? "").trim(),
+            pictureUrl: emailStylePhoto,
             businessName,
             logoUrl: businessLogoUrl || null,
             phone: businessPhone || null,
@@ -3670,6 +3740,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
           });
+          const replyTo = await quoteReplyTo(intendedTo);
           const outcome = await sendTenantEmail(supabase, clientId, {
             kind: "estimate",
             shortCode: designId,
@@ -3677,6 +3748,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             subject: content.subject,
             html: content.html,
             text: content.text,
+            ...(replyTo ? { replyTo } : {}),
           });
           if (outcome.sent) {
             ownDomainHandled = true;

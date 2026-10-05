@@ -2,12 +2,13 @@
 // the three app endpoints, and the Twilio side (after-dial, the warm leg, the conference
 // callback). Twilio's REST API is a stub here; what only a live call can prove is listed in
 // DEVIATIONS ("Not verified here").
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   conferenceTwiml, EMERGENCY_CALLBACK, HOLD_MUSIC, legsOf, nextTransferState, onTheCall, type CallAction,
 } from "../src/conference";
 import type { CallRow } from "../src/db";
 import worker from "../src/index";
+import { WARM_OFF_HOURS } from "../src/routes/conference";
 import { updateParticipant } from "../src/twilioRest";
 import {
   Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CONTACT_1, CUSTOMER, FakeCtx, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
@@ -654,6 +655,36 @@ describe("POST /calls/:id/warm-transfer", () => {
     expect(res.status).toBe(400);
     expect(json.error.message).toBe("That teammate is on Do Not Disturb.");
     expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  // Migration 264: outside their own hours is away, like DND, and said the same way.
+  describe("a teammate's own hours", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-29T15:00:00Z")); // Tuesday 10:00 in Chicago, 11:00 in New York
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("outside them: refused, nothing moved, and their hours were read", async () => {
+      const { net, token } = await appSetup(liveCall(), {}, { targetSettings: [{ dnd: false, dnd_until: null, ring_hours: { tue: [["13:00", "17:00"]] }, ring_hours_tz: "America/Chicago" }] });
+      const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+      expect(res.status).toBe(400);
+      expect(json.error.message).toBe(WARM_OFF_HOURS);
+      expect(net.to(/api\.twilio\.com/)).toEqual([]);
+      expect(net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("ring_hours_tz");
+    });
+
+    it("inside them (read in the number's zone when they saved none): rung as usual", async () => {
+      const { net, token } = await appSetup(liveCall(), {}, {
+        targetSettings: [{ dnd: false, dnd_until: null, ring_hours: { tue: [["10:30", "17:00"]] }, ring_hours_tz: null }],
+        route: routeInfo({}, { time_zone: "America/New_York" }),
+      });
+      const { res } = await press(token, "warm-transfer", { to_user_id: USER_B });
+      expect(res.status).toBe(200);
+      expect(net.to(/\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/)).toHaveLength(1);
+    });
   });
 
   it("a teammate on another tenant is not found", async () => {

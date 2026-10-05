@@ -201,7 +201,7 @@ Deno.test("the timeline plays a voicemail from the Worker, never preloading it, 
 // ── Settings → Phone offers the phase-6 pieces ─────────────────────────────────────────────
 Deno.test("the Phone tab offers Connect and a calling-only number, each only where the server will accept it", () => {
   const view = slice(SMS, "function PhoneSettingsView(", "// ── The Calls page", "PhoneSettingsView");
-  assert(/phoneAction\("phone_enable_number"\)/.test(view));
+  assert(/phoneAction\("phone_enable_number", \{ numberId: sel\.id \}\)/.test(view), "Connect names the open number (migration 266)");
   assert(/phoneAction\("phone_search_numbers", \{ areaCode: numQ \}\)/.test(view));
   assert(/phoneAction\("phone_buy_number", \{ phoneNumber: e164 \}\)/.test(view));
   assert(/data\.scope === "team" && !data\.number && data\.canBuyNumber && data\.numbersForSale/.test(view), "buying is offered only to someone canBuyNumber allows");
@@ -215,9 +215,11 @@ Deno.test("the Phone tab offers Connect and a calling-only number, each only whe
 Deno.test("the Phone form drops a route member who has LEFT the team, so Save is not refused for someone it cannot show", () => {
   const zones = slice(SMS, "const PHONE_TIME_ZONES = [", "\n];\n", "PHONE_TIME_ZONES") + "\n];";
   const display = slice(SMS, "function phoneDisplay(e164) {", "\n}\n", "phoneDisplay") + "\n}";
-  const seed = slice(SMS, "const PHONE_DEFAULT_HOURS = {", "function PhoneSettingsView(", "phoneFormFrom");
+  // The hours constant, then phoneFormFrom on to the view: the hours editor between them is JSX.
+  const seed = slice(SMS, "const PHONE_DEFAULT_HOURS = {", "\n};\n", "PHONE_DEFAULT_HOURS") + "\n};\n"
+    + slice(SMS, "function phoneFormFrom(d, teamList) {", "function PhoneSettingsView(", "phoneFormFrom");
   const phoneFormFrom = new Function("Intl", `${zones}\n${display}\n${seed}; return phoneFormFrom;`)(Intl) as
-    (d: unknown) => { members: string[] };
+    (d: unknown, teamList?: unknown) => { members: string[] };
   const A = "00000000-0000-4000-8000-00000000000a", B = "00000000-0000-4000-8000-00000000000b";
   const GONE = "00000000-0000-4000-8000-0000000000ff";
   const route = { mode: "in_order", members: [A, GONE, B], ringSeconds: 20, timeZone: "America/Chicago" };
@@ -225,6 +227,8 @@ Deno.test("the Phone form drops a route member who has LEFT the team, so Save is
   // names them); GONE was removed from the team after the route was saved.
   const team = [{ userId: A, phoneLevel: "edit" }, { userId: B, phoneLevel: "none" }];
   assertEquals(phoneFormFrom({ route, team }).members, [A, B]);
+  // A per-number entry (migration 266) carries no team of its own: the page passes its team in.
+  assertEquals(phoneFormFrom({ id: "n1", route }, team).members, [A, B]);
   // After a save the route is the server's own answer, already validated: kept as it came.
   assertEquals(phoneFormFrom({ route: { ...route, members: [B, A] } }).members, [B, A]);
 });

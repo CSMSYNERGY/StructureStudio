@@ -171,9 +171,12 @@ Deno.test("My Profile resolves for every role, settings area or not", () => {
   assertEquals(ssClampTab("settings", false, true, OWNER_MAP, false, false, false, "myprofile"), "settings");
 });
 
+// Asked of a DRIVER, who holds no settings area at all. Not of a sales rep: since `phone` joined
+// SETTINGS_AREAS (Phone is a Settings card gated on the phone area itself), a rep's phone 'own'
+// rightly opens Settings, where their rail is Phone and My Profile.
 Deno.test("only My Profile: the rest of Settings still needs an area", () => {
   for (const sub of [null, "structures", "team", "billing", "phone", "not-a-real-slug"]) {
-    assertEquals(ssClampTab("settings", false, false, SALES_REP, false, false, false, sub), ssFallbackTab(SALES_REP), String(sub));
+    assertEquals(ssClampTab("settings", false, false, DRIVER, false, false, false, sub), ssFallbackTab(DRIVER), String(sub));
   }
 });
 

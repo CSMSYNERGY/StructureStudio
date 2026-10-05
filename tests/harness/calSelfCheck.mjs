@@ -754,7 +754,8 @@ async function main() {
   await answer("porch", "No");
   const fixPorch = page.locator("#ssc-fix-porch");
   const fixCount = fixPorch.locator('input[data-ss-step-count="ss-fix"]');
-  const fixSteps = fixPorch.locator("label").filter({ hasText: /^Steps off its front/ }).locator("select");
+  // A projecting porch's steps leave its front or (2026-10-03) one of its sides: "Where its steps are".
+  const fixSteps = fixPorch.locator("label").filter({ hasText: /^Where its steps are/ }).locator("select");
   const typeFixCount = async (v) => { await fixCount.click(); await fixCount.fill(String(v)); await page.keyboard.press("Tab"); await page.waitForTimeout(300); };
   r.ok("the porch fix panel has no step count while the porch has no steps",
     (await fixPorch.count()) === 1 && (await fixSteps.count()) === 1 && (await fixCount.count()) === 0);
@@ -784,6 +785,14 @@ async function main() {
   await page.waitForTimeout(300);
   r.ok("⚠️ STEPS BACK ON, THE COUNT WENT WITH \"No steps\": blank, no count drawn",
     (await fixCount.inputValue()) === "" && !/\d steps on the left/.test(await spanLine()), await spanLine());
+  // Down a side of the deck (2026-10-03): offered here too, and said in plain words.
+  r.ok("the fix panel offers steps down either side of the deck",
+    (await fixSteps.locator("option").evaluateAll((os) => os.map((o) => o.value))).join("|") === "|left|center|right|leftSide|rightSide");
+  await fixSteps.selectOption("rightSide");
+  await page.waitForTimeout(300);
+  r.ok("...and What we drew says \"steps off its right side\"", /\bsteps off its right side/.test(await spanLine()), await spanLine());
+  await fixSteps.selectOption("left");
+  await page.waitForTimeout(300);
 
   // ── "blank = N" OVER FALLING GROUND (review, 2026-09-29) ────────────────────────────────
   // The fix panel's placeholder was the count at the FRONT's floor height, while the flight is
@@ -794,11 +803,12 @@ async function main() {
   await answer("walls", "Yes");
   await answer("walls", "No");
   const fixFoundation = page.locator('select[data-ss-foundation="ssc-fix"]');
-  // The fall to the back is its two back corners, 2 ft lower (2026-09-29: a box per corner).
+  // The fall to the back is its two back corners, 2 ft lower (2026-09-29: a box per corner), typed in
+  // inches since 2026-10-03.
   const fixCorner = (k) => page.locator(`[data-ss-grade-corners="ssc-fix"] input[data-ss-grade-corner="${k}"]`);
   await fixFoundation.selectOption("piers");
   await page.waitForTimeout(300);
-  for (const k of ["bl", "br"]) { await fixCorner(k).click(); await fixCorner(k).fill("2"); await page.keyboard.press("Tab"); await page.waitForTimeout(300); }
+  for (const k of ["bl", "br"]) { await fixCorner(k).click(); await fixCorner(k).fill("24"); await page.keyboard.press("Tab"); await page.waitForTimeout(300); }
   await answer("porch", "Yes");
   await answer("porch", "No");
   await fixPorch.getByRole("button", { name: "The other end", exact: true }).click();

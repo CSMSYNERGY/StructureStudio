@@ -11,19 +11,21 @@
 // refused with a sentence the owner can act on, instead of a Postgres constraint name.
 
 import { effectiveAccess, type Level } from "../_shared/access.ts";
+import { noticeSaysRecorded } from "../_shared/recordingNotice.ts";
+import { type BusinessHours, parseBusinessHours, validTimeZone } from "../_shared/phoneHours.ts";
 
-/** The seven keys business_hours uses, in the order the Settings screen shows them. */
-export const PHONE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
-export type PhoneDay = typeof PHONE_DAYS[number];
-export type BusinessHours = Partial<Record<PhoneDay, [string, string][]>>;
+// The hours rules moved to _shared/phoneHours.ts (migration 264), because the phone-api Worker
+// checks a person's own ring hours with them too. Re-exported, so everything that imported them
+// from here (index.ts, tests/phone/phoneSettings_test.ts) is unchanged.
+export {
+  type BusinessHours, parseBusinessHours, PHONE_DAYS, type PhoneDay, validTimeZone,
+} from "../_shared/phoneHours.ts";
 
 /** Twilio rings at most ten <Client>s in one <Dial> (plan section 8). */
 export const MAX_ROUTE_MEMBERS = 10;
 /** phone_routes.ring_seconds CHECK (ring_seconds between 5 and 60). */
 export const RING_MIN = 5;
 export const RING_MAX = 60;
-/** More opening periods than this in one day is a typo, not a timetable. */
-const MAX_PERIODS_PER_DAY = 4;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (v: unknown): v is string => typeof v === "string" && UUID.test(v);
@@ -41,60 +43,6 @@ export function nanpE164(raw: unknown): string | null {
   const ten = d.length === 11 && d.startsWith("1") ? d.slice(1) : d;
   if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(ten)) return null;
   return `+1${ten}`;
-}
-
-/** Is this an IANA time zone this runtime can actually compute business hours in? */
-export function validTimeZone(tz: unknown): tz is string {
-  if (typeof tz !== "string" || !tz || tz.length > 64 || !/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return false;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
-const DAY_LABEL: Record<PhoneDay, string> = {
-  mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday",
-};
-
-/**
- * business_hours as the owner sent it → the stored jsonb, or a sentence saying what is wrong.
- *
- * null means ALWAYS OPEN (SPEC: "null = always open"), which is different from an object whose
- * every day is empty — that one is "closed all week", and every call goes to the after-hours
- * action. Both are legitimate, so the two are never collapsed into each other.
- *
- * A day that is missing or empty is closed. Periods must run forward within the day: an
- * overnight period (22:00-06:00) is written as two, one on each day, which is what a builder
- * with a night shift would expect the screen to show anyway.
- */
-export function parseBusinessHours(raw: unknown): { ok: true; value: BusinessHours | null } | { ok: false; error: string } {
-  if (raw === null || raw === undefined) return { ok: true, value: null };
-  if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "Business hours were not in a shape we recognise." };
-  const out: BusinessHours = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!(PHONE_DAYS as readonly string[]).includes(k)) return { ok: false, error: "Business hours were not in a shape we recognise." };
-    const day = k as PhoneDay;
-    if (!Array.isArray(v)) return { ok: false, error: `${DAY_LABEL[day]}'s hours were not in a shape we recognise.` };
-    if (v.length > MAX_PERIODS_PER_DAY) return { ok: false, error: `${DAY_LABEL[day]} has more than ${MAX_PERIODS_PER_DAY} opening periods.` };
-    const periods: [string, string][] = [];
-    for (const p of v) {
-      if (!Array.isArray(p) || p.length !== 2 || !HHMM.test(String(p[0])) || !HHMM.test(String(p[1]))) {
-        return { ok: false, error: `${DAY_LABEL[day]} has a time that isn't in hours and minutes.` };
-      }
-      const [open, close] = [String(p[0]), String(p[1])];
-      if (open >= close) return { ok: false, error: `On ${DAY_LABEL[day]}, the closing time has to be after the opening time.` };
-      periods.push([open, close]);
-    }
-    periods.sort((a, b) => (a[0] < b[0] ? -1 : 1));
-    for (let i = 1; i < periods.length; i++) {
-      if (periods[i][0] < periods[i - 1][1]) return { ok: false, error: `${DAY_LABEL[day]}'s opening periods overlap.` };
-    }
-    if (periods.length) out[day] = periods;
-  }
-  return { ok: true, value: out };
 }
 
 /** A greeting the phone can play: https, and a length Twilio will accept in <Play>. */
@@ -198,6 +146,129 @@ export function parseRoute(
       business_hours: hours.value, time_zone: tz, after_hours: afterHours,
       greeting_url: greeting.value,
     },
+  };
+}
+
+// ── Call recording (migration 263) ───────────────────────────────────────────────────────
+//
+// The settings card's form → the client_settings columns, or the first thing wrong with it.
+// The columns' CHECKs are mirrored here so a bad value is refused in words the owner can act on.
+// Decided for Ahsan on 2026-10-04 (Carolyn can change the settings later): recording off until the
+// owner turns it on; the announcement on and LOCKED ON while calls are recorded (this refuses
+// turning it off; the column stays for a later decision); transcripts on; recordings kept 365
+// days unless the owner picks another of the five lengths. The standard wording is the phone-api
+// Worker's (src/recording.ts STANDARD_NOTICE*), repeated here only to show the owner.
+
+/** client_settings_phone_recording_retention_chk. */
+export const RECORDING_RETENTION_DAYS = [30, 90, 180, 365, 730] as const;
+export const DEFAULT_RECORDING_RETENTION_DAYS = 365;
+/** client_settings_phone_recording_notice_text_chk, counted after trimming. */
+export const NOTICE_MIN = 10;
+export const NOTICE_MAX = 300;
+export const STANDARD_NOTICE = "This call will be recorded.";
+export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and transcribed.";
+
+/** The sentence a business with no wording of its own hears (the Worker adds "and transcribed" only while it will happen). */
+export function standardNotice(transcribe: boolean): string {
+  return transcribe ? STANDARD_NOTICE_TRANSCRIBED : STANDARD_NOTICE;
+}
+
+export type RecordingRow = {
+  phone_record_calls: boolean;
+  phone_recording_notice: true;
+  phone_recording_notice_text: string | null;
+  phone_transcribe_calls: boolean;
+  phone_recording_retention_days: number;
+};
+
+/**
+ * { on, noticeText?, transcribe?, retentionDays?, notice? } → the columns to write.
+ *   on            required, true or false
+ *   notice        absent or true. false is refused: the announcement is locked on
+ *   noticeText    blank, or either standard sentence, means the standard wording (stored NULL,
+ *                 so it follows the transcripts switch); otherwise 10-300 characters once spaces
+ *                 are tidied, one line, and it has to say the call is recorded and not deny it
+ *                 (noticeSaysRecorded)
+ *   transcribe    default true
+ *   retentionDays one of 30, 90, 180, 365, 730; default 365
+ */
+export function parseRecording(p: Record<string, unknown>): { ok: true; row: RecordingRow } | { ok: false; error: string } {
+  if (typeof p.on !== "boolean") return { ok: false, error: "Say whether calls should be recorded." };
+  if (p.notice === false) {
+    return { ok: false, error: "The announcement can't be turned off: callers are always told a call is recorded." };
+  }
+  if (p.transcribe !== undefined && p.transcribe !== null && typeof p.transcribe !== "boolean") {
+    return { ok: false, error: "Say whether recorded calls should be transcribed." };
+  }
+  const transcribe = p.transcribe !== false;
+
+  const days = p.retentionDays === undefined || p.retentionDays === null || p.retentionDays === ""
+    ? DEFAULT_RECORDING_RETENTION_DAYS
+    : Number(p.retentionDays);
+  if (!(RECORDING_RETENTION_DAYS as readonly number[]).includes(days)) {
+    return { ok: false, error: "Choose how long recordings are kept: 30, 90, 180, 365 or 730 days." };
+  }
+
+  if (p.noticeText !== undefined && p.noticeText !== null && typeof p.noticeText !== "string") {
+    return { ok: false, error: "The announcement wasn't in a shape we recognise." };
+  }
+  // Tidied the way it will be spoken: one line, single spaces.
+  const raw = String(p.noticeText ?? "").replace(/\s+/g, " ").trim();
+  let text: string | null = raw;
+  if (!raw || raw === STANDARD_NOTICE || raw === STANDARD_NOTICE_TRANSCRIBED) text = null;
+  if (text !== null) {
+    // deno-lint-ignore no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(text)) return { ok: false, error: "The announcement has a character that can't be spoken." };
+    if (text.length < NOTICE_MIN) return { ok: false, error: `The announcement has to be at least ${NOTICE_MIN} characters.` };
+    if (text.length > NOTICE_MAX) return { ok: false, error: `The announcement can be at most ${NOTICE_MAX} characters.` };
+    // A word of its own, and not denied ("not recorded"): _shared/recordingNotice.ts.
+    if (!noticeSaysRecorded(text)) return { ok: false, error: "The announcement has to tell callers the call is recorded." };
+  }
+
+  return {
+    ok: true,
+    row: {
+      phone_record_calls: p.on,
+      phone_recording_notice: true,
+      phone_recording_notice_text: text,
+      phone_transcribe_calls: transcribe,
+      phone_recording_retention_days: days,
+    },
+  };
+}
+
+/**
+ * Whether calls can be recorded on this server at all: the phone-api Worker's CALL_RECORDING rail,
+ * mirrored as this function's own secret of the same name (set together, workers/phone-api
+ * SETUP.md 7c). Exactly "on", as the Worker reads it. The database can't see the Worker's rail,
+ * so without this the card would say calls are recorded while nothing records.
+ */
+export function recordingServerOn(env: (k: string) => string | undefined): boolean {
+  return env("CALL_RECORDING") === "on";
+}
+
+/**
+ * A client_settings row's recording columns → what the Settings card shows. Missing columns read
+ * as the defaults. `serverOn` is recordingServerOn: calls are recorded only while the owner's
+ * `on` AND it are true; with the owner's on and the server's off, the card says recording hasn't
+ * started yet.
+ */
+export function recordingView(row: Record<string, unknown> | null | undefined, serverOn = false) {
+  const r = row ?? {};
+  const transcribe = r.phone_transcribe_calls !== false;
+  const days = Number(r.phone_recording_retention_days);
+  const text = typeof r.phone_recording_notice_text === "string" && r.phone_recording_notice_text.trim() ? r.phone_recording_notice_text : null;
+  return {
+    on: r.phone_record_calls === true,
+    serverOn: serverOn === true,
+    notice: true,
+    noticeText: text,
+    standardText: standardNotice(transcribe),
+    transcribe,
+    retentionDays: (RECORDING_RETENTION_DAYS as readonly number[]).includes(days) ? days : DEFAULT_RECORDING_RETENTION_DAYS,
+    retentionChoices: [...RECORDING_RETENTION_DAYS],
+    updatedAt: typeof r.phone_recording_updated_at === "string" ? r.phone_recording_updated_at : null,
+    updatedBy: typeof r.phone_recording_updated_by === "string" ? r.phone_recording_updated_by : null,
   };
 }
 
@@ -526,4 +597,117 @@ export function createContactRefusal(error: { code?: unknown; message?: unknown 
     return { status: 403, error: "Your account isn't on this team any more. Sign in again." };
   }
   return null;
+}
+
+// ── More than one number (migration 266) ──────────────────────────────────────────────────
+//
+// Carolyn, 2026-09-30: "What if they want more than one number?" and "all of these settings ...
+// needs to be for that individual number." The settings already were per number (phone_routes has
+// one row per sms_numbers row); what follows is the part of the Phone tab that names a number,
+// says whose it is, and decides which number a request is about. Safe defaults (contract):
+//   * a number is a TEAM LINE unless assigned to a person; one personal number per person;
+//   * at most MAX_NUMBERS live numbers per business;
+//   * a request that names no number means the FIRST (oldest) one, the number every screen before
+//     266 showed, so an older portal bundle keeps working unchanged.
+
+/** At most this many live numbers per business. */
+export const MAX_NUMBERS = 10;
+/** sms_numbers_label_len (migration 266). */
+export const NUMBER_LABEL_MAX = 40;
+
+/** The 23505 on sms_numbers_one_per_person, in words. */
+export const ONE_NUMBER_PER_PERSON =
+  "That person already has their own number. Make that one a team line first, or choose someone else.";
+/** A numberId that is not one of this business's live numbers (released meanwhile, or never ours). */
+export const NUMBER_GONE = "That number isn't on this account any more. Reload the page.";
+
+/**
+ * The number a request is about: `raw` (payload.numberId) when it is given, which must be one of
+ * `rows` (this business's live numbers, read by the caller on clientId), else the FIRST row, or
+ * null when there is none. A given id that matches nothing is refused, never read as "the first":
+ * changing the wrong number's settings is worse than asking for a reload.
+ */
+export function pickNumber<T extends { id: string }>(rows: T[], raw: unknown):
+  { ok: true; n: T | null } | { ok: false; error: string } {
+  const list = (rows ?? []).filter(Boolean);
+  if (raw === undefined || raw === null || raw === "") return { ok: true, n: list[0] ?? null };
+  if (!isUuid(raw)) return { ok: false, error: NUMBER_GONE };
+  const n = list.find((r) => String(r.id).toLowerCase() === raw.toLowerCase());
+  return n ? { ok: true, n } : { ok: false, error: NUMBER_GONE };
+}
+
+/** A number's name as typed → what is stored: spaces tidied, NULL for none, 1 to 40 characters. */
+export function parseNumberLabel(raw: unknown): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  if (typeof raw !== "string") return { ok: false, error: "A number's name has to be text." };
+  const s = raw.replace(/\s+/g, " ").trim();
+  if (!s) return { ok: true, value: null };
+  // deno-lint-ignore no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(s)) return { ok: false, error: "A number's name can't have that character in it." };
+  if (s.length > NUMBER_LABEL_MAX) return { ok: false, error: `A number's name can be at most ${NUMBER_LABEL_MAX} characters.` };
+  return { ok: true, value: s };
+}
+
+/**
+ * "Whose number": empty / null = a team line; otherwise someone in `eligible` (every user id on
+ * THIS business with phone access, computed by the caller from client_users, never from the
+ * request), so a number can't be given to someone on another builder's team or with no phone.
+ */
+export function parseAssignee(
+  raw: unknown,
+  eligible: Set<string>,
+  names: Map<string, string | null> = new Map(),
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined || raw === "") return { ok: true, value: null };
+  if (!isUuid(raw)) return { ok: false, error: "The person this number is for isn't on your team." };
+  const id = raw.toLowerCase();
+  if (!eligible.has(id)) {
+    const who = names.get(id);
+    return {
+      ok: false,
+      error: who
+        ? `${who} doesn't have Phone access, so a number can't be theirs. Change it on the Team tab first.`
+        : "The person this number is for isn't on your team, or doesn't have Phone access.",
+    };
+  }
+  return { ok: true, value: id };
+}
+
+/** The keys of the answer-list form. A save that carries none of them changes no route. */
+export const ROUTE_KEYS = [
+  "mode", "members", "ringSeconds", "noAnswer", "forwardTo", "businessHours", "timeZone", "afterHours", "greetingUrl",
+] as const;
+export function carriesRoute(p: Record<string, unknown>): boolean {
+  return ROUTE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(p ?? {}, k));
+}
+
+/**
+ * Who a number with no saved route is offered to ring (the Phone tab's first-time setup; nothing
+ * is saved until the owner presses Save): its person, when it is someone's and they have phone
+ * access, else the business's owners (plan section 7: "the list starts with the owner").
+ */
+export function suggestedMembersFor(
+  assignedUserId: string | null | undefined,
+  team: { userId: string; role: string | null; phoneLevel: string }[],
+): string[] {
+  const who = String(assignedUserId ?? "").toLowerCase();
+  if (who && team.some((t) => t.userId === who && t.phoneLevel !== "none")) return [who];
+  return team.filter((t) => t.role === "owner" && t.phoneLevel !== "none").map((t) => t.userId);
+}
+
+export type CallerNumberRow = { id: string; phone_number: string; purchased_at?: string | null; assigned_user_id?: string | null };
+
+/**
+ * The number a person's calls show, phone_caller_context's pick (migration 266) as the Phone tab
+ * tells someone with their own calls only: their own number, else a team line (the texting number
+ * first), else the oldest; somebody else's own number only when nothing else is live. `rows` are
+ * live and oldest first (phoneNumberRows), so "the oldest" is the first that qualifies.
+ */
+export function callerNumberFor<T extends CallerNumberRow>(rows: T[], userId: string | null | undefined, smsNumber: string | null | undefined): T | null {
+  const list = (rows ?? []).filter(Boolean);
+  const me = String(userId ?? "").toLowerCase();
+  const own = me ? list.find((n) => String(n.assigned_user_id ?? "").toLowerCase() === me) : undefined;
+  if (own) return own;
+  const team = list.filter((n) => !n.assigned_user_id);
+  return team.find((n) => smsNumber && n.phone_number === smsNumber) ?? team[0] ?? list[0] ?? null;
 }

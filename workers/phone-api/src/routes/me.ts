@@ -1,20 +1,119 @@
-// The signed-in person's own things: POST /settings/me, /devices, /devices/signout-all, /log,
-// and GET /turn and /health.
+// The signed-in person's own things: POST and GET /settings/me, POST /devices,
+// /devices/signout-all, /log, and GET /turn and /health. (Their voicemail greeting, under
+// /settings/me/greeting/*, is ./greeting.ts.)
 
 import type { Ctx, Env } from "../env";
 import { WORKER_VERSION } from "../env";
-import { requireCaller, requireLogin } from "../context";
-import { adminClient, must } from "../db";
-import { ApiError, ok, readJson } from "../http";
+import { requireCaller, requireLogin, type Caller } from "../context";
+import { adminClient, callerContext, must } from "../db";
+import { ApiError, ok, readJson, UUID_RE } from "../http";
 import { isPremiumRate, toE164 } from "../identity";
 import { logFault } from "../log";
 import { EXTENSION_LOG_SOURCES, extensionContext, pseudonymKey, reportRefs, scrubText } from "../logPrivacy";
 import { ntsToken } from "../twilioRest";
 import { onDnd } from "./voice";
+import { parseBusinessHours, RING_HOURS_WORDS, validTimeZone } from "../../../../supabase/functions/_shared/phoneHours.ts";
 
-// ── POST /settings/me ───────────────────────────────────────────────────────────────
+// ── POST /settings/me, GET /settings/me ─────────────────────────────────────────────
 
 const MAX_DND_MS = 30 * 86_400_000;
+
+// ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz, greeting_recording_sid and greeting_updated_at
+// are migration 264's: this Worker must not be deployed before it is applied.
+export const SETTINGS_COLUMNS =
+  "dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting_recording_sid, greeting_updated_at";
+
+export interface SettingsRow {
+  dnd: boolean;
+  dnd_until: string | null;
+  forward_to_cell: string | null;
+  dnd_cover_user_id: string | null;
+  ring_hours: Record<string, unknown> | null;
+  ring_hours_tz: string | null;
+  greeting_recording_sid: string | null;
+  greeting_updated_at: string | null;
+}
+
+/**
+ * Your own voicemail greeting as the apps see it (migration 264): whether there is one, and when
+ * it was recorded. Never the recording's sid: the audio is GET /settings/me/greeting/audio.
+ */
+export function greetingOut(s: Partial<Pick<SettingsRow, "greeting_recording_sid" | "greeting_updated_at">> | null): { set: boolean; updated_at: string | null } {
+  const set = !!s?.greeting_recording_sid;
+  return { set, updated_at: set ? s?.greeting_updated_at ?? null : null };
+}
+
+/** phone-core's MySettings. `dnd` is the effective value: a passed end time reads as off. */
+export function settingsOut(s: Partial<SettingsRow> | null) {
+  const hours = s?.ring_hours;
+  return {
+    dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
+    dnd_until: s?.dnd_until ?? null,
+    forward_to_cell: s?.forward_to_cell ?? null,
+    dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
+    ring_hours: hours && typeof hours === "object" && !Array.isArray(hours) ? hours : null,
+    ring_hours_tz: s?.ring_hours_tz ?? null,
+    greeting: greetingOut(s),
+  };
+}
+
+const COVER_REFUSED = "That teammate can't take calls.";
+
+/**
+ * Who rings in your place while you're away (migration 264): a teammate's user id, or null / ""
+ * for nobody extra. Anyone with phone access on your own business, on the answer list or not;
+ * never yourself. This is only the choice: whether they can take a call right then (access, a
+ * call of their own, their own DND) is checked on every call (voice.ts ringSlots, calls.ts).
+ */
+async function coverChoice(c: Caller, v: unknown): Promise<string | null> {
+  if (v === null || v === "") return null;
+  const id = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (!UUID_RE.test(id) || id === c.userId.toLowerCase()) throw new ApiError("bad_request", COVER_REFUSED);
+  const ctx = await callerContext(c.admin, id);
+  if (!ctx || ctx.client_id !== c.ctx.client_id || ctx.phone_level === "none") throw new ApiError("bad_request", COVER_REFUSED);
+  return id;
+}
+
+// Your own hours (migration 264): refusals in the person's words.
+const HOURS_NO_DAYS = "Add hours to at least one day, or choose Always.";
+const HOURS_NO_ZONE = "Choose the time zone your hours are in.";
+const HOURS_BAD_ZONE = "That time zone isn't one we know. Pick it from the list.";
+
+/**
+ * The hours your phone rings (migration 264): `ring_hours` null for always (whenever the business
+ * is open), or business hours' weekly shape, checked by the rule the owner's hours pass
+ * (_shared/phoneHours.ts), with at least one day; `ring_hours_tz` the zone they're in (the apps
+ * and the portal send the device's), required with hours. Outside them you count as away, like
+ * DND (voice.ts isAway). Neither touches the business's own hours, which stay the outer gate.
+ */
+function hoursPatch(body: Record<string, unknown>): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (body.ring_hours !== undefined) {
+    const h = parseBusinessHours(body.ring_hours, RING_HOURS_WORDS);
+    if (!h.ok) throw new ApiError("bad_request", h.error);
+    // {} would be "never": a person who wants no calls has Do Not Disturb, with its end time.
+    if (h.value && !Object.keys(h.value).length) throw new ApiError("bad_request", HOURS_NO_DAYS);
+    patch.ring_hours = h.value;
+  }
+  if (body.ring_hours_tz !== undefined) {
+    if (body.ring_hours_tz === null || body.ring_hours_tz === "") patch.ring_hours_tz = null;
+    else if (!validTimeZone(body.ring_hours_tz)) throw new ApiError("bad_request", HOURS_BAD_ZONE);
+    else patch.ring_hours_tz = body.ring_hours_tz;
+  }
+  // Hours are always saved with the zone they were set in, so they never move with the business's.
+  if (patch.ring_hours && !patch.ring_hours_tz) throw new ApiError("bad_request", HOURS_NO_ZONE);
+  return patch;
+}
+
+/** Your own settings, for a screen that has no /token answer to read them from (the portal). */
+export async function mySettings(env: Env, req: Request): Promise<Response> {
+  const c = await requireCaller(env, req, { needOn: false });
+  const row = must(
+    await c.admin.from("phone_user_settings").select(SETTINGS_COLUMNS).eq("user_id", c.userId).maybeSingle(),
+    "read phone settings",
+  ) as SettingsRow | null;
+  return ok({ settings: settingsOut(row) });
+}
 
 export async function settingsMe(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
@@ -43,18 +142,23 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
     } else {
       const cell = toE164(String(body.forward_to_cell));
       if (!cell || isPremiumRate(cell)) throw new ApiError("bad_request", "That cell number isn't a US or Canadian number.");
-      // Forwarding the business line to itself would ring the same Dial forever.
-      if (c.ctx.number && cell === c.ctx.number.e164) throw new ApiError("bad_request", "That's your business number. Enter your own cell phone.");
+      // Forwarding a business line to itself (or to another of the business's numbers, migration
+      // 266) would ring the same Dial forever.
+      if ((c.ctx.number && cell === c.ctx.number.e164) || (c.ctx.numbers ?? []).includes(cell)) {
+        throw new ApiError("bad_request", "That's your business number. Enter your own cell phone.");
+      }
       patch.forward_to_cell = cell;
     }
   }
+  Object.assign(patch, hoursPatch(body));
+  if (body.dnd_cover_user_id !== undefined) patch.dnd_cover_user_id = await coverChoice(c, body.dnd_cover_user_id);
 
   const nowIso = new Date().toISOString();
   const row = { user_id: c.userId, client_id: c.ctx.client_id, updated_at: nowIso, ...patch };
   let saved = must(
-    await c.admin.from("phone_user_settings").upsert(row, { onConflict: "user_id" }).select("dnd, dnd_until, forward_to_cell").single(),
+    await c.admin.from("phone_user_settings").upsert(row, { onConflict: "user_id" }).select(SETTINGS_COLUMNS).single(),
     "save phone settings",
-  ) as { dnd: boolean; dnd_until: string | null; forward_to_cell: string | null } | null;
+  ) as SettingsRow | null;
   // Turning DND on without an end time must not inherit the end of an earlier timed DND that
   // has already passed: the upsert keeps the old dnd_until, and a passed one reads as OFF here
   // and in phone_route_for_number, so the switch did nothing and calls kept ringing. A timer
@@ -64,20 +168,13 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
     if (Number.isFinite(until) && until <= Date.now()) {
       const cleared = must(
         await c.admin.from("phone_user_settings").update({ dnd_until: null, updated_at: nowIso })
-          .eq("user_id", c.userId).lte("dnd_until", new Date().toISOString()).select("dnd, dnd_until, forward_to_cell"),
+          .eq("user_id", c.userId).lte("dnd_until", new Date().toISOString()).select(SETTINGS_COLUMNS),
         "clear passed dnd_until",
-      ) as { dnd: boolean; dnd_until: string | null; forward_to_cell: string | null }[] | null;
+      ) as SettingsRow[] | null;
       if (cleared?.length) saved = cleared[0];
     }
   }
-  const s = saved ?? { dnd: false, dnd_until: null, forward_to_cell: null };
-  return ok({
-    settings: {
-      dnd: onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until }),
-      dnd_until: s.dnd_until ?? null,
-      forward_to_cell: s.forward_to_cell ?? null,
-    },
-  });
+  return ok({ settings: settingsOut(saved) });
 }
 
 // ── POST /devices ───────────────────────────────────────────────────────────────────

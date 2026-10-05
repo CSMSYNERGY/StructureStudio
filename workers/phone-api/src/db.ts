@@ -45,6 +45,38 @@ export function must<T>(res: { data: T | null; error: { message?: string; code?:
   return res.data;
 }
 
+// ── The business's call recording settings (migration 263) ──────────────────────────
+// Both RPCs return them as `recording`, read from client_settings. Whether a call is ARMED
+// (announced, so it may be recorded) is the Worker's decision: these plus the CALL_RECORDING
+// rail (recording.ts armedFor).
+
+export interface RecordingSettings {
+  /** The business turned recording on (client_settings.phone_record_calls). */
+  on: boolean;
+  /** Play the announcement. Locked on for now: a call is armed only while this is true. */
+  notice: boolean;
+  /** The business's own sentence, or null for the standard one (recording.ts noticeText). */
+  notice_text: string | null;
+  /** Transcripts and summaries, while recording is on. */
+  transcribe: boolean;
+}
+
+/** What a business with no settings (or a database before 263) has: off. */
+export const RECORDING_OFF: RecordingSettings = { on: false, notice: true, notice_text: null, transcribe: true };
+
+/** An RPC's `recording` block. Anything missing or malformed reads as off, never as on. */
+export function recordingSettingsOf(v: unknown): RecordingSettings {
+  if (!v || typeof v !== "object") return { ...RECORDING_OFF };
+  const r = v as Record<string, unknown>;
+  const text = typeof r.notice_text === "string" ? r.notice_text.trim() : "";
+  return {
+    on: r.on === true,
+    notice: r.notice !== false,
+    notice_text: text ? text.slice(0, 300) : null,
+    transcribe: r.transcribe !== false,
+  };
+}
+
 // ── phone_caller_context(p_user_id) ─────────────────────────────────────────────────
 // One row, uncached (SPEC section 2). Null when the user is on no team.
 
@@ -55,8 +87,19 @@ export interface CallerContext {
   contacts_level: Level;
   own_contacts_only: boolean;
   device_generation: number;
+  /**
+   * The number this person's calls show (migration 266: their own number first, then a team line,
+   * then the texting number, then the oldest). Before 266, the business's one number.
+   */
   number: { id: string; e164: string; voice_enabled: boolean; registration_status: string | null } | null;
+  /**
+   * Every live number of the business, E.164, oldest first (migration 266). A database before 266
+   * returns none: then it is `number` alone, which was the business's only number.
+   */
+  numbers: string[];
   full_name: string | null;
+  /** The business's call recording settings (migration 263). */
+  recording: RecordingSettings;
 }
 
 export async function callerContext(admin: Admin, userId: string): Promise<CallerContext | null> {
@@ -81,8 +124,27 @@ export async function callerContext(admin: Admin, userId: string): Promise<Calle
         registration_status: data.number.registration_status ?? null,
       }
       : null,
+    numbers: businessNumbersOf((data as { numbers?: unknown }).numbers, data.number?.e164),
     full_name: data.full_name ?? null,
+    recording: recordingSettingsOf((data as { recording?: unknown }).recording),
   };
+}
+
+/**
+ * The RPC's `numbers`, E.164 strings only, at most 50, with `number` always in it: the list a
+ * ringing call's From is compared against (a teammate's transfer rings From a business number).
+ * Missing or malformed (a database before 266) reads as `number` alone.
+ */
+export function businessNumbersOf(v: unknown, number?: string | null): string[] {
+  const out: string[] = [];
+  for (const x of Array.isArray(v) ? v : []) {
+    const e = typeof x === "string" ? x.trim() : "";
+    if (/^\+[1-9]\d{6,14}$/.test(e) && !out.includes(e)) out.push(e);
+    if (out.length >= 50) break;
+  }
+  const own = typeof number === "string" ? number.trim() : "";
+  if (own && !out.includes(own)) out.unshift(own);
+  return out;
 }
 
 export function normLevel(v: unknown): Level {
@@ -114,6 +176,31 @@ export interface RouteMember {
   has_access: boolean;
   full_name: string | null;
   forward_to_cell: string | null;
+  /**
+   * Migration 264: the teammate who rings in this person's place while they're away (on DND),
+   * or null for nobody extra. Optional so a database before 264 (and the many fixtures written
+   * before it) reads as no cover.
+   */
+  dnd_cover?: string | null;
+  /**
+   * Migration 264: this row is only here as someone's cover (they are not on the answer list).
+   * It rings only in an away member's place (routes/voice.ts ringSlots), never on its own, and
+   * nothing outside the cover logic reads it.
+   */
+  cover_only?: boolean;
+  /**
+   * Migration 264: the hours this person's phone rings ({"mon":[["08:00","17:00"]], ...}), or
+   * null for always. Outside them they count as away, like DND (routes/voice.ts isAway).
+   * Optional so a database before 264 (and the fixtures written before it) reads as always.
+   */
+  ring_hours?: Record<string, unknown> | null;
+  /** Migration 264: the time zone ring_hours are in, or null for the number's (route.time_zone). */
+  hours_tz?: string | null;
+  /**
+   * Migration 264: this person's own voicemail greeting, a Twilio recording sid, or null. Played
+   * on a line that is only theirs (../voicemail.ts lineOwner). Optional, like the keys above.
+   */
+  greeting_sid?: string | null;
 }
 
 export interface RouteInfo {
@@ -124,6 +211,15 @@ export interface RouteInfo {
   members: RouteMember[];
   business_name: string | null;
   recent_emergency_user: string | null;
+  /**
+   * Migration 266: the person the dialled number belongs to (sms_numbers.assigned_user_id), with
+   * their own greeting and whether they have phone access on this business; null for a team line,
+   * and from a database before 266. Their greeting plays on the number's voicemail
+   * (../voicemail.ts lineOwner). Optional so the fixtures written before it read as a team line.
+   */
+  number_owner?: { user_id: string; greeting_sid: string | null; has_access: boolean } | null;
+  /** The business's call recording settings (migration 263). */
+  recording: RecordingSettings;
 }
 
 export const DEFAULT_ROUTE: PhoneRoute = {
@@ -171,10 +267,31 @@ export async function routeForNumber(admin: Admin, e164: string): Promise<RouteI
         has_access: m.has_access === true,
         full_name: m.full_name ?? null,
         forward_to_cell: m.forward_to_cell ? String(m.forward_to_cell) : null,
+        dnd_cover: m.dnd_cover ? String(m.dnd_cover) : null,
+        cover_only: m.cover_only === true,
+        ring_hours: m.ring_hours && typeof m.ring_hours === "object" && !Array.isArray(m.ring_hours) ? m.ring_hours : null,
+        hours_tz: m.hours_tz ? String(m.hours_tz) : null,
+        // Only a real recording sid: the Worker builds a URL from it.
+        greeting_sid: typeof m.greeting_sid === "string" && /^RE[0-9a-f]{32}$/.test(m.greeting_sid) ? m.greeting_sid : null,
       }))
       : [],
     business_name: data.business_name ?? null,
     recent_emergency_user: data.recent_emergency_user ? String(data.recent_emergency_user) : null,
+    number_owner: numberOwnerOf((data as { number_owner?: unknown }).number_owner),
+    recording: recordingSettingsOf(data.recording),
+  };
+}
+
+/** The RPC's `number_owner` (migration 266). Anything missing or malformed is a team line. */
+export function numberOwnerOf(v: unknown): RouteInfo["number_owner"] {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.user_id !== "string" || !o.user_id) return null;
+  return {
+    user_id: o.user_id,
+    // Only a real recording sid: the Worker builds a URL from it.
+    greeting_sid: typeof o.greeting_sid === "string" && /^RE[0-9a-f]{32}$/.test(o.greeting_sid) ? o.greeting_sid : null,
+    has_access: o.has_access === true,
   };
 }
 
@@ -215,11 +332,18 @@ export interface CallRow {
   handoff_sid?: string | null;
   /** The leg the call is moving away from. */
   handoff_from_sid?: string | null;
+  /**
+   * The TwiML this call ran carried the recording announcement, so it may be recorded
+   * (migration 263, recording.ts). Optional for the same reason as the handoff columns; absent
+   * reads as not armed, and nothing about recording runs for the call.
+   */
+  recording_armed?: boolean;
 }
 
+// ⚠️ recording_armed is migration 263's: this Worker must not be deployed before it is applied.
 export const CALL_COLUMNS =
   "id, client_id, number_id, contact_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, placed_by, answered_by, rang_user_ids, transferred_from, transfer_state, status, started_at, answered_at, ended_at, duration_s, error_code, is_emergency, "
-  + "handoff_state, handoff_to, handoff_key, handoff_at, handoff_sid, handoff_from_sid";
+  + "handoff_state, handoff_to, handoff_key, handoff_at, handoff_sid, handoff_from_sid, recording_armed";
 
 export async function callById(admin: Admin, id: string): Promise<CallRow | null> {
   return must(

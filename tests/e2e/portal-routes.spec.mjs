@@ -11,6 +11,9 @@ const ROUTES = [
   "/portal/commissions", "/portal/quickbooks", "/portal/view-3d",
   // My Synergy Phone's Calls report. It resolves for anyone with phone access (owners always).
   "/portal/calls",
+  // Conversations (2026-10-05), and its three filters, which are subs the shell reads as state.
+  // Behind the CRM: without it the page is the CRM card, which is a render.
+  "/portal/conversations", "/portal/conversations/email", "/portal/conversations/texts", "/portal/conversations/calls",
   "/portal/support", "/portal/support/mine", "/portal/support/features", "/portal/support/fixes", "/portal/support/roadmap",
   // Our own account only (ssAdvancedOn). For the test owner it must land on the Designer, which
   // is a render; tests/harness/advancedTab.mjs drives both sides of the gate.

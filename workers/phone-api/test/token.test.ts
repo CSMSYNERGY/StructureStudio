@@ -2,7 +2,8 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { mintAccessToken, pushCredentialFor } from "../src/accessToken";
 import { b64urlDecodeJson } from "../src/b64";
-import { Auth, FakeNet, SUPABASE_URL, USER_A, appRequest, call, callerCtx, jsonRes, makeEnv } from "./helpers";
+import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
+import { businessNumbersOf } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
 
@@ -190,11 +191,99 @@ describe("POST /token", () => {
     });
   });
 
+  it("says whether this business's calls are recorded: the owner's choice AND the Worker's CALL_RECORDING rail", async () => {
+    const on = { on: true, notice: true, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" });
+    const s = await setup(callerCtx({ recording: on }));
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json).toMatchObject({ recording: { on: true }, features: { recordings: true } });
+    expect((await call(makeEnv(), await req(s.auth))).json.recording).toEqual({ on: false });
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, on: false } }));
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+    s.net.rpc("phone_caller_context", () => callerCtx()); // a database before 263
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+  });
+
+  // Migration 264: the apps show who rings in your place while you're away from this answer.
+  it("settings carry the cover (null when none is chosen), read from the caller's own row", async () => {
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod", app_version: "1" });
+    const s = await setup(undefined, [{ dnd: true, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: USER_C }]);
+    const { json } = await call(s.env, await req(s.auth));
+    expect(json.settings).toEqual({ dnd: true, forward_to_cell: null, dnd_cover_user_id: USER_C, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
+    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("dnd_cover_user_id");
+    expect(filter(s.net.reads("phone_user_settings")[0], "user_id")).toBe(USER_A);
+    const none = await setup(undefined, []);
+    expect((await call(none.env, await req(none.auth))).json.settings).toEqual({ dnd: false, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
+  });
+
+  // Migration 264: the apps show the hours your phone rings (they're changed in Structure Studio).
+  it("settings carry your own hours and their zone", async () => {
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const hours = { mon: [["08:00", "17:00"]], fri: [["08:00", "15:00"]] };
+    const s = await setup(undefined, [{ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: hours, ring_hours_tz: "America/Denver" }]);
+    const { json } = await call(s.env, await req(s.auth));
+    expect(json.settings).toMatchObject({ ring_hours: hours, ring_hours_tz: "America/Denver" });
+    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("ring_hours_tz");
+    // Anything but an object (a database fault, say) reads as always.
+    const odd = await setup(undefined, [{ dnd: false, ring_hours: [["08:00", "17:00"]], ring_hours_tz: null }]);
+    expect((await call(odd.env, await req(odd.auth))).json.settings).toMatchObject({ ring_hours: null, ring_hours_tz: null });
+  });
+
+  // Migration 264: the apps offer Record, Play and "Use the standard greeting" from this answer.
+  it("settings say whether you recorded your own greeting and when, never its sid", async () => {
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" });
+    const SID = "RE" + "0".repeat(31) + "4";
+    const s = await setup(undefined, [{ dnd: false, dnd_until: null, forward_to_cell: null, greeting_recording_sid: SID, greeting_updated_at: "2026-10-05T15:01:00Z" }]);
+    const { json, text } = await call(s.env, await req(s.auth));
+    expect(json.settings.greeting).toEqual({ set: true, updated_at: "2026-10-05T15:01:00Z" });
+    expect(text).not.toContain(SID);
+    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("greeting_recording_sid");
+    // A time with no recording is not a greeting.
+    const stray = await setup(undefined, [{ dnd: false, greeting_recording_sid: null, greeting_updated_at: "2026-10-05T15:01:00Z" }]);
+    expect((await call(stray.env, await req(stray.auth))).json.settings.greeting).toEqual({ set: false, updated_at: null });
+  });
+
   it("refuses a missing or bad login", async () => {
     const { env } = await setup();
     const none = await call(env, appRequest("POST", "/token", null, { platform: "chrome", build_type: "prod" }));
     expect(none.res.status).toBe(401);
     const junk = await call(env, appRequest("POST", "/token", "not.a.jwt", { platform: "chrome", build_type: "prod" }));
     expect(junk.json.error.code).toBe("unauthorized");
+  });
+});
+
+// ── More than one number (migration 266) ────────────────────────────────────────────────────
+describe("POST /token with more than one business number", () => {
+  async function tokenFor(ctx: Record<string, unknown>) {
+    const net = new FakeNet().install();
+    const auth = await new Auth().init();
+    auth.serve(net);
+    net.rpc("phone_caller_context", () => ctx);
+    net.rest("GET", "phone_user_settings", () => []);
+    return call(makeEnv(), appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod" }));
+  }
+
+  it("`number` is the caller's own (the RPC's pick); `numbers` is every number of the business", async () => {
+    const own = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550102", voice_enabled: true, registration_status: "pending_registration" };
+    const { res, json } = await tokenFor(callerCtx({ number: own, numbers: ["+15555550100", "+15555550101", "+15555550102"] }));
+    expect(res.status).toBe(200);
+    expect(json.number).toEqual({ e164: "+15555550102" });
+    expect(json.numbers).toEqual(["+15555550100", "+15555550101", "+15555550102"]);
+  });
+
+  it("a database before 266 (no `numbers`): the one number; no number at all: none", async () => {
+    const before = await tokenFor(callerCtx());
+    expect(before.json.numbers).toEqual(["+15555550100"]);
+    const none = await tokenFor(callerCtx({ number: null }));
+    expect(none.json.number).toBeNull();
+    expect(none.json.numbers).toEqual([]);
+  });
+
+  it("businessNumbersOf keeps E.164 strings only, once each, at most 50, with `number` always in it", () => {
+    expect(businessNumbersOf(["+15555550100", "+15555550100", "nope", 7, null, " +15555550101 "], "+15555550100")).toEqual(["+15555550100", "+15555550101"]);
+    expect(businessNumbersOf(["+15555550101"], "+15555550100")).toEqual(["+15555550100", "+15555550101"]);
+    expect(businessNumbersOf("+15555550100", null)).toEqual([]);
+    expect(businessNumbersOf(undefined, "+15555550100")).toEqual(["+15555550100"]);
+    expect(businessNumbersOf(Array.from({ length: 80 }, (_, i) => `+1555555${String(1000 + i)}`), null)).toHaveLength(50);
+    expect(NUMBER_ID).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

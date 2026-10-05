@@ -90,16 +90,17 @@ The zone's tenant wildcard route (`*.structurestudiosuite.com/*`) outranks a cus
 4. Make sure `phone` can never be taken as a tenant subdomain.
 5. Update the Twilio URLs from step 2 to `https://phone.structurestudiosuite.com/...` if you set them to workers.dev.
 
-## 6. The database webhook for text alerts
+## 6. The database webhooks for text and email alerts
 
-The webhook is a trigger in the repo, not a Dashboard webhook:
+The webhooks are triggers in the repo, not Dashboard webhooks:
 
 1. Put the push secret in Supabase Vault, the SAME value as the Worker's `PUSH_WEBHOOK_SECRET`:
    `select vault.create_secret('<PUSH_WEBHOOK_SECRET>', 'sss_phone_push_secret', 'x-push-secret for phone-api /push/text');`
 2. Apply `supabase/migrations/256_sss_phone_push_webhook.sql` (by hand, `--file`, then record 256 in the ledger).
 3. Set the Worker's `FCM_SERVICE_ACCOUNT_JSON` (Android) and the APNS_* secrets (iPhone).
+4. Email alerts (2026-10-05), once texts work: deploy a Worker that has `POST /push/email`, check the live copy has it (the marker `push_email_failed` in the downloaded bundle) and `/health`, make sure the app's privacy page says what an email alert shows, then apply `supabase/migrations/267_phone_push_email.sql` the same way. It uses the same Vault secret: nothing new to create. Its own probe prints what it checked; its AFTER APPLYING block has the read-backs.
 
-Do NOT also create a Dashboard "Database Webhook" on sms_messages: 256 already is that webhook, and a second one sends every alert twice (and stores the secret in plain text). Never add the `net` schema to the API's exposed schemas.
+Do NOT also create a Dashboard "Database Webhook" on sms_messages or email_inbound: 256 and 267 already are those webhooks, and a second one sends every alert twice (and stores the secret in plain text). Never add the `net` schema to the API's exposed schemas.
 
 ## 7. The pilot line
 
@@ -124,8 +125,29 @@ Once the portal's Phone tab ships, it owns these settings.
 - **Call and text charges (migration 259):** apply 259 BEFORE deploying a Worker that has `src/cron/usageCharge.ts`. From deploy day the Worker records each call's and text's Twilio cost as a `shadow` row in `usage_charges` (`PHONE_USAGE_COST_CAPTURE`, ships `on`) and charges nothing. To charge, ALL of: `PHONE_USAGE_METERS` = `on` (wrangler.jsonc, then deploy; and as a Supabase function secret for texts sent from the portal), `phone_billing_settings.markup` and `armed_at` set, and the meter (`voice_minute`, `voice_minute_in`, `sms_segment`, `sms_in`) active or the tenant in `pilot_client_ids`. **Order matters: turn `PHONE_USAGE_METERS` on (Worker and function secret) FIRST, then set `armed_at`.** With `armed_at` still empty the rail charges nothing, but a call or text after `armed_at` that the Worker settles while its rail is still `off` becomes a final `shadow` row and is never charged. The arming SQL is at the bottom of migration 259. Check first that the Billing tab understands `pricing = 'cost_plus'`.
 - **Wallet floor:** outbound calls and texts are refused below `phone_billing_settings.floor_cents` (default 500), on the same rails as the charges above. Exempt tenants, inbound calls and 911 are never refused.
 - **Auto top-up from the Worker:** the charges and the refusals ask the `wallet-autotopup` edge function for a top-up. Set the Supabase function secret `WALLET_AUTOTOPUP_SECRET` to the exact value of this Worker's `SUPABASE_SERVICE_ROLE_KEY`. If that key is a new-format `sb_secret_...` key (not a JWT), set `verify_jwt = false` for `wallet-autotopup` in `supabase/config.toml`, or the gateway refuses every request.
-- **Monthly line fee:** needs BOTH `PHONE_USAGE_METERS` = `on` and `phone_line_monthly` active and priced. Check first that the Billing tab labels that meter kind.
+- **Monthly line fee:** needs BOTH `PHONE_USAGE_METERS` = `on` and `phone_line_monthly` active and priced. Check first that the Billing tab labels that meter kind. ⚠️ It charges for the same number the monthly number fee below already charges for: before pricing it, make it skip numbers that pay `sms_number_monthly` (`src/cron/lineFee.ts` header).
+- **Monthly number fee (months 2 and on):** `src/cron/numberFee.ts`, at 09:00 UTC, on ONE switch: `usage_prices` `sms_number_monthly` active and priced. That is the same row the purchase's first month is held on, so arming it (`update public.usage_prices set active = true where kind = 'sms_number_monthly';`) arms every month at once; `PHONE_USAGE_METERS` is not read. Each live number is charged on the day of the month it was bought (clamped to the month's last day), keyed `sms_number_monthly:<number id>:m<n>`, current month only: arming late never bills the months before. After the first 09:00 run, look for `sms_number_fee_failed` (a charge to retry; the next run does) and `sms_number_fee_no_tenant` (a live number whose tenant was deleted: release it at Twilio) in the grouped error query (section 10).
 - **Hold and warm transfer** need nothing switched on, but prove them on a real call in both directions (step 8) before anyone uses them with a customer.
+
+## 7c. Call recording, transcripts and summaries (release B2, all off until you turn them on)
+
+Nothing records until ALL of: migration 263 applied, this Worker deployed with `CALL_RECORDING` = `on`, and the business's owner turning recording on in Settings › Phone. Transcripts and summaries also need `CALL_TRANSCRIBE` = `on` and the business leaving transcripts on.
+
+`CALL_RECORDING` lives in two places, always set together: this Worker's var (the rail that records) and a Supabase function secret of the same name, which `portal-settings` reads so the Settings card can say whether calls really are recorded (the database can't see the Worker's vars). Unset reads as off. In this order:
+
+1. **Migration 263** (`supabase/migrations/263_phone_call_recording.sql`), by hand, as its header says. It must land BEFORE this Worker (which reads `phone_calls.recording_armed` on every call and embeds `phone_call_recordings` in `GET /calls`) and before the edge function.
+2. **The edge function `phone-call-summary`** (`npx supabase functions deploy phone-call-summary`). It reads `ANTHROPIC_API_KEY` (already a project secret) and answers only the service role. Set the function secret `PHONE_SUMMARY_SECRET` to the exact value of this Worker's `SUPABASE_SERVICE_ROLE_KEY` (the Worker holds its own key; the runtime's may differ). If that key is a new-format `sb_secret_...` key (not a JWT), the gateway refuses every request while `verify_jwt = true`. Then, in this order: set `PHONE_SUMMARY_SECRET` to that key, change `gatewayVerified: true` to `false` in `phone-call-summary/summary.ts` (with `verify_jwt` off, its service_role claim door is forgeable by anyone), and only then set `verify_jwt = false` for `phone-call-summary` in `supabase/config.toml` and deploy. `tests/phone/callSummary_test.ts` refuses the one without the other.
+   Then **portal-settings** (`npx supabase functions deploy portal-settings`), with its `CALL_RECORDING` secret still unset: it saves the owner's settings (`phone_recording_save`) and builds the contact timeline, whose `_shared/crmFeed.ts` now reads each call's recording and summary. crmFeed's other importer is this Worker (`src/emailThread.ts`), deployed next; so is that of the new `_shared/recordingNotice.ts` (the announcement rule: portal-settings' `phone.ts` and this Worker's `src/recording.ts`).
+   And **admin-catalog** (`npx supabase functions deploy admin-catalog`), the only importer of the changed `_shared/phoneBillingAdmin.ts`: the phone usage report counts call minutes from calls only (a recording and its transcript are per minute too) and leaves transcript costs (Workers AI, Claude) out of the comparison with Twilio's bill.
+3. **This Worker**, with `CALL_RECORDING` and `CALL_TRANSCRIBE` still `off` and the `ai` binding in `wrangler.jsonc` (Workers AI; billed to the account, no key). Deploy and check `app_errors` as usual.
+   Then the phone app (its player, summary, transcript and "Recorded call" chip); it is safe against a Worker that has nothing to show yet. NOT the portal yet: its Settings card is where owners turn recording on, and every business that does is recorded the moment the rail goes on in step 4.
+4. **The verification call** (plan section 13, step 8; it places a real call on our own test tenant, so it needs a go-ahead). First check that nobody but the test business has turned recording on:
+   `select client_id from public.client_settings where phone_record_calls;`
+   It must return no rows, or only the test business. If any other business shows up, stop and ask before going on. Then turn `CALL_RECORDING` and `CALL_TRANSCRIBE` on, deploy, set the function secret too (`npx supabase secrets set CALL_RECORDING=on`), turn recording on for the test business only (`update public.client_settings set phone_record_calls = true, phone_recording_updated_at = now() where client_id = '<the test business>';`), and prove: one recording through hold, resume, warm and cold transfer and a device switch; it stops before a voicemail redirect; which channel is the customer (`CHANNEL_MAP` in `src/recording.ts`, change it if Twilio puts them the other way); the MP3 downloads as two channels with `RequestedChannels=2`; nova-3 takes it, and how it bills two channels; the outbound whisper plays inside the recording; the time from hang-up to summary.
+5. **The portal** (the Settings › Phone "Call recording" card and the timeline's player, summary and transcript) on beta, once the call is proved. Ask before promoting. With the rails on, an owner who turns recording on is recorded from their next call, and the card says so.
+6. Leave both rails `on` (the Worker var and the function secret) once proved; each business's owner decides for their own calls. The meters `call_recording` and `call_transcription` ship inactive and invisible: until Carolyn prices and activates them (the 259 ARMING notes, plus `update public.usage_prices set active = true where kind in ('call_recording', 'call_transcription')`), each recording and transcript is a `shadow` row with its cost. A pilot of call and text billing (259 ARMING step 2) does not charge them: migration 263 limits the pilot list to the four call and text meters.
+
+To stop everything at once: set `CALL_RECORDING` to `off` and deploy, and set the function secret to `off` too (`npx supabase secrets set CALL_RECORDING=off`) so the Settings card stops saying calls are recorded. Calls are no longer announced or recorded; recordings already made still play and still expire with each business's retention (daily, 09:00 UTC).
 
 ## 8. Prove it (plan section 20, phase 1b)
 
@@ -215,4 +237,5 @@ Pseudonymous is not anonymous. Anyone who can query the database can line a repo
 
 - Stop everything for a tenant at once: `update public.client_settings set phone_status = 'off' where client_id = '<id>';`
 - Previous Worker version: `npx wrangler rollback` from this directory.
+- Stop email alerts only (texts keep theirs): `drop trigger if exists phone_push_email on public.email_inbound;` (267's ROLLBACK has the rest).
 - If the Worker is down, callers still reach voicemail through the number's fallback Bin.

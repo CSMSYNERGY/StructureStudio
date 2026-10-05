@@ -274,7 +274,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         // alone was wrong in a way nothing would have reported — keeping only the narrow
         // projection loses the Pipeline's ability to open a customer at all, and keeping only
         // this line silently re-inflates every list payload back to the blob.
-        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, total_cents, expected_close_date`)
+        //
+        // ss_invoice_sent_at (2026-10-05) is for the delete dialog only: a StructureStudio
+        // invoice leaves the design 'accepted', and the dialog has to know its quote is kept.
+        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, total_cents, expected_close_date`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }).order("short_code", { ascending: false })
         .range(from, to), (r) => r.short_code),
@@ -867,15 +870,29 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
             // while the design itself is gone — a bare "Deleted." would hide a leftover
             // estimate in someone else's system.
             const est = res.estimateNumber ? `EST-${res.estimateNumber}` : "its estimate";
+            // The StructureStudio quote's half (2026-10-05), named only when the design has a
+            // quote number, and added to whichever CRM sentence applies: a design can have both (a
+            // CRM estimate from before the switch to StructureStudio paperwork, then a quote). A
+            // server older than this page sends no `quote`, and every message then reads exactly
+            // as before.
+            const quote = res.quoteNumber ? `Quote ${res.quoteNumber}` : null;
+            const quoteLine = !quote ? ""
+              : res.quote === "removed" ? ` ${quote} and its PDF were deleted too.`
+              : res.quote === "kept" ? ` ${quote} and its PDF were kept, because an invoice was made from it.`
+              : res.quote === "failed" ? ` The PDF for ${quote} could not be removed. Support has a record of it.`
+              : "";
+            let msg;
             if (res.estimate === "failed") {
-              setDelMsg({ err: `${base}, but ${est} could NOT be removed from your CRM (${res.estimateError || "unknown error"}). Delete it there by hand — support has a record.` });
+              msg = `${base}, but ${est} could NOT be removed from your CRM (${res.estimateError || "unknown error"}). Delete it there by hand — support has a record.`;
             } else if (res.estimate === "skipped_invoiced") {
-              setDelMsg({ ok: `${base}. ${est} was left in your CRM because an invoice was created from it — void that invoice there if you also want the estimate gone.` });
+              msg = `${base}. ${est} was left in your CRM because an invoice was created from it — void that invoice there if you also want the estimate gone.`;
             } else if (res.estimate === "deleted") {
-              setDelMsg({ ok: `${base}, along with ${est} in your CRM.` });
+              msg = `${base}, along with ${est} in your CRM.`;
             } else {
-              setDelMsg({ ok: `${base}.` });
+              msg = `${base}.`;
             }
+            const leftover = res.estimate === "failed" || (quote && res.quote === "failed");
+            setDelMsg(leftover ? { err: msg + quoteLine } : { ok: msg + quoteLine });
             load();
           }} />
       )}
@@ -1448,6 +1465,313 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   );
 }
 
+// ─── Conversations (every customer's latest email, text or call) ───
+// Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations would
+// be email, all of it. In the way that GoHighLevel has that, like I like that except I want that
+// bar at the top that shows that I can sort and see just that." And @42:45, comparing Pipedrive:
+// "I want a conversations tab, sure, but I want to be able to see my calls."
+//
+// ONE ROW PER CUSTOMER, from their newest message, newest first (portal-settings crm_inbox; the
+// rules are in supabase/functions/_shared/crmInbox.ts). The bar on top is All · Email · Texts ·
+// Calls, plus Everyone / Mine. A row opens the customer's record ON the matching History chip,
+// and the replying happens there, in the record's Email and SMS boxes: this page has no reply
+// box of its own (a GoHighLevel-style split pane was not built; say so when it ships).
+//
+// "Waiting on you" is derived, not stored: the customer spoke last (an email or a text from them,
+// or a call from them nobody picked up). Replying is what clears it, so there is no read/unread
+// state to keep.
+//
+// The filter lives in the URL (/portal/conversations/email|texts|calls), so the browser's Back
+// from a record lands on the same filter. Mine/Everyone is remembered for the tab's session.
+//
+// Texts and Calls are offered the way the record's History chips are (CRM_CHIPS `when`): Texts
+// once the account can text or has texts, Calls (for someone allowed to see calls) once calling
+// is offered or there are calls. A filter that can only ever be empty reads as broken.
+const SS_INBOX_FILTERS = [
+  { slug: null, channel: "all", label: "All" },
+  { slug: "email", channel: "email", label: "Email" },
+  { slug: "texts", channel: "sms", label: "Texts" },
+  { slug: "calls", channel: "calls", label: "Calls" },
+];
+// The History chip (CRM_CHIPS key) a row opens the record on, by the row's channel.
+const CRM_INBOX_CHIP = { email: "emails", sms: "messages", calls: "calls" };
+const SS_INBOX_CHANNEL = {
+  email: { label: "Email", bg: "#EFF6FF", fg: "#1D4ED8" },
+  sms: { label: "Text", bg: "#F0FDF4", fg: "#15803D" },
+  calls: { label: "Call", bg: "#F5F3FF", fg: ACCENT },
+};
+const SS_INBOX_DIRECTION = {
+  in: { email: "Received", sms: "Received", calls: "Incoming" },
+  out: { email: "Sent", sms: "Sent", calls: "Outgoing" },
+};
+// When, the way a message list says it: a time today, "Yesterday", a weekday this week, else the
+// date (with the year only when it isn't this year). The full date and time is on hover.
+function ssInboxWhen(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(now) - day(d)) / 86400000);
+  if (days === 0) return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (days === 1) return "Yesterday";
+  if (days > 1 && days < 7) return d.toLocaleDateString("en-US", { weekday: "short" });
+  return d.toLocaleDateString("en-US", d.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+// Pages joined by customer: the server never lists someone twice, and this makes sure of it.
+function ssInboxJoin(list, more) {
+  const seen = new Set(list.map((r) => r.contactId));
+  return list.concat((more || []).filter((r) => r && r.contactId && !seen.has(r.contactId) && seen.add(r.contactId)));
+}
+const SS_INBOX_MINE_KEY = "ss.inbox.mine";
+
+// `urlFilter` is the URL's sub segment; `onFilter(slug)` changes it. `onOpen(contactId, channel)`
+// opens the record. `phoneLevel` (the viewer's phone access) only keys the cache: what calls a
+// person may see changes with it, the same reason the cache keys on the contacts row scope.
+function ConversationsInbox({ clientId, viewing = false, phoneOffered = false, phoneLevel = null, urlFilter = null, onFilter = null, onOpen = null }) {
+  const filter = SS_INBOX_FILTERS.find((f) => f.slug === urlFilter) || SS_INBOX_FILTERS[0];
+  const channel = filter.channel;
+  const [mine, setMine] = useState(() => { try { return sessionStorage.getItem(SS_INBOX_MINE_KEY) === "1"; } catch (_e) { return false; } });
+  const [rows, setRows] = useState(null);       // null = loading
+  const [cursor, setCursor] = useState(null);   // where the next page starts; null = no more
+  const [meta, setMeta] = useState(null);       // which filters to offer (the first page says)
+  const [error, setError] = useState(null);
+  const [more, setMore] = useState(false);
+  // True while load() is reading: the rows on screen may be the cached copy it is replacing.
+  // Load more waits for it (review 2026-10-05): appended to the cached rows, its page either
+  // overwrote the fresh first page (a customer who just texted vanished) or was wiped by it.
+  const [refreshing, setRefreshing] = useState(false);
+  // Drops an answer that arrives after the filter moved on, like openDetails' actReqRef above.
+  const reqRef = useRef(0);
+  // NARROW (a phone, or a squeezed window): one column per row, the way a messages app lists them
+  // (the name, then the channel, then the words; the time on the right), instead of three
+  // columns where the words wrap one per line and the time is pushed off the side. Measured on
+  // the card itself, so the rail's width counts and no stylesheet is needed.
+  const cardRef = useRef(null);
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const el = cardRef.current;
+    const measure = () => { const w = el ? el.getBoundingClientRect().width : window.innerWidth; setNarrow(w < 560); };
+    measure();
+    if (el && typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  // Cache-seeded like Contacts, so coming Back from a record paints at once and refreshes behind
+  // it (every portal-settings call carries ~2 s of fixed cost). Not in view-as, like Contacts.
+  const cacheAction = `crm_inbox|${channel}|${mine ? 1 : 0}|${phoneLevel || ""}`;
+
+  const fetchPage = async (cur) => {
+    const { data, error: err } = await sb.functions.invoke("portal-settings", {
+      body: { action: "crm_inbox", channel, mine, ...(cur ? { cursor: cur } : {}) },
+    });
+    if (err) return { error: await fnError(err) };
+    if (!data || data.error || !Array.isArray(data.threads)) return { error: (data && data.error) || "Couldn't load your conversations. Please try again." };
+    return { data };
+  };
+
+  const load = useCallback(async () => {
+    const req = ++reqRef.current;
+    setError(null);
+    setMore(false);
+    setRefreshing(true);
+    const hit = viewing ? null : ssCacheGet("portal-settings", cacheAction, clientId);
+    if (hit) { setRows(hit.threads); setCursor(hit.cursor); setMeta(hit.meta); }
+    else { setRows(null); setCursor(null); }
+    let list = [];
+    let cur = null;
+    let firstMeta = null;
+    try {
+      // A page can come back with nobody on it and more to read: Mine, or someone who sees only
+      // their own customers, can filter a whole page away. Read on a few pages before saying
+      // "nothing here", rather than showing an empty list with a Load more under it.
+      for (let i = 0; i < 5; i++) {
+        const out = await fetchPage(cur);
+        if (req !== reqRef.current) return;
+        if (out.error) {
+          setError(out.error);
+          // Keep what did arrive (Load more retries from where it stopped); with nothing, the
+          // cached rows, if any, stay on screen under the error.
+          if (list.length) { setRows(list); setCursor(cur); }
+          return;
+        }
+        const d = out.data;
+        if (i === 0) firstMeta = { smsReady: !!d.smsReady, hasTexts: !!d.hasTexts, hasCalls: !!d.hasCalls, seesCalls: !!d.seesCalls };
+        list = ssInboxJoin(list, d.threads);
+        cur = d.cursor || null;
+        if (list.length || !cur) break;
+      }
+      setRows(list); setCursor(cur); setMeta(firstMeta);
+      if (!viewing) ssCachePut("portal-settings", cacheAction, clientId, { threads: list, cursor: cur, meta: firstMeta });
+    } finally {
+      // A newer load owns the flag from here.
+      if (req === reqRef.current) setRefreshing(false);
+    }
+  }, [clientId, viewing, channel, mine, cacheAction]);
+  useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    if (!cursor || more || refreshing) return;
+    const req = reqRef.current;
+    setMore(true); setError(null);
+    let list = rows || [];
+    let cur = cursor;
+    try {
+      for (let i = 0; i < 5 && cur; i++) {
+        const out = await fetchPage(cur);
+        if (req !== reqRef.current) return;
+        if (out.error) { setError(out.error); break; }
+        const before = list.length;
+        list = ssInboxJoin(list, out.data.threads);
+        cur = out.data.cursor || null;
+        if (list.length > before) break;
+      }
+      if (req !== reqRef.current) return;
+      setRows(list); setCursor(cur);
+    } finally {
+      if (req === reqRef.current) setMore(false);
+    }
+  };
+
+  const setWhose = (v) => {
+    setMine(v);
+    try { sessionStorage.setItem(SS_INBOX_MINE_KEY, v ? "1" : "0"); } catch (_e) { /* storage blocked: it just won't be remembered */ }
+  };
+
+  const offered = SS_INBOX_FILTERS.filter((f) =>
+    f.channel === channel || f.channel === "all" || f.channel === "email"
+    || (f.channel === "sms" && !!(meta && (meta.smsReady || meta.hasTexts)))
+    || (f.channel === "calls" && !!(meta && meta.seesCalls && (phoneOffered || meta.hasCalls))));
+  const open = (r) => { if (onOpen) onOpen(r.contactId, r.channel); };
+  const pill = (on) => ({
+    display: "inline-flex", alignItems: "center", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700,
+    padding: "5px 12px", borderRadius: 999, border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+    background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+  });
+  // Empty WITH more to read is not "nothing yet": load() gave up reading ahead (Mine, or someone
+  // who sees only their own customers, can filter page after page away), and the button under
+  // this reads further back. Mine's sentence names no "team": for someone who sees only their own
+  // customers, Everyone adds the ones nobody is assigned to, not their colleagues' (review 2026-10-05).
+  const emptyText = cursor
+    ? "Nothing in the most recent conversations. Use Look further back to see older ones."
+    : mine
+    ? "Nothing here for you yet. Switch to Everyone to see every conversation you have access to."
+    : channel === "email" ? "No email conversations yet."
+    : channel === "sms" ? "No text conversations yet."
+    : channel === "calls" ? "No calls with customers yet."
+    : "No conversations yet. Emails, texts and calls with your customers show up here as they happen.";
+
+  return (
+    <div ref={cardRef} style={S.card} data-ss-inbox="" data-ss-inbox-narrow={narrow ? "1" : "0"}>
+      <CardHead
+        title="Conversations"
+        count={rows ? `${rows.length}${cursor ? "+" : ""}` : null}
+        desc="Click a conversation to open the customer's record and reply from there."
+        right={<button type="button" onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
+      />
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <div role="group" aria-label="Show" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {offered.map((f) => (
+            <button key={f.channel} type="button" aria-pressed={f.channel === channel} data-ss-inbox-filter={f.channel}
+              onClick={() => { if (f.channel !== channel && onFilter) onFilter(f.slug); }} style={pill(f.channel === channel)}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div role="group" aria-label="Whose conversations" style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" aria-pressed={!mine} data-ss-inbox-mine="0" onClick={() => { if (mine) setWhose(false); }} style={pill(!mine)}>Everyone</button>
+          <button type="button" aria-pressed={mine} data-ss-inbox-mine="1" onClick={() => { if (!mine) setWhose(true); }} style={pill(mine)}
+            title="Your customers, customers nobody is assigned to, and anyone you've written to or talked with">Mine</button>
+        </div>
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>{(narrow ? ["Customer", "When"] : ["Customer", "Latest", "When"]).map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>{narrow ? <SkelRows cols={2} rows={6} widths={["80%", "60%"]} /> : <SkelRows cols={3} rows={6} widths={["55%", "80%", "50%"]} />}</tbody>
+          </table>
+        </div>
+      )}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12, margin: 0 }} data-ss-inbox-empty="">{emptyText}</p>
+      )}
+      {rows && rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={S.th}>Customer</th>
+              {!narrow && <th style={S.th}>Latest</th>}
+              <th style={{ ...S.th, textAlign: "right" }}>When</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const ch = SS_INBOX_CHANNEL[r.channel] || SS_INBOX_CHANNEL.email;
+                const dir = (SS_INBOX_DIRECTION[r.direction] || SS_INBOX_DIRECTION.in)[r.channel] || "";
+                // A real link, like the nav: right-click or middle-click opens the record in a new
+                // tab. A left click stays on the page (ssNavClick) and opens it on the History chip
+                // for this channel.
+                const who = (
+                  <a href={ssPagePath("contacts", "c-" + r.contactId)}
+                    onClick={(e) => { e.stopPropagation(); ssNavClick(() => open(r))(e); }}
+                    style={{ color: ACCENT, fontWeight: 800, textDecoration: "none", overflowWrap: "anywhere" }}>
+                    {r.name || "Unnamed contact"}
+                  </a>
+                );
+                const waiting = r.awaitingReply ? (
+                  <span data-ss-inbox-waiting="" style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 999, padding: "2px 9px", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" }}>Waiting on you</span>
+                ) : null;
+                const latest = (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 3 }}>
+                      <span style={{ background: ch.bg, color: ch.fg, borderRadius: 6, padding: "1px 8px", fontSize: 11.5, fontWeight: 800 }}>{ch.label}</span>
+                      <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>{dir}</span>
+                      {narrow && waiting}
+                    </div>
+                    <div style={{ color: "#334155", overflowWrap: "anywhere" }}>{r.preview}</div>
+                  </>
+                );
+                return (
+                  <tr key={r.contactId} data-ss-inbox-row={r.contactId} data-ss-inbox-channel={r.channel}
+                    onClick={() => open(r)} style={{ cursor: "pointer" }}>
+                    {narrow ? (
+                      <td style={S.td}>
+                        <div style={{ marginBottom: 4 }}>{who}</div>
+                        {latest}
+                      </td>
+                    ) : (
+                      <>
+                        <td style={{ ...S.td, width: "32%" }}>
+                          {who}
+                          {waiting && <div style={{ marginTop: 5 }}>{waiting}</div>}
+                        </td>
+                        <td style={S.td}>{latest}</td>
+                      </>
+                    )}
+                    <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right", color: "#64748B", width: 1 }} title={fmtWhen(r.at)}>{ssInboxWhen(r.at)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {rows && cursor && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" onClick={loadMore} disabled={more || refreshing} data-ss-inbox-more=""
+            style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0", padding: "8px 16px", cursor: more || refreshing ? "default" : "pointer" }}>
+            {more || refreshing ? "Loading…" : rows.length ? "Load more" : "Look further back"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // THE MERGED CRM RECORD PAGE — Contacts + Designs, one shell, two contexts.
@@ -1507,23 +1831,31 @@ function crmSsQuoteDesign(c) {
   return d && d.ss_quote_number && !d.ghl_estimate_number ? d : null;
 }
 
+// `kinds` is which record a card can EVER appear on, and it is what Settings → My Profile lists
+// when someone puts the cards in their own order. `when` is whether it shows on THIS record. The
+// two have to agree (a card whose `when` can pass on a contact must list "contact"), and
+// crmCardOrder_test holds them to it: a card missing from `kinds` still renders, but it can't be
+// moved, so it would sit at the bottom of everyone's arranged column with no way up.
 const CRM_SECTIONS = [
-  { key: "summary", title: "Summary", when: () => true },
-  { key: "details", title: "Details", when: () => true },
+  { key: "summary", title: "Summary", kinds: ["contact", "design"], when: () => true },
+  { key: "details", title: "Details", kinds: ["contact", "design"], when: () => true },
   // ── THE RECIPROCAL EMBED. This pair IS Carolyn's "here is the contact, and the deal is
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
-  { key: "deals", title: "Deals", when: (c) => c.kind === "contact" },
+  { key: "deals", title: "Deals", kinds: ["contact"], when: (c) => c.kind === "contact" },
   // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
   // you should see the deal. You should see the orders." Deals were already here; orders
   // are what say whether any of them turned into a sale. Contact-side only — a design's
   // order is the same one row and would just repeat the stage bar above it.
-  { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
-  { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  { key: "orders", title: "Orders", kinds: ["contact"], when: (c) => c.kind === "contact" },
+  { key: "person", title: "Person", kinds: ["design"], when: (c) => c.kind === "design" },
   // SALES TAX (Avalara stage, 2026-09-17). The deal on screen — the record itself, or the one
   // picked on a contact — and only a StructureStudio-issued quote: a CRM-mode tenant's CRM
   // figures tax on its own estimate, so there is nothing here for them to see or change.
-  { key: "tax", title: "Sales tax", when: (c) => !!crmSsQuoteDesign(c) },
+  // `note` is the line My Profile shows under it, so nobody arranging their cards wonders why
+  // this one is missing from most records.
+  { key: "tax", title: "Sales tax", kinds: ["contact", "design"], when: (c) => !!crmSsQuoteDesign(c),
+    note: "Shows for a deal with a StructureStudio quote" },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -1532,11 +1864,51 @@ const CRM_SECTIONS = [
   // "If there's nothing, like, because they haven't placed an order, the card just is going
   // to be blank. It'll say build schedule. And it just is nothing." -- so an empty card
   // RENDERS EMPTY rather than disappearing. A card that vanishes reads as "not built".
-  { key: "build", title: "Build schedule", when: () => true },
-  { key: "delivery", title: "Delivery schedule", when: () => true },
-  { key: "repairs", title: "Repairs", when: () => true },
-  { key: "overview", title: "Overview", when: () => true },
+  { key: "build", title: "Build schedule", kinds: ["contact", "design"], when: () => true },
+  { key: "delivery", title: "Delivery schedule", kinds: ["contact", "design"], when: () => true },
+  { key: "repairs", title: "Repairs", kinds: ["contact", "design"], when: () => true },
+  { key: "overview", title: "Overview", kinds: ["contact", "design"], when: () => true },
 ];
+
+// ── EACH PERSON'S CARD ORDER ──────────────────────────────────────────────────────────────
+// Carolyn, 2026-08-28 @39:00: "they can put their cards in the order that they want them, and
+// they can have a different order under a contact, and a different order under a deal." Stored
+// per person in client_users.prefs.cardOrder ({ contact: [...keys], design: [...keys] }, migration
+// 165) and arranged in Settings → My Profile; nothing on the server reads it.
+//
+// The saved list is a WISH, not a schema. It can name a card this build doesn't have (save_prefs
+// keeps unknown keys on purpose, so a newer tab's layout survives a save from an older one) or
+// leave out one added since it was saved. So: the saved keys that are showing, in saved order,
+// then everything else that is showing in registry order. A new card turns up at the bottom of an
+// arranged column rather than vanishing, and an empty or missing list is the registry order.
+function crmOrderSections(visible, saved) {
+  if (!Array.isArray(saved) || !saved.length) return visible;
+  const out = [];
+  for (const k of saved) {
+    const s = visible.find((v) => v.key === k);
+    if (s && out.indexOf(s) === -1) out.push(s);
+  }
+  for (const s of visible) if (out.indexOf(s) === -1) out.push(s);
+  return out;
+}
+
+// The list to SAVE once someone has arranged the cards this build knows (`known`, the full key
+// list for one kind). A key the saved list holds and this build doesn't know keeps its slot, and
+// the known keys fill the other slots in their new order, so an older tab can't quietly drop a
+// newer card's place. Known keys that weren't saved before go on the end.
+function crmMergeCardOrder(saved, known) {
+  const queue = known.slice();
+  const seen = [];
+  const out = [];
+  for (const k of (Array.isArray(saved) ? saved : [])) {
+    if (typeof k !== "string" || seen.indexOf(k) !== -1) continue;
+    seen.push(k);
+    // Each distinct known key in `saved` takes one slot, and there are never more of them than
+    // `known` holds, so the queue can't run dry here.
+    out.push(known.indexOf(k) === -1 ? k : queue.shift());
+  }
+  return out.concat(queue);
+}
 
 // The ACTION BAR — "up at the top here is things you can do. So this bar is basically
 // actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
@@ -1778,6 +2150,55 @@ const CRM_CHIPS = [
   { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
     "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change", "owner_change"] },
 ];
+
+// WHAT HAPPENED TO ONE OF OUR EMAILS AFTER IT LEFT (B4, migration 262). Carolyn, 2026-10-01: a
+// prospective client "asked to be able to see if an email is read or not." crmFeed puts the
+// answer in `meta.delivery` (Opened, Delivered, Bounced or Marked as spam; nothing while it is only
+// sent) and this draws it beside the title, the way the History already flags a failed send.
+//
+// "Marked as spam" is its own chip, not a kind of Bounced: the email ARRIVED (often it was opened
+// first), so "check the address and send again" would be false, and sending again to someone who
+// just reported the builder is what hurts their sending domain most.
+//
+// An open is a guess the provider makes from a tracking image, so the tooltip says so in the same
+// words as Settings → Email Settings: some mail apps block the image (a real open never shows) and
+// some fetch it by themselves (an open shows that nobody made). A builder who reads "Opened" as
+// proof is the failure this sentence is for.
+const SS_DELIVERY_TONE = {
+  Opened: { bg: "#F0FDF4", fg: "#15803D", bd: "#BBF7D0" },
+  Delivered: { bg: "#F1F5F9", fg: "#475569", bd: "#E2E8F0" },
+  Bounced: { bg: "#FEF2F2", fg: "#DC2626", bd: "#FECACA" },
+  "Marked as spam": { bg: "#FEF2F2", fg: "#DC2626", bd: "#FECACA" },
+};
+function SsEmailDeliveryChip({ meta }) {
+  const tone = meta && SS_DELIVERY_TONE[meta.delivery];
+  if (!tone) return null;
+  let tip = "The customer's mail server accepted it.";
+  if (meta.delivery === "Bounced") {
+    // A suppressed send is recorded as a bounce too (postmark-events): the email provider skipped
+    // it because an earlier email to the address bounced or was reported, maybe another builder's.
+    tip = "The customer's mail server refused it, or it wasn't sent because an earlier email to this address bounced or was marked as spam. Check the address before sending again.";
+  } else if (meta.delivery === "Marked as spam") {
+    tip = "They marked this email as spam. Don't email them again.";
+  } else if (meta.delivery === "Opened") {
+    let when = "";
+    try {
+      when = new Date(meta.openedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    } catch (_e) { when = ""; }
+    // 25 is where the server stops counting (migration 262), so 25 means "25 or more".
+    const n = Number(meta.openCount) || 1;
+    tip = `${when ? `First opened ${when}` : "Opened"}${n > 1 ? ` · opened ${n >= 25 ? "25+" : n} times` : ""}. `
+      + "Opens are approximate: some mail apps block the tracking image, and some open emails automatically.";
+  }
+  return (
+    <span title={tip} style={{
+      marginLeft: 6, display: "inline-block", verticalAlign: "1px", fontSize: 10, fontWeight: 800,
+      color: tone.fg, background: tone.bg, border: "1px solid " + tone.bd, borderRadius: 4, padding: "0 5px",
+    }}>
+      {meta.delivery}
+    </span>
+  );
+}
 
 // Street / City / State / ZIP for the contact editor, which renders in TWO places (the
 // contact record's Person card and a deal record's Person drop-down). It was copy-pasted
@@ -2504,6 +2925,229 @@ function SsVoicemailPlayer({ voicemailId }) {
   );
 }
 
+// MY SYNERGY PHONE, CALL RECORDING (migration 263): a recorded call's audio, cloned from
+// SsVoicemailPlayer above and for the same reasons. Nothing is fetched until Play is pressed;
+// then the audio comes from the Worker (GET /recordings/:id/audio) with the sign-in in the
+// Authorization header (ssPhoneFetchRecording) and plays from a blob: URL. The Worker's own
+// sentence is shown when it says no ("The recording isn't ready yet. Try again in a minute.").
+function SsRecordingPlayer({ recordingId, durationS }) {
+  const [src, setSrc] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => () => { if (src) { try { URL.revokeObjectURL(src); } catch (_e) { /* already gone */ } } }, [src]);
+  const play = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await sb.auth.getSession();
+      const token = data && data.session ? data.session.access_token : null;
+      setSrc(await ssPhoneFetchRecording(recordingId, token));
+    } catch (e) { setErr(e && e.message ? e.message : "The recording couldn't be loaded. Try again."); }
+    finally { setBusy(false); }
+  };
+  if (src) {
+    return (
+      <audio controls autoPlay src={src} data-ss-recording={recordingId}
+        style={{ display: "block", width: "100%", maxWidth: 340, height: 34, marginTop: 5 }} />
+    );
+  }
+  const len = Number(durationS) > 0 ? ` · ${Math.max(1, Math.round(Number(durationS) / 60))} min` : "";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+      <button type="button" disabled={busy} onClick={play} data-ss-recording-play={recordingId}
+        style={{ background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 700, color: "#334155", cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+        {busy ? "Loading…" : `▶ Play recording${len}`}
+      </button>
+      {err && <span style={{ fontSize: 12, color: "#B91C1C" }}>{err}</span>}
+    </div>
+  );
+}
+
+// A recorded call on the contact timeline: its summary (in the feed already, crmFeed's
+// recordingMeta, and kept after the audio is deleted), Play recording, and "Show transcript".
+// The transcript is NOT in the feed: it is read from the Worker on the press
+// (ssPhoneFetchTranscript), which applies the same visibility rule as the audio. `canListen` is
+// the voicemail player's rule: phone access, calling on, not an operator in view-as (whose
+// sign-in is not on this builder's team, so the Worker would refuse it).
+function SsCallRecording({ callId, meta, canListen }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const toggle = async () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (text) return;
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await sb.auth.getSession();
+      const token = data && data.session ? data.session.access_token : null;
+      const r = await ssPhoneFetchTranscript(callId, token);
+      setText(r.transcript);
+    } catch (e) { setErr(e && e.message ? e.message : "The transcript couldn't be loaded. Try again."); }
+    finally { setBusy(false); }
+  };
+  const state = meta.recordingState;
+  const note = state === "live" ? "This call is being recorded."
+    : state === "paused" ? "Recording paused while the customer is on hold."
+    : state === "processing" ? "The recording is being saved. It can be played in a minute."
+    : state === "failed" ? "This call wasn't recorded."
+    : meta.transcriptPending ? "The transcript and summary are on their way."
+    : meta.recordingDeleted && meta.summary ? "The recording and transcript were deleted after your keep period. The summary stays."
+    : null;
+  return (
+    <div data-ss-call-recording={callId} style={{ marginTop: 4 }}>
+      {meta.summary && (
+        <div data-ss-call-summary style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: "#64748B", letterSpacing: "0.04em", textTransform: "uppercase", marginBottom: 2 }}>Call summary</div>
+          <div style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{meta.summary}</div>
+        </div>
+      )}
+      {meta.recordingReady && meta.recordingId && canListen && ssPhoneRecordingAudioUrl(meta.recordingId) && (
+        <SsRecordingPlayer recordingId={meta.recordingId} durationS={meta.recordingDurationS} />
+      )}
+      {note && <div style={{ fontSize: 11.5, color: "#64748B", fontStyle: "italic", marginTop: 4 }}>{note}</div>}
+      {meta.hasTranscript && canListen && (
+        <div style={{ marginTop: 5 }}>
+          <button type="button" onClick={toggle} disabled={busy} data-ss-transcript-toggle={callId}
+            style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+            {busy ? "Loading the transcript…" : open ? "Hide transcript" : "Show transcript"}
+          </button>
+          {open && text && (
+            <div data-ss-transcript style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
+              {text}
+            </div>
+          )}
+          {open && err && <div style={{ fontSize: 12, color: "#B91C1C", marginTop: 4 }}>{err}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// QUICK SENDS, the button and its list beside the record's Email and SMS boxes (Carolyn
+// 2026-09-30; the rules are in 01-core beside ssFillQuickSend). The same list, the same chips and
+// the same rows as My Synergy Phone's picker: "All · N" and each category, then every quick send
+// with its name, a two-line preview filled in for THIS customer, "used N×" and Insert. Insert only
+// fills the box (CrmRecord's insertQuickSend); nothing here sends.
+//
+// `quick` is CrmRecord's: null until the first open asks for the list (onOpen), "loading", the
+// list, or "off" — a failed read hides the button entirely, with no banner, because the box works
+// the same without it. Adding and editing quick sends stays in the app for now, so the empty
+// state says where.
+function CrmQuickSendPicker({ channel, quick, onOpen, onInsert, fill }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(null);
+  // Where the list sits, worked out as it opens: under the button, moved left just enough to stay
+  // on screen. On a phone the button starts a third of the way across, and a list anchored to
+  // it ran off the right edge and scrolled the page sideways.
+  const [place, setPlace] = useState({ left: 0, width: 380 });
+  const wrap = useRef(null);
+  const button = useRef(null);
+  // A click anywhere else, or Escape, closes it (Escape hands focus back to the button).
+  useEffect(() => {
+    if (!open) return undefined;
+    const down = (e) => { if (wrap.current && !wrap.current.contains(e.target)) setOpen(false); };
+    const key = (e) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      if (button.current) button.current.focus();
+    };
+    document.addEventListener("mousedown", down);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); };
+  }, [open]);
+  if (quick === "off") return null;
+
+  const list = quick && Array.isArray(quick.list) ? quick.list : null;
+  const chips = list ? ssQuickSendChips(list) : [];
+  const current = list && picked !== null && chips.some((c) => c.category === picked) ? picked : null;
+  const rows = list ? ssQuickSendsIn(list, current) : [];
+  const toggle = () => {
+    if (!open) {
+      onOpen();
+      const vw = document.documentElement.clientWidth || window.innerWidth || 0;
+      const at = button.current ? button.current.getBoundingClientRect().left : 0;
+      const width = Math.max(240, Math.min(380, vw - 16));
+      // 8px inside the right edge if it can, and never past 8px from the left.
+      setPlace({ left: Math.max(8 - at, Math.min(0, vw - 8 - at - width)), width });
+    }
+    setOpen(!open);
+  };
+
+  return (
+    <div ref={wrap} style={{ position: "relative", display: "inline-block" }}>
+      <button ref={button} type="button" onClick={toggle} data-ss-quick-sends={channel}
+        aria-haspopup="dialog" aria-expanded={open}
+        title="Put a saved message in the box"
+        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>
+        Quick sends
+      </button>
+      {open && (
+        <div role="dialog" aria-label="Quick sends" data-ss-quick-send-picker={channel}
+          style={{
+            position: "absolute", left: place.left, top: "calc(100% + 6px)", zIndex: 30, width: place.width,
+            background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 10px 28px rgba(15,23,42,0.16)",
+            textAlign: "left",
+          }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 12px 4px" }}>
+            <span style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B" }}>Quick sends</span>
+            <button type="button" onClick={() => setOpen(false)} aria-label="Close quick sends"
+              style={{ background: "none", border: "none", padding: "2px 4px", color: "#64748B", fontSize: 16, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>
+              ×
+            </button>
+          </div>
+          {!list ? (
+            <div style={{ padding: "10px 12px 12px", fontSize: 12.5, color: "#64748B" }}>Loading your quick sends…</div>
+          ) : !list.length ? (
+            <div data-ss-quick-send-empty style={{ padding: "8px 12px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+              No quick sends yet. Add them in My Synergy Phone, under Settings → Quick sends.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", padding: "4px 12px 8px" }}>
+                {chips.map((c) => {
+                  const on = c.category === current;
+                  return (
+                    <button key={c.category === null ? "" : "c:" + c.category} type="button" onClick={() => setPicked(c.category)}
+                      data-ss-quick-send-chip={c.category === null ? "" : c.category} aria-pressed={on}
+                      style={{
+                        background: on ? ACCENT : "#F1F5F9", color: on ? "#FFF" : "#475569",
+                        border: "none", borderRadius: 999, padding: "3px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                      }}>{c.label}</button>
+                  );
+                })}
+              </div>
+              <div style={{ maxHeight: 320, overflowY: "auto", borderTop: "1px solid #F1F5F9" }}>
+                {rows.map((q) => (
+                  <div key={q.id} data-ss-quick-send={q.id}
+                    style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px", borderBottom: "1px solid #F1F5F9" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.name}</div>
+                      <div data-ss-quick-send-preview
+                        style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.45, marginTop: 2, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" }}>
+                        {ssFillQuickSend(q.body, fill)}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>used {Math.max(0, Math.floor(Number(q.usage_count) || 0))}×</div>
+                    </div>
+                    <button type="button" aria-label={`Insert ${q.name}`}
+                      onClick={() => { setOpen(false); onInsert(q); }}
+                      style={{ ...S.btn("#FFF", ACCENT), border: "1px solid " + ACCENT, padding: "6px 12px", fontSize: 12.5, flex: "0 0 auto" }}>
+                      Insert
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <div style={{ padding: "7px 12px 9px", fontSize: 11.5, color: "#64748B", textAlign: "center" }}>
+            Inserting fills the box. Sending is yours.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -2517,7 +3161,22 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
   // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
-  userId = null, canCall = false, phoneOn = false }) {
+  userId = null, canCall = false, phoneOn = false,
+  // The signed-in person's email signature (My Profile), shown under the Email box because the
+  // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
+  // which shows nothing. onEditProfile opens My Profile, where it is changed.
+  emailSignature = null, onEditProfile = null,
+  // Quick sends (the signed-in person's saved messages, the list My Synergy Phone keeps) beside
+  // the Email and SMS boxes. Off in view-as: the list would be the OPERATOR's own, and the server
+  // refuses it there too.
+  quickSendsOn = false,
+  // The signed-in person's card order (My Profile), { contact: [...], design: [...] } or null.
+  // Null in view-as, where prefs aren't read, so the operator sees the default order.
+  cardOrder = null,
+  // The History chip to open on (a CRM_CHIPS key), when the reader came from a Conversations row:
+  // an email opens on Emails, a text on Messages, a call on Calls. Read once, as initial state
+  // (the shell remounts the record per route). A chip this record doesn't show falls back to All.
+  initialChip = null }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -2539,11 +3198,20 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
-  const [chip, setChip] = useState("all");
+  const [chip, setChip] = useState(initialChip || "all");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
+  // QUICK SENDS, read the first time a picker opens and never when the record opens:
+  // null (not asked yet) → "loading" → { list, myName }, or "off" when the server would not give
+  // them (an older server that doesn't know the action, a refusal, a blip), which hides the
+  // button for the rest of this record without a banner. One read serves the Email and SMS
+  // boxes both. The two refs are the boxes Insert hands focus back to. Up here with the other
+  // hooks: CrmRecord returns early on `!data`, and a hook below that is React #310 (13ca37e).
+  const [quick, setQuick] = useState(null);
+  const mailBodyRef = useRef(null);
+  const textBoxRef = useRef(null);
   // ⚠️ These live in the TOP hook block, not beside sendSms below. CrmRecord returns early
   // on `!data`, so a hook declared next to its handler runs only on the renders that get
   // past the guard — React #310, and the whole record page goes white the instant its data
@@ -3033,6 +3701,52 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     setMail({ subject: "", body: "" });
     setMailMsg({ ok: "Sent." });
     load();
+  };
+
+  // ── QUICK SENDS (Carolyn 2026-09-30; the helpers and the why are in 01-core) ─────────────────
+  // The list, once per record, the first time either picker opens.
+  const loadQuickSends = async () => {
+    if (quick !== null) return;
+    setQuick("loading");
+    let r = null, failed = false;
+    try {
+      const res = await sb.functions.invoke("portal-settings", { body: { action: "quick_sends_list" } });
+      r = res.data;
+      failed = !!res.error;
+    } catch (_e) { failed = true; }
+    if (failed || !r || r.error || !Array.isArray(r.quick_sends)) { setQuick("off"); return; }
+    setQuick({ list: r.quick_sends, myName: typeof r.my_name === "string" ? r.my_name : "" });
+  };
+
+  // INSERT FILLS THE BOX, AND THAT IS ALL IT DOES. The quick send, filled in for this customer,
+  // goes into the BODY (after anything already typed; an email's subject is never touched), focus
+  // goes back to the box, and Send stays the person's own press. One that would run past the
+  // box's limit is refused with the box left as it was, never cut. The use is counted in the
+  // background, and a failure there is ignored: it is only "used N×".
+  const insertQuickSend = (q, channel) => {
+    if (!quick || !quick.list || !q) return;
+    const email = channel === "email";
+    const fill = { contactName: data.contact && data.contact.name, myName: quick.myName };
+    const next = ssInsertQuickSend(email ? mail.body : text, q, fill, channel);
+    const say = email ? setMailMsg : setTextMsg;
+    if (next === null) { say({ err: ssQuickSendTooLong(channel) }); return; }
+    if (email) setMail((p) => ({ ...p, body: next })); else setText(next);
+    say(null);
+    const box = email ? mailBodyRef.current : textBoxRef.current;
+    setTimeout(() => {
+      if (!box) return;
+      box.focus();
+      try { box.setSelectionRange(next.length, next.length); } catch (_e) { /* not a text box */ }
+      box.scrollTop = box.scrollHeight;
+    }, 0);
+    Promise.resolve(sb.functions.invoke("portal-settings", { body: { action: "quick_send_used", id: q.id } }))
+      .then((res) => {
+        if (!res || res.error || !res.data || !res.data.ok) return;
+        setQuick((cur) => (cur && cur.list
+          ? { ...cur, list: cur.list.map((x) => (x.id === q.id ? { ...x, usage_count: (Number(x.usage_count) || 0) + 1 } : x)) }
+          : cur));
+      })
+      .catch(() => { /* only a count */ });
   };
 
   const renderSection = (key) => {
@@ -3586,8 +4300,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 
       <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
-          {CRM_SECTIONS.filter((s) => s.when(ctx)).map((s) => (
-            <div key={s.key} style={{ ...S.card, marginBottom: 10 }}>
+          {/* In the reader's own order (My Profile). CrmRecordSkeleton doesn't follow it: its
+              blocks are untitled placeholders, so there is nothing there to arrange. */}
+          {crmOrderSections(CRM_SECTIONS.filter((s) => s.when(ctx)), cardOrder && cardOrder[kind]).map((s) => (
+            <div key={s.key} data-ss-crm-section={s.key} style={{ ...S.card, marginBottom: 10 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 7 }}>{s.title}</div>
               {renderSection(s.key)}
             </div>
@@ -3736,10 +4452,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                             {CONSENT_ATTESTATION}
                           </span>
                         </label>
-                        <input value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
-                          maxLength={200}
+                        {/* Two lines, not one (2026-10-05): "how they gave it" is a short story —
+                            where, when, who asked — and a one-line box hid most of it as it was typed. */}
+                        <textarea value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
+                          rows={2} maxLength={200} data-ss-consent-note=""
                           placeholder="How they gave it — e.g. asked us at the lot on 12 Aug (optional)"
-                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5 }} />
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5, resize: "vertical", display: "block", lineHeight: 1.45 }} />
                         <div style={{ display: "flex", gap: 8, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
                           <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !consentTicked}
                             onClick={recordConsent}>
@@ -3759,11 +4477,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   </div>
                 ) : (
                   <>
-                    <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+                    <textarea ref={textBoxRef} value={text} onChange={(e) => setText(e.target.value)} rows={4}
                       maxLength={1600}
                       placeholder="Text this customer…"
                       style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                     <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                      {quickSendsOn && (
+                        <CrmQuickSendPicker channel="sms" quick={quick} onOpen={loadQuickSends}
+                          onInsert={(q) => insertQuickSend(q, "sms")}
+                          fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                      )}
                       <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
                         {busy ? "Sending…" : "Send text"}
                       </button>
@@ -3797,15 +4520,55 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             )}
             {tab === "email" && tabOn("email") && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
+                {/* WHERE A REPLY GOES follows the server's rule (_shared/repReplyTo.ts): the writer's
+                    own address, except in view-as, where CSM Synergy staff are never put on a
+                    builder's email and the copy goes to the customer's assigned rep instead (or the
+                    send is refused when no reply could reach anyone). viewingLabel is set only in
+                    view-as. */}
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
-                  To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
+                  {viewingLabel
+                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They go to this customer's assigned rep, if they have one.</>
+                    : <>To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.</>}
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
-                <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
+                <textarea ref={mailBodyRef} value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
                   placeholder="Write to this customer…"
                   style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
+                {/* THE SIGNATURE, WHERE SHE IS TYPING. Carolyn 2026-10-01: "if I'm sitting here
+                    typing a message, I want to see my signature right here." crm_send_email adds
+                    it server-side (_shared/emailSignature.ts), so this is a preview of what goes
+                    out, on one line; the full text is in the tooltip. Leaving for My Profile
+                    asks first when the email has words in it, because the record unmounts and
+                    the draft is not kept anywhere. */}
+                {emailSignature !== null && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                    <span title={emailSignature || undefined}
+                      style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {emailSignature
+                        ? "Your signature is added: " + emailSignature.split("\n").map((l) => l.trim()).filter(Boolean).join(" · ")
+                        : "No email signature yet."}
+                    </span>
+                    {onEditProfile && (
+                      <a href={ssPagePath("settings", "myprofile")}
+                        onClick={ssNavClick(() => {
+                          if ((mail.subject.trim() || mail.body.trim())
+                            && !window.confirm("Leave this email for My Profile? What you've written here won't be kept.")) return;
+                          onEditProfile();
+                        })}
+                        style={{ color: ACCENT, fontWeight: 700, whiteSpace: "nowrap", textDecoration: "none" }}>
+                        {emailSignature ? "Edit in My Profile" : "Add one in My Profile"}
+                      </a>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                  {/* QUICK SENDS. Insert fills the body above; Send email is still the only way out. */}
+                  {quickSendsOn && (
+                    <CrmQuickSendPicker channel="email" quick={quick} onOpen={loadQuickSends}
+                      onInsert={(q) => insertQuickSend(q, "email")}
+                      fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                  )}
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
                   </button>
@@ -3966,9 +4729,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               {chips.map((c) => {
                 const n = c.types ? (data.feed || []).filter((e) => c.types.indexOf(e.type) !== -1).length : (data.feed || []).length;
                 return (
-                  <button key={c.key} onClick={() => setChip(c.key)}
+                  /* Lit from `active`, the chip the list is really filtered by: a chip asked for
+                     that this record doesn't show (initialChip "messages" where texting is off)
+                     filters by All, and All is what has to look selected. */
+                  <button key={c.key} onClick={() => setChip(c.key)} aria-pressed={active.key === c.key} data-ss-crm-chip={c.key}
                     style={{
-                      background: chip === c.key ? ACCENT : "#F1F5F9", color: chip === c.key ? "#FFF" : "#475569",
+                      background: active.key === c.key ? ACCENT : "#F1F5F9", color: active.key === c.key ? "#FFF" : "#475569",
                       border: "none", borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
                     }}>{c.label} ({n})</button>
                 );
@@ -4083,7 +4849,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
                   ) : (
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{e.title}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+                        {e.title}
+                        {/* Opened / Delivered / Bounced (migration 262). Only our own emails
+                            carry it; the customer's replies are drawn above. */}
+                        {e.type === "email" && <SsEmailDeliveryChip meta={e.meta} />}
+                      </div>
                       {/* Our own emails and texts keep their line breaks, the way the
                           customer's replies above do: a conversation email's body is the
                           words someone typed (migration 261). Every other email body here is
@@ -4105,6 +4876,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {e.type === "voicemail" && e.meta && e.meta.voicemailId && !e.meta.voicemailDeleted
                         && ctx.canCall && ctx.phone.on && !ctx.viewing && ssPhoneVoicemailAudioUrl(e.meta.voicemailId) && (
                         <SsVoicemailPlayer voicemailId={e.meta.voicemailId} />
+                      )}
+                      {/* MY SYNERGY PHONE, CALL RECORDING (migration 263): a recorded call's
+                          summary, its recording and its transcript. The summary is in the feed
+                          for anyone who sees the call; Play and Show transcript ask the Worker,
+                          so they follow the voicemail player's rule above. */}
+                      {(e.type === "call" || e.type === "call_missed" || e.type === "voicemail") && e.meta && e.meta.callId
+                        && (e.meta.summary || e.meta.recordingId) && (
+                        <SsCallRecording callId={e.meta.callId} meta={e.meta}
+                          canListen={!!(ctx.canCall && ctx.phone.on && !ctx.viewing)} />
                       )}
                     </div>
                   )}

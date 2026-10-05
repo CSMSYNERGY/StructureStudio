@@ -19,6 +19,15 @@ function ssTaxReadUnavailable(err) {
   return err.ssStatus === 400 && /^Unknown action\b/i.test(String(err.message || ""));
 }
 
+// The Settings → Company "Quotes are good for" box: a whole number of days, 1 to 365 — the same
+// rule as portal-settings' save and client_settings' CHECK (migration 269).
+function ssQuoteDaysOk(v) {
+  const s = String(v ?? "").trim();
+  if (!/^\d+$/.test(s)) return false;
+  const n = Number(s);
+  return n >= 1 && n <= 365;
+}
+
 function SettingsView({ section }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
@@ -50,6 +59,9 @@ function SettingsView({ section }) {
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
+    // How many days a quote stays good for (migration 269). A STRING like every other field; "30"
+    // is the column's default and what every quote printed before the setting existed.
+    quoteValidDays: "30",
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
@@ -163,6 +175,7 @@ function SettingsView({ section }) {
         businessLogoUrl: data.businessLogoUrl || "",
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
+        quoteValidDays: typeof data.quoteValidDays === "number" ? String(data.quoteValidDays) : "30",
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         invoiceInGhl: data.invoiceInGhl !== false,
         ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
@@ -200,6 +213,14 @@ function SettingsView({ section }) {
       setError("Beta mode needs a working test inbox — that's the address estimates go to instead of your customers. Add one, or turn beta mode off.");
       return;
     }
+    // Same bounds as the server and the column (1..365), stopped here so the owner sees it beside
+    // the box they just typed in. The server check is the one that counts. A cleared box is not a
+    // mistake: it means the 30 its placeholder shows, as the server's parseQuoteValidDays reads it.
+    const quoteDaysBlank = String(form.quoteValidDays ?? "").trim() === "";
+    if (quoteDaysReady && !quoteDaysBlank && !ssQuoteDaysOk(form.quoteValidDays)) {
+      setError("Quotes have to stay good for a whole number of days, from 1 to 365.");
+      return;
+    }
     setBusy(true);
     const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
     const body = {
@@ -213,6 +234,9 @@ function SettingsView({ section }) {
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
       showPricing: form.showPricing,
+      // Only when `status` could read the column: a portal-settings or database without migration
+      // 269 never sees the key, so this page can ship ahead of either without breaking the save.
+      ...(quoteDaysReady ? { quoteValidDays: quoteDaysBlank ? 30 : Number(form.quoteValidDays) } : {}),
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
@@ -236,6 +260,10 @@ function SettingsView({ section }) {
   // true, and this must not follow it. The render below is unreachable until status has
   // loaded (the `!status && !error` branch), so there is no flash of the wrong card.
   const mayGhlInvoice = Boolean(status && status.ghlInvoicingAllowed === true);
+  // Can this tenant set how long quotes stay good for? `status` answers a number once migration
+  // 269 is applied and portal-settings knows the field; before that (or on a read that failed) it
+  // answers null or nothing, and the box stays hidden rather than offer a value it cannot save.
+  const quoteDaysReady = Boolean(status && typeof status.quoteValidDays === "number");
   // The SS-paperwork fields used to key on `!form.invoiceInGhl` alone. For a tenant that
   // cannot choose, SS mode is the only mode — including while their row still says otherwise,
   // which is exactly when they need the numbering fields in front of them.
@@ -955,6 +983,9 @@ function SettingsView({ section }) {
               <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
               {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}
             </div>
+            {/* The quote PDF fetches the logo server-side, and only from where Upload puts it
+                (_shared/pdfLogo.ts). A pasted link from another site still shows in emails. */}
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your quote PDFs.</div>
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -965,6 +996,21 @@ function SettingsView({ section }) {
         </div>
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+        {/* Carolyn 2026-08-06: "estimate good for X amount of days". Prints as the "Valid until"
+            date on every quote PDF, and is the expiry date on estimates your CRM sends. */}
+        {quoteDaysReady && (
+          <div style={{ marginTop: 12 }}>
+            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Quotes are good for</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input id="ss-quote-valid-days" style={{ ...S.input, width: 90 }} value={form.quoteValidDays}
+                onChange={set("quoteValidDays")} inputMode="numeric" placeholder="30" />
+              <span style={{ fontSize: 13, color: "#475569" }}>days</span>
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+              Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days.
+            </div>
+          </div>
+        )}
       </div>
       </>)}
 

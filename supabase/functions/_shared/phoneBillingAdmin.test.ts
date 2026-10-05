@@ -234,6 +234,28 @@ Deno.test("with no markup, would-have-charged is unknown rather than $0", () => 
   assertEquals([rep.account.twilioMicros, rep.account.gapMicros], [null, null]);
 });
 
+Deno.test("a recorded call: its recording and transcript add no call minutes, and the transcript stays out of the Twilio gap", () => {
+  // One 10-minute call with its recording and its transcript (migration 263): three rows, one call.
+  const rows: UsageChargeRow[] = [
+    row({ cost_micros: 140000, units: 10 }),
+    row({ source: "recording", cost_micros: 25000, units: 10 }),
+    row({ source: "transcription", cost_micros: 60000, cost_source: "estimate", units: 10 }),
+  ];
+  const rep = summarizePhoneUsage({
+    range: RANGE, rows,
+    twilio: [{ day: "2026-09-01", category: "calls", price_micros: 140000 }, { day: "2026-09-01", category: "recordings", price_micros: 25000 }],
+    // A per-minute ceiling holds the call only, as in the worker: the other two lines have none.
+    settings: { markup: 2, ceiling_min_micros: 3000, ceiling_seg_micros: null },
+    names: new Map(),
+  });
+  const a = rep.tenants[0];
+  assertEquals([a.calls, a.minutes, rep.totals.minutes], [1, 10, 10], "ten call minutes, not thirty");
+  assertEquals([a.costMicros, a.costTwilioMicros, a.costEstimateMicros], [225000, 165000, 60000], "our cost is still every line");
+  assertEquals(a.wouldChargeMicros, 30000 + 50000 + 120000);
+  // Twilio billed the call and the recording; the transcript (Workers AI, Claude) is not on its bill.
+  assertEquals([rep.account.twilioMicros, rep.account.ourCostCoveredMicros, rep.account.gapMicros], [165000, 165000, 0]);
+});
+
 // ── small helpers ───────────────────────────────────────────────────────────────────────
 
 Deno.test("micros print with the decimals they need", () => {

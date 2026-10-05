@@ -10,13 +10,14 @@
 // Texts follow the contacts area, as they always have; "mine" narrows the thread LIST only.
 // Email follows it the same way (emailThread.ts shapes it), and is never narrowed by phone level.
 
+import { senderVerifiedFrom } from "../../../../supabase/functions/_shared/crmFeed.ts";
 import { hasPaidFeature } from "../../../../supabase/functions/_shared/featureCheck.ts";
 import type { Env } from "../env";
 import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { CALL_COLUMNS, DbError, must, type CallRow } from "../db";
 import {
-  EMAIL_PAGE, INBOUND_COLS, LIST_EMAIL_KINDS, SEND_COLS, THREAD_EMAIL_KINDS,
+  EMAIL_PAGE, INBOUND_COLS, LIST_EMAIL_KINDS, SEND_COLS, SEND_COLS_BEFORE_262, THREAD_EMAIL_KINDS,
   contactEmailFilter, emailAddress, emailBlock, hasText, threadEmails,
   type Compose, type EmailInboundRow, type EmailSendRow, type EmailSettings, type ThreadEmail,
 } from "../emailThread";
@@ -27,6 +28,8 @@ import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, phon
 
 const PAGE = 50;
 const SCAN = 500;
+/** PostgREST / Postgres "no such column" (media.ts's set). */
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 /** Rows read per email table for one page of the list (?channels=…,email). */
 const EMAIL_SCAN = 200;
 
@@ -43,6 +46,8 @@ function cursorParam(url: URL): string | null {
 type CallWithJoins = CallRow & {
   crm_contacts: { name: string | null; owner_user_id: string | null } | { name: string | null; owner_user_id: string | null }[] | null;
   phone_voicemails: VoicemailJoin | VoicemailJoin[] | null;
+  /** The call's recording (migration 263). Optional: fixtures from before it need nothing. */
+  phone_call_recordings?: RecordingJoin | RecordingJoin[] | null;
 };
 
 interface VoicemailJoin {
@@ -54,10 +59,61 @@ interface VoicemailJoin {
   transcript?: string | null;
 }
 
+interface RecordingJoin {
+  id: string;
+  status: string;
+  duration_s: number | null;
+  summary: string | null;
+  transcript_status: string;
+  /** Optional: fixtures from before it need nothing. 'off' beside a done transcript = no words. */
+  summary_status?: string;
+  deleted_at: string | null;
+}
+
 const one = <T>(v: T | T[] | null | undefined): T | null => (Array.isArray(v) ? v[0] ?? null : v ?? null);
 
 const VM_SELECT = "phone_voicemails(id, duration_s, listened_at, deleted_at, transcript)";
-const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SELECT}`;
+// ⚠️ migration 263's table: this Worker must not be deployed before it is applied.
+// No transcript here, on purpose: both apps save these rows on the device (the extension's
+// IndexedDB, the phone's query cache), where a copy would outlive the business's retention. The
+// transcript is read on demand, GET /calls/:id/transcript, and kept in memory only.
+const REC_SELECT = "phone_call_recordings(id, status, duration_s, summary, transcript_status, summary_status, deleted_at)";
+const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SELECT}, ${REC_SELECT}`;
+
+export type RecordingState = "live" | "paused" | "processing" | "ready" | "failed";
+
+/**
+ * A call's recording as the apps see it (null: none, or deleted by retention):
+ *   live        recording now (or starting)
+ *   paused      the customer is on hold
+ *   processing  the call is over and Twilio has not finished the file yet
+ *   ready       playable: GET /recordings/:id/audio
+ *   failed      it did not record (Twilio refused, or heard nothing)
+ * Who may see it is who may see the call: the list is already scoped (scopeCalls, isMineCall).
+ */
+export function recordingOut(r: Pick<CallRow, "ended_at">, rec: RecordingJoin | null) {
+  if (!rec || rec.deleted_at) return null;
+  let state: RecordingState;
+  if (rec.status === "completed") state = "ready";
+  else if (rec.status === "failed" || rec.status === "absent") state = "failed";
+  else if (r.ended_at) state = "processing";
+  else state = rec.status === "paused" ? "paused" : "live";
+  return { id: rec.id, duration_s: rec.duration_s ?? null, state };
+}
+
+/**
+ * pending | done | failed for the apps (working is pending to them; off is null). `done` is the
+ * apps' cue for "Show transcript", which reads GET /calls/:id/transcript, so it means there is
+ * text: a call nova-3 heard no words in (done, with its summary left off, cron/transcribe.ts)
+ * is null, like one never transcribed.
+ */
+function transcriptStatusOut(rec: RecordingJoin | null): "pending" | "done" | "failed" | null {
+  if (!rec || rec.deleted_at) return null;
+  if (rec.transcript_status === "pending" || rec.transcript_status === "working") return "pending";
+  if (rec.transcript_status === "done") return rec.summary_status === "off" ? null : "done";
+  if (rec.transcript_status === "failed") return "failed";
+  return null;
+}
 
 /**
  * One call as the apps see it. `warm` (only on a live call in its conference that a warm
@@ -68,10 +124,18 @@ const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SE
  * `error_code` is why a call was refused before it was placed (wallet_empty, minute_cap,
  * not_your_customer, ...; null for every call that went out or came in), so Recents can say
  * "Not placed: wallet empty" instead of a bare "failed".
+ *
+ * Call recording (release B2, additive: older apps ignore the keys):
+ *   recording          recordingOut above, or null
+ *   summary            2-4 sentences and action items; KEPT after the audio is deleted
+ *   transcript_status  pending | done | failed, or null (not transcribed, no words, or
+ *                      deleted). The transcript itself is never on a call row (REC_SELECT says
+ *                      why): done means GET /calls/:id/transcript has it.
  */
 export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
   const contact = one(r.crm_contacts);
   const vm = one(r.phone_voicemails);
+  const rec = one(r.phone_call_recordings);
   return {
     id: r.id,
     direction: r.direction,
@@ -90,6 +154,9 @@ export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
     // where to. Null when none is, or the last one is past its 45 s. Outcomes: GET /calls/:id/handoff.
     handoff_state: switchUnderWay(r) ? r.handoff_state ?? null : null,
     handoff_to: switchUnderWay(r) ? r.handoff_to ?? null : null,
+    recording: recordingOut(r, rec),
+    summary: rec?.summary ?? null,
+    transcript_status: transcriptStatusOut(rec),
     ...(warm ? { warm } : {}),
   };
 }
@@ -148,7 +215,7 @@ export async function listCalls(env: Env, req: Request): Promise<Response> {
     // calls / voicemails on contacts I OWN, which ring whoever the route rings, not me.
     const [a, b] = await Promise.all([
       base(CALL_SELECT).or(`placed_by.eq.${me},answered_by.eq.${me},transferred_from.eq.${me},rang_user_ids.cs.{${me}}`),
-      base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${VM_SELECT}`)
+      base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${VM_SELECT}, ${REC_SELECT}`)
         .eq("crm_contacts.owner_user_id", me).in("status", ["missed", "voicemail", "ringing"]),
     ]);
     const ra = (must(a, "list my calls") as CallWithJoins[] | null) ?? [];
@@ -220,6 +287,8 @@ interface ThreadEvent {
   sent_by: string | null;
   /** The text itself, for texts: the thread's number comes from it. */
   sms: MsgRow | null;
+  /** A customer's email only: crmFeed's verdict on its sender (false: failed SPF, DKIM or DMARC). */
+  sender_verified?: boolean | null;
 }
 
 /** One table's newest rows below the cursor. `full` means it hit its limit: older rows exist that it didn't read. */
@@ -264,14 +333,14 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
   // conversation or test), on a contact. Mail from someone who isn't a contact isn't listed,
   // as in the portal, and quotes and invoices show inside the conversation, not here.
   const received = async (): Promise<Scan> => {
-    let q = c.admin.from("email_inbound").select("id, contact_id, subject, received_at")
+    let q = c.admin.from("email_inbound").select("id, contact_id, subject, received_at, spam_verdict")
       .eq("client_id", client).not("contact_id", "is", null).order("received_at", { ascending: false }).limit(EMAIL_SCAN);
     if (cursor) q = q.lt("received_at", cursor);
-    const rows = (must(await q, "list received email") as { id: string; contact_id: string; subject: string | null; received_at: string }[] | null) ?? [];
+    const rows = (must(await q, "list received email") as { id: string; contact_id: string; subject: string | null; received_at: string; spam_verdict: string | null }[] | null) ?? [];
     return {
       events: rows.map((r) => ({
         key: r.contact_id, contact_id: r.contact_id, at: r.received_at, direction: "in",
-        body: r.subject ?? "", channel: "email", sent_by: null, sms: null,
+        body: r.subject ?? "", channel: "email", sent_by: null, sms: null, sender_verified: senderVerifiedFrom(r.spam_verdict),
       })),
       full: rows.length === EMAIL_SCAN,
     };
@@ -382,7 +451,13 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
       // says nothing about where texts from it went.
       e164: g.sms ? customerNumber(g.sms) : toE164(contact?.phone),
       ...(channels ? { e164_source: g.sms ? "sms" : "contact" } : {}),
-      last: { body: g.last.body, direction: g.last.direction, at: g.last.at, ...(channels ? { channel: g.last.channel } : {}) },
+      last: {
+        body: g.last.body, direction: g.last.direction, at: g.last.at,
+        ...(channels ? { channel: g.last.channel } : {}),
+        // A customer's email: false when its sender failed SPF, DKIM or DMARC, so the apps don't
+        // alert on a forged "From:" (the rule /push/email keeps). null is unknown, and alerts.
+        ...(g.last.channel === "email" && g.last.direction === "in" ? { sender_verified: g.last.sender_verified ?? null } : {}),
+      },
     });
     if (threads.length >= PAGE) break;
   }
@@ -469,12 +544,20 @@ async function contactEmails(c: Caller, contactId: string): Promise<ThreadEmail[
     "read contact designs",
   ) as { short_code: string | null }[] | null) ?? [];
   const scope = contactEmailFilter(contactId, designs.map((d) => d.short_code));
-  const [sentRes, receivedRes] = await Promise.all([
-    c.admin.from("email_sends").select(SEND_COLS).eq("client_id", client).in("kind", THREAD_EMAIL_KINDS).or(scope)
-      .order("created_at", { ascending: false }).limit(EMAIL_PAGE),
+  const readSent = (cols: string) =>
+    c.admin.from("email_sends").select(cols).eq("client_id", client).in("kind", THREAD_EMAIL_KINDS).or(scope)
+      .order("created_at", { ascending: false }).limit(EMAIL_PAGE);
+  const [firstSent, receivedRes] = await Promise.all([
+    readSent(SEND_COLS),
     c.admin.from("email_inbound").select(INBOUND_COLS).eq("client_id", client).or(scope)
       .order("received_at", { ascending: false }).limit(EMAIL_PAGE),
   ]);
+  // A Worker deployed ahead of migration 262 is refused opened_at ("no such column"), and must()
+  // would fail the WHOLE thread over it — texts and calls included. Asked once more without it,
+  // the thread opens and its emails simply never read "opened".
+  const sentRes = MISSING_COLUMN.has(String((firstSent as { error?: { code?: string } | null }).error?.code ?? ""))
+    ? await readSent(SEND_COLS_BEFORE_262)
+    : firstSent;
   const sent = (must(sentRes as never, "read sent email") as EmailSendRow[] | null) ?? [];
   const received = (must(receivedRes as never, "read received email") as EmailInboundRow[] | null) ?? [];
 
@@ -521,10 +604,32 @@ export function searchTerm(q: string): string {
   return q.replace(/[^\p{L}\p{N} .'@_-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+/**
+ * The email-address half of `?email=1`: lower case, with the characters an address holds (a `+`
+ * too, which searchTerm drops) and nothing a PostgREST filter would trip on. Null when it is
+ * too short to search addresses by: under 3 characters with no @, a term like "co" or "ma"
+ * would match every .com and gmail address.
+ */
+export function emailSearchTerm(q: string): string | null {
+  const t = q.toLowerCase().replace(/[^\p{L}\p{N}.'@_+-]/gu, "").slice(0, 60);
+  return t.length >= 3 || (t.length >= 2 && t.includes("@")) ? t : null;
+}
+
+/**
+ * GET /search?q=: contacts by name or 3+ digits of their number, each with a number to call or
+ * text. `&email=1` (2026-10-05, the phone app's New message) also matches the email address and
+ * keeps a contact that has only an email: every row then carries `email` (null when there is
+ * none), and `e164` is null for an email-only one. Address matches are read separately and come
+ * after the name and number matches, so a common address fragment never pushes a name out of
+ * the 20. Without it the answer is exactly as before, which old app builds, the extension's
+ * Keypad and New message, and the Contacts tab (a call list) all read.
+ */
 export async function search(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   if (c.ctx.contacts_level === "none") return ok({ contacts: [] });
-  const raw = new URL(req.url).searchParams.get("q") ?? "";
+  const url = new URL(req.url);
+  const raw = url.searchParams.get("q") ?? "";
+  const withEmail = url.searchParams.get("email") === "1";
   const term = searchTerm(raw);
   const digits = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   if (term.length < 2 && digits.length < 3) return ok({ contacts: [] });
@@ -532,20 +637,35 @@ export async function search(env: Env, req: Request): Promise<Response> {
   const ors: string[] = [];
   if (term.length >= 2) ors.push(`name.ilike.*${term}*`);
   if (digits.length >= 3) ors.push(`phone_digits.like.*${digits}*`);
-  const rows = (must(
-    await c.admin.from("crm_contacts").select("id, name, phone, phone_digits")
-      .eq("client_id", c.ctx.client_id).is("merged_into", null).or(ors.join(","))
-      .order("updated_at", { ascending: false }).limit(60),
-    "search contacts",
-  ) as { id: string; name: string | null; phone: string | null; phone_digits: string | null }[] | null) ?? [];
+  type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email?: string | null };
+  const contactsQuery = () =>
+    c.admin.from("crm_contacts").select(withEmail ? "id, name, phone, phone_digits, email" : "id, name, phone, phone_digits")
+      .eq("client_id", c.ctx.client_id).is("merged_into", null)
+      .order("updated_at", { ascending: false }).limit(60);
+  const emailTerm = withEmail ? emailSearchTerm(raw) : null;
+  const [byName, byEmail] = await Promise.all([
+    contactsQuery().or(ors.join(",")),
+    // email_lower is generated (lower(btrim(email)), migration 130).
+    emailTerm ? contactsQuery().ilike("email_lower", `*${emailTerm}*`) : null,
+  ]);
+  const named = (must(byName, "search contacts") as Row[] | null) ?? [];
+  const found = new Set(named.map((r) => r.id));
+  const addressed = byEmail ? ((must(byEmail, "search contacts by email") as Row[] | null) ?? []).filter((r) => !found.has(r.id)) : [];
+  const rows = [...named, ...addressed];
 
   const visible = await visibleContactIds(c, rows.map((r) => r.id));
   const contacts = [];
   for (const r of rows) {
     if (!visible.has(r.id)) continue;
     const e164 = toE164(r.phone) ?? toE164(r.phone_digits);
-    if (!e164) continue; // nothing to call or text
-    contacts.push({ id: r.id, name: r.name ?? "", e164 });
+    if (withEmail) {
+      const email = emailAddress(r.email);
+      if (!e164 && !email) continue; // nothing to call, text or email
+      contacts.push({ id: r.id, name: r.name ?? "", e164, email });
+    } else {
+      if (!e164) continue; // nothing to call or text
+      contacts.push({ id: r.id, name: r.name ?? "", e164 });
+    }
     if (contacts.length >= 20) break;
   }
   return ok({ contacts });

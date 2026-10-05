@@ -18,8 +18,15 @@
 //      a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
 //      3b: on Auto, the steps' and posts' −/+ step from the count Auto draws, and the posts' Auto chip
 //      keeps saying what Auto draws once a number is typed;
+//      3c (2026-10-03): a projecting porch's steps go down either side too, greyed out (saying why) on a
+//      deck under 2' 6"; one picked on a deeper deck stays picked there but is not drawn, the note saying
+//      so, and is drawn again once the deck is deepened (2026-10-04); a recessed porch offers the three
+//      front ones only and builds its steps;
 //   4  a shed roof greys out Wings and Dormer (they need a ridge); 4b: at a phone's width the Save
 //      footer spans the width and the add-on tabs stay one row with no sideways page scroll;
+//   3d (2026-10-04, the 10-01 call): the overhang presets reach 24″, which builds a 2 ft overhang; the
+//      dormer's width box runs to the building's length, a full-length dormer is drawn 3" in from each
+//      gable end and says so, and on a shorter building the same dormer stays inside its gable ends;
 //   5  the calibration panel in Settings > Designer still shows every field at once and no tab strip;
 //   6  the second review (2026-09-29): the End view's words are readable (11 px or more at 1440) and its
 //      pitch is the Pitch box's own number; a click in the middle of a number box never changes the
@@ -303,9 +310,10 @@ try {
   await shot(page, "ask-porch-4-steps.png");
 
   await radio(page, "What it stands on", "Piers").click();
-  // The ground 2 ft lower at both back corners (2026-09-29: a box per corner, in place of "falls away" + "Toward").
+  // The ground 2 ft lower at both back corners (2026-09-29: a box per corner, in place of "falls away" + "Toward"),
+  // typed in inches since 2026-10-03.
   for (const corner of ["back left", "back right"]) {
-    await byLabel(page, `Ground at the ${corner} corner (ft lower)`).fill("2");
+    await byLabel(page, `Ground at the ${corner} corner (in lower)`).fill("24");
     await page.keyboard.press("Tab");
   }
   await panelModel(page, (M) => !!(M.gradeCorners && M.gradeCorners.bl === 2 && M.gradeCorners.br === 2 && M.gradeCorners.fl === 0 && M.gradeCorners.fr === 0 && M.foundation && M.foundation.kind === "piers"));
@@ -360,6 +368,143 @@ try {
   ok("3b: from Auto, + gives one post more than Auto draws", autoPosts >= 2 && postsUp === Math.min(8, autoPosts + 1), `Auto ${autoPosts} → ${postsUp}`);
   ok("3b: …and the chip still says what Auto draws, not the number typed", postsChip.trim() === `Auto (${autoPosts})` && await autoChip("porchPosts").getAttribute("aria-pressed") === "false", postsChip);
   await autoChip("porchPosts").click();
+
+  // 3c ── the steps by porch kind (2026-10-03) ─────────────────────────────────────────────────────
+  const segOpts = () => page.locator('[data-ss-adv-f="porchSteps"] button').evaluateAll((bs) => bs.map((b) => `${b.textContent.trim()}${b.disabled ? "(off)" : ""}`).join("|"));
+  ok("3c: a projecting porch's steps go along its front or down either side", (await segOpts()) === "None|Left|Center|Right|Left side|Right side", await segOpts());
+  await byLabel(page, "Depth (ft)").fill("2");
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(200);
+  ok("3c: …on a 2 ft deck the two sides are greyed out, saying why",
+    (await segOpts()) === "None|Left|Center|Right|Left side(off)|Right side(off)" && (await segBtn(page, "Porch steps", "Left side").getAttribute("title")) === "Needs a deck at least 2' 6\" deep",
+    await segOpts());
+  await byLabel(page, "Depth (ft)").fill("6");
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(200);
+  await segBtn(page, "Porch steps", "Left side").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.steps && M.porch.steps.where === "leftSide" && M.porch.steps.turn === -1));
+  ok("3c: Left side builds a flight off the deck's left end", true);
+  // ⚠️ Made shallower than 2' 6" (2026-10-04) it stays picked but is not drawn, through the wall or the
+  // corner's support, and the note says so; deepened again the flight comes back.
+  await byLabel(page, "Depth (ft)").fill("1.5");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => { let n = 0; M.root.traverse((o) => { if (o.userData && o.userData.ssPorchSteps) n++; }); return !!(M.porch && M.porch.D === 1.5 && !M.porch.steps) && n === 0; });
+  const shallowNote = (await page.locator('[data-ss-adv-f="porchSteps"]').innerText()).replace(/\s+/g, " ");
+  ok("3c: ⚠️ on a 1.5 ft deck the side flight stays picked, is not drawn, and the note says why",
+    (await segBtn(page, "Porch steps", "Left side").getAttribute("aria-pressed")) === "true" && /Steps down a side are not drawn until the deck is at least 2' 6" deep/.test(shallowNote), shallowNote);
+  await byLabel(page, "Depth (ft)").fill("6");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => !!(M.porch && M.porch.D === 6 && M.porch.steps && M.porch.steps.where === "leftSide"));
+  ok("3c: …and back at 6 ft the flight is drawn again", true);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-porch-side-steps.png");
+  await radio(page, "Porch", "Recessed").click();
+  await page.waitForTimeout(200);
+  ok("3c: a recessed porch offers the three front steps only, the side flight gone", (await segOpts()) === "None|Left|Center|Right"
+    && (await segBtn(page, "Porch steps", "None").getAttribute("aria-pressed")) === "true", await segOpts());
+  ok("3c: …and with no steps, no wood colour to pick", (await page.locator('[data-ss-adv-f="wood"]').count()) === 0);
+  await segBtn(page, "Porch steps", "Center").click();
+  await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "center" && !M.porch));
+  ok("3c: Center builds the recessed porch's steps", true);
+  ok("3c: …and its step count shows, on Auto", (await page.locator('[data-ss-adv-f="porchStepCount"]').count()) === 1 && /^Auto \(\d+\)$/.test((await autoChip("porchStepCount").innerText()).trim()));
+  // The recessed steps are built of the porch wood (2026-10-04), so its picker shows for them, named so.
+  const woodF = page.locator('[data-ss-adv-f="wood"]');
+  ok("3c: …and the wood colour they are built in, as \"Wood color (steps)\"", (await woodF.count()) === 1 && /Wood color \(steps\)/.test(await woodF.innerText()));
+  await shot(page, "ask-recessed-steps.png");
+  await radio(page, "Porch", "Projecting").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.steps && M.porch.steps.where === "center"));
+  ok("3c: back to projecting, the centre steps stay", true);
+
+  // 3d ── the 10-01 call's polish (2026-10-04) ──────────────────────────────────────────────────────
+  // A 24″ overhang preset. The main roof's slopes are 0.2 ft boxes as long as the ridge plus an overhang
+  // at each gable (zLen = L + 2 x overhang), so on this 12x16 a 2 ft overhang makes them 20 ft long.
+  const boxesIn = (test) => page.waitForFunction((src) => {
+    const P = window.__ss3dPanel;
+    if (!(P && P.model)) return false;
+    const want = new Function("g", "return " + src + ";");
+    let n = 0;
+    P.model.roofGroup.traverse((q) => { const g = q.isMesh && q.geometry.type === "BoxGeometry" ? q.geometry.parameters : null; if (g && want(g)) n++; });
+    return n > 0;
+  }, test, { timeout: 60000 });
+  const zOf = (test) => page.evaluate((src) => {
+    const P = window.__ss3dPanel, V = P.camera.position.constructor;
+    const want = new Function("g", "return " + src + ";");
+    P.scene.updateMatrixWorld(true);
+    const out = [];
+    P.model.roofGroup.traverse((q) => {
+      const g = q.isMesh && q.geometry.type === "BoxGeometry" ? q.geometry.parameters : null;
+      if (!g || !want(g)) return;
+      let lo = Infinity, hi = -Infinity;
+      for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) {
+        const v = new V(x * g.width / 2, y * g.height / 2, z * g.depth / 2).applyMatrix4(q.matrixWorld);
+        lo = Math.min(lo, v.z); hi = Math.max(hi, v.z);
+      }
+      out.push({ depth: g.depth, z0: lo, z1: hi });
+    });
+    return out;
+  }, test);
+  const ohGroup = page.getByRole("group", { name: "Overhang presets", exact: true });
+  await ohGroup.scrollIntoViewIfNeeded();
+  const ohChips = (await ohGroup.getByRole("button").allInnerTexts()).map((t) => t.trim());
+  ok("3d: the overhang presets run from Flush to 24″", JSON.stringify(ohChips) === JSON.stringify(["Flush", "2″", "6″", "12″", "16″", "24″"]), JSON.stringify(ohChips));
+  await ohGroup.getByRole("button", { name: "24″", exact: true }).click();
+  await boxesIn("Math.abs(g.height - 0.2) < 1e-9 && Math.abs(g.depth - 20) < 1e-9");
+  ok("3d: 24″ is a 2 ft overhang: the box says 24, the chip is on, and the roof runs 2 ft past each gable end",
+    (await byLabel(page, "Overhang").inputValue()) === "24" && (await ohGroup.getByRole("button", { name: "24″", exact: true }).getAttribute("aria-pressed")) === "true");
+  await page.locator("#ss-step-adv-shape").scrollIntoViewIfNeeded();
+  await shot(page, "ask-overhang-24.png");
+  // A dormer the building's whole length. The gable dormer's body is a box 2 ft deep, its rise tall
+  // (2.5 ft unless set) and as long as the dormer is drawn; along the ridge is world z here.
+  const BODY = "g.width === 2 && g.height === 2.5";
+  await tab(page, "dormer").click();
+  await switchOn(page);
+  const dBox = byLabel(page, "Dormer width (ft)");
+  ok("3d: the dormer width box and its slider run to the building's length (16 on a 12x16)",
+    (await dBox.getAttribute("max")) === "16" && (await page.getByLabel("Dormer width (ft), slider", { exact: true }).getAttribute("max")) === "16",
+    String(await dBox.getAttribute("max")));
+  ok("3d: a dormer that fits says nothing about how it is drawn", (await page.locator("[data-ss-dormer-drawn]").count()) === 0);
+  await dBox.fill("16");
+  await page.keyboard.press("Tab");
+  await boxesIn(`${BODY} && Math.abs(g.depth - 15.5) < 1e-9`);
+  const full = await zOf(BODY);
+  ok("3d: typed 16 on a 12x16, the dormer is drawn 15' 6\" long, 3\" in from each gable end",
+    full.length === 1 && Math.abs(full[0].depth - 15.5) < 1e-9 && Math.abs(full[0].z0 + 7.75) < 1e-6 && Math.abs(full[0].z1 - 7.75) < 1e-6, JSON.stringify(full));
+  const drawnSay = (await page.locator("[data-ss-dormer-drawn]").innerText().catch(() => "")).replace(/ /g, " ").trim();
+  ok("3d: …and the page says so under the box", drawnSay === `Drawn 15' 6" wide on 12x16, stopping 3" in from each gable end`, JSON.stringify(drawnSay));
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-dormer-full-length.png");
+  // The same style on a shorter building: the dormer stays inside its gable ends, the gable and the transom.
+  await page.locator("#ss-step-adv-shape").scrollIntoViewIfNeeded();
+  await byLabel(page, "Length (ft)").fill("12");
+  await page.keyboard.press("Tab");
+  await boxesIn(`${BODY} && Math.abs(g.depth - 11.5) < 1e-9`);
+  const short = await zOf(BODY);
+  ok("3d: on a 12x12 the 16 ft dormer is drawn 11' 6\", inside the gable ends", short.length === 1 && Math.abs(short[0].z0 + 5.75) < 1e-6 && Math.abs(short[0].z1 - 5.75) < 1e-6, JSON.stringify(short));
+  ok("3d: …and the box keeps the 16 typed, its top now 12", (await dBox.inputValue()) === "16" && (await dBox.getAttribute("max")) === "12",
+    `${await dBox.inputValue()} max ${await dBox.getAttribute("max")}`);
+  // Section 3's lean-to meets the roof up one eave, and a transom facing that eave stops short of it or is
+  // not built at all (d3RoofLands): put the dormer on the other slope.
+  const ltDir = await page.evaluate(() => { const T = window.__ss3dPanel.model.leanTos; return T && T[0] && T[0].kind === "eave" ? T[0].dir : null; });
+  if (ltDir) { await byLabel(page, "Dormer position").fill(String(-0.45 * ltDir)); await page.keyboard.press("Tab"); }
+  await segBtn(page, "Dormer type", "Transom").click();
+  // The transom's roof is a 0.2 ft box as wide as the dormer plus 3 in each side: 12 ft, from one gable
+  // wall's line to the other's.
+  const TSLAB = "Math.abs(g.height - 0.2) < 1e-9 && Math.abs(g.depth - 12) < 1e-9";
+  await boxesIn(TSLAB);
+  const tz = await zOf(TSLAB);
+  ok("3d: a transom there keeps its roof between the gable walls' lines (z ±6)", tz.length === 1 && Math.abs(tz[0].z0 + 6) < 1e-6 && Math.abs(tz[0].z1 - 6) < 1e-6, JSON.stringify(tz));
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-dormer-transom-shorter.png");
+
+  // Back to the building 3c left, for the sections after this: 12x16, no dormer, the porch tab, a 7.2 in overhang.
+  await page.locator("#ss-step-adv-shape").scrollIntoViewIfNeeded();
+  await byLabel(page, "Length (ft)").fill("16");
+  await page.keyboard.press("Tab");
+  await byLabel(page, "Overhang").fill("7.2");
+  await page.keyboard.press("Tab");
+  await switchOff(page);
+  await tab(page, "porch").click();
+  await page.waitForTimeout(300);
 
   // 4 ── a shed greys out Wings and Dormer ─────────────────────────────────────────────────────
   await radio(page, "Roof type", "One slant").click();

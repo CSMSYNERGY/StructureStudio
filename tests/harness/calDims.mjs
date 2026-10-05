@@ -204,7 +204,9 @@ async function main() {
   // The three dimension inputs are the only `.ssc-dim-in` elements on the page, in the order the
   // card asks for them. Located by class rather than by label text so an em dash or a reworded
   // hint cannot break the harness without breaking the card.
-  const dimIn = page.locator("input.ssc-dim-in");
+  // The dimensions card's own boxes. The panel's other small boxes share the class (the ground at each
+  // corner, shown since 2026-10-03 on a style with no foundation set as well, and the step count).
+  const dimIn = page.locator('[data-ssc-card="dims"] input.ssc-dim-in');
   const widthIn = dimIn.nth(0), lengthIn = dimIn.nth(1), wallIn = dimIn.nth(2);
   const gen = page.getByRole("button", { name: /Generate the 3D model/ });
   // Amber is the card's one visual claim: "this number is not a measurement yet". Read off the
@@ -340,6 +342,12 @@ async function main() {
   await page.waitForTimeout(150);
   const a4 = await press("press 4 (16 in)");
   r.ok("a measured eave rides along in inches", Boolean(a4) && a4.dims.overhangIn === 16, JSON.stringify(a4 && a4.dims));
+
+  // 24 in, the chip the 10-01 call asked for (builders sometimes build a 2 ft eave).
+  await page.getByRole("button", { name: "24 in", exact: true }).click();
+  await page.waitForTimeout(150);
+  const a4b = await press("press 4b (24 in)");
+  r.ok("a 24 in eave is a chip too, and rides along as 24", Boolean(a4b) && a4b.dims.overhangIn === 24, JSON.stringify(a4b && a4b.dims));
 
   await page.getByRole("button", { name: "Read it from the video", exact: true }).click();
   await page.waitForTimeout(150);

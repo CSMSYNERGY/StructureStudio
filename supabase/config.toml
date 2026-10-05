@@ -70,9 +70,12 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.postmark-events]
-# Postmark posts delivery/bounce/spam-complaint events here server-to-server. Authenticated
-# by a shared secret in the URL (?key= ⇄ POSTMARK_WEBHOOK_SECRET) compared in constant time —
-# the same pattern as feedback-monday-webhook.
+# RESEND (the name is Postmark's, kept: it is an address) posts delivered / opened / bounced /
+# complained / suppressed / failed events here server-to-server, from a webhook of its own (not
+# the email.received one, which posts to email-inbound). Authenticated by a shared secret in the
+# URL (?key= ⇄ EMAIL_EVENTS_SECRET, the legacy POSTMARK_WEBHOOK_SECRET as fallback) compared in
+# constant time — the same pattern as feedback-monday-webhook. Flip this to true and every open
+# and bounce stops arriving with nothing logged: the gateway 401s Resend before the function runs.
 verify_jwt = false
 
 [functions.admin-save-settings]
@@ -242,6 +245,19 @@ verify_jwt = true
 # Worker's SUPABASE_SERVICE_ROLE_KEY is that format, its top-up requests die here (the Worker logs
 # the 401, this side logs nothing) and this must become false — safe, because the in-function
 # check is the authentication either way.
+verify_jwt = true
+
+[functions.phone-call-summary]
+# A recorded call's summary (migration 263): the phone-api Worker's transcription cron POSTs
+# {recording_id} here, because ANTHROPIC_API_KEY lives in Supabase secrets only. Server-to-server
+# only. The real gate is inside (summary.ts callerAllowed): the bearer must equal the runtime's
+# SUPABASE_SERVICE_ROLE_KEY or PHONE_SUMMARY_SECRET, compared in constant time, OR a JWT whose
+# role claim is service_role. That third door is proof ONLY because this line has the gateway
+# verify the signature first (summary.ts passes gatewayVerified: true for that reason; a test in
+# tests/phone/callSummary_test.ts pins the two together). With verify_jwt = false, anyone could
+# forge the claim. An `sb_secret_…` key is NOT a JWT and the gateway 401s it before the function
+# runs; if the Worker's key is that format, do all three together: set PHONE_SUMMARY_SECRET to it,
+# change summary.ts to gatewayVerified: false, and only then set this to false.
 verify_jwt = true
 
 # Twilio Event Streams cannot send a Supabase JWT. With verification ON the gateway

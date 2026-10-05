@@ -22,8 +22,10 @@ import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
+import { armedFor } from "../recording";
 import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
+import { greetingOut } from "./me";
 import { onDnd } from "./voice";
 
 export const TOKEN_TTL = 3600;
@@ -59,7 +61,11 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
 
   const [ctx, settingsRes, alive] = await Promise.all([
     callerContext(admin, claims.sub),
-    admin.from("phone_user_settings").select("dnd, dnd_until, forward_to_cell").eq("user_id", claims.sub).maybeSingle(),
+    // ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz and the greeting columns are migration 264's:
+    // this Worker must not be deployed before it is applied.
+    admin.from("phone_user_settings")
+      .select("dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting_recording_sid, greeting_updated_at")
+      .eq("user_id", claims.sub).maybeSingle(),
     sessionAlive(env, jwt),
   ]);
   if (alive === false) throw new ApiError("unauthorized", "You were signed out. Please sign in again.");
@@ -101,7 +107,11 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       },
   });
 
-  const s = (settingsRes.data ?? null) as { dnd?: boolean; dnd_until?: string | null; forward_to_cell?: string | null } | null;
+  const s = (settingsRes.data ?? null) as {
+    dnd?: boolean; dnd_until?: string | null; forward_to_cell?: string | null; dnd_cover_user_id?: string | null;
+    ring_hours?: Record<string, unknown> | null; ring_hours_tz?: string | null;
+    greeting_recording_sid?: string | null; greeting_updated_at?: string | null;
+  } | null;
   return ok({
     token: jwtOut,
     identity,
@@ -118,15 +128,34 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       // that texted first follow a different rule (sms.ts) and do not read this.
       can_text_contacts: maySendToContacts(ctx),
     },
+    // The number this person's calls show: their own number when the business gave them one
+    // (migration 266), else a team line. The apps say "Your number".
     number: ctx.number ? { e164: ctx.number.e164 } : null,
+    // Every number of the business (migration 266), so the apps can tell a teammate's transfer,
+    // which rings From one of them, from a customer. An older app reads `number` alone.
+    numbers: ctx.numbers,
     settings: {
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
       forward_to_cell: s?.forward_to_cell ?? null,
+      // Who rings in this person's place while they're away (migration 264), or null.
+      dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
+      // The hours this person's phone rings and their zone (migration 264), or null for always.
+      // The apps show them; they're changed in Structure Studio.
+      ring_hours: s?.ring_hours && typeof s.ring_hours === "object" && !Array.isArray(s.ring_hours) ? s.ring_hours : null,
+      ring_hours_tz: s?.ring_hours_tz ?? null,
+      // Their own voicemail greeting (migration 264): whether they recorded one, and when. The
+      // apps offer Record, Play and "Use the standard greeting" when this is here.
+      greeting: greetingOut(s),
     },
     wallet,
+    // Are this business's calls recorded (and announced) right now: its owner's choice and this
+    // Worker's CALL_RECORDING rail together (../recording.ts armedFor), so the apps can say
+    // "Calls are recorded" in settings. A single call's own state is GET /calls `recording`.
+    recording: { on: armedFor(env, ctx.recording) },
     // What this Worker can do that older ones could not, so an app shows a button only when
     // the server behind it has the endpoint. handoff: moving a live call to the person's
-    // other device (../handoff.ts, routes/handoff.ts).
-    features: { handoff: true },
+    // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and
+    // GET /calls/:id/transcript, and the recording keys on a call (routes/reads.ts).
+    features: { handoff: true, recordings: true },
   });
 }

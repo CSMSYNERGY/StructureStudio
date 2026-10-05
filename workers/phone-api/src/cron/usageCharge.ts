@@ -28,7 +28,8 @@
 //   shadow        COST CAPTURE. Billable, but the meter is not armed for it: the env rail
 //                 PHONE_USAGE_METERS is not "on", or phone_usage_armed(client, meter) says no
 //                 (no markup, no armed_at, the meter inactive and the tenant not on the pilot
-//                 list), or it happened before armed_at. Records the cost and what it WOULD
+//                 list; the pilot list covers the four call and text meters only, migration
+//                 263), or it happened before armed_at. Records the cost and what it WOULD
 //                 have charged at today's markup (null while no markup is set). This is what
 //                 runs from deploy day, so Carolyn has real numbers before she arms anything.
 //   charged       wallet_usage_debit posted the line (idempotency key usage:call:<id> /
@@ -82,6 +83,21 @@
 // CLAIM_MIN_LEFT remain; a row is not started without ROW_MIN; a row that runs out half way is
 // released (lease cleared) with every row after it, for the next run, and that is logged.
 // Writes that finish a row already priced (the debit, the row update) are always allowed.
+//
+// ── CALL RECORDINGS AND TRANSCRIPTS (release B2, migration 263) ─────────────────────────
+// Two more sources, both keyed on phone_call_recordings.id (the unique source + source_id keeps
+// them apart), each its own wallet line, by the same states and the same ledger rules:
+//   recording      Twilio's price for the recording (fetchRecording), or RECORDING_MIN_MICROS a
+//                  minute once fallback_after_hours have passed unpriced (or it was deleted
+//                  first). Meter call_recording. Billable when it completed with any length.
+//   transcription  the transcript and summary together: stt_cost_micros + llm_cost_micros, both
+//                  the Worker's and the edge function's own estimates (cost_source 'estimate').
+//                  Meter call_transcription. Queued only once the summary has settled.
+// Both meters ship INACTIVE and INVISIBLE, so until Carolyn prices and arms them every one is a
+// shadow row with its cost. A pilot of call and text billing does not arm them: 263 re-issued
+// phone_usage_armed so the pilot list counts for the four call and text meters only, and these
+// two charge only once their own usage_prices row is active. callCost stays voicemail-only for recordings: a call recording is
+// never counted in its call's line, only in its own.
 //
 // phone_calls.cost_cents is written too (Twilio's cost, rounded to cents). That column is
 // server-only: phone_calls has RLS on, no policies and no tenant grants (migration 254), and
@@ -229,23 +245,38 @@ export function previousUtcDay(now: Date): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)).toISOString().slice(0, 10);
 }
 
-export type Meter = "voice_minute" | "voice_minute_in" | "sms_segment" | "sms_in";
+export type Meter = "voice_minute" | "voice_minute_in" | "sms_segment" | "sms_in" | "call_recording" | "call_transcription";
 
-export function meterFor(source: "call" | "sms", direction: "in" | "out"): Meter {
+export type ChargeSource = "call" | "sms" | "recording" | "transcription";
+
+/** A recording and its transcript are one meter each, whichever way the call went. */
+export function meterFor(source: ChargeSource, direction: "in" | "out"): Meter {
+  if (source === "recording") return "call_recording";
+  if (source === "transcription") return "call_transcription";
   if (source === "call") return direction === "out" ? "voice_minute" : "voice_minute_in";
   return direction === "out" ? "sms_segment" : "sms_in";
 }
 
-/** The debit's idempotency key: usage:call:<phone_calls.id> or usage:sms:<sms_messages.id>. */
+/**
+ * The debit's idempotency key: usage:call:<phone_calls.id>, usage:sms:<sms_messages.id>,
+ * usage:recording:<phone_call_recordings.id> or usage:transcription:<phone_call_recordings.id>.
+ */
 export function idemFor(row: Pick<ChargeRow, "source" | "source_id">): string {
   return `usage:${row.source}:${row.source_id}`;
+}
+
+/** The per-unit ceiling a source's charge is held to: calls by the minute, texts by the segment, recordings none. */
+function ceilingFor(source: ChargeSource, s: BillingSettings): number | null {
+  if (source === "call") return s.ceilingMinMicros;
+  if (source === "sms") return s.ceilingSegMicros;
+  return null;
 }
 
 // ── Rows ────────────────────────────────────────────────────────────────────────────
 
 export interface ChargeRow {
   id: number;
-  source: "call" | "sms";
+  source: ChargeSource;
   source_id: string;
   client_id: string;
   direction: "in" | "out";
@@ -297,9 +328,33 @@ export interface UsageSms {
   created_at: string;
 }
 
+/** A call recording and what its transcript and summary cost (migration 263). */
+export interface UsageRecording {
+  id: string;
+  client_id: string;
+  recording_sid: string | null;
+  status: string;
+  duration_s: number | null;
+  completed_at: string | null;
+  deleted_at: string | null;
+  transcript_status: string;
+  summary_status: string;
+  stt_cost_micros: number | string | null;
+  llm_cost_micros: number | string | null;
+  phone_calls: RecCallJoin | RecCallJoin[] | null;
+}
+
+interface RecCallJoin {
+  direction: "in" | "out";
+  from_e164: string;
+  to_e164: string;
+}
+
 const CALL_SELECT =
   "id, client_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, transfer_state, status, started_at, answered_at, ended_at, duration_s, cost_cents, error_code, phone_voicemails(recording_sid, duration_s)";
 const SMS_SELECT = "id, client_id, direction, status, from_number, to_number, provider_sid, num_segments, created_at";
+const REC_SELECT =
+  "id, client_id, recording_sid, status, duration_s, completed_at, deleted_at, transcript_status, summary_status, stt_cost_micros, llm_cost_micros, phone_calls(direction, from_e164, to_e164)";
 
 const FINAL_CALL = new Set(["completed", "missed", "voicemail", "no_answer", "busy", "failed"]);
 const UNANSWERED = new Set(["missed", "no_answer", "busy", "failed"]);
@@ -372,6 +427,14 @@ export function callMemo(call: Pick<UsageCall, "direction" | "status" | "from_e1
 export function smsMemo(direction: "in" | "out", other: string, segments: number): string {
   const seg = `${segments} segment${segments === 1 ? "" : "s"}`;
   return direction === "out" ? `Text to ${displayNumber(other)} · ${seg}` : `Text from ${displayNumber(other)} · ${seg}`;
+}
+
+/** A call recording's or transcript's wallet line, naming the call it belongs to. */
+export function recordingMemo(source: "recording" | "transcription", call: RecCallJoin | null, units: number): string {
+  const what = source === "recording" ? "Call recording" : "Call transcript and summary";
+  if (!call) return `${what} · ${units} min`;
+  const with_ = call.direction === "out" ? `call to ${displayNumber(call.to_e164)}` : `call from ${displayNumber(call.from_e164)}`;
+  return `${what}, ${with_} · ${units} min`;
 }
 
 // ── The run ─────────────────────────────────────────────────────────────────────────
@@ -512,12 +575,15 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
   let calls: Map<string, UsageCall>;
   let events: Map<string, UsageEvent[]>;
   let msgs: Map<string, UsageSms>;
+  let recs: Map<string, UsageRecording>;
   try {
     const callIds = rows.filter((r) => r.source === "call").map((r) => r.source_id);
     const smsIds = rows.filter((r) => r.source === "sms").map((r) => r.source_id);
+    const recIds = [...new Set(rows.filter((r) => r.source === "recording" || r.source === "transcription").map((r) => r.source_id))];
     calls = callIds.length ? await readCalls(run, callIds) : new Map();
     events = callIds.length ? await readEvents(run, callIds) : new Map();
     msgs = smsIds.length ? await readMessages(run, smsIds) : new Map();
+    recs = recIds.length ? await readRecordings(run, recIds) : new Map();
     await loadExemptions(run, [...new Set(rows.map((r) => r.client_id))]);
     await readLedger(run, rows);
   } catch (e) {
@@ -535,7 +601,11 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
     try {
       const state = row.source === "call"
         ? await chargeCall(run, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
-        : await chargeSms(run, row, msgs.get(row.source_id) ?? null);
+        : row.source === "sms"
+          ? await chargeSms(run, row, msgs.get(row.source_id) ?? null)
+          : row.source === "recording"
+            ? await chargeRecording(run, row, recs.get(row.source_id) ?? null)
+            : await chargeTranscription(run, row, recs.get(row.source_id) ?? null);
       counts[state]++;
     } catch (e) {
       if (e instanceof BudgetSpent) {
@@ -551,6 +621,12 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
 async function readCalls(run: Run, ids: string[]): Promise<Map<string, UsageCall>> {
   run.budget.spend();
   const rows = (must(await run.admin.from("phone_calls").select(CALL_SELECT).in("id", ids), "read calls to charge") as UsageCall[] | null) ?? [];
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+async function readRecordings(run: Run, ids: string[]): Promise<Map<string, UsageRecording>> {
+  run.budget.spend();
+  const rows = (must(await run.admin.from("phone_call_recordings").select(REC_SELECT).in("id", ids), "read call recordings to charge") as UsageRecording[] | null) ?? [];
   return new Map(rows.map((r) => [r.id, r]));
 }
 
@@ -726,7 +802,7 @@ interface Decision extends Priced {
   units: number;
   unit: "minute" | "segment";
   meter: Meter;
-  refType: "phone_call" | "sms_message";
+  refType: "phone_call" | "sms_message" | "phone_call_recording";
   idem: string;
   memo: string;
   ceilingMicros: number | null;
@@ -804,7 +880,7 @@ async function settleFromLedger(
   const s = run.settings;
   const cost = line.costMicros ?? d?.costMicros ?? null;
   const units = d ? d.units : line.units;
-  const ceiling = d ? d.ceilingMicros : row.source === "call" ? s.ceilingMinMicros : s.ceilingSegMicros;
+  const ceiling = d ? d.ceilingMicros : ceilingFor(row.source, s);
   const markup = s.markup !== null && cost !== null && units !== null && chargeFor(cost, s.markup, ceiling, units) === line.chargeMicros
     ? s.markup
     : null;
@@ -823,7 +899,7 @@ async function settleFromLedger(
     });
   } else {
     Object.assign(patch, {
-      units: line.units, unit: line.unit ?? (row.source === "call" ? "minute" : "segment"), memo: line.memo,
+      units: line.units, unit: line.unit ?? (row.source === "sms" ? "segment" : "minute"), memo: line.memo,
       cost_detail: { ledger: { wallet_tx_id: line.txId } },
     });
   }
@@ -1032,6 +1108,109 @@ async function callCost(run: Run, call: UsageCall, vm: VmJoin | null, events: Us
     detail.conference = { participant_legs: joined.length, micros: confMicros, estimated: true };
   }
   return { costMicros: micros, costSource: estimated ? "estimate" : conference ? "mixed" : "twilio", costDetail: detail };
+}
+
+// ── Call recordings and their transcripts (migration 263) ───────────────────────────
+
+/** The row is gone (the call was deleted with it): the ledger's word, else failed. */
+async function sourceGone(run: Run, row: ChargeRow, what: string): Promise<FinalState> {
+  const line = run.ledger.get(row.id);
+  if (line) return settleFromLedger(run, row, line, "failed", null, null);
+  await updateRow(run, row, { state: "failed", last_error: `the ${what} row is gone` });
+  await logFault({ code: "usage_charge_source_gone", clientId: row.client_id, message: `phone_call_recordings ${row.source_id} is gone; its ${row.source} charge was given up.` });
+  return "failed";
+}
+
+/** Whole minutes, rounded up, at least one: how Twilio bills a recording. */
+const recMinutes = (s: number | null | undefined): number => Math.max(1, Math.ceil((Number(s) || 0) / 60));
+
+/**
+ * A call recording: Twilio's own price for it (fetchRecording), which it fills in a while after
+ * the recording ends. Unpriced until fallback_after_hours: pending. After that, or when Twilio no
+ * longer has it (retention, or deleted by hand before it was priced), RECORDING_MIN_MICROS a
+ * minute, an estimate. Storage is not metered.
+ */
+async function chargeRecording(run: Run, row: ChargeRow, rec: UsageRecording | null): Promise<FinalState | "pending"> {
+  if (!rec) return sourceGone(run, row, "recording");
+  const ended = Date.parse(rec.completed_at ?? "");
+  if (!Number.isFinite(ended)) return reschedule(run, row, backoffAt(run, row), "the recording has not completed");
+  if (run.now.getTime() - ended < SETTLE_MS) return reschedule(run, row, ended + SETTLE_MS, null);
+  const allowEstimate = run.now.getTime() - ended >= run.settings.fallbackAfterHours * 3_600_000;
+  const units = recMinutes(rec.duration_s);
+  const billable = rec.status === "completed" && (Number(rec.duration_s) || 0) > 0;
+
+  let priced: Priced;
+  let tw: Awaited<ReturnType<typeof fetchRecording>> = null;
+  let twErr: string | null = null;
+  if (rec.recording_sid && twilioConfigured(run.env)) {
+    try {
+      run.budget.spend();
+      tw = await fetchRecording(run.env, rec.recording_sid);
+    } catch (e) {
+      if (e instanceof BudgetSpent) throw e;
+      twErr = (e as Error)?.message ?? String(e);
+    }
+  } else {
+    twErr = rec.recording_sid ? "Twilio is not configured" : "the recording has no SID";
+  }
+  if (tw && tw.price !== null) {
+    priced = { costMicros: tw.price, costSource: "twilio", costDetail: { sid: tw.sid, duration_s: tw.duration, price_micros: tw.price } };
+  } else if (!billable) {
+    priced = { costMicros: 0, costSource: "twilio", costDetail: { sid: rec.recording_sid, status: rec.status, price_micros: 0 } };
+  } else if (tw === null && twErr === null && rec.deleted_at) {
+    // Deleted before Twilio priced it: what it would have cost, an estimate.
+    priced = { costMicros: units * RECORDING_MIN_MICROS, costSource: "estimate", costDetail: { sid: rec.recording_sid, gone: true, minutes: units } };
+  } else if (!allowEstimate) {
+    return reschedule(run, row, backoffAt(run, row), twErr ?? "the recording is not priced yet");
+  } else {
+    priced = {
+      costMicros: units * RECORDING_MIN_MICROS, costSource: "estimate",
+      costDetail: { sid: rec.recording_sid, minutes: units, fallback: (twErr ?? "not priced in time").slice(0, 200) },
+    };
+  }
+  return decide(run, row, {
+    ...priced,
+    billable,
+    units,
+    unit: "minute",
+    meter: meterFor("recording", row.direction),
+    refType: "phone_call_recording",
+    idem: idemFor(row),
+    memo: recordingMemo("recording", one(rec.phone_calls), units),
+    ceilingMicros: null,
+  });
+}
+
+/**
+ * A recording's transcript and summary, one line: what the transcript (Workers AI) and the
+ * summary (Claude) cost, both estimates written where they were made. Billable once there was
+ * something to transcribe; a summary that failed adds nothing.
+ */
+async function chargeTranscription(run: Run, row: ChargeRow, rec: UsageRecording | null): Promise<FinalState | "pending"> {
+  if (!rec) return sourceGone(run, row, "recording");
+  if (rec.transcript_status !== "done" || !["done", "failed", "off"].includes(rec.summary_status)) {
+    return reschedule(run, row, backoffAt(run, row), "the transcript or summary is not finished");
+  }
+  const micros = (v: unknown): number => {
+    const n = v === null || v === undefined || v === "" ? NaN : Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+  };
+  const stt = micros(rec.stt_cost_micros);
+  const llm = micros(rec.llm_cost_micros);
+  const units = recMinutes(rec.duration_s);
+  return decide(run, row, {
+    costMicros: stt + llm,
+    costSource: "estimate",
+    costDetail: { stt_micros: stt, llm_micros: llm, summary: rec.summary_status },
+    billable: stt + llm > 0,
+    units,
+    unit: "minute",
+    meter: meterFor("transcription", row.direction),
+    refType: "phone_call_recording",
+    idem: idemFor(row),
+    memo: recordingMemo("transcription", one(rec.phone_calls), units),
+    ceilingMicros: null,
+  });
 }
 
 // ── Texts ───────────────────────────────────────────────────────────────────────────

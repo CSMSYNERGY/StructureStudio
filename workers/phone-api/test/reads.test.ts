@@ -54,6 +54,11 @@ function holds(val: unknown, expr: string): boolean {
   if (op === "lt") return val != null && String(val) < arg;
   if (op === "gte") return val != null && String(val) >= arg;
   if (op === "in") return val != null && splitTop(arg.slice(1, -1)).map(unquote).includes(String(val));
+  if (op === "like" || op === "ilike") {
+    // PostgREST's * is SQL's %; _ is any one character.
+    const re = [...arg].map((ch) => (ch === "*" || ch === "%" ? ".*" : ch === "_" ? "." : ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))).join("");
+    return val != null && new RegExp(`^${re}$`, op === "ilike" ? "is" : "s").test(String(val));
+  }
   throw new Error(`table(): the fake has no "${op}" filter`);
 }
 
@@ -368,7 +373,7 @@ describe("GET /threads?channels=sms,email (email joins the list)", () => {
     });
     const { json } = await call(env, list(token));
     expect(json.threads).toEqual([
-      { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "contact", last: { body: "Shed sizes", direction: "in", at: T(1), channel: "email" } },
+      { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "contact", last: { body: "Shed sizes", direction: "in", at: T(1), channel: "email", sender_verified: null } },
       { key: CONTACT_3, contact_id: CONTACT_3, contact_name: "Riley", e164: null, e164_source: "contact", last: { body: "Your delivery date", direction: "out", at: T(2), channel: "email" } },
       { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "text s1", direction: "in", at: T(3), channel: "sms" } },
     ]);
@@ -395,8 +400,27 @@ describe("GET /threads?channels=sms,email (email joins the list)", () => {
     const { json } = await call(env, list(token));
     expect(json.threads).toEqual([
       { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "sms", last: { body: "On my way", direction: "out", at: T(1), channel: "sms" } },
-      { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "Re: Your quote", direction: "in", at: T(2), channel: "email" } },
+      { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "Re: Your quote", direction: "in", at: T(2), channel: "email", sender_verified: null } },
     ]);
+  });
+
+  it("a customer's email says whether its sender was confirmed, so the apps can skip alerting on a forged From", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    world(net, {
+      contacts: [person(CONTACT_1, "Jordan"), person(CONTACT_2, "Casey"), person(CONTACT_3, "Riley")],
+      inbound: [
+        mailIn("i1", { contact_id: CONTACT_1, spam_verdict: "spf=fail dmarc=fail", received_at: T(1) }),
+        mailIn("i2", { contact_id: CONTACT_2, spam_verdict: "spam=pass virus=pass spf=pass dkim=pass dmarc=pass", received_at: T(2) }),
+      ],
+      sent: [mailOut("o1", { contact_id: CONTACT_3, created_at: T(3) })],
+    });
+    const { json } = await call(env, list(token));
+    const last = (key: string) => json.threads.find((t: { key: string }) => t.key === key).last;
+    expect(last(CONTACT_1).sender_verified).toBe(false);
+    expect(last(CONTACT_2).sender_verified).toBe(true);
+    // Only a customer's email carries it: not our own email, and not a text.
+    expect(last(CONTACT_3)).not.toHaveProperty("sender_verified");
+    expect(net.reads("email_inbound")[0].url.searchParams.get("select")).toBe("id,contact_id,subject,received_at,spam_verdict");
   });
 
   it("a thread I emailed is mine even when the customer belongs to someone else", async () => {
@@ -665,13 +689,13 @@ describe("GET /threads/:key email (emails and compose)", () => {
     const byId = Object.fromEntries(json.emails.map((e: { id: string }) => [e.id, e]));
     expect(byId.o1).toEqual({
       id: "o1", direction: "out", at: T(30), kind: "conversation", subject: "About your shed", body: "Hi Jordan", body_truncated: false,
-      status: "sent", sent_by: USER_A, client_temp_id: "tmp-1", from: null, to_email: "jordan@example.test", sender_verified: null,
+      status: "sent", opened_at: null, sent_by: USER_A, client_temp_id: "tmp-1", from: null, to_email: "jordan@example.test", sender_verified: null,
     });
     expect(byId.o2).toMatchObject({ kind: "estimate", subject: "Your quote", body: null, sent_by: null });
     expect(byId.o3).toMatchObject({ status: "sending", to_email: "jordan@example.test" });
     expect(byId.i1).toEqual({
       id: "i1", direction: "in", at: T(25), kind: "conversation", subject: "Re: About your shed", body: "Sounds good", body_truncated: false,
-      status: null, sent_by: null, client_temp_id: null, from: { name: "Jordan", email: "jordan@example.test" }, to_email: null, sender_verified: true,
+      status: null, opened_at: null, sent_by: null, client_temp_id: null, from: { name: "Jordan", email: "jordan@example.test" }, to_email: null, sender_verified: true,
     });
     expect(byId.i2.sender_verified).toBe(false);
 
@@ -689,6 +713,36 @@ describe("GET /threads/:key email (emails and compose)", () => {
     // Every body had a text part, so no HTML was read at all.
     expect(net.reads("email_inbound")).toHaveLength(1);
     expect(i.url.searchParams.get("select")).not.toContain("body_html");
+  });
+
+  it("an opened email reads \"opened\" with its time; a delivered one \"delivered\" (migration 262)", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    thread(net, {
+      sent: [
+        sentRow("o1", { contact_id: CONTACT_1, status: "delivered", delivered_at: T(2), opened_at: T(3), created_at: T(1) }),
+        sentRow("o2", { contact_id: CONTACT_1, status: "delivered", delivered_at: T(5), opened_at: null, created_at: T(4) }),
+        sentRow("o3", { contact_id: CONTACT_1, status: "bounced", opened_at: T(7), created_at: T(6) }),
+      ],
+    });
+    const { json } = await call(env, read(token));
+    expect(json.emails.map((e: { id: string; status: string; opened_at: string | null }) => [e.id, e.status, e.opened_at]))
+      .toEqual([["o3", "failed", T(7)], ["o2", "delivered", null], ["o1", "opened", T(3)]]);
+    expect(net.reads("email_sends")[0].url.searchParams.get("select")).toContain("opened_at");
+  });
+
+  it("ahead of migration 262 (no opened_at column) the thread still opens: asked again without it", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    thread(net, { sent: [sentRow("o1", { contact_id: CONTACT_1, status: "delivered" })] });
+    net.rest("GET", "email_sends", (s) => (s.url.searchParams.get("select") ?? "").includes("opened_at")
+      ? new Response(JSON.stringify({ code: "42703", message: "column email_sends.opened_at does not exist" }), { status: 400, headers: { "content-type": "application/json" } })
+      : [sentRow("o1", { contact_id: CONTACT_1, status: "delivered" })]);
+    const { res, json } = await call(env, read(token));
+    expect(res.status).toBe(200);
+    expect(json.emails.map((e: { id: string; status: string; opened_at: string | null }) => [e.id, e.status, e.opened_at])).toEqual([["o1", "delivered", null]]);
+    const asked = net.reads("email_sends").map((s) => s.url.searchParams.get("select") ?? "");
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).not.toContain("opened_at");
+    expect(asked[1]).toContain("body_text");
   });
 
   it("a contact with no designs is found by the contact alone", async () => {
@@ -843,6 +897,138 @@ describe("GET /search and /team", () => {
     expect(net.reads("crm_contacts")[0].url.searchParams.get("or")).toBe("(name.ilike.*a b c d 555*,phone_digits.like.*555*)");
   });
 
+  describe("?email=1, the phone app's New message (2026-10-05)", () => {
+    const CONTACT_4 = "00000000-0000-4000-8000-00000000c004";
+    const CONTACT_5 = "00000000-0000-4000-8000-00000000c005";
+    // A crm_contacts row; email_lower is generated from email (lower(btrim(email)), migration 130).
+    const contact = (id: string, over: Record<string, unknown>) => {
+      const r: Record<string, unknown> = { id, client_id: CLIENT, merged_into: null, name: null, phone: null, phone_digits: null, email: null, updated_at: T(0), ...over };
+      return { ...r, email_lower: r.email == null ? null : String(r.email).trim().toLowerCase() };
+    };
+    // The two reads ?email=1 makes: names and numbers (the `or` one), and addresses.
+    const nameReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("or"));
+    const addressReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("email_lower"));
+    const ROWS = [
+      contact(CONTACT_1, { name: "Jordan Phone", phone: "(555) 555-0142", phone_digits: "5555550142", email: "jordan@example.com", updated_at: T(1) }),
+      contact(CONTACT_2, { name: "Jordan Mail", email: " Jo@Example.com ", updated_at: T(2) }),
+      // Neither a number to call or text nor an address to email.
+      contact(CONTACT_3, { name: "Jordan Nothing", phone: "555-01", phone_digits: "55501", email: "not an address", updated_at: T(3) }),
+      // Merged into another contact, and another business's: never found.
+      contact(CONTACT_4, { name: "Jordan Merged", email: "jo@example.net", merged_into: CONTACT_2, updated_at: T(4) }),
+      contact(CONTACT_5, { name: "Jordan Elsewhere", email: "jo@example.org", client_id: OTHER_TENANT, updated_at: T(5) }),
+    ];
+
+    it("without it, the answer is exactly as before: contacts with a number, no email filter and no email column", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord", token));
+      expect(json.contacts).toEqual([{ id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142" }]);
+      const q = net.reads("crm_contacts")[0];
+      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
+      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits");
+      expect(addressReads(net)).toEqual([]);
+      // An address typed without the param matches nobody.
+      const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex", token));
+      expect(byEmail.contacts).toEqual([]);
+    });
+
+    it("with it, an email-only contact comes back with e164 null and its address; every row carries email", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
+      expect(json.contacts).toEqual([
+        { id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142", email: "jordan@example.com" },
+        { id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" },
+      ]);
+      const [q] = nameReads(net);
+      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
+      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
+      const [e] = addressReads(net);
+      expect(e.url.searchParams.get("email_lower")).toBe("ilike.*jord*");
+      for (const r of [q, e]) {
+        expect(filter(r, "client_id")).toBe(CLIENT);
+        expect(r.url.searchParams.get("merged_into")).toBe("is.null");
+        expect(r.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
+        expect(r.url.searchParams.get("order")).toBe("updated_at.desc");
+        expect(r.url.searchParams.get("limit")).toBe("60");
+      }
+    });
+
+    it("matches on the email address, whatever its case", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent("JO@Ex")}&email=1`, token));
+      expect(json.contacts).toEqual([{ id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" }]);
+      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*JO@Ex*)");
+      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*jo@ex*");
+    });
+
+    it("finds an address with a + in it, typed whole or in part", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      const SAM = "00000000-0000-4000-8000-00000000c006";
+      net.rest("GET", "crm_contacts", table([...ROWS, contact(SAM, { name: null, email: "sam+sheds@example.com", updated_at: T(6) })]));
+      for (const q of ["sam+sheds", "Sam+Sheds@Example.com"]) {
+        const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent(q)}&email=1`, token));
+        expect(json.contacts).toEqual([{ id: SAM, name: "", e164: null, email: "sam+sheds@example.com" }]);
+      }
+      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*sam+sheds*");
+      // The name half is unchanged: searchTerm still drops the +.
+      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*sam sheds*)");
+    });
+
+    it("lists name matches before address matches, so a common address fragment never pushes a name out", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      // 70 newer contacts whose only match is ".com" (more than one read's 60), and an older Casey Combs.
+      const dotCom = Array.from({ length: 70 }, (_, i) =>
+        contact(`00000000-0000-4000-8000-0000000e${String(i).padStart(4, "0")}`, { name: `Pat ${i}`, email: `pat${i}@gmail.com`, updated_at: T(i) }));
+      const combs = contact(CONTACT_1, { name: "Casey Combs", phone: "(555) 555-0142", phone_digits: "5555550142", email: "casey@example.com", updated_at: T(500) });
+      net.rest("GET", "crm_contacts", table([...dotCom, combs]));
+      const { json } = await call(env, appRequest("GET", "/search?q=Com&email=1", token));
+      expect(json.contacts[0]).toEqual({ id: CONTACT_1, name: "Casey Combs", e164: "+15555550142", email: "casey@example.com" });
+      expect(json.contacts).toHaveLength(20);
+      expect(ids(json.contacts.slice(1))).not.toContain(CONTACT_1);
+      // Two letters with no @ don't search addresses at all: "co" is in every .com address.
+      const before = addressReads(net).length;
+      const { json: short } = await call(env, appRequest("GET", "/search?q=Co&email=1", token));
+      expect(ids(short.contacts)).toEqual([CONTACT_1]);
+      expect(addressReads(net)).toHaveLength(before);
+    });
+
+    it("keeps the own-customers scope: a rep never finds another rep's email-only contact", async () => {
+      const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), [CONTACT_1]);
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
+      expect(ids(json.contacts)).toEqual([CONTACT_1]);
+      const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex&email=1", token));
+      expect(byEmail.contacts).toEqual([]);
+      // Contacts `none` sees no customer at all, and nothing is read.
+      const none = await setup(callerCtx({ contacts_level: "none" }));
+      none.net.rest("GET", "crm_contacts", table(ROWS));
+      const { json: nothing } = await call(none.env, appRequest("GET", "/search?q=jo@ex&email=1", none.token));
+      expect(nothing.contacts).toEqual([]);
+      expect(none.net.reads("crm_contacts")).toHaveLength(0);
+    });
+
+    it("still drops a contact with neither a valid number nor a valid address", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=nothing&email=1", token));
+      expect(json.contacts).toEqual([]);
+      // The row was read (its name matched); the Worker left it out.
+      expect(nameReads(net)).toHaveLength(1);
+    });
+
+    it("still stops at 20", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      const many = Array.from({ length: 30 }, (_, i) =>
+        contact(`00000000-0000-4000-8000-0000000d${String(i).padStart(4, "0")}`, { name: `Jo ${i}`, email: `jo${i}@example.com`, updated_at: T(i) }));
+      net.rest("GET", "crm_contacts", table(many));
+      const { json } = await call(env, appRequest("GET", "/search?q=jo&email=1", token));
+      expect(json.contacts).toHaveLength(20);
+      expect(json.contacts[0]).toEqual({ id: "00000000-0000-4000-8000-0000000d0000", name: "Jo 0", e164: null, email: "jo0@example.com" });
+    });
+  });
+
   it("lists teammates with phone access and their identity base", async () => {
     const { net, token, env } = await setup(callerCtx());
     net.rest("GET", "client_users", () => [
@@ -853,5 +1039,129 @@ describe("GET /search and /team", () => {
     const { json } = await call(env, appRequest("GET", "/team", token));
     // Owners are always edit; a crew member has no phone access.
     expect(json.members).toEqual([{ user_id: USER_A, full_name: "Avery", identity_base: `u_${USER_A.replace(/-/g, "")}_g2` }]);
+  });
+});
+
+describe("call recordings on a call (GET /calls, GET /recordings/:id/audio, GET /calls/:id/transcript)", () => {
+  const REC = "00000000-0000-4000-8000-0000000ae001";
+  const REC_SID = "RE" + "0".repeat(31) + "7";
+  const CALL = "00000000-0000-4000-8000-0000000ca777";
+  const rec = (over: Record<string, unknown> = {}) => ({
+    id: REC, status: "completed", duration_s: 125, transcript: "Customer: Hello.\nTeam: Hi.", summary: "Cam asked about a 12x24.",
+    transcript_status: "done", deleted_at: null, ...over,
+  });
+
+  it("each call carries recording, summary and transcript_status (null when there is none), never the transcript", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    net.rest("GET", "phone_calls", () => [
+      callRow("k1", { answered_by: USER_A, phone_call_recordings: rec() }),
+      callRow("k2", { answered_by: USER_A }),
+      callRow("k3", { answered_by: USER_A, ended_at: null, status: "in_progress", phone_call_recordings: [rec({ status: "paused", transcript: null, summary: null, transcript_status: "off", duration_s: null })] }),
+      callRow("k4", { answered_by: USER_A, ended_at: T(0), phone_call_recordings: rec({ status: "recording", transcript: null, summary: null, transcript_status: "off" }) }),
+      callRow("k5", { answered_by: USER_A, phone_call_recordings: rec({ transcript_status: "working", transcript: null, summary: null }) }),
+      callRow("k6", { answered_by: USER_A, phone_call_recordings: rec({ status: "failed", transcript_status: "off", transcript: null, summary: null }) }),
+      // nova-3 heard no words: done, with the summary left off. Nothing to show.
+      callRow("k7", { answered_by: USER_A, phone_call_recordings: rec({ transcript: null, summary: null, summary_status: "off" }) }),
+    ]);
+    const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+    const by = Object.fromEntries(json.calls.map((c: { id: string }) => [c.id, c]));
+    expect(by.k1).toMatchObject({
+      recording: { id: REC, duration_s: 125, state: "ready" }, summary: "Cam asked about a 12x24.", transcript_status: "done",
+    });
+    // The transcript is read on demand (GET /calls/:id/transcript): the apps save these rows on
+    // the device, where a copy would outlive the business's retention.
+    for (const c of json.calls) {
+      expect(c).not.toHaveProperty("transcript");
+      expect(c).not.toHaveProperty("transcript_more");
+    }
+    expect(JSON.stringify(json)).not.toContain("Customer: Hello.");
+    expect(by.k2).toMatchObject({ recording: null, summary: null, transcript_status: null });
+    expect(by.k3.recording).toEqual({ id: REC, duration_s: null, state: "paused" });
+    expect(by.k4.recording.state).toBe("processing"); // the call is over, Twilio is finishing the file
+    expect(by.k5.transcript_status).toBe("pending");
+    expect(by.k6.recording.state).toBe("failed");
+    expect(by.k7).toMatchObject({ recording: { state: "ready" }, summary: null, transcript_status: null });
+    expect(net.reads("phone_calls")[0].url.searchParams.get("select")).toContain("phone_call_recordings(id,status,duration_s,summary,transcript_status,summary_status,deleted_at)");
+  });
+
+  it("once retention deleted the audio (and the transcript) only the summary stays", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    net.rest("GET", "phone_calls", () => [
+      callRow("l2", { answered_by: USER_A, phone_call_recordings: rec({ deleted_at: T(0), transcript: null }) }),
+    ]);
+    const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+    expect(json.calls[0]).toMatchObject({ recording: null, transcript_status: null, summary: "Cam asked about a 12x24." });
+    expect(json.calls[0]).not.toHaveProperty("transcript");
+  });
+
+  it("the 'mine' list's second read (my customers' missed calls) embeds the recording too", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "own" }));
+    net.rest("GET", "phone_calls", () => []);
+    await call(env, appRequest("GET", "/calls", token));
+    for (const r of net.reads("phone_calls")) expect(r.url.searchParams.get("select")).toContain("phone_call_recordings(");
+  });
+
+  describe("the audio and the whole transcript", () => {
+    const callFor = (over: Record<string, unknown> = {}) => callRow(CALL, { answered_by: USER_A, ...over });
+    async function audioSetup(ctx: Record<string, unknown>, recRow: Record<string, unknown>, row = callFor()) {
+      const s = await setup(ctx);
+      s.net.rest("GET", "phone_call_recordings", () => [recRow]);
+      s.net.rest("GET", "phone_calls", () => [row]);
+      s.net.rest("GET", "crm_contacts", () => [{ owner_user_id: USER_A }]);
+      s.net.on("GET", (u) => u.pathname.endsWith(`/Recordings/${REC_SID}.mp3`), (r) => new Response("mp3", {
+        status: r.headers.get("range") ? 206 : 200,
+        headers: { "content-length": "3", ...(r.headers.get("range") ? { "content-range": "bytes 0-2/3" } : {}) },
+      }));
+      return s;
+    }
+    const full = { id: REC, call_id: CALL, client_id: CLIENT, recording_sid: REC_SID, status: "completed", deleted_at: null };
+
+    it("streams it from Twilio, mixed to one channel, header bearer only, never cached, Range passed through", async () => {
+      const { net, token, env } = await audioSetup(callerCtx({ phone_level: "own" }), full);
+      const { res, text } = await call(env, appRequest("GET", `/recordings/${REC}/audio`, token, undefined, { range: "bytes=0-2" }));
+      expect(res.status).toBe(206);
+      expect(text).toBe("mp3");
+      expect(res.headers.get("content-type")).toBe("audio/mpeg");
+      expect(res.headers.get("cache-control")).toBe("private, no-store");
+      expect(res.headers.get("content-range")).toBe("bytes 0-2/3");
+      const media = net.to(/\.mp3/)[0];
+      expect(media.url.search).toBe(""); // not RequestedChannels=2: both people in both ears
+      expect(media.headers.get("range")).toBe("bytes=0-2");
+      // No ?access_token= door.
+      const q = await call(env, appRequest("GET", `/recordings/${REC}/audio?access_token=${token}`, null));
+      expect(q.res.status).toBe(401);
+    });
+
+    it.each([
+      ["another tenant's recording", { ...full, client_id: OTHER_TENANT }, callFor(), callerCtx({ phone_level: "view" }), "That recording wasn't found."],
+      ["a call the caller may not see (own level, someone else's)", full, callFor({ answered_by: USER_B, rang_user_ids: [USER_B] }), callerCtx({ phone_level: "own" }), "That recording wasn't found."],
+      ["a recording retention deleted", { ...full, deleted_at: T(0) }, callFor(), callerCtx({ phone_level: "view" }), "That recording is no longer available."],
+      ["a recording still going", { ...full, status: "recording" }, callFor(), callerCtx({ phone_level: "view" }), "The recording isn't ready yet. Try again in a minute."],
+    ])("404 for %s, and Twilio is never asked", async (_l, recRow, row, ctx, message) => {
+      const { net, token, env } = await audioSetup(ctx, recRow, row);
+      const { res, json } = await call(env, appRequest("GET", `/recordings/${REC}/audio`, token));
+      expect(res.status).toBe(404);
+      expect(json.error.message).toBe(message);
+      expect(net.to(/\.mp3/)).toEqual([]);
+    });
+
+    it("GET /calls/:id/transcript gives the whole text to whoever may see the call, and nothing once deleted", async () => {
+      const long = `Customer: ${"y".repeat(9000)}`;
+      const s = await audioSetup(callerCtx({ phone_level: "view" }), { id: REC, transcript: long, summary: "S.", deleted_at: null });
+      let r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.json).toEqual({ ok: true, call_id: CALL, recording_id: REC, transcript: long, summary: "S." });
+      expect(filter(s.net.reads("phone_calls")[0], "client_id")).toBe(CLIENT);
+      // Deleted by retention: the transcript went with the audio.
+      s.net.rest("GET", "phone_call_recordings", () => [{ id: REC, transcript: null, summary: "S.", deleted_at: T(0) }]);
+      r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.res.status).toBe(404);
+      // An own-level caller and someone else's call: as if there were none.
+      s.net.rpc("phone_caller_context", () => callerCtx({ phone_level: "own" }));
+      s.net.rest("GET", "phone_call_recordings", () => [{ id: REC, transcript: long, summary: "S.", deleted_at: null }]);
+      s.net.rest("GET", "phone_calls", () => [callFor({ answered_by: USER_B, rang_user_ids: [USER_B] })]);
+      r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.res.status).toBe(404);
+      expect(r.json.error.message).toBe("That call wasn't found.");
+    });
   });
 });

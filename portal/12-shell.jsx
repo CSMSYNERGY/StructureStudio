@@ -42,6 +42,8 @@ const ICONS = {
   // took that glyph in the same week, and two column icons in one rail read as one thing.
   projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
   contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  // Two speech bubbles: a back-and-forth. Not Settings → SMS's single bubble, which is one channel.
+  conversations: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>,
   orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
   pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
   "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
@@ -636,17 +638,36 @@ function Dashboard({ session }) {
   });
   // The Settings / Admin sub-page, lifted out of those shells so it can live in the URL.
   const [sub, setSub] = useState(() => ssParsePath().sub || null);
-  // Which DEAL a customer record should open on, when the reader arrived by clicking that
-  // deal in the Pipeline. Carolyn 2026-09-02: a contact record opens with nothing selected
-  // and "it's Greek, you have no idea" — but arriving from a pipeline row means the deal is
-  // already known, so there is nothing to guess.
+  // HOW THE READER ARRIVED AT A RECORD, when the page that opened it knows more than the URL
+  // says. Three things ride along, all optional:
+  //   deal  which DEAL a customer record opens on: the Pipeline row, or the schedule job or stop,
+  //         that was clicked. Carolyn 2026-09-02: a contact record opens with nothing selected
+  //         and "it's Greek, you have no idea" — but arriving from one of those the deal is
+  //         already known, so there is nothing to guess.
+  //   chip  which HISTORY CHIP it opens on, from a Conversations row: an email opens on Emails,
+  //         a text on Messages, a call on Calls.
+  //   from  where the record's own Back goes, when that isn't the list the record belongs to:
+  //         { page, pageSub }. Conversations opens a CONTACT record, whose Back would otherwise
+  //         land on Contacts (pageSub keeps the filter left, /portal/conversations/texts), and the
+  //         Build and Delivery Schedules open a contact or a design record.
   //
-  // SELF-INVALIDATING BY SHAPE, which is why it stores the contact id alongside the deal
-  // rather than the deal alone: it is honoured only while `sub` still names that same
-  // contact, so walking to another record, or back and in again by hand, silently stops
-  // matching instead of preselecting a deal that belongs to somebody else. No cleanup
-  // effect, and nothing to forget on a new route.
-  const [recordDeal, setRecordDeal] = useState(null);   // { contactId, deal } | null
+  // KEPT IN THE HISTORY ENTRY, not just here (review 2026-10-05). navigate() writes it into the
+  // entry it pushes, and onPop reads it back from the entry it lands on, so the record's own Back
+  // and the browser's Back always agree (Carolyn 2026-08-28: "they function the same way"). An
+  // earlier draft spent all three the moment `sub` moved, which broke exactly that: Open in
+  // designer, then the browser's Back, reopened the record with no deal and a Back to Contacts,
+  // and took the Pipeline's preselected deal with it.
+  //
+  // Every other navigate() passes none, so it clears: the same customer reopened from Contacts
+  // opens on nothing, with a Back to Contacts. And `sub` is stored with it, and every reader
+  // checks it, so a context can only ever apply to the record it was captured for.
+  // Seeded from the entry a reload lands on, which still carries it.
+  const [recordCtx, setRecordCtx] = useState(() => {
+    try {
+      const st = window.history.state, p = ssParsePath();
+      return st && st.rec && st.rec.sub === (p.sub || null) ? st.rec : null;
+    } catch (_e) { return null; }
+  });   // { sub, deal?, chip?, from?: { page, pageSub } } | null
   // What the URL ASKED for, held until the role/operator gates have resolved. Without this
   // the clamp below runs on the first render — when isOperator is still false because
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
@@ -678,14 +699,20 @@ function Dashboard({ session }) {
   // operator console are keep-mounted, and a real navigation would discard an in-progress
   // design or a half-filled admin form. The rail's anchors call THIS from their left-click
   // handler and leave every other click to the browser — see ssNavClick in 01-core.jsx.
-  const navigate = useCallback((page, nextSub = null, replace = false) => {
+  //
+  // `rec` is how the reader arrived, for a record (recordCtx above): { deal?, chip?, from? }.
+  // Left out, it clears, which is what every ordinary navigation wants.
+  const navigate = useCallback((page, nextSub = null, replace = false, rec = null) => {
     wanted.current = null;                 // an explicit click supersedes the boot intent
+    const ctx = rec ? { ...rec, sub: nextSub } : null;
+    setRecordCtx(ctx);
     setTab(page);
     setSub(nextSub);
     try {
       const url = ssPagePath(page, nextSub);
-      if (replace) window.history.replaceState({ page, sub: nextSub }, "", url);
-      else window.history.pushState({ page, sub: nextSub }, "", url);
+      const state = ctx ? { page, sub: nextSub, rec: ctx } : { page, sub: nextSub };
+      if (replace) window.history.replaceState(state, "", url);
+      else window.history.pushState(state, "", url);
     } catch (_e) { /* history unavailable — the app still works, the URL just won't track */ }
   }, []);
 
@@ -1232,6 +1259,11 @@ function Dashboard({ session }) {
         }
       }
       wanted.current = p.page && TAB_META[p.page] ? p.page : null;
+      // How the reader first arrived at the record this entry holds (recordCtx): the entry kept
+      // it, so Back onto a record opened from a schedule, Conversations or the Pipeline reopens it
+      // on the same deal or chip, with the same Back. Anything else clears.
+      const st = window.history.state;
+      setRecordCtx(st && st.rec && st.rec.sub === (p.sub || null) ? st.rec : null);
       setTab(p.page && TAB_META[p.page] ? p.page : "designs");
       setSub(p.sub || null);
       if (crosses) {
@@ -1688,7 +1720,10 @@ function Dashboard({ session }) {
         // the server carries a stored blocks/piers foundation and its floor height forward over the
         // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
         // The ground's fall is not in that promise: it rides as two explicit keys (ssD3WithFall).
-        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front" };
+        // `slabGround: true` (2026-10-03) says this panel draws a slab's corners too, so the null
+        // ssD3WithFall sends for level ground clears them on a slab; an older panel's null, which only
+        // knew raised floors, keeps them (carryForwardFoundation).
+        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front", slabGround: true };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
@@ -2437,6 +2472,37 @@ function Dashboard({ session }) {
   // Inventory offer their schedule entry points.
   const schedCanEdit = canAdmin || !!(myAccess && myAccess.build_schedule === "edit");
   const deliverCanEdit = canAdmin || !!(myAccess && myAccess.delivery_schedule === "edit");
+  // A schedule row's CUSTOMER (Carolyn 2026-08-28: "when I click this card here, it does the
+  // same thing as when I'm here, and I click the [contact]"). The Build Schedule's job popup and
+  // the Delivery Schedule's stop rows carry portal-schedule's customer_link; this answers, per
+  // row, the click that opens it for THIS reader, or null to leave the name as plain text. Where
+  // it goes is schedCustomerDest's rule (05-schedule.jsx), the Pipeline's onOpenRecord fallback:
+  // the contact record ON that deal, else the design's record, else nothing. Each "may open" is
+  // asked through ssClampTab, so it cannot promise a page the router would refuse (the hazard
+  // CrmRecord's onNavigate documents). Null outright when this reader may open neither record,
+  // so a crew member gets no link at all rather than one per row that goes nowhere.
+  //
+  // BACK PARITY, her explicit condition ("What happens when I hit the back button up here? I
+  // want to make sure that ... they function the same way"): recordCtx's `from` sends the
+  // record's own Back to the schedule it came from, and the schedule reopens on the view and week
+  // it left (schedViewLoad). It rides in the history entry, so it survives a hop away and the
+  // browser's Back onto the record again.
+  const scheduleCustomerOpener = (fromPage) => {
+    const reach = {
+      crm: crmUnlocked,
+      contacts: ssClampTab("contacts", isOperator, canAdmin, myAccess, supportView) === "contacts",
+      designs: ssClampTab("designs", isOperator, canAdmin, myAccess, supportView) === "designs",
+    };
+    if (!(reach.crm && reach.contacts) && !reach.designs) return null;
+    return (link) => {
+      const dest = schedCustomerDest(link, reach);
+      if (!dest) return null;
+      return () => navigate(dest.page, dest.sub, false, {
+        deal: dest.contactId ? dest.code : null,
+        from: { page: fromPage, pageSub: null },
+      });
+    };
+  };
   // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation
   // only — the server re-checks {area:'orders', level:'edit'} whatever the browser believes.
   const ordersCanEdit = canAdmin || !!(myAccess && myAccess.orders === "edit");
@@ -2677,6 +2743,11 @@ function Dashboard({ session }) {
               then what they are quoting. The List | Pipeline board toggle stays INSIDE
               Pipeline (02-sales); it is the section, not a third nav item. */}
           {navItem("contacts", "Contacts")}
+          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
+              Contacts: the same people, seen by their latest message. Only with the CRM: unlike
+              Contacts, which stays in the rail to sell it, one locked item there is enough. A
+              typed /portal/conversations without it still lands on the CRM card below. */}
+          {crmUnlocked && navItem("conversations", "Conversations")}
           {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -3113,14 +3184,21 @@ function Dashboard({ session }) {
                    record used to render with a live Notes box that 403'd on Save. Passing the
                    entitlement lets CrmRecord grey what it cannot save instead. */
                 crmUnlocked={crmUnlocked}
-                /* Only when `sub` still names the contact the deal was captured for — see
-                   recordDeal's declaration. `key={sub}` remounts the record on every route,
-                   so this is read fresh as initial state and never fights a later hand-pick. */
-                initialDeal={recordDeal && sub === "c-" + recordDeal.contactId ? recordDeal.deal : null}
+                /* Only when `sub` still names the record the deal was captured for — see
+                   recordCtx's declaration. `key={sub}` remounts the record on every route,
+                   so this is read fresh as initial state and never fights a later hand-pick.
+                   A contact record only: a design record IS its one deal. */
+                initialDeal={recordCtx && recordCtx.sub === sub && sub.charAt(0) === "c" ? (recordCtx.deal || null) : null}
+                /* The History chip a Conversations row asked for, under the same rule as the deal. */
+                initialChip={recordCtx && recordCtx.sub === sub ? (recordCtx.chip || null) : null}
                 onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
                 /* Back goes to the list this record belongs to, which after the split is a
-                   whole tab rather than a sub-view. */
-                onBack={() => navigate(sub.charAt(0) === "c" ? "contacts" : "designs")}
+                   whole tab rather than a sub-view; or to the page that opened it, when that
+                   page said so (recordCtx.from: Conversations, on the filter the reader left; a
+                   Build or Delivery Schedule, which reopens on the week it left). */
+                onBack={() => (recordCtx && recordCtx.sub === sub && recordCtx.from
+                  ? navigate(recordCtx.from.page, recordCtx.from.pageSub || null)
+                  : navigate(sub.charAt(0) === "c" ? "contacts" : "designs"))}
                 /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
                    record shell above serves EITHER kind under EITHER tab, so the tab here is
                    cosmetic — which nav item highlights — and switching to one the clamp
@@ -3162,6 +3240,23 @@ function Dashboard({ session }) {
                 userId={session.user ? session.user.id : null}
                 canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
                 phoneOn={phoneOffered && effPhoneStatus === "on"}
+                /* EMAIL SIGNATURE (My Profile). The SIGNED-IN person's, off the prefs `status`
+                   returned at boot and kept current by My Profile's save (onPrefsSaved), because
+                   crm_send_email adds the signature of whoever is signed in. In view-as there is
+                   no prefs read (status is skipped), so null: the composer shows nothing rather
+                   than a guess. */
+                emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
+                onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
+                /* QUICK SENDS (the signed-in person's saved messages, beside the Email and SMS
+                   boxes). Not in view-as: the person signed in is CSM Synergy staff, so the list
+                   would be the operator's OWN, read and seeded under the builder's account.
+                   portal-settings refuses quick_sends_list to an operator as well; this keeps the
+                   button from being offered at all. Same rule as the signature above. */
+                quickSendsOn={!viewing}
+                /* CARD ORDER (My Profile). The signed-in person's, off the same boot prefs and
+                   kept current the same way as the signature above. Null in view-as, where no
+                   prefs are read, so the operator sees the default order. */
+                cardOrder={viewing ? null : ((tenant.prefs && tenant.prefs.cardOrder) || null)}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -3193,10 +3288,8 @@ function Dashboard({ session }) {
                      tenant's Pipeline click at the upsell would take away the page they have
                      today, which is a regression dressed as a feature. */
                 onOpenRecord={(code, contactId) => {
-                  if (contactId && crmUnlocked) {
-                    setRecordDeal({ contactId, deal: code });
-                    navigate("contacts", "c-" + contactId);
-                  } else navigate("designs", "d-" + code);
+                  if (contactId && crmUnlocked) navigate("contacts", "c-" + contactId, false, { deal: code });
+                  else navigate("designs", "d-" + code);
                 }}
                 /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
                    deliberately carries no view of its own so the saved preference can fill
@@ -3233,6 +3326,37 @@ function Dashboard({ session }) {
                     "Text and email them from inside the record — the thread stays",
                     "Follow-up activities so nobody quietly goes cold",
                     "The pipeline board view, alongside your list",
+                  ]}
+                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                  available
+                />
+              )
+            )}
+            {/* CONVERSATIONS — /portal/conversations[/email|texts|calls]. The sub is the filter, so
+                the browser's Back from a record restores it. Behind the built-in CRM like Contacts;
+                the nav item only appears with it, and a typed URL without it gets the CRM card.
+                A row opens the CONTACT record on the History chip for its channel, and the
+                record's Back returns here (recordCtx.from). */}
+            {!gateLocked && activeTab === "conversations" && (
+              crmUnlocked ? (
+                <ConversationsInbox key={"t-" + effClientId} clientId={effClientId} viewing={!!viewing}
+                  phoneOffered={phoneOffered}
+                  phoneLevel={myAccess ? (myAccess.phone || null) : null}
+                  urlFilter={sub}
+                  onFilter={(slug) => navigate("conversations", slug, true)}
+                  onOpen={(contactId, channel) => navigate("contacts", "c-" + contactId, false, {
+                    chip: CRM_INBOX_CHIP[channel] || "all",
+                    from: { page: "conversations", pageSub: sub || null },
+                  })} />
+              ) : (
+                <ComingSoon
+                  title="Conversations"
+                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>}
+                  blurb="Every email, text and call with your customers in one list, newest first, with a bar on top to see just one kind. Part of the built-in CRM."
+                  bullets={[
+                    "One line per customer, showing their latest message",
+                    "See who's waiting on a reply at a glance",
+                    "Click through to the customer's record to answer",
                   ]}
                   cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
                   available
@@ -3406,7 +3530,8 @@ function Dashboard({ session }) {
               schedUnlocked ? (
                 <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
                   access={mirrorAccess}
-                  onOpenDesign={(code) => openInDesigner(code)} />
+                  onOpenDesign={(code) => openInDesigner(code)}
+                  customerOpener={scheduleCustomerOpener("build-schedule")} />
               ) : (
               <ComingSoon
                 title="Build Schedule"
@@ -3425,7 +3550,8 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
                 <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
-                  access={mirrorAccess} />
+                  access={mirrorAccess}
+                  customerOpener={scheduleCustomerOpener("delivery-schedule")} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"

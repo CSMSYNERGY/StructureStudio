@@ -19,6 +19,12 @@
 //
 // ⚠️ wallet_credit's p_meter_kind: migration 244 records it on the row. Check before arming that
 // 'phone_line_monthly' is accepted there (and shown on the Billing tab).
+//
+// ⚠️ ONE RENTAL FEE PER NUMBER (decided 2026-10-05). The voice-enabled number that gives a
+// tenant its "line" is an sms_numbers row, and cron/numberFee.ts already charges every live row
+// `sms_number_monthly` each month (the purchase took the first). This meter is priced 0, so
+// nothing is charged twice today. Before pricing it, make it skip the numbers that pay
+// sms_number_monthly (or retire one of the two), or a builder pays twice for one number.
 
 import type { Env } from "../env";
 import { must, type Admin } from "../db";
