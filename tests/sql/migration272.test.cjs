@@ -25,7 +25,9 @@ const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/272_builder_options.sql"), "utf8");
+// LF, whatever the checkout: the mutants below splice LF-only text, and on a CRLF checkout
+// (core.autocrlf) they would silently fail to form. The migration strips \r itself.
+const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/272_builder_options.sql"), "utf8").replace(/\r/g, "");
 
 // get_fixtures as it is live: 208's own create statement, carriage returns removed (a Windows
 // checkout has them; the live body does not). PART 3 checks it by the md5 of its body, so the
