@@ -137,6 +137,12 @@ import {
 import { SELF_CHECK_CLAIM_WINDOW_MS } from "../_shared/styleD3.ts";
 // The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
 import { draftIdemKey } from "../_shared/styleD3.ts";
+// One hauled and one built-on-site row per wall-height increase, sharing no width (272), once
+// WALL_HEIGHT_SITE_PAIRS is on. This function is the module's only importer.
+import { bindWallHeightWrites, wallHeightClash, wallHeightListedTwice, type WallHeightRowShape } from "../_shared/wallHeightRows.ts";
+// "Offered on": the building styles a catalog fixture is sold on (272). admin-catalog imports the
+// same module (cloneStyleIds), so a change to it deploys both functions.
+import { keepTenantStyleIds, NO_STYLE_TICKED, readStyleIds } from "../_shared/fixtureStyleIds.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -2344,7 +2350,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // style_ids (272): the "Offered on" ticks. This select needs 272 applied; before it, the
+      // whole catalog read fails on the unknown column.
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -5480,12 +5488,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (szRes.error) return dbFail(req, clientId, "read that style's sizes", szRes.error);
     const allWidths = [...new Set((szRes.data ?? []).map((z: { width_ft: number }) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((x, y) => x - y);
 
-    const exRes = await admin.from("style_wall_heights").select("id").eq("client_id", clientId).eq("style_id", styleId);
+    // Each row's KEY (increase + built on site) and widths as well as its id: since 272 an increase
+    // can be listed twice, so the save has to know which row holds which key (bindWallHeightWrites)
+    // and what a row it leaves alone still offers (wallHeightClash).
+    const exRes = await admin.from("style_wall_heights").select("id, delta_in, build_on_site, widths_ft").eq("client_id", clientId).eq("style_id", styleId);
     if (exRes.error) return dbFail(req, clientId, "read your current wall heights", exRes.error);
-    const existingIds = new Set((exRes.data ?? []).map((r: { id: string }) => String(r.id)));
+    type ExistingWallHeight = { id: string; delta_in: number; build_on_site: boolean | null; widths_ft: number[] | null };
+    const existing = new Map(((exRes.data ?? []) as ExistingWallHeight[]).map((r) => [String(r.id), r]));
+    const existingIds = new Set(existing.keys());
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
-    const seenDeltas = new Set<number>();
+    // Rows that passed every check, written below once the WHOLE list has been checked.
+    const plans: (WallHeightRowShape & { rid: string; patch: Record<string, unknown> })[] = [];
     let i = 0;
     for (const raw of payload.rows) {
       const row = raw as Record<string, unknown>;
@@ -5500,8 +5514,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!Number.isInteger(deltaIn) || deltaIn <= 0 || deltaIn > 48) {
         skipped.push(`row ${i}: "${row?.deltaIn}" is not a whole number of inches between 1 and 48${unchanged}`); i++; continue;
       }
-      if (seenDeltas.has(deltaIn)) { skipped.push(`+${deltaIn} in: listed twice${unchanged}`); i++; continue; }
-      seenDeltas.add(deltaIn);
+      // "Listed twice" is no longer a per-row skip: an increase may appear once hauled and once
+      // built on site (272). The whole list is checked below, once every row has been read, and
+      // still refuses a second row while the pair is switched off (WALL_HEIGHT_SITE_PAIRS).
 
       // Refuse, never coerce — the rate posture everywhere in this file. A blank rate is a
       // deliberate "offer it later": the row is stored unpriced and get_config withholds it.
@@ -5564,19 +5579,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         widths_ft: widthsFt,
         updated_at: new Date().toISOString(),
       };
-      const res = isExisting
-        ? await admin.from("style_wall_heights").update(patch).eq("id", rid).eq("client_id", clientId)
-        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...patch }).select("id").maybeSingle();
-      if (res.error) { skipped.push(`+${deltaIn} in: ${res.error.message}`); i++; continue; }
-      if (!isExisting && (res as { data?: { id?: string } }).data?.id) keptIds.add(String((res as { data: { id: string } }).data.id));
-      saved++; i++;
+      plans.push({ rid: isExisting ? rid : "", deltaIn, buildOnSite, widthsFt, patch });
+      i++;
     }
+
+    // ONE HAULED AND ONE BUILT-ON-SITE ROW PER INCREASE, SHARING NO WIDTH (272). This replaced
+    // "listed twice": a builder sells +12" hauled on the 8-12 wide and the same +12" built on site
+    // on the 14 wide (bug report 2026-10-02), and the width is what tells the two rows apart when
+    // the designer and submit-estimate pick one. Checked on the list as it WILL BE, so a row this
+    // save leaves alone (it failed a check above and keeps what it has) counts with what it still
+    // offers. Refused WHOLE rather than row by row: skipping one row of a clashing pair could leave
+    // that row's OLD widths in place, sharing the very width the builder was moving. The portal
+    // checks the same rule before it sends, so this is the backstop for a stale or crafted save.
+    const leftAlone: WallHeightRowShape[] = [...keptIds]
+      .filter((id) => !plans.some((p) => p.rid === id))
+      .map((id) => existing.get(id) as ExistingWallHeight)
+      .map((r) => ({ deltaIn: Number(r.delta_in), buildOnSite: r.build_on_site === true, widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null }));
+    // ⚠️ The pair is SWITCHED OFF until production runs the new resolveWallHeight: a designer from
+    // before 272 prices the first row it finds for an increase, so a pair saved under it previews
+    // one price and bills another. While WALL_HEIGHT_SITE_PAIRS is not "on", an increase is listed
+    // once, the rule before 272, whichever tree deployed this function (wallHeightRows.ts says how
+    // to switch it on). Read per request, so setting the secret needs no redeploy.
+    const sitePairs = Deno.env.get("WALL_HEIGHT_SITE_PAIRS") === "on";
+    const asSaved = [...plans, ...leftAlone];
+    const clash = (sitePairs ? null : wallHeightListedTwice(asSaved)) ?? wallHeightClash(asSaved, allWidths);
+    if (clash) return json({ error: `Nothing was saved. ${clash}` }, 400);
+
+    // Rows the list no longer mentions go FIRST, so deleting the +12 row and adding a new +12 row in
+    // one save does not collide with the row being removed. The set was fixed by the loop above,
+    // before anything was written: ids absent from the payload only, never a row that failed a check.
     const sweep = [...existingIds].filter((id) => !keptIds.has(id));
     let deleted = 0;
     if (sweep.length) {
       const del = await admin.from("style_wall_heights").delete().in("id", sweep).eq("client_id", clientId);
       if (del.error) return dbFail(req, clientId, "remove the wall heights you deleted", del.error);
       deleted = sweep.length;
+    }
+    // Each row lands on the existing row that already holds its key where there is one, so ticking
+    // Built on site on one +12 row and unticking it on the other in the same save never meets the
+    // unique key half-way through (bindWallHeightWrites says why that is safe in any order).
+    const pool = plans.filter((p) => p.rid).map((p) => {
+      const r = existing.get(p.rid) as ExistingWallHeight;
+      return { id: p.rid, deltaIn: Number(r.delta_in), buildOnSite: r.build_on_site === true };
+    });
+    const targets = bindWallHeightWrites(pool, plans);
+    for (let n = 0; n < plans.length; n++) {
+      const target = targets[n];
+      const res = target
+        ? await admin.from("style_wall_heights").update(plans[n].patch).eq("id", target).eq("client_id", clientId)
+        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...plans[n].patch });
+      if (res.error) { skipped.push(`+${plans[n].deltaIn} in: ${res.error.message}`); continue; }
+      saved++;
     }
     return json({ ok: true, saved, deleted, skipped });
   }
@@ -5953,7 +6006,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "save_insulation") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
-    const TYPES = new Set(["batt", "spray_foam"]);
+    // rigid_foam needs migration 272's widened ins_type check: saved ahead of it, the row is
+    // refused by the database and comes back in skipped[] with the rest of the save intact.
+    const TYPES = new Set(["batt", "spray_foam", "rigid_foam"]);
     const AREAS = new Set(["floor", "walls", "roof"]);
 
     // The master switch, presence-guarded so a save that does not mention it cannot flip it.
@@ -5989,10 +6044,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // what makes the customer's toggle disappear.
       const rateRaw = String(row?.ratePerSqft ?? "").trim();
       if (rateRaw === "") {
-        const del = await admin.from("insulation_offerings").delete()
+        const del = await admin.from("insulation_offerings").delete({ count: "exact" })
           .eq("client_id", clientId).eq("ins_type", insType).eq("area", area);
         if (del.error) { skipped.push(`${insType}/${area}: ${del.error.message}`); continue; }
-        cleared++; continue;
+        // Counted from what was really deleted. The card sends every cell of the matrix, so
+        // counting blanks reported cells that were never offered as "no longer offered", and
+        // since 272 added a third type that is a whole untouched Rigid Foam row on every save.
+        cleared += del.count ?? 0; continue;
       }
       const rate = Number(rateRaw);
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${insType}/${area}: "${rateRaw}" is not a usable dollar amount`); continue; }
@@ -6253,6 +6311,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
       }
     }
+    // Offered on (272): the building styles this item is sold on, for EVERY category, presence-
+    // guarded like its neighbours so a spreadsheet or an older portal that never sends it leaves
+    // the builder's ticks alone. null = every style (the living default, the shape above); an
+    // array = exactly those. An empty one is refused: it would hide the item on every style while
+    // it still reads as offered. The CALLERS keep only this tenant's styles.
+    if (has("styleIds")) {
+      const s = readStyleIds(row.styleIds);
+      if (s.err) return { err: `${name}: ${s.err}` };
+      if (s.value !== undefined) rec.style_ids = s.value;
+    }
     // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
     // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
     // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
@@ -6326,6 +6394,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
+    if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     if (!("door_style" in rec)) rec.door_style = "auto";
@@ -6341,6 +6410,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data } = await admin.from("window_colors").select("id").eq("client_id", clientId).in("id", ids);
     const ok = new Set((data ?? []).map((r: any) => String(r.id)));
     rec.window_color_ids = ids.filter((x) => ok.has(String(x)));
+  };
+
+  // This tenant's building-style ids, for the Offered on ticks (272). The uuid[] column has no
+  // foreign key, so this is the one check that a style id is this builder's own. A failed read is
+  // reported as one, never taken as "none of them are yours".
+  const tenantStyleIds = async (): Promise<{ ids?: Set<string>; error?: unknown }> => {
+    const { data, error } = await admin.from("building_styles").select("id").eq("client_id", clientId);
+    if (error) return { error };
+    return { ids: new Set((data ?? []).map((r: any) => String(r.id).toLowerCase())) };
   };
 
   // The FK on fixture_items.fixed_color_id accepts ANY colors row — including another
@@ -6368,6 +6446,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (v.err) return json({ error: v.err }, 400);
     { const p = await fixedColorProblem(v.rec!); if (p) return json({ error: p }, 400); }
     await filterWindowColorIds(v.rec!);
+    // Offered on (272): only this builder's styles stay. None left is refused like an empty list,
+    // never saved as "nowhere".
+    if (Array.isArray(v.rec!.style_ids)) {
+      const t = await tenantStyleIds();
+      if (t.error) return dbFail(req, clientId, "check the styles that line is offered on", t.error);
+      const kept = keepTenantStyleIds(v.rec!.style_ids as string[], t.ids!);
+      if (!kept.length) return json({ error: `${v.rec!.name}: none of those building styles are in your catalog any more. Reload the page, then ${NO_STYLE_TICKED}.` }, 400);
+      v.rec!.style_ids = kept;
+    }
     const id = String(payload?.id ?? "").trim();
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
@@ -6459,6 +6546,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (wc.error) return dbFail(req, clientId, "read your window colors", wc.error);
       windowColorIds = new Set((wc.data ?? []).map((r: any) => String(r.id)));
     }
+    // Offered on (272). The sheet has no such column, so this read happens only for a caller that
+    // sent the field; each row then keeps only this builder's styles.
+    let styleIds: Set<string> | null = null;
+    if (payload.rows.some((r: any) => r && Object.prototype.hasOwnProperty.call(r, "styleIds"))) {
+      const t = await tenantStyleIds();
+      if (t.error) return dbFail(req, clientId, "read your building styles", t.error);
+      styleIds = t.ids!;
+    }
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
@@ -6474,6 +6569,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         v.rec!.window_color_ids = (v.rec!.window_color_ids as unknown[]).filter((x) => windowColorIds!.has(String(x)));
         if ((v.rec!.window_color_ids as unknown[]).length < before) {
           skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some colors aren't in your window color list — dropped`);
+        }
+      }
+      if (styleIds && Array.isArray(v.rec!.style_ids)) {
+        const before = (v.rec!.style_ids as string[]).length;
+        const kept = keepTenantStyleIds(v.rec!.style_ids as string[], styleIds);
+        // None of them this builder's: the row's other columns still go in, its styles stay as they were.
+        if (!kept.length) {
+          delete v.rec!.style_ids;
+          skipped.push(`${String(row?.name ?? "row " + (i + 1))}: none of those building styles are in your catalog — styles left as they were`);
+        } else {
+          v.rec!.style_ids = kept;
+          if (kept.length < before) skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some building styles aren't in your catalog — dropped`);
         }
       }
       const rid = String(row?.id ?? "").trim();

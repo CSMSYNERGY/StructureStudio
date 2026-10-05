@@ -26,12 +26,14 @@ for (const name of ["insulationSqft", "insulationOffered", "insulationTypes", "i
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
-const { insulationSqft, insulationTypes, insulationAreasFor } = new Function(
-  `${BLOCK}; return { insulationSqft, insulationOffered, insulationTypes, insulationAreasFor };`,
+const { insulationSqft, insulationTypes, insulationAreasFor, INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL } = new Function(
+  `${BLOCK}; return { insulationSqft, insulationOffered, insulationTypes, insulationAreasFor, INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL };`,
 )() as {
   insulationSqft: (area: string, w: number, l: number, h: number) => number;
   insulationTypes: (C: unknown, includeInternal?: boolean) => string[];
   insulationAreasFor: (C: unknown, t: string, includeInternal?: boolean) => string[];
+  INSULATION_TYPE_LABEL: Record<string, string>;
+  INSULATION_AREA_LABEL: Record<string, string>;
 };
 
 // get_config's shape after 177: offered combinations only, and NO rate — Carolyn chose no
@@ -197,4 +199,120 @@ Deno.test("the designer multiplies the emitted rate rather than hardcoding a bla
     /total: showP && insRate != null \? Math\.round\(insRate \* sqft \* 100\) \/ 100 : null,/.test(SRC),
     "the insulation row must price itself as rate x sqft",
   );
+});
+
+// ── Rigid foam, floor only (migration 272) ───────────────────────────────────
+// A builder asked (2026-10-02): "We use Rigid Foam insulation only under the floor sheeting."
+// Rigid foam is a third type; "floor only" is configuration, a Floor rate with Walls and Roof
+// left blank, so get_config emits exactly one row for that tenant.
+const FOAM_FLOOR = { insulation: [{ type: "rigid_foam", area: "floor", ratePerSqft: 1.25 }] };
+
+Deno.test("a rigid-foam-floor-only tenant offers one type and one area", () => {
+  assertEquals(insulationTypes(FOAM_FLOOR), ["rigid_foam"]);
+  assertEquals(insulationAreasFor(FOAM_FLOOR, "rigid_foam"), ["floor"]);
+  assertEquals(insulationAreasFor(FOAM_FLOOR, "batt"), []);
+});
+
+Deno.test("the rigid foam floor line is Rigid Foam Insulation, rate x width x length", () => {
+  // The designer's preview row label, built the way the breakdown builds it.
+  const label = `${INSULATION_TYPE_LABEL["rigid_foam"] || "rigid_foam"} Insulation — ${INSULATION_AREA_LABEL["floor"]}`;
+  assertEquals(label, "Rigid Foam Insulation — Floor");
+  // Floor is the footprint whatever the wall height: a taller-wall upgrade never reaches it.
+  assertEquals(insulationSqft("floor", 12, 24, 8), 288);
+  assertEquals(insulationSqft("floor", 12, 24, 9), 288);
+  assertEquals(Math.round(1.25 * insulationSqft("floor", 12, 24, 8) * 100) / 100, 360);
+  assertEquals(serverSqft("floor", 12, 24, 9), insulationSqft("floor", 12, 24, 9));
+});
+
+// The area button's label, lifted from the shipped render. With one type there is no type picker,
+// so the bare "Floor" said nothing about what goes in it; the type now rides on the button.
+const LBL_START = "const insAreaLabel = (a) => (";
+const LBL_END = "INSULATION_AREA_LABEL[a]);";
+const li = SRC.indexOf(LBL_START);
+const lj = SRC.indexOf(LBL_END, li);
+if (li < 0 || lj < 0) {
+  throw new Error(
+    `insulation_test: could not find the area button label (start=${li}, end=${lj}). ` +
+      "The anchors moved — re-point them rather than deleting this test.",
+  );
+}
+const insAreaLabelFor = new Function(
+  "insTypes", "insType", "INSULATION_TYPE_LABEL", "INSULATION_AREA_LABEL",
+  `${SRC.slice(li, lj + LBL_END.length)} return insAreaLabel;`,
+) as (insTypes: string[], insType: string, T: Record<string, string>, A: Record<string, string>) => (a: string) => string;
+
+Deno.test("one type on offer names it on the area button: Rigid Foam — Floor", () => {
+  const types = insulationTypes(FOAM_FLOOR);
+  const lbl = insAreaLabelFor(types, types[0], INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL);
+  assertEquals(lbl("floor"), "Rigid Foam — Floor");
+  // Any single type does the same, batt-only included.
+  const battOnly = insAreaLabelFor(["batt"], "batt", INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL);
+  assertEquals(battOnly("walls"), "Batt — Walls");
+});
+
+Deno.test("two or more types keep the short area names under the type picker", () => {
+  // The only live insulation tenant offers batt and spray foam: its buttons must not change.
+  const types = insulationTypes(C);
+  assertEquals(types.length, 2);
+  const lbl = insAreaLabelFor(types, "batt", INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL);
+  assertEquals(["floor", "walls", "roof"].map(lbl), ["Floor", "Walls", "Roof"]);
+  // And a type hidden from the customer leaves one on the customer page, which then names it.
+  const C2 = { insulation: [{ type: "batt", area: "floor" }, { type: "rigid_foam", area: "floor", internalOnly: true }] };
+  assertEquals(insulationTypes(C2), ["batt"]);
+  assertEquals(insAreaLabelFor(insulationTypes(C2), "batt", INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL)("floor"), "Batt — Floor");
+  assertEquals(insAreaLabelFor(insulationTypes(C2, true), "batt", INSULATION_TYPE_LABEL, INSULATION_AREA_LABEL)("floor"), "Floor");
+});
+
+Deno.test("the area buttons render that label", () => {
+  assert(
+    /className=\{insHas\(a\) \? "ssd-cov is-on" : "ssd-cov"\}>\{insAreaLabel\(a\)\}<\/button>/.test(SRC),
+    "the insulation area button must render insAreaLabel(a)",
+  );
+});
+
+// Five places name the insulation types: the database check, portal-settings' save, the portal's
+// matrix, submit-estimate's line names and the designer's labels. Adding a type to some of them
+// fails quietly: the portal sends a row the save skips, or a line reads "rigid_foam Insulation".
+// Read from the shipped files, so a sixth copy that drifts is the only way past this.
+const read = (rel: string) => Deno.readTextFile(new URL(rel, import.meta.url));
+const objLiteral = (src: string) => new Function(`return (${src});`)();
+
+Deno.test("every place that names an insulation type names the same three, alike", async () => {
+  const designer = INSULATION_TYPE_LABEL;
+  const keys = Object.keys(designer).sort();
+  assertEquals(keys, ["batt", "rigid_foam", "spray_foam"]);
+
+  const se = await read("../../submit-estimate/index.ts");
+  const seM = /const TYPE_LABEL: Record<string, string> = (\{[^}]*\});/.exec(se);
+  assert(seM, "submit-estimate's TYPE_LABEL moved");
+  assertEquals(objLiteral(seM[1]), designer, "submit-estimate names the quote line as the designer names the preview");
+
+  const ps = await read("../../portal-settings/index.ts");
+  const psSave = ps.slice(ps.indexOf(`if (action === "save_insulation")`));
+  const psM = /const TYPES = new Set\((\[[^\]]*\])\);/.exec(psSave);
+  assert(psM, "portal-settings' save_insulation TYPES moved");
+  assertEquals((objLiteral(psM[1]) as string[]).slice().sort(), keys, "portal-settings saves exactly these types");
+
+  const portal = await read("../../../../portal/03-catalog.jsx");
+  const pCard = portal.slice(portal.indexOf("function Insulation("));
+  const pM = /const TYPES = (\[\[[\s\S]*?\]\]);/.exec(pCard);
+  assert(pM, "the portal Insulation card's TYPES moved");
+  const pTypes = objLiteral(pM[1]) as [string, string][];
+  assertEquals(Object.fromEntries(pTypes), designer, "the portal's matrix rows carry the same names");
+
+  // The newest migration that sets the check is what the database allows.
+  const migDir = new URL("../../../migrations/", import.meta.url);
+  const migs: string[] = [];
+  for await (const e of Deno.readDir(migDir)) if (e.isFile && e.name.endsWith(".sql")) migs.push(e.name);
+  migs.sort();
+  let allowed: string[] | null = null;
+  for (const name of migs) {
+    // Comments dropped first: a migration's written-out rollback re-adds the OLD check.
+    const sql = (await Deno.readTextFile(new URL(name, migDir)))
+      .split("\n").filter((l) => !l.trimStart().startsWith("--")).join("\n");
+    const m =/add constraint insulation_offerings_ins_type_check\s+check \(ins_type in \(([^)]*)\)\)/.exec(sql);
+    if (m) allowed = m[1].split(",").map((v) => v.trim().replace(/^'|'$/g, ""));
+  }
+  assert(allowed, "no migration sets insulation_offerings_ins_type_check");
+  assertEquals(allowed.slice().sort(), keys, "the database check allows exactly these types");
 });
