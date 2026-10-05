@@ -18,6 +18,10 @@
 //   8. a RAISED CENTRE (roof.wingSide, 2026-09-24 review): a flood light on the centre's own eave
 //      wall, which stands above H, hangs 0.2-0.35 ft under THAT wall's eave finish, not in its
 //      soffit at the wall top minus 0.75 (the wing's eave is feet lower and says nothing about it)
+//   9. the 3D Add row has NO "Electrical Items" button (2026-10-05). It used to: clicking it said
+//      "click the floor", and clicking the floor flashed place3's "pick from the palette beside
+//      the plan" refusal, a dead end in the full-screen editor. Devices are placed on the plan
+//      only, and the 2D picker still places them (every device above came from it).
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/elec3d.mjs                  (exit 0 = every check held)
@@ -264,6 +268,11 @@ export async function main() {
 
     const items = (await readItems(page)) || [];
     const elec = items.filter((i) => i.electricalItemId);
+    // 9, first half: the plan is still where devices are added. Each of these five went in through
+    // the 2D "Electrical Items" picker, so removing its 3D twin must not have touched this path.
+    const picked2d = [floodN, floodE, heavy, brk, fan];
+    ok("the 2D Electrical Items picker still places devices (5 of 5, each with its electricalItemId)",
+      picked2d.every((it) => it && it.electricalItemId), picked2d.map((it) => (it ? it.type : "none")).join(" "));
     const byId = new Map(items.map((i) => [i.id, i]));
     console.log("electrical items:", JSON.stringify(Object.entries(elec.reduce((m, i) => ((m[i.type] = (m[i.type] || 0) + 1), m), {}))));
 
@@ -410,6 +419,18 @@ export async function main() {
     // The 3D Add row stays free of electrical (place3 refuses it; the row leaves it out).
     const elecButtons = await page.evaluate(() => [...document.querySelectorAll("button")].filter((b) => b.offsetParent && /^\S+\s(OUTLE|FLOOD|CEILI|BREAK|220V|LIGHT)\b/.test((b.innerText || "").trim())).map((b) => b.innerText.trim()));
     ok("no electrical buttons in the 3D Add row", elecButtons.length === 0, elecButtons.join(" | "));
+    // 9, second half: nor the "Electrical Items" picker. The row is read by its own "Add" label, so a
+    // 2D button elsewhere on the page cannot answer for it, and it must hold the tools that DO place
+    // from 3D (the workbench at least), so an empty or missing row cannot pass vacuously.
+    const addRow = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll("span")]
+        .filter((s) => s.offsetParent && (s.textContent || "").trim() === "Add" && s.parentElement && s.parentElement.querySelector(":scope > button"))
+        .map((s) => [...s.parentElement.querySelectorAll(":scope > button")].map((b) => (b.textContent || "").trim()));
+      return rows.length === 1 ? rows[0] : { rows };
+    });
+    ok("the 3D Add row is on screen, once, with the workbench in it", Array.isArray(addRow) && addRow.some((t) => /\bWB\b|Workbench/i.test(t)), JSON.stringify(addRow));
+    ok("no Electrical Items button in the 3D Add row (3D has no way to place a device)",
+      Array.isArray(addRow) && !addRow.some((t) => /electrical/i.test(t) || t.startsWith("⚡")), JSON.stringify(addRow));
 
     // ── A scoped interior rebuild keeps them, still shadowless ──────────────────
     await page.evaluate((its) => { const E = window.__ss3dEngine; E.model.rebuildInterior(its); E.render(); }, items);

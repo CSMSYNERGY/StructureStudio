@@ -1887,6 +1887,10 @@ function Dashboard({ session }) {
         videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
         modelStatus: (st && st.model_status) || "none",
         aiReady: data.aiReady !== false,
+        // The video meter as the server reads it (price, on or off, exempt), for the money line.
+        // Passed through untouched: the designer's calChargeOf is the one place it is read, and a
+        // catalog with no wallet (an older function, a failed read) is null, which says no price.
+        wallet: data.wallet ?? null,
       };
     },
     onDraftFromPhotos: async (photoUrls, styleValue) => {
@@ -2031,7 +2035,9 @@ function Dashboard({ session }) {
       if (brokeOff || closedAtDeadline) {
         const rec = opts && opts.recover;
         if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
-          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+          // No money claim (2026-10-05): this line cannot see the wallet, and with the meter off
+          // nobody is charged. The server's own pickup sentences are the ones that say money.
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, it counted as one generation.");
         }
         let asked = 0;
         let got = null;

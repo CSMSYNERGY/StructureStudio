@@ -15456,6 +15456,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         //
         // Refusing here closes the class. The tools themselves are re-admitted to the 3D palette
         // (see paletteKeys), so shelving is placed from 3D by its real buttons.
+        //
+        // Electrical has no real buttons to re-admit: a device is placed on the plan only. So
+        // paletteKeys leaves its picker out of the Add row (2026-10-05) and this refusal stays
+        // as the guard rail. 3D placement would need a chooser sheet like the door/window one,
+        // and a placement that skips the electricalItemId/heightOffFloorIn stamps the 2D click
+        // writes is drawn as nothing and priced at $0.
         if (cfg.isShelfPicker || cfg.isElecItemPicker || cfg.isVentPicker) {
           flash3("Pick which one from the palette beside the plan, then place it here.");
           setTool3(null);
@@ -20637,6 +20643,48 @@ function ssChangeLine(change) {
   const word = (v, side) => (absent(v) ? (side === "to" ? "gone" : "not set") : show(v));
   return { label, text: `${word(change.from, "from")} → ${word(change.to, "to")}` };
 }
+// THE MONEY LINE'S ONE RULE (2026-10-05). What one press of Generate takes from the wallet, as the
+// server last said it: portal-settings `catalog` → wallet, which the host hands over with the
+// style's photos when the editor opens (onLoadStyle3D), and again at every press (calGenerate).
+// The panel used to state a fixed $20 price while the meter was off; the copy follows the meter
+// now.
+//
+//   { cents, said }  the meter is on, this tenant is not exempt, and the price is above 0:
+//                    wallet_hold takes exactly that, once per press.
+//   { free: true }   the meter is off (wallet_hold answers meter_inactive and the press runs
+//                    free), the tenant is exempt (held at 0), or the price is 0.
+//   null             not known: no wallet (an older function, a failed read, a host with no
+//                    catalog), a price the server redacted, or a field it did not send. The line
+//                    then makes no money claim at all, never a guessed one.
+//
+// ⚠️ NO `exempt`, NO ANSWER, NOT EVEN "OFF". The walletRead before this one turned a usage_prices
+// read that FAILED into meterActive false, so from a function without `exempt` (a branch deploy,
+// a rollback) "off" can be a failed read on an armed meter, and "free" would be a promise the hold
+// then breaks. The new walletRead always sends a boolean `exempt` and answers a failed or missing
+// read with wallet null, so its "off" is the meter's own.
+//
+// ⚠️ IT DECIDES NOTHING. The charge is wallet_hold's, server-side, at the press; this only picks
+// the sentence the builder reads. calGenerate reads the wallet again at the press, so a meter
+// armed or disarmed while the editor sat open is said as it now is. What is left is a flip in the
+// seconds between that read and the hold.
+function calChargeOf(wallet) {
+  if (!wallet || typeof wallet !== "object") return null;
+  if (typeof wallet.exempt !== "boolean") return null;
+  if (wallet.meterActive === false) return { free: true };
+  if (wallet.meterActive !== true) return null;
+  if (wallet.exempt) return { free: true };
+  const p = wallet.priceCents;
+  if (typeof p !== "number" || !isFinite(p) || p < 0) return null;
+  const cents = Math.round(p);
+  if (cents === 0) return { free: true };
+  const dollars = cents / 100;
+  return {
+    cents,
+    said: "$" + (cents % 100 === 0
+      ? dollars.toLocaleString("en-US")
+      : dollars.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+  };
+}
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
 // ⚠️ THREE LANES, AND THIS HAS NOW BEEN WRONG IN BOTH DIRECTIONS. The history is short and worth
@@ -22520,7 +22568,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // React #310, and this file has shipped that.
   const calLoadRef = useRef(null);
   // Building scan (094): { busy, step, err, measured, file, status } for the selected style.
-  const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+  // `charge` (2026-10-05) rides beside the aiReady probe from the same read: calChargeOf of the
+  // catalog's wallet, i.e. what one Generate press costs this tenant. null until that read lands.
+  const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null, charge: null });
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
@@ -24780,7 +24830,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const mid = calMidSize(s.value);
       if (mid) setSel((p) => ({ ...p, style: s.value, size: mid }));
     }
-    setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+    setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null, charge: null });
     // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
     // carrying them across would draft the next style from the previous building.
     setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
@@ -24821,7 +24871,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // identically to a style whose walk-around simply had not arrived.
         const vf = Array.isArray(meta.videoFrames) ? meta.videoFrames.filter(Boolean) : [];
         setAdminCalVideo((p) => ({ ...p, urls: vf, count: vf.length }));
-        setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false }));
+        // The money line's answer rides with the probe it sits beside (calChargeOf). A host that
+        // sends no wallet leaves it null, which the line says as no price at all.
+        setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false, charge: calChargeOf(meta.wallet) }));
       }).catch(() => { /* a convenience read; never block the editor */ });
     }
   };
@@ -26204,6 +26256,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // running (see cal3dPanel), so this is the second lock on the same door.
     const run = calRunRef.current;
     const mine = () => calRunRef.current === run;
+    // THE MONEY LINE IS READ AT THE PRESS (2026-10-05). scan.charge came from the read the editor
+    // made when the style opened, and a meter armed or disarmed while the editor sat open would
+    // have been said from that: "free" on a press that took $20, or "$20" on one that took
+    // nothing. So the same read goes out again now, beside the generation, and the line makes no
+    // money claim until it lands. Only `.wallet` is used: the photo and frame writes live in
+    // openCalEditor's own then() and do not run from here. The one side effect is the shell's save
+    // base (ssStyleSaveBase), moved forward only when no save was confirmed since this was issued,
+    // which a 409 would rebase onto the current version anyway. Never throws: a failed read is
+    // null, i.e. no money claim.
+    setScan((p) => ({ ...p, charge: null }));
+    const chargeNow = (setup3d.onLoadStyle3D ? Promise.resolve().then(() => setup3d.onLoadStyle3D(adminCal.styleValue)) : Promise.resolve(null))
+      .then((meta) => calChargeOf(meta && meta.wallet), () => null);
+    chargeNow.then((c) => { if (mine()) setScan((p) => ({ ...p, charge: c })); });
     calShotRef.current = null;
     calSpinReqRef.current = {};
     // Four answers about the LAST building are not four answers about this one.
@@ -26272,7 +26337,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // and without offering it back: the spec it was merged onto is gone, and a button
       // claiming to restore it would be a promise this panel cannot keep.
       if (!mine()) {
-        setAdminCalMsg({ ok: false, msg: "That generation finished after you opened another style, so it has not been applied to anything. Opening a style replaces what is on screen. You were charged for it once, as usual." });
+        // The money as THIS press read it (chargeNow, above): the style opened since resets
+        // scan.charge, so the closure is not the answer. Said only on a priced meter.
+        const charged = await chargeNow;
+        const paid = charged && charged.cents ? " You were charged for it once, as usual." : "";
+        setAdminCalMsg({ ok: false, msg: "That generation finished after you opened another style, so it has not been applied to anything. Opening a style replaces what is on screen." + paid });
         return;
       }
       // ⚠️ A SERVER THAT NEVER HEARD OF `dims` MUST NOT THROW AWAY THE MEASUREMENT IT IGNORED.
@@ -26469,15 +26538,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const scanPick = async (file) => {
     if (!file) return;
     // Full replacement on purpose (drops renderUrls — a new file needs new
-    // renders) but the style's status, the aiReady probe and the builder's
-    // device pick survive.
-    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+    // renders) but the style's status, the aiReady probe, the money line's charge
+    // and the builder's device pick survive.
+    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     try {
       const { scene, measured } = await scanReadGlb(file);
       scanDisposeScene(scene);
-      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     } catch (e) {
-      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     }
   };
   // Four three-quarter turntable JPEGs of the raw scan, framed off the
@@ -28817,7 +28886,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     takes the wallet hold server-side, ordered after the daily cap and before
                     the model call, and the wallet deliberately FAILS CLOSED — failing open
                     means performing a paid service free with no record of it. A browser button
-                    that thought it knew the price would be a second opinion about money. */}
+                    that thought it knew the price would be a second opinion about money. The
+                    money line below only REPEATS the server's own answer (scan.charge, from
+                    calChargeOf) and gates nothing. */}
                 {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && (
                   <div style={{ marginTop: 10, borderTop: "1px solid #FEF3C7", paddingTop: 10 }}>
                     <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
@@ -28897,9 +28968,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             ? "Still going. Big videos take longer — don't close the page."
                             : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
                         </div>
-                        {/* THE MONEY LINE. Under a rule, on every render of this card. */}
-                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
-                          This is one generation. The check and the correction are part of it — you are charged $20 once, however much we have to fix.
+                        {/* THE MONEY LINE. Under a rule, on every render of this card. What it
+                            says about money follows the meter (calChargeOf, 2026-10-05): the
+                            price when one is charged, "free" when nothing is, and no money claim
+                            when the server has not said. data-ssc-charge names which. */}
+                        <div data-ssc-charge={scan.charge ? (scan.charge.cents ? "priced" : "free") : "unknown"} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
+                          {scan.charge && scan.charge.cents
+                            ? `This is one generation. The check and the correction are part of it — you are charged ${scan.charge.said} once, however much we have to fix.`
+                            : scan.charge && scan.charge.free
+                              ? "This is one generation. The check and the correction are part of it. Generating is free right now, so nothing comes out of your wallet."
+                              : "This is one generation. The check and the correction are part of it."}
                         </div>
                       </div>
                     )}
@@ -29029,7 +29107,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
                     {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
                     {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
-                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save. You were charged once, as usual.</>}
+                    {/* "Charged once" only on a priced meter (calChargeOf): with the meter off it
+                        was a claim about money nobody paid. */}
+                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save.{scan.charge && scan.charge.cents ? " You were charged once, as usual." : ""}</>}
                   </div>
                   {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && (
                     <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "grid", gap: 3 }}>
@@ -29285,10 +29365,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                   )}
                   {/* "SOMETHING IS WRONG" NEVER ENDS THE FLOW, and it says the price rather
-                      than hiding it — plus what to change about the input, so the second $20
-                      is not the same $20 twice. */}
+                      than hiding it — plus what to change about the input, so the second
+                      generation is not the same generation twice. The price is the meter's
+                      (calChargeOf); with none charged, or none known, it names no amount. */}
                   <div style={{ marginTop: 8, borderTop: "1px dashed #E2E8F0", paddingTop: 8, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — a new generation is another $20.
+                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — {scan.charge && scan.charge.cents ? `a new generation is another ${scan.charge.said}.` : "that counts as a new generation."}
                   </div>
                 </div>
               )}
@@ -30349,8 +30430,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              one slab the three REAL slabs are re-stamped noPalette and replaced by a single
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
-             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
+             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
+             placed on the plan only (the 3D draws them but has no chooser), so the button could
+             only ever flash place3's "pick from the palette" refusal. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={false}
@@ -34927,8 +35011,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              one slab the three REAL slabs are re-stamped noPalette and replaced by a single
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
-             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
+             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
+             placed on the plan only (the 3D draws them but has no chooser), so the button could
+             only ever flash place3's "pick from the palette" refusal. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
