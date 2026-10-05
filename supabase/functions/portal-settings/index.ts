@@ -84,6 +84,14 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 // A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
+// The Conversations page's calls go through the record timeline's own visibility rule.
+import { scopeCallRows } from "../_shared/crmFeed.ts";
+// The Conversations page (crm_inbox). Its own module, so crmFeed (which the phone-api Worker
+// bundles too) is untouched; this function is its only importer.
+import {
+  buildInbox, INBOX_AT_COLUMN, INBOX_EMAIL_KINDS, InboxReadError, parseInboxRequest,
+  type InboxContact, type InboxSource, type InboxTable,
+} from "../_shared/crmInbox.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
@@ -376,6 +384,11 @@ const GATES: GateTable = {
   // stays `any` so the design record still opens for exactly the people it always did.
   crm_record:            { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
   crm_feed:              { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
+  // The Conversations page: every customer's newest email, text or call. Contacts ALONE, not
+  // crm_record's `any`: there is no design half here, every row is a person. contacts:'own'
+  // passes the gate and is narrowed row by row in the branch (visibleContactIds), and calls
+  // follow the phone level there as well. The crm_ prefix brings the CRM subscription check.
+  crm_inbox:             { area: "contacts", level: "view" },
   crm_send_email:        { area: "contacts", level: "edit" },
   crm_save_note:         { area: "contacts", level: "edit" },
   crm_delete_note:       { area: "contacts", level: "edit" },
@@ -7809,6 +7822,124 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true, phone: { ...scope0, contactOwner } });
     return json({ ok: true, feed });
+  }
+
+  // ── CONVERSATIONS: every customer's newest email, text or call ─────────────────────────
+  // Carolyn, 2026-08-21 @45:22: "So conversations would be email, all of it. In the way that
+  // GoHighLevel has that ... except I want that bar at the top that shows that I can sort and see
+  // just that." And @42:45: "I want to be able to see my calls." One row per customer, newest
+  // first, with an All / Email / Texts / Calls filter; a row opens the customer's record, where
+  // the replying happens (Email and SMS tabs). No reply box here, and no read/unread state:
+  // "waiting on you" is derived from who spoke last.
+  //
+  // The rules (paging, grouping, Mine) live in _shared/crmInbox.ts. This branch only reaches the
+  // tables, and narrows on the way, the same three ways the record page does:
+  //   • contacts:'own' sees only their own customers (visibleContactIds). If that check fails the
+  //     page is refused; it never falls back to everyone;
+  //   • calls only for someone with phone access, and phone:'own' only the calls that are theirs:
+  //     the record timeline's own rule (crmFeed scopeCallRows, phoneFeedScope), with each call's
+  //     customer's owner deciding whose a missed call is;
+  //   • a customer merged into another record is left out. The merge moved their messages to the
+  //     record they were merged into, so nothing is lost.
+  // Customers who only ever got a quote or an invoice by email are not listed: those sends carry no
+  // contact_id, the same as in My Synergy Phone's list. Texts from numbers that aren't a contact
+  // stay in My Synergy Phone too (there is no page here for a bare number).
+  //
+  // ONE CALL A PAGE. Every portal-settings call carries about 2 s of fixed cost, so the page never
+  // makes a second one: the filter's extra facts ride on the first page's answer.
+  if (action === "crm_inbox") {
+    const req0 = parseInboxRequest(payload);
+    if ("error" in req0) return json({ error: req0.error }, 400);
+    const me = isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null;
+    const seesCalls = canRead("phone");
+    const callScope = phoneFeedScope(null);
+    // deno-lint-ignore no-explicit-any
+    const ownerOf = (r: any): string | null => {
+      const c = Array.isArray(r?.crm_contacts) ? r.crm_contacts[0] : r?.crm_contacts;
+      return c?.owner_user_id ?? null;
+    };
+    // deno-lint-ignore no-explicit-any
+    const callVisible = (r: any) => scopeCallRows([r], { ...callScope, contactOwner: ownerOf(r) }).length === 1;
+    // What scopeCallRows needs, and whose customer it is (phone_calls has a foreign key to
+    // crm_contacts, so the owner rides along on the same read).
+    const CALL_SCOPE_COLS = "contact_id, status, placed_by, answered_by, transferred_from, rang_user_ids, crm_contacts(owner_user_id)";
+    const TABLE: Record<InboxTable, string> = { sms: "sms_messages", emailIn: "email_inbound", emailOut: "email_sends", calls: "phone_calls" };
+    const COLS: Record<InboxTable, string> = {
+      sms: "id, contact_id, direction, body, num_media, sent_by, created_at",
+      emailIn: "id, contact_id, subject, received_at",
+      emailOut: "id, contact_id, subject, sent_by, created_at",
+      calls: `id, direction, started_at, answered_at, duration_s, ${CALL_SCOPE_COLS}, phone_voicemails(id)`,
+    };
+    // deno-lint-ignore no-explicit-any
+    const must = (res: { data: any; error: any }, where: string): any[] => {
+      if (res.error) throw new InboxReadError(where, res.error);
+      return (res.data ?? []) as unknown[];
+    };
+    // deno-lint-ignore no-explicit-any
+    const kinds = (t: InboxTable, q: any) => (t === "emailOut" ? q.in("kind", INBOX_EMAIL_KINDS) : q);
+    const src: InboxSource = {
+      async scan(t, cursor, limit) {
+        let q = kinds(t, admin.from(TABLE[t]).select(COLS[t]).eq("client_id", clientId).not("contact_id", "is", null))
+          .order(INBOX_AT_COLUMN[t], { ascending: false }).limit(limit);
+        if (cursor) q = q.lt(INBOX_AT_COLUMN[t], cursor);
+        return must(await q, "load your conversations");
+      },
+      async newer(t, ids, cursor) {
+        const q = kinds(t, admin.from(TABLE[t]).select(t === "calls" ? CALL_SCOPE_COLS : "contact_id").eq("client_id", clientId))
+          .in("contact_id", ids).gte(INBOX_AT_COLUMN[t], cursor).limit(1000);
+        return must(await q, "load your conversations");
+      },
+      async contacts(ids) {
+        const res = await admin.from("crm_contacts").select("id, name, owner_user_id, email, phone")
+          .eq("client_id", clientId).in("id", ids).is("merged_into", null);
+        return must(res, "load these customers") as InboxContact[];
+      },
+      visible: (ids) => visibleContactIds(ids),
+      async everByMe(ids) {
+        if (!me) return new Set<string>();
+        const [t, e, c] = await Promise.all([
+          admin.from("sms_messages").select("contact_id").eq("client_id", clientId).in("contact_id", ids).eq("sent_by", me).limit(1000),
+          admin.from("email_sends").select("contact_id").eq("client_id", clientId).in("contact_id", ids).in("kind", INBOX_EMAIL_KINDS).eq("sent_by", me).limit(1000),
+          // `me` is a checked uuid, so it cannot carry PostgREST grammar into the `or`.
+          seesCalls
+            ? admin.from("phone_calls").select("contact_id").eq("client_id", clientId).in("contact_id", ids).or(`placed_by.eq.${me},answered_by.eq.${me}`).limit(1000)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
+        const where = "check which customers you've been in touch with";
+        return new Set([...must(t, where), ...must(e, where), ...must(c, where)].map((r) => String(r.contact_id)));
+      },
+    };
+    // The first page also says which filters to offer: Texts once the account can text or has
+    // texts, Calls (for someone who may see them) once the phone is offered or there are calls.
+    const firstPage = !req0.cursor;
+    try {
+      const [page, smsCfg, anyText, anyCall] = await Promise.all([
+        buildInbox(src, req0, { me, seesCalls, callVisible }),
+        firstPage ? admin.from("client_settings").select("sms_number, sms_status").eq("client_id", clientId).maybeSingle() : null,
+        firstPage ? admin.from("sms_messages").select("id").eq("client_id", clientId).not("contact_id", "is", null).limit(1) : null,
+        firstPage && seesCalls ? admin.from("phone_calls").select("id").eq("client_id", clientId).not("contact_id", "is", null).limit(1) : null,
+      ]);
+      // deno-lint-ignore no-explicit-any
+      const cfg = (smsCfg as any)?.data;
+      return json({
+        ok: true,
+        threads: page.threads,
+        cursor: page.cursor,
+        ...(firstPage
+          ? {
+            smsReady: !!(cfg && cfg.sms_status === "active" && cfg.sms_number),
+            // A failed probe is "don't know", which only hides a filter button: the list itself
+            // is already answered, so it is not worth refusing the page over.
+            hasTexts: !!anyText && !anyText.error && (anyText.data ?? []).length > 0,
+            hasCalls: !!anyCall && !anyCall.error && (anyCall.data ?? []).length > 0,
+            seesCalls,
+          }
+          : {}),
+      });
+    } catch (e) {
+      if (e instanceof InboxReadError) return dbFail(req, clientId, e.where, e.dbError ?? { message: e.where });
+      throw e;
+    }
   }
 
   // ── EMAIL A CUSTOMER FROM THE RECORD PAGE ──────────────────────────────────────────

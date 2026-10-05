@@ -3081,11 +3081,15 @@ function CommissionsReport({ clientId }) {
 // Saves to client_users.prefs (migration 165) through save_prefs, which is gated "self" --
 // the handler keys strictly off the caller's own user id and never off anything in the body.
 //
-// ⚠️ CARD ORDERING IS NOT HERE, and that is her call rather than an omission. On the same
-// call, right after describing it: "and then, OBVIOUSLY LATER, I'm just like giving like the
-// big scope is allowing them to organize their cards in the way that they want them to be."
-// The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
-// waiting; the UI is not built because she scoped it out.
+// THE RECORD CARD ORDER CARD (2026-10-05). Carolyn on the same call @39:00: "they can put their
+// cards in the order that they want them, and they can have a different order under a contact,
+// and a different order under a deal." She called it "obviously later" then; it is built now as
+// an up/down list here, the Settings home Ahsan proposed @42:28 and she agreed to, rather than
+// dragging on the record: it works by keyboard and on a phone, and it needs no new server write.
+// It saves the FULL key list for a kind, the cards that only show sometimes (Sales tax) included,
+// so they keep their place; CrmRecord reads it through crmOrderSections (02-sales.jsx). save_prefs
+// has kept cardOrder since 2026-08-29 (the column is migration 165's), and the card still checks
+// the echo the way the reply-to card does.
 //
 // THE REPLY-TO CARD BELOW has worked since 2026-09-06, when save_prefs learned to keep
 // `replyToEmail`. Since 2026-10-05 it covers every email a customer gets from us, not only the
@@ -3117,11 +3121,37 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const [sigBusy, setSigBusy] = useState(false);
   const [sigMsg, setSigMsg] = useState(null);
   const savedSig = (prefs && prefs.emailSignature) || "";
+  // ── The record card order card's own state ──────────────────────────────────────
+  // The SAVED list per kind, or null for "never arranged" (the registry order). Seeded from prefs
+  // and moved on screen at once, so a run of presses doesn't wait on the server between them;
+  // the saves queue behind each other (saveOrder) and only the last arrangement has to land.
+  const seedOrder = (p) => {
+    const co = (p && p.cardOrder) || {};
+    const one = (k) => (Array.isArray(co[k]) && co[k].length ? co[k] : null);
+    return { contact: one("contact"), design: one("design") };
+  };
+  const [cardOrder, setCardOrder] = useState(() => seedOrder(prefs));
+  const [orderBusy, setOrderBusy] = useState(false);
+  const [orderMsg, setOrderMsg] = useState(null);
+  const orderWant = useRef(null);
+  const orderSaving = useRef(false);
+  const orderKept = useRef(seedOrder(prefs));
 
-  // One writer for both cards. save_prefs takes the WHOLE prefs map and replaces the stored
+  // One writer for every card. save_prefs takes the WHOLE prefs map and replaces the stored
   // blob with it, so every save has to carry the keys it is not changing -- hence the spread.
+  //
+  // THE SPREAD IS OF WHAT THIS PAGE LAST ASKED FOR, not of the `prefs` prop (review 2026-10-05).
+  // The prop is the copy from the render a save started in, and the card order's queue (saveOrder)
+  // keeps sending from that render: press ▼ twice, switch the Pipeline default while the first
+  // save is out, and the queued order save put the old default back on the server while the card
+  // said "Saved.". Every save merges its own keys into prefsWant first, so each one carries every
+  // card's latest choice, whichever lands last. This page is the only writer of these prefs, so
+  // nothing else can move them underneath it. (A save that fails leaves its value on screen, and
+  // the next save of any card now stores it: the same thing the screen already shows.)
+  const prefsWant = useRef(prefs || {});
   const commit = async (patch) => {
-    const body = { action: "save_prefs", prefs: { ...(prefs || {}), ...patch } };
+    prefsWant.current = { ...prefsWant.current, ...patch };
+    const body = { action: "save_prefs", prefs: prefsWant.current };
     const { data, error } = await sb.functions.invoke("portal-settings", { body });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
     // Hand the saved map back so the shell stops serving the stale one -- otherwise the
@@ -3186,6 +3216,64 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     setSigBusy(false);
   };
 
+  // The cards one kind of record can show, in this person's order: every card, the ones that
+  // only show sometimes included, because the saved list has to give each of them a place.
+  const cardsFor = (kind) => crmOrderSections(CRM_SECTIONS.filter((s) => s.kinds.indexOf(kind) !== -1), cardOrder[kind]);
+
+  // ONE SAVE AT A TIME, THE LATEST ARRANGEMENT LAST. Each press moves the card on screen and asks
+  // for a save; a press while one is in flight only replaces what the next save sends. Two saves
+  // racing would land in either order, and save_prefs replaces the whole blob, so the older one
+  // could win. Every save carries both kinds in full (`send`). The loop goes on calling the
+  // `commit` of the render it started in, which is safe only because commit spreads prefsWant (a
+  // ref) rather than that render's `prefs`: another card saved mid-run rides along.
+  const saveOrder = async (next) => {
+    orderWant.current = next;
+    if (orderSaving.current) return;
+    orderSaving.current = true; setOrderBusy(true); setOrderMsg(null);
+    let said = null;
+    try {
+      while (orderWant.current) {
+        const want = orderWant.current;
+        orderWant.current = null;
+        const send = {};
+        for (const k of ["contact", "design"]) if (want[k]) send[k] = want[k];
+        const back = await commit({ cardOrder: send });
+        // The whitelist check again (see saveAddr): a server that drops the key still says ok.
+        const kept = seedOrder(back);
+        orderKept.current = kept;
+        const same = ["contact", "design"].every((k) => JSON.stringify(kept[k]) === JSON.stringify(send[k] || null));
+        said = same
+          ? { ok: "Saved." }
+          : { err: "Saved, but this server build didn't keep the order — records keep the usual order for now. Tell CSM Synergy." };
+        if (!same && !orderWant.current) setCardOrder(kept);
+      }
+    } catch (e) {
+      // Back to what the server last kept, so the list never shows an order no record will use.
+      orderWant.current = null;
+      setCardOrder(orderKept.current);
+      said = { err: e.message };
+    }
+    orderSaving.current = false; setOrderBusy(false); setOrderMsg(said);
+  };
+
+  const moveCard = (kind, key, step) => {
+    const keys = cardsFor(kind).map((s) => s.key);
+    const i = keys.indexOf(key);
+    const j = i + step;
+    if (i < 0 || j < 0 || j >= keys.length) return;
+    keys[i] = keys[j]; keys[j] = key;
+    const next = { ...cardOrder, [kind]: crmMergeCardOrder(cardOrder[kind], keys) };
+    setCardOrder(next);
+    saveOrder(next);
+  };
+
+  const resetCardOrder = (kind) => {
+    if (!cardOrder[kind]) return;
+    const next = { ...cardOrder, [kind]: null };
+    setCardOrder(next);
+    saveOrder(next);
+  };
+
   return (
     <div>
       {/* YOUR DETAILS FIRST (Carolyn 2026-09-11: "move the information in Your details to the
@@ -3207,6 +3295,69 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           ))}
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+      </div>
+
+      {/* ── RECORD CARD ORDER — Carolyn 2026-08-28 @39:00 ──────────────────────────────
+          Next to the Pipeline default because Ahsan put the two together on that call ("all of
+          these settings for contact cards, the pipeline cards, and the default one"). Two lists,
+          because she asked for "a different order under a contact, and a different order under a
+          deal".
+
+          ⚠️ THE ARROWS ARE NEVER `disabled`. Chrome drops focus from a button the moment it
+          becomes disabled, so the ▲ on a card that has just reached the top would throw a
+          keyboard user's place back to the start of the page. aria-disabled says the same thing
+          to a screen reader, and moveCard ignores a step past either end. */}
+      <div style={S.card}>
+        <div style={S.h2}>Record card order</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Put the cards down the side of a customer's record in the order you want them. Your own
+          order, not the business's — everyone on your team arranges their own.
+        </p>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+          {[["contact", "On a contact"], ["design", "On a deal"]].map(([kind, label]) => {
+            const cards = cardsFor(kind);
+            return (
+              <div key={kind} data-ss-card-order={kind} style={{ flex: "1 1 240px", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", flex: 1 }}>{label}</div>
+                  <button onClick={() => resetCardOrder(kind)} aria-disabled={!cardOrder[kind]}
+                    style={{ background: "none", border: "none", padding: 0, fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                      color: cardOrder[kind] ? ACCENT : "#CBD5E1", cursor: cardOrder[kind] ? "pointer" : "default" }}>
+                    Reset to default
+                  </button>
+                </div>
+                <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+                  {cards.map((s, i) => (
+                    <div key={s.key} data-ss-card-order-row={s.key}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderTop: i ? "1px solid #F1F5F9" : "none", background: "#FFF" }}>
+                      <span style={{ width: 18, fontSize: 11.5, color: "#94A3B8", textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#334155" }}>{s.title}</div>
+                        {s.note && <div style={{ fontSize: 11.5, color: "#94A3B8", lineHeight: 1.35 }}>{s.note}</div>}
+                      </div>
+                      {[[-1, "▲", "up"], [1, "▼", "down"]].map(([step, glyph, word]) => {
+                        const off = (step < 0 && i === 0) || (step > 0 && i === cards.length - 1);
+                        return (
+                          <button key={word} onClick={() => moveCard(kind, s.key, step)}
+                            aria-label={`Move ${s.title} ${word}`} aria-disabled={off} title={off ? "" : `Move ${word}`}
+                            style={{ width: 30, height: 28, flexShrink: 0, border: "1px solid #E2E8F0", borderRadius: 6, background: off ? "#F8FAFC" : "#FFF",
+                              color: off ? "#CBD5E1" : "#475569", fontSize: 11, cursor: off ? "default" : "pointer", fontFamily: "inherit", padding: 0 }}>
+                            {glyph}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {(orderBusy || orderMsg) && (
+          <div style={{ marginTop: 10, fontSize: 12, color: orderBusy ? "#64748B" : (orderMsg.err ? "#DC2626" : "#15803D") }}>
+            {orderBusy ? "Saving…" : (orderMsg.err || orderMsg.ok)}
+          </div>
+        )}
       </div>
 
       {/* ── WHERE REPLIES GO — Carolyn 2026-09-04 @35:06 ────────────────────────────

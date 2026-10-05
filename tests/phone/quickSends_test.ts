@@ -295,7 +295,8 @@ Deno.test("the shell offers quick sends only outside view-as", () => {
 
 Deno.test("the record reads the list only when a picker opens, and Insert never sends", () => {
   const head = slice(SALES, "function CrmRecord(", "const [data, setData] = useState(null);", "CrmRecord's props");
-  assert(head.includes("quickSendsOn = false }) {"), "off unless the shell says so");
+  // Not pinned to the end of the props list: later props (cardOrder, 2026-10-05) follow it.
+  assert(/\bquickSendsOn = false[,\s}]/.test(head), "off unless the shell says so");
   // The list is read in loadQuickSends and nowhere else; loadQuickSends runs only as a picker's onOpen.
   assertEquals(SALES.split(`action: "quick_sends_list"`).length - 1, 1, "one read");
   const load = slice(SALES, "const loadQuickSends = async () => {", "const insertQuickSend = ", "loadQuickSends");
