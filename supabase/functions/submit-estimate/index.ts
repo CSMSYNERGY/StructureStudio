@@ -2777,34 +2777,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // conditionals threaded through the money path. Junior Barns and every other tenant on
   // invoice_in_ghl = true reach this line and walk straight past it.
   if (!invoiceInGhl) {
-    // The number is allocated ONCE per design and reused on every resubmit — the same promise
-    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
-    // customer who receives a revised quote must not see the number change under them.
-    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
-    if (!ssQuoteNumber) {
-      const { data: allocated, error: allocErr } = await supabase
-        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
-      if (allocErr) {
-        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
-        // contract. A driver message can carry column names, constraint text and row values,
-        // and this response is read by an anonymous shopper.
-        await logEdgeError({
-          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
-          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
-          context: { designId: String(designId) },
-        });
-        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
-      }
-      ssQuoteNumber = allocated ? String(allocated) : null;
-    }
-    // NULL means the tenant has no starting number. portal-settings refuses to save this
-    // combination, so reaching here means the row was edited around the portal — refuse rather
-    // than invent a 1, which would collide with the paperwork they already have out.
-    if (!ssQuoteNumber) {
-      return json({
-        error: "This account issues its own quotes but has no starting quote number set. Add one in Settings → CRM Connection → Quotes & Invoices.",
-      }, 400);
-    }
+    // The quote number is allocated further down, AFTER the sales-tax decision (2026-10-07).
+    // See "The quote number" below for why.
 
     // ── Sales tax (migration 148; the rate chain, 2026-09-17) ───────────────────────────
     //
@@ -2879,8 +2853,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       } catch (e) {
         // REFUSE, do not fall to the company rate. A quote that names a location with its own
         // rate would be emailed at a total the builder did not set, and the next resubmit
-        // would quietly change it. Nothing about the quote has been written yet; a first issue
-        // loses its allocated number, as it does on every refusal after the allocation above.
+        // would quietly change it. Nothing about the quote has been written yet, and no number
+        // has been taken: the allocation waits below this decision.
         // This is also what a deploy ahead of migration 245 looks like.
         await logEdgeError({
           fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
@@ -2891,15 +2865,54 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }
       taxDefault = chooseDefaultRate({ salesLocationId, location, homeLot, companyRate: ssTaxRate, companyLabel: ssTaxLabel });
       // No link has a rate. portal-settings refuses to turn invoice_in_ghl off without a company
-      // rate, so reaching here means the row was edited around the portal, and quoting an
-      // untaxed bill is the one outcome worth refusing over — the same posture the missing
-      // quote number takes immediately above. The company rate still lives on that card.
+      // rate, so reaching here means the row was created without that save (280's default: a
+      // paperwork row whose owner never opened the card) or edited around the portal, and
+      // quoting an untaxed bill is the one outcome worth refusing over. The company rate still
+      // lives on that card. Refused BEFORE the number is allocated below, so it costs nothing.
       if (!taxDefault) {
         return json({
           error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
           reason: "no_tax_rate",
         }, 400);
       }
+    }
+    // ── The quote number (moved below the tax decision, 2026-10-07) ─────────────────────
+    // The number is allocated ONCE per design and reused on every resubmit — the same promise
+    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
+    // customer who receives a revised quote must not see the number change under them.
+    //
+    // WHY HERE AND NOT FIRST. Allocating spends the number, and every refusal after it burned
+    // one. Since migration 283 a blank starting number hands out 1000 (Carolyn 2026-10-06), so
+    // with the allocation first, a paperwork tenant with no tax rate yet took 1000, 1001, 1002 …
+    // on every shopper's refused attempt and opened its books on a gap. Both tax refusals above
+    // now come first. The amendment gate below refuses only SIGNED designs, and those already
+    // carry their number, so nothing after this point allocates for a quote that is turned away
+    // before its first write.
+    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
+    if (!ssQuoteNumber) {
+      const { data: allocated, error: allocErr } = await supabase
+        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
+      if (allocErr) {
+        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
+        // contract. A driver message can carry column names, constraint text and row values,
+        // and this response is read by an anonymous shopper.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
+          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
+      }
+      ssQuoteNumber = allocated ? String(allocated) : null;
+    }
+    // DEFENSIVE. Since 283 the allocator answers NULL only for a tenant with no settings row,
+    // which step 1 turned away long before this, or while 123's allocator is still the live one
+    // (this function deployed ahead of 283) and the start is blank. Refuse; never invent a number
+    // here, which could collide with paperwork the builder already has out.
+    if (!ssQuoteNumber) {
+      return json({
+        error: "We couldn't issue a quote number for this business. Please try again later, or contact them directly. (For the business: check your numbering under Settings → CRM Connection → Quotes & Invoices.)",
+      }, 400);
     }
     // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
     // Only a design the customer already signed can be an amendment. BEFORE the first write,

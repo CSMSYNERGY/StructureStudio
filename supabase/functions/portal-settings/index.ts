@@ -1591,7 +1591,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : Promise.resolve({ data: null, error: null }),
       admin
         .from("client_settings")
-        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
+        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, qbo_realm_id, qbo_connected_at, updated_at")
         .eq("client_id", clientId)
         .maybeSingle(),
       // Designer branding lives in client_configs (drives the public ?client= link). See the
@@ -1706,6 +1706,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
         ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // Is a QuickBooks company connected (migration 283's card hint)? The CONNECTION, never the
+        // quickbooks_sync entitlement: a builder who pays for QuickBooks but never connected it has
+        // no QuickBooks numbering to continue. Realm id AND connected_at, getQboConnection's test:
+        // the realm alone survives a disconnect as a tombstone. Only a boolean leaves; never the id.
+        qboConnected: Boolean(data?.qbo_realm_id && data?.qbo_connected_at),
         // Sales tax (migration 148). The rate is surfaced as a PERCENT — it is stored as a
         // fraction, and a settings card that round-trips 0.0725 into a box labelled "%" is how
         // a tenant ends up quoting at 0.07%.
@@ -1896,10 +1901,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
     // Tentative — the capability check below can force this to false. See migration 217.
     if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
-    // The quote-number START. Blank clears it back to "not set"; anything else must be a
-    // whole positive number, because it is allocated with +1 and printed on a customer's
-    // quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is exactly the
-    // collision with a tenant's existing paperwork that this field exists to avoid.
+    // The quote-number START. Blank means "not chosen" (NULL), which the allocator turns into
+    // 1000, or one past the highest quote already issued under the prefix (migration 283, Carolyn
+    // 2026-10-06); a counter already in use is kept instead (the merged check below). Anything
+    // else must be a whole positive number, because it is allocated with +1 and printed on a
+    // customer's quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is
+    // exactly the collision with a tenant's existing paperwork that this field exists to avoid.
     if ("ssQuoteNext" in payload) {
       const raw = String(payload.ssQuoteNext ?? "").trim();
       if (!raw) updates.ss_quote_next = null;
@@ -2062,14 +2069,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updates.ss_invoice_prefix = p;
     }
 
-    // Turning CRM invoicing OFF hands the numbering to us, so BOTH start values (quote AND
-    // invoice — separate sequences, migration 125) have to exist before the switch flips —
-    // otherwise the first SS document would begin at 1 and collide with the tenant's
-    // existing paperwork. Checked against the MERGED state (the controls can arrive in
-    // separate saves), the same way the beta pair below is.
+    // Turning CRM invoicing OFF hands the paperwork to us. The two starting numbers (quote AND
+    // invoice — separate sequences, migration 125) are optional since migration 283 (Carolyn
+    // 2026-10-06: "if a builder hasn't set a starting number, start at 1000 automatically"): a
+    // blank one is allocated as 1000, or one past the highest number already issued under its
+    // prefix, so it can never restart at 1 or repeat an issued number. The TAX RATE is still
+    // required. Checked against the MERGED state (the controls can arrive in separate saves),
+    // the same way the beta pair below is.
     if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
-      const { data: curInv } = await admin
+      const { data: curInv, error: curInvErr } = await admin
         .from("client_settings").select("invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_invoice_next, ss_tax_rate, ss_quote_prefix, ss_invoice_prefix").eq("client_id", clientId).maybeSingle();
+      // A BLANK START NEVER UNSETS A COUNTER IN USE (283). The card posts both numbers on every
+      // save, so a tab opened while a box was blank would write NULL over a counter that has
+      // moved since. The allocator's floor then reads only the documents still on file: a number
+      // on a deleted design goes out again, and a start another admin typed is dropped. Clearing
+      // gains nothing (a NULL counter carries on past the last number issued anyway), so a blank
+      // against a set counter keeps it. Unreadable, the stored counter is unknown: refuse rather
+      // than risk the NULL.
+      const blankQuote = "ssQuoteNext" in payload && updates.ss_quote_next === null;
+      const blankInvoice = "ssInvoiceNext" in payload && updates.ss_invoice_next === null;
+      if (curInvErr && (blankQuote || blankInvoice)) return dbFail(req, clientId, "check your numbering", curInvErr);
+      if (blankQuote && curInv?.ss_quote_next != null) delete updates.ss_quote_next;
+      if (blankInvoice && curInv?.ss_invoice_next != null) delete updates.ss_invoice_next;
       // ── CRM INVOICING IS A CAPABILITY NOW (migration 217, Carolyn 2026-09-07) ───────────
       // "All other builders will only have the option to invoice through SS." A tenant
       // without the flag can write only FALSE here, whatever the body says — the browser
@@ -2077,32 +2098,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // Forced only when the key is PRESENT. A non-allowed tenant still on the CRM path who
       // saves a neighbouring field (a tax label, a prefix) must not be silently flipped into
-      // paperwork they have set no numbering for; the flip belongs to the save that comes
-      // from the Quotes & Invoices card, which always posts this key.
+      // paperwork they never chose, and may have no tax rate for; the flip belongs to the save
+      // that comes from the Quotes & Invoices card, which always posts this key.
       const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
       if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
       // A tenant with NO row is not on the CRM path: this save creates its row, and since
       // migration 280 a new row starts false. Reading it as CRM mode let a lone starting quote
-      // number through without the invoice number and tax rate, into a paperwork-mode row with
-      // two of the three missing: a shopper's quote then takes a number and is refused for want
-      // of a rate (submit-estimate's no_tax_rate), and the next one takes another.
+      // number through without a tax rate, into a paperwork-mode row every shopper's quote is
+      // then refused from (submit-estimate's no_tax_rate).
       const nextInGhl = "invoiceInGhl" in payload
         ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
         : (curInv ? curInv.invoice_in_ghl !== false : false);
-      const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
-      const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
-      if (!nextInGhl && nextQuoteStart == null) {
-        return json({
-          error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
-        }, 400);
-      }
-      if (!nextInGhl && nextInvoiceStart == null) {
-        return json({
-          error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
-        }, 400);
-      }
-      // A rate is as mandatory as a number, and for the same reason: refuse rather than invent.
+      // A rate is mandatory where a number no longer is: refuse rather than invent.
       // Rates come from each quote's delivery address, but this one is what gets charged when
       // that lookup is unavailable — so without it there is no defensible figure to fall back
       // to, and an untaxed invoice goes out that nobody was ever asked about. 0 is accepted;
@@ -2128,6 +2136,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // Gaps stay fine (123/125's own property): the rule is only "not at or below one you
       // have already used", never "exactly one more than the last".
+      //
+      // This guards a TYPED start. A blank one has the same floor inside the allocator (283):
+      // it starts at 1000 or one past the highest issued under the prefix, whichever is higher.
       const numericTail = (value: unknown, prefix: string): number | null => {
         const s = String(value ?? "");
         if (prefix && !s.startsWith(prefix)) return null;
@@ -14115,9 +14126,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
     {
       const { data: cur0 } = await admin.from("client_settings")
-        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy, ss_invoice_next, qbo_realm_id, qbo_connected_at, qbo_refresh_error")
         .eq("client_id", clientId).maybeSingle();
       if (cur0?.invoice_in_ghl === false) {
+        // ── QUICKBOOKS AND A BLANK INVOICE START (migration 283) ─────────────────────────────
+        // A blank invoice start is allocated as 1000, and the books push hands that number to
+        // QuickBooks as the DocNumber. A builder who already invoices out of their QuickBooks
+        // company may well have an invoice 1000 there. So while the push would run, ask for their
+        // next QuickBooks number instead of starting at 1000. "Would run" is the push's own two
+        // dark guards: a connected, unbroken company AND the paid entitlement. Without either
+        // nothing is pushed, and 1000 is safe.
+        //
+        // FAILS CLOSED. The connection is judged from cur0 with getQboConnection's own test (realm
+        // AND connected_at, no refresh error), so no extra read can fail and pass as "not
+        // connected". The entitlement goes through qboEntitled, NOT qboPushAllowed: that one
+        // answers false on a billing-read error, which here would let 1000 through while the push
+        // further down, reading again, could succeed and send it. Connection first, so a tenant
+        // with nothing connected never pays for the billing read; a start already set pays nothing.
+        //
+        // Only the FIRST number is guarded here (once one is issued the counter is set). A company
+        // connected after invoices 1000-1004 went out is covered where the adoption happens:
+        // pushQboInvoice adopts an existing DocNumber only for the same customer.
+        const QBO_NEEDS_START = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Quotes & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
+        const qboBlankStart = async (): Promise<"ok" | "needs_start" | { unreadable: unknown }> => {
+          if (cur0?.ss_invoice_next != null) return "ok";
+          if (!cur0?.qbo_realm_id || !cur0?.qbo_connected_at || cur0?.qbo_refresh_error) return "ok";
+          try {
+            return (await qboEntitled()) ? "needs_start" : "ok";
+          } catch (e) {
+            return { unreadable: e };
+          }
+        };
+
         // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
         // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
         // — there is no live GHL estimate to check.
@@ -14352,6 +14392,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           const phoneDigits = phoneKey(contact.phone);
           if (phoneDigits.length < 10) {
             return json({ error: "This customer has no phone number on file, and they sign the invoice by text. Add their number to the contact first, then push it to an invoice." }, 400);
+          }
+
+          // The QuickBooks start (qboBlankStart above), asked HERE for the phone's reason: refused
+          // at the allocation further down, this push would already have recorded a rep
+          // acceptance, promoted the design and opened its order. A design never accepted has no
+          // issued invoice number to recover, so the answer here is the answer down there.
+          {
+            const qb = await qboBlankStart();
+            if (qb === "needs_start") return json({ error: QBO_NEEDS_START }, 400);
+            if (qb !== "ok") return dbFail(req, clientId, "check your QuickBooks plan", qb.unreadable, 502);
           }
 
           // Who is attesting. Read from client_users by the VERIFIED session's userId, never
@@ -14654,6 +14704,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // Number — allocated ONCE; the recovery path reuses it, never re-numbers.
         let invNumber = recoveredNumber;
         if (!invNumber) {
+          // QuickBooks and a blank start (qboBlankStart, at the top of this branch). Asked before
+          // the number is taken, so a refusal spends nothing.
+          {
+            const qb = await qboBlankStart();
+            if (qb === "needs_start") {
+              await setClaim({ status: "failed", error: "qbo needs invoice start" });
+              return json({ error: QBO_NEEDS_START }, 400);
+            }
+            if (qb !== "ok") {
+              await setClaim({ status: "failed", error: "qbo entitlement unreadable" });
+              return dbFail(req, clientId, "check your QuickBooks plan", qb.unreadable, 502);
+            }
+          }
           const { data: allocated, error: allocErr } = await admin
             .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
           if (allocErr) {
@@ -14661,6 +14724,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             return dbFail(req, clientId, "allocate an invoice number", allocErr, 502);
           }
           invNumber = allocated ? String(allocated) : null;
+          // DEFENSIVE since 283, which starts a blank invoice book at 1000: NULL now means the
+          // settings row vanished, or 125's allocator is still the live one.
           if (!invNumber) {
             await setClaim({ status: "failed", error: "no invoice starting number" });
             return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Quotes & Invoices." }, 400);

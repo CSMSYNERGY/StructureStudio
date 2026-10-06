@@ -285,6 +285,11 @@ function SettingsView({ section, view3d = false }) {
   // cannot choose, SS mode is the only mode — including while their row still says otherwise,
   // which is exactly when they need the numbering fields in front of them.
   const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
+  // What a BLANK starting-number box will actually print (migration 283): the counter already in
+  // use when there is one (the save keeps a set counter over a blank), otherwise 1000. `stored` is
+  // the saved counter as status reports it, so the preview never promises 1000 to a builder whose
+  // numbering has moved on.
+  const blankStart = (stored) => (stored == null || stored === "" ? "1000" : String(stored));
 
   // SALES TAX SUMMARY — read-only, under the company rate (Avalara plan, 2026-09-17). Which rate
   // a quote charges is no longer just the box on this card: a sales location's own rate beats
@@ -583,9 +588,12 @@ function SettingsView({ section, view3d = false }) {
           the quote and the invoice are objects in the CRM. OFF moves BOTH documents into
           StructureStudio — and the copy has to be explicit that contacts and opportunities
           still go to the CRM, because "invoice in StructureStudio" reads like "stop using my
-          CRM" otherwise. The starting number is required before the switch can go off (the
-          server refuses the save without one); numbering that silently restarted at 1 would
-          collide with the paperwork a builder already has out. */}
+          CRM" otherwise. The starting numbers are optional since migration 283 (Carolyn
+          2026-10-06): left blank, quotes and invoices each start at 1000, or carry on one past
+          the last number issued under the prefix, so a book never restarts at 1. A box cleared
+          over a counter already in use keeps that counter (the server ignores the blank), and
+          the preview says so. The tax rate is still required (the server refuses the save
+          without one). */}
       <div style={S.card}>
         <div style={S.h2}>Quotes &amp; Invoices</div>
         {mayGhlInvoice && (
@@ -605,17 +613,20 @@ function SettingsView({ section, view3d = false }) {
         {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Starting quote number</span>
-              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off. Counts up by one per quote.</div></div>
+              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="1000" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last quote). Counts up by one per quote.</div></div>
             <div><span style={S.lbl}>Quote prefix (optional)</span>
               <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || "1041")}.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || blankStart(status && status.ssQuoteNext))}.</div></div>
             <div><span style={S.lbl}>Starting invoice number</span>
-              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="e.g. 2001" inputMode="numeric" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes — set where they begin.</div></div>
+              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="1000" inputMode="numeric" />
+              {/* The QuickBooks line follows the CONNECTION (status.qboConnected), not the
+                  subscription: send_invoice refuses a blank start while a connected company would
+                  receive the invoice, because QuickBooks may already hold an invoice 1000. */}
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes. Leave blank to start at 1000 (or carry on after your last invoice).{status && status.qboConnected === true && <> Connected to QuickBooks? Enter your next QuickBooks invoice number.</>}</div></div>
             <div><span style={S.lbl}>Invoice prefix (optional)</span>
               <input style={S.input} value={form.ssInvoicePrefix} onChange={set("ssInvoicePrefix")} placeholder="e.g. INV-" maxLength={12} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || blankStart(status && status.ssInvoiceNext))}.</div></div>
           </div>
         )}
         {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
@@ -676,15 +687,11 @@ function SettingsView({ section, view3d = false }) {
             })()}
           </div>
         )}
-        {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
+        {/* Only the tax rate is still required: a blank starting number begins at 1000 (283). */}
+        {ssMode && !String(form.ssTaxRate).trim() && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Before saving, set{" "}
-            {[
-              !String(form.ssQuoteNext).trim() && "a starting quote number",
-              !String(form.ssInvoiceNext).trim() && "a starting invoice number",
-              !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
-            ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
-            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a company tax rate a quote whose sales location has no rate of its own has nothing to charge.
+            Before saving, set your sales tax rate (0 counts).
+            Without a company tax rate, a quote whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
         {ssMode && status && status.emailReady === false && (

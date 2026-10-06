@@ -9,7 +9,9 @@
 //   1. THE PUSH bills only from the connected company's mappings. A row stamped with another
 //      company, or with none, is NOT MAPPED: the push stops with "unmapped … then Retry" before a
 //      single request reaches QuickBooks. A row for the connected company still bills, and the
-//      invoice row records which company it went into (create and adopt alike). A layout item
+//      invoice row records which company it went into (create and adopt alike). Only an invoice
+//      under the same number AND for the same customer is adopted (283): another customer's is
+//      refused as `rejected:` and listed for Retry. A layout item
 //      with no row of its own goes to the fallback (the dead `layout_item||` step is gone). A
 //      mapping read that fails says so, rather than reading as every line unmapped.
 //   2. THE CALLBACK clears, after the connection saves, every row not stamped with the company
@@ -267,6 +269,7 @@ type Intuit = {
   calls: { method: string; url: string; body: any }[];
   companyName?: string;
   existingInvoiceId?: string | null;   // the DocNumber idempotency query finds this one
+  existingCustomerId?: string;         // …made for this customer (default: the one the lookup finds, "77")
   // Automated Sales Tax, as Preferences reports it. On (the default, as for most US companies)
   // the push sends no line-level tax codes; off is the one case delivery's NON code is sent.
   automatedSalesTax?: boolean;
@@ -300,7 +303,9 @@ function intuitFetch(w: Intuit): typeof fetch {
           const q = u.searchParams.get("query") ?? "";
           if (/from Customer/i.test(q)) return ok({ QueryResponse: { Customer: [{ Id: "77" }] } });
           if (/from Invoice/i.test(q)) {
-            return ok({ QueryResponse: w.existingInvoiceId ? { Invoice: [{ Id: w.existingInvoiceId, DocNumber: "INV-1", TotalAmt: 100 }] } : {} });
+            return ok({ QueryResponse: w.existingInvoiceId
+              ? { Invoice: [{ Id: w.existingInvoiceId, DocNumber: "INV-1", TotalAmt: 100, CustomerRef: { value: w.existingCustomerId ?? "77" } }] }
+              : {} });
           }
           if (/from Preferences/i.test(q)) return ok({ QueryResponse: { Preferences: [{ TaxPrefs: { PartnerTaxEnabled: w.automatedSalesTax !== false } }] } });
         }
@@ -455,6 +460,22 @@ Deno.test("push: an invoice adopted after a crashed run records its company too"
   assertEquals(row.qbo_invoice_id, "4444");
   assertEquals(row.qbo_realm_id, BOOKS_B);
   assert(!apiCalls(w).some((c) => c.method === "POST"), "an adopted invoice was created a second time");
+});
+
+// Since 283 a blank invoice start numbers from 1000, so a company connected later (or whose own
+// numbering began at 1001) can already hold an UNRELATED invoice under the same number. Adopted on
+// its Id alone, it was linked to ours, nothing reached the books and qbo_error stayed empty.
+Deno.test("push: an invoice with the same number for ANOTHER customer is not adopted, and the push is listed for Retry", async () => {
+  const db = pushWorld(BOOKS_B, [map(TENANT, "fallback", "29", BOOKS_B)], LINES);
+  const w: Intuit = { calls: [], existingInvoiceId: "4444", existingCustomerId: "12" };
+  await push(db, w);
+  const row = ledger(db);
+  assertEquals(row.qbo_invoice_id, null, "someone else's QuickBooks invoice was linked to this one");
+  assertEquals(row.qbo_realm_id, null);
+  assert(String(row.qbo_error).startsWith("rejected: QuickBooks already has an invoice numbered INV-1 for a different customer"), row.qbo_error);
+  assert(String(row.qbo_error).length <= 300, "qbo_pending shows 300 characters");
+  assertEquals(row.qbo_attempts, 1);
+  assert(!apiCalls(w).some((c) => c.method === "POST" && /\/invoice\?/.test(c.url)), "an invoice was created under a number QuickBooks already uses");
 });
 
 Deno.test("push: a mapping read that FAILS says so, and is never reported as unmapped lines", async () => {
