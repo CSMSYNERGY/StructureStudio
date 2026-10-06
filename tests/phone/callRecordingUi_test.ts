@@ -5,7 +5,8 @@
 //     fallback on a database before 263), and that a transcript never rides in the feed
 //   * 01-core's audio and transcript fetches: the sign-in in the header, never in a URL
 //   * Settings › Phone's Call recording card: its standard wording, keep lengths and wording
-//     check are the server's own (portal-settings/phone.ts)
+//     check are the server's own (portal-settings/phone.ts), and the standard wording is the
+//     phone-api Worker's, which is what callers actually hear (the three hand-kept copies)
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
 //
@@ -22,6 +23,7 @@ const CORE = await read("../../portal/01-core.jsx");
 const SALES = await read("../../portal/02-sales.jsx");
 const SMS = await read("../../portal/11-sms.jsx");
 const WORKER_READS = await read("../../workers/phone-api/src/routes/reads.ts");
+const WORKER_RECORDING = await read("../../workers/phone-api/src/recording.ts");
 
 const slice = (src: string, a: string, b: string, what: string) => {
   const i = src.indexOf(a), j = src.indexOf(b, i + a.length);
@@ -240,6 +242,17 @@ Deno.test("the card shows the server's standard wording and every keep length th
   assertEquals(Object.keys(card.PHONE_REC_KEEP_WORDS).map(Number), [...RECORDING_RETENTION_DAYS]);
 });
 
+Deno.test("the standard wording is the Worker's, word for word: what the card shows is what callers hear", () => {
+  const worker = (name: string) => {
+    const m = new RegExp(`export const ${name} = ("[^"]*");`).exec(WORKER_RECORDING);
+    assert(m, `workers/phone-api/src/recording.ts has no ${name}`);
+    return JSON.parse(m![1]) as string;
+  };
+  assertEquals(worker("STANDARD_NOTICE"), STANDARD_NOTICE);
+  assertEquals(worker("STANDARD_NOTICE_TRANSCRIBED"), STANDARD_NOTICE_TRANSCRIBED);
+  assertEquals(STANDARD_NOTICE, "This call may be recorded.", "Carolyn's wording, 2026-10-06");
+});
+
 Deno.test("the card's wording check agrees with parseRecording, sentence for sentence", () => {
   const cases = [
     "", "   ", STANDARD_NOTICE, STANDARD_NOTICE_TRANSCRIBED, "Recorded.", "This call may be recorded for training.",
@@ -247,6 +260,8 @@ Deno.test("the card's wording check agrees with parseRecording, sentence for sen
     "This call is recorded.\u0007", "Calls on this line are not recorded.", "This call isn't being recorded.",
     "Thanks for calling Demo Sheds, the record-setting builder!", "We record calls. Do not share card numbers.",
     "Recordings of calls help us train our team.", "x".repeat(294) + "record",
+    // The sentence 263 shipped: now an own wording on both sides.
+    "This call will be recorded.", "This call will be recorded and transcribed.",
   ];
   for (const text of cases) {
     const server = parseRecording({ on: true, noticeText: text });
@@ -287,4 +302,19 @@ Deno.test("the card says calls are recorded only while the owner's switch AND th
   assert(view.includes("Calls will be announced and recorded once call recording starts on this account."), "the save says when it starts");
   const own = slice(SMS, "// Someone with their OWN calls only", "{installCard}", "the own-level view");
   assert(own.includes("data.recording && data.recording.on && data.recording.serverOn &&"), "the own-level line only when calls really are recorded");
+});
+
+Deno.test("the card promises transcripts only while the server makes them, and says recording is on by default", () => {
+  const view = slice(SMS, "const rec = data.recording || null;", "// Someone with their OWN calls only", "the Call recording card");
+  assert(view.includes("const standard = recForm.transcribe && rec.transcribeServerOn ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;"),
+    "the empty box's sentence is the one the Worker says");
+  assert(/recForm\.transcribe && rec\.transcribeServerOn \? " and read its transcript and summary" : ""/.test(view),
+    "turning recording on promises a transcript only while they are made");
+  assert(/\{!rec\.transcribeServerOn && \(\s*<span data-ss-phone-recording-transcripts-waiting/.test(view), "the note shows only while the rail is off");
+  assert(/Transcripts haven&rsquo;t started on this account yet\. Your choice is saved and takes effect once they do\./.test(view));
+  assert(!/disabled=\{[^}]*transcribeServerOn/.test(view), "the transcripts box is neither hidden nor disabled by the rail");
+  assert(/\{!when && rec\.on && \(\s*<span data-ss-phone-recording-default/.test(view), "a business no owner has saved says it is on by default");
+  assert(view.includes("On by default for every business. The business owner can turn it off."));
+  assert(view.includes("if (recForm.on && (!rec.on || !rec.updatedAt) && !window.confirm(rec.serverOn"),
+    "the first save of a business on by default asks 'Record calls?' before stamping the owner's choice");
 });
