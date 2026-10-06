@@ -300,8 +300,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       minCents: MIN_PAYMENT_CENTS,
       maxCents: MAX_PAYMENT_CENTS,
       tokenizer: {
+        // Also where the modal tokenizes a bank account itself (the Routing and Checking
+        // boxes, 2026-10): the numbers go from the browser to CardSecure, never through here.
         origin: cpTokenizerOrigin(),
         cardUrl: cpTokenizerUrl("card"),
+        // Unused by the current modal; kept for a portal tab still running the old build.
         achUrl: cpTokenizerUrl("ach"),
         // swipeonly is a SEPARATE url: the reader is a USB keyboard, and letting it share
         // the keyed-entry frame would mean a swipe could also be typed by hand.

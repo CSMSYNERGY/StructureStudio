@@ -1094,6 +1094,81 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     box.appendChild(btn);
   }
 
+  // ── Bank details: a Routing box and a Checking box (Carolyn, 2026-09-02) ──────────────
+  // "You need two boxes there … one says routing and one says checking." CardPointe's hosted
+  // tokenizer takes a bank account only as ONE "routing/account" string in ONE field, which
+  // is what the customer used to be asked to type, slash and all. So the two boxes are ours,
+  // and the string they compose goes from this browser straight to CardSecure's tokenize
+  // endpoint on the tokenizer's own origin (served by customer-pay, never written here — the
+  // repo is public). It answers with the same kind of token the iframe posted back, and
+  // customer-pay charges it exactly as before. The numbers never reach our servers.
+  //
+  // Checked 2026-10-06 from headless Chrome on the beta and production origins, with an empty
+  // body: CardSecure answers both the preflight and the request with
+  // Access-Control-Allow-Origin: *, so the browser can read the token.
+  //
+  // ⚠️ THE NUMBERS ARE NEVER WRITTEN ANYWHERE. Not localStorage, not a URL, not the console,
+  // not an error sentence: they live in the two inputs and in the body of that one POST.
+  // scripts/preflight.mjs (checkAchBankInputs) refuses a push where an ach* name meets one of
+  // those sinks, and lifts the two checks below out of this page AND out of
+  // portal/04-orders.jsx, where the builder's copy lives, to prove the two agree.
+
+  // A routing number is 9 digits, and the 9th is a check digit:
+  // 3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) is a multiple of 10. That catches a mistyped digit
+  // here instead of at the bank. A wrong ACCOUNT number cannot be caught: it tokenizes fine and
+  // only fails at the gateway (work log, 2026-09-02).
+  function achRoutingOk(v) {
+    var d = String(v == null ? "" : v);
+    if (!/^\d{9}$/.test(d)) return false;
+    var n = [];
+    for (var i = 0; i < 9; i++) n.push(d.charCodeAt(i) - 48);
+    return (3 * (n[0] + n[3] + n[6]) + 7 * (n[1] + n[4] + n[7]) + (n[2] + n[5] + n[8])) % 10 === 0;
+  }
+  // A checking account number is 4 to 17 digits (17 is the width of the bank-file field).
+  function achAccountOk(v) {
+    return /^\d{4,17}$/.test(String(v == null ? "" : v));
+  }
+  // routing + "/" + account → { token } or { error }. The error sentences name neither number,
+  // and CardSecure's own message is never shown, so nothing it echoes can reach the screen.
+  function achTokenize(origin, achRouting, achAccount) {
+    var bad = { error: "We couldn't check those bank details. Check both numbers and try again." };
+    if (!/^https:\/\//.test(String(origin || "")) || !achRoutingOk(achRouting) || !achAccountOk(achAccount)) {
+      return Promise.resolve(bad);
+    }
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : null;
+    return fetch(origin + "/cardsecure/api/v1/ccn/tokenize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: achRouting + "/" + achAccount, unique: true }),
+      credentials: "omit",
+      cache: "no-store",
+      signal: ctl ? ctl.signal : undefined
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var j = null;
+        try { j = JSON.parse(text); } catch (e) { /* not JSON */ }
+        var tok = j && typeof j.token === "string" ? j.token.trim() : "";
+        // An older reply shape carries the token in `message` beside errorcode 0.
+        if (!tok && j && Number(j.errorcode) === 0 && /^\d{8,}$/.test(String(j.message || ""))) tok = String(j.message);
+        // "NNNN::reason" is how CardSecure spells a failure inside a 200, and it may come
+        // URL-encoded ("0008%3A%3A…"): Fiserv's own itoke.js decodes before it tests, so do we.
+        var plain = tok;
+        try { plain = decodeURIComponent(tok); } catch (e) { /* not encoded */ }
+        if (!res.ok || !tok || tok.length > 256 || /^\d{4}::/.test(plain)) return bad;
+        return { token: tok };
+      });
+    }).then(null, function () {
+      // AFTER the body read, not beside it: a connection that drops (or the 15 s abort that
+      // fires) once the headers are in rejects res.text(), and that must land here too, or
+      // the caller is left on "Checking your bank details…" with Pay off for good.
+      return { error: "Couldn't reach the bank-details check. Check your connection and try again." };
+    }).then(function (r) {
+      if (timer) clearTimeout(timer);
+      return r;
+    });
+  }
+
   function openPayPanel(box, q, opt, fig, btn) {
     // Toggle, the same idiom as the accept and sign panels — this page has no modal
     // pattern, and a fixed overlay plus a mobile keyboard plus an iframe is the layout
@@ -1136,10 +1211,18 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     payBtn.disabled = true;
     payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
 
+    // Bumped on every edit and every remount, so a tokenize answer for numbers that are no
+    // longer on screen is dropped instead of arming Pay. achBusy = a check is scheduled or out.
+    var achSeq = 0, achTimer = null, achBusy = false;
+
     function mountFrame() {
       frameWrap.textContent = "";
       payToken = null; payExpiry = null; payBtn.disabled = true;
+      achSeq++; clearTimeout(achTimer); achBusy = false;
       setError(errEl, "");
+      // A bank account is OUR two boxes, not the tokenizer's single "routing/account" field
+      // (see achTokenize). Its iframe URL is still served, for a page cached before this.
+      if (rail === "ach") { mountBankBoxes(); return null; }
       var f = document.createElement("iframe");
       f.title = "Payment details";
       f.setAttribute("scrolling", "no");
@@ -1147,19 +1230,115 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // Height comes from the SERVER (cpTokenizerHeight) so this page and the portal's
       // modal cannot drift. Too short is not cosmetic: at the original 132px the CVV sat
       // below the fold of a non-scrolling frame, so the form could not be completed and
-      // nothing errored. The fallbacks only matter for a cached page mid-deploy.
+      // nothing errored. The fallback only matters for a cached page mid-deploy.
       var tk = opt.tokenizer || {};
-      var h = rail === "ach" ? (tk.achHeight || 130) : (tk.cardHeight || 265);
-      f.style.cssText = "width:100%;border:0;display:block;height:" + h + "px";
-      f.src = rail === "ach" ? opt.tokenizer.achUrl : opt.tokenizer.cardUrl;
+      f.style.cssText = "width:100%;border:0;display:block;height:" + (tk.cardHeight || 265) + "px";
+      f.src = opt.tokenizer.cardUrl;
       frameWrap.appendChild(f);
-      if (rail === "ach") {
-        var hint = document.createElement("div");
-        hint.style.cssText = "font-size:12px;color:#64748B;margin-top:6px;line-height:1.45";
-        hint.textContent = "Find these at the bottom of a cheque, or in your banking app. Routing number first, then a slash, then your account number.";
-        frameWrap.appendChild(hint);
-      }
       return f;
+    }
+
+    // The Routing box and the Checking box. Digits only, no autofill, nothing remembered: the
+    // values exist in these two inputs and in the one tokenize request, and nowhere else.
+    function mountBankBoxes() {
+      function box(label, id) {
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "margin-bottom:10px";
+        var l = document.createElement("label");
+        l.className = "label";
+        l.setAttribute("for", id);
+        l.textContent = label;
+        var input = document.createElement("input");
+        input.id = id;
+        input.type = "text";
+        input.setAttribute("inputmode", "numeric");
+        input.setAttribute("pattern", "[0-9]*");
+        input.setAttribute("autocomplete", "off");
+        input.setAttribute("autocorrect", "off");
+        input.setAttribute("autocapitalize", "off");
+        input.spellcheck = false;
+        wrap.appendChild(l); wrap.appendChild(input);
+        frameWrap.appendChild(wrap);
+        return input;
+      }
+      var achId = "ach-" + String(q.quoteRef || "q").replace(/[^A-Za-z0-9_-]/g, "");
+      var achRoutingEl = box("Routing number", achId + "-routing");
+      var achAccountEl = box("Checking account number", achId + "-checking");
+      var hint = document.createElement("div");
+      hint.style.cssText = "font-size:12px;color:#64748B;line-height:1.45";
+      hint.textContent = "Find both at the bottom of a check.";
+      frameWrap.appendChild(hint);
+      var state = document.createElement("div");
+      state.style.cssText = "font-size:13px;color:#475569;margin-top:6px;min-height:18px";
+      frameWrap.appendChild(state);
+
+      // The boxes the person has moved on from, so a half-typed number is not scolded
+      // mid-keystroke, and a short one they left STAYS reported while they type in the other
+      // box (the portal's achLeft). Set on leaving a box, cleared when that box is edited.
+      var achLeft = { routing: false, account: false };
+
+      // What is wrong, in words — never the number itself.
+      function problem() {
+        var r = achRoutingEl.value, a = achAccountEl.value;
+        if (r.length > 9 || (achLeft.routing && r.length > 0 && r.length < 9)) return "A routing number is 9 digits.";
+        if (r.length === 9 && !achRoutingOk(r)) return "That routing number doesn't look right. Check it against the bottom of a check.";
+        if (a.length > 17) return "A checking account number is 17 digits at most.";
+        if (achLeft.account && a.length > 0 && a.length < 4) return "A checking account number is at least 4 digits.";
+        return "";
+      }
+
+      function edited() {
+        // ANY edit clears the token first: Pay must never stay armed on numbers that are no
+        // longer the ones on screen.
+        achSeq++; clearTimeout(achTimer); achBusy = false;
+        payToken = null; payExpiry = null; payBtn.disabled = true;
+        state.textContent = "";
+        if (/\D/.test(achRoutingEl.value)) achRoutingEl.value = achRoutingEl.value.replace(/\D/g, "");
+        if (/\D/.test(achAccountEl.value)) achAccountEl.value = achAccountEl.value.replace(/\D/g, "");
+        setError(errEl, problem());
+        if (!achRoutingOk(achRoutingEl.value) || !achAccountOk(achAccountEl.value)) return;
+        var mine = achSeq;
+        achBusy = true;
+        state.textContent = "Checking your bank details…";
+        // Two seconds of quiet, the same the tokenizer's own iframe waited (cpTokenizerUrl:
+        // inactivityto=2000). Any 4+ digits is a valid-looking account number, so a shorter
+        // pause to read the next digits off a check would arm Pay on half of one.
+        achTimer = setTimeout(function () {
+          if (mine !== achSeq || !document.body.contains(frameWrap)) return;
+          achTokenize(opt.tokenizer.origin, achRoutingEl.value, achAccountEl.value).then(function (res) {
+            if (mine !== achSeq) return;
+            achBusy = false;
+            if (res.token) {
+              payToken = res.token; payExpiry = null; payBtn.disabled = false;
+              setError(errEl, "");
+              state.textContent = "Bank details ready ✓";
+            } else {
+              state.textContent = "";
+              setError(errEl, res.error);
+            }
+          }, function () {
+            // achTokenize answers rather than throws; this is the belt to that brace, so a
+            // surprise can never leave the check stuck "busy" with leaving a box unable to retry.
+            if (mine !== achSeq) return;
+            achBusy = false;
+            state.textContent = "";
+            setError(errEl, "Couldn't reach the bank-details check. Check your connection and try again.");
+          });
+        }, 2000);
+      }
+      // Leaving a box says what is wrong with it, or, when both are fine but the last check
+      // failed (a dropped connection), simply checks again.
+      function left(which) {
+        achLeft[which] = true;
+        if (payToken) return;
+        var p = problem();
+        if (p) { setError(errEl, p); return; }
+        if (!achBusy && achRoutingOk(achRoutingEl.value) && achAccountOk(achAccountEl.value)) edited();
+      }
+      achRoutingEl.addEventListener("input", function () { achLeft.routing = false; edited(); });
+      achAccountEl.addEventListener("input", function () { achLeft.account = false; edited(); });
+      achRoutingEl.addEventListener("blur", function () { left("routing"); });
+      achAccountEl.addEventListener("blur", function () { left("account"); });
     }
 
     // ⚠️ THE ORIGIN TEST IS THE WHOLE SECURITY OF THIS LISTENER. This page holds a session
@@ -1219,9 +1398,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         t.className = "sign-tab active";
         feeEl.textContent = "";
         payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
-        // A reload rather than a field toggle: the two rails need different tokenizer
-        // parameters (a bank account is typed as routing/account, which needs the full
-        // keyboard), and a reload correctly discards whatever was typed in the other tab.
+        // A remount rather than a field toggle: Card is the tokenizer's iframe and Bank account
+        // is our own two boxes, and a remount correctly discards whatever was typed in the
+        // other tab, bank numbers included.
         frame = mountFrame();
       });
       tabs.appendChild(t);

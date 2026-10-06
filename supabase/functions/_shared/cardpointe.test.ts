@@ -321,6 +321,41 @@ Deno.test("cpExpiry converts the tokenizer's YYYYMM to the gateway's MMYY", () =
   check("too short", cp.cpExpiry("123") === undefined);
 });
 
+Deno.test("cpExpiry reads the tokenizer's FIVE-digit YYYYM — every card expiring Jan to Sep", () => {
+  // Fiserv's itoke.js builds expiry as `expiryYear.toString() + expiryMonth.toString()` with
+  // the month as a number, and says so in its own comment: "YYYYM (if Jan-Sep)". Before this
+  // case existed, a 5-digit value fell through to undefined and the expiry was silently left
+  // off /auth for nine months out of twelve.
+  check("YYYYM September", cp.cpExpiry("20329") === "0932", String(cp.cpExpiry("20329")));
+  check("YYYYM January", cp.cpExpiry("20321") === "0132", String(cp.cpExpiry("20321")));
+  // A hand-typed one-digit month ("9/2032") is the other five-digit shape. The two cannot
+  // collide: YYYYM starts with "20", MYYYY has its "20" at positions 1-2.
+  check("MYYYY", cp.cpExpiry("92032") === "0932", String(cp.cpExpiry("92032")));
+  check("MYYYY with a separator", cp.cpExpiry("9/2032") === "0932", String(cp.cpExpiry("9/2032")));
+  // Month 0 is no month. Omitted, never guessed.
+  check("YYYYM month 0", cp.cpExpiry("20320") === undefined, String(cp.cpExpiry("20320")));
+  check("five digits that are neither shape", cp.cpExpiry("19329") === undefined, String(cp.cpExpiry("19329")));
+  check("MYYYY outside the century", cp.cpExpiry("91999") === undefined, String(cp.cpExpiry("91999")));
+});
+
+Deno.test("cpAuth sends the gateway MMYY when the tokenizer said YYYYM", async () => {
+  // The unit above is only half the fix: what matters is the field /auth actually receives.
+  let sent: Record<string, unknown> | null = null;
+  globalThis.fetch = ((_u: string | URL | Request, init?: RequestInit) => {
+    sent = JSON.parse(String(init?.body ?? "{}"));
+    return Promise.resolve(new Response(JSON.stringify({
+      respstat: "A", respcode: "000", resptext: "Approval", retref: "r9", amount: "6.00", token: "9413948780281111",
+    }), { status: 200 }));
+  }) as typeof fetch;
+  try {
+    await cp.cpAuth({ ...REQ, expiry: "20329" });
+  } finally {
+    restore();
+  }
+  const body = (sent ?? {}) as Record<string, unknown>;
+  check("expiry reached /auth as MMYY", body.expiry === "0932", JSON.stringify(body.expiry));
+});
+
 Deno.test("cardpointeConfigured is all-or-nothing", () => {
   // The nmiConfigured rule: a tokenizer base without credentials mints tokens nobody can
   // charge, and credentials without a tokenizer base cannot collect an instrument at all.
