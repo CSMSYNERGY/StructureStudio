@@ -445,7 +445,7 @@ export async function chargeInvoicePayment(
     // reason is the one thing the customer can act on. Capped and stripped — it is still
     // third-party text.
     await closeAttempt("closed_declined", msg);
-    const clean = msg.replace(/[ -]/g, " ").trim().slice(0, 200);
+    const clean = msg.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 200);
     return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402 };
   }
 
