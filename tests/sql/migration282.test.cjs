@@ -32,7 +32,9 @@ const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG_TEXT = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/282_crm_ghl_import.sql"), "utf8");
+// LF, whatever the checkout: the mutants below splice LF-only text, and on a CRLF checkout
+// (core.autocrlf) they would not find their anchors. The CRLF check builds its own copy.
+const MIG_TEXT = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/282_crm_ghl_import.sql"), "utf8").replace(/\r/g, "");
 
 // The resolver, lifted from 191 itself (its body is the live one: pg_get_functiondef compared on
 // 2026-10-06), so the test runs the matching rules the import really goes through and not a copy.
