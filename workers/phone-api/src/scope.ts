@@ -4,10 +4,14 @@
 // _shared/access.ts, and the per-row answer comes from public.crm_visible_contact_ids, the SAME
 // predicate portal-settings' visibleContactIds and the 193 RLS policies run. If the meaning of
 // contacts:'own' changes, it changes there and this follows.
+//
+// contacts:'own_view' (2026-10-06, migration 286: own customers, view only) needed no rule of its
+// own here: ownContactsOnly() narrows it like 'own', canEdit() refuses it every write (texting and
+// email), and mayReadUnknownNumbers() keeps unknown numbers to view and edit.
 
 import { canEdit, effectiveAccess, ownContactsOnly, ownPhoneOnly, type Level as AccessLevel } from "../../../supabase/functions/_shared/access.ts";
 import type { Caller } from "./context";
-import { must, type CallerContext, type Level } from "./db";
+import { must, type CallerContext, type ContactsLevel, type Level } from "./db";
 
 /**
  * May they see the TEAM's calls? The literal check SPEC section 2 asks for (rank puts own ==
@@ -18,12 +22,13 @@ export function isTeamLevel(level: Level): boolean {
   return !ownPhoneOnly({ phone: level as AccessLevel });
 }
 
-/** May they text a saved contact? contacts:'edit', or 'own' (which writes, narrowed per row). */
+/** May they text a saved contact? contacts:'edit', or 'own' (which writes, narrowed per row). Never
+ *  'own_view': view only means no texts and no emails (canEdit says no). */
 export function maySendToContacts(ctx: CallerContext): boolean {
   return canEdit({ contacts: ctx.contacts_level as AccessLevel }, "contacts");
 }
 
-/** Narrowed to the customers they own or follow? */
+/** Narrowed to the customers they own or follow? 'own' and 'own_view' both are (ownContactsOnly). */
 export function narrowedToOwn(ctx: CallerContext): boolean {
   return ctx.own_contacts_only || ownContactsOnly({ contacts: ctx.contacts_level as AccessLevel });
 }
@@ -85,8 +90,10 @@ export function phoneLevelOf(row: { role: string | null; title: string | null; a
   return row.role === "owner" ? "edit" : "none";
 }
 
-export function contactsLevelOf(row: { role: string | null; title: string | null; access: Record<string, unknown> | null }): Level {
+/** Contacts level for one team member, from access.ts. Keeps 'own_view' (migration 286): dropping it
+ *  to 'none' would fail closed, but would also drop an own_view follower's text alerts. */
+export function contactsLevelOf(row: { role: string | null; title: string | null; access: Record<string, unknown> | null }): ContactsLevel {
   const eff = effectiveAccess(row.role, row.title, row.access) as Record<string, string | undefined>;
   const lvl = eff.contacts;
-  return lvl === "own" || lvl === "view" || lvl === "edit" ? lvl : "none";
+  return lvl === "own" || lvl === "own_view" || lvl === "view" || lvl === "edit" ? lvl : "none";
 }

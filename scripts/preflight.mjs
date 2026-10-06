@@ -1387,15 +1387,18 @@ function checkAreaMirror(files, inject = null) {
   const areasSrc = ts.slice(areasAt, areasEnd);
   // `levels:` is either a named constant (RVE) or an inline array. Resolve named ones from
   // their own declaration so a change to the constant is seen, not assumed.
+  // ⚠️ A LEVEL MAY CARRY AN UNDERSCORE (contacts' "own_view", migration 286). The level pattern was
+  // [a-z]+ until then, which silently SKIPPED such a level on this side only, so the joined
+  // vocabularies could never agree; self-test (c2) pins it.
   const namedLevels = {};
   for (const m of ts.matchAll(/^const\s+([A-Z][A-Z0-9_]*)\s*:\s*Level\[\]\s*=\s*\[([^\]]*)\]/gm)) {
-    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
   }
   const tsAreas = new Map();
   for (const m of areasSrc.matchAll(/\{\s*key:\s*"([a-z_]+)"[^}]*?levels:\s*(\[[^\]]*\]|[A-Z][A-Z0-9_]*)/g)) {
     const raw = m[2];
     const levels = raw.startsWith("[")
-      ? [...raw.matchAll(/"([a-z]+)"/g)].map((x) => x[1])
+      ? [...raw.matchAll(/"([a-z_]+)"/g)].map((x) => x[1])
       : namedLevels[raw];
     if (!levels) {
       errors.push(`${TS}: area "${m[1]}" uses levels constant \`${raw}\` which preflight could `
@@ -2840,6 +2843,19 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a level-vocabulary mismatch did not fire");
     process.exit(1);
   }
+  // (c2) SEES A LEVEL WITH AN UNDERSCORE, on the TypeScript side. Drop contacts' "own_view" from
+  // access.ts alone: the two sides now disagree, and the rule must say so. With the old [a-z]+
+  // pattern the TS side never saw the level at all, so this mismatch would have been invisible —
+  // and the real files could never have passed (a).
+  const dropOwnView = amTs.replace(/levels:\s*\["none", "own_view", "own", "view", "edit"\]/, 'levels: ["none", "own", "view", "edit"]');
+  if (dropOwnView === amTs) {
+    console.error("self-test FAILED: could not find contacts' own_view in access.ts — the anchor moved and (c2) tests nothing");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { ts: dropOwnView }).some((e) => /area "contacts" allows \[none\|own\|view\|edit\]/.test(e))) {
+    console.error("self-test FAILED: an underscore level missing from access.ts did not fire");
+    process.exit(1);
+  }
   // (d) REFUSES TO RUN BLIND. A renamed AREAS export must be an error, never a clean pass —
   // the whole point is that a rule reporting nothing must not look like a rule reporting OK.
   if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const AREAS", "export const AREAS_RENAMED") })
@@ -2932,7 +2948,8 @@ if (process.argv.includes("--self-test")) {
     + "one that is not, and it refuses to run blind if the table is renamed");
 
   console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
-    + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
+    + "missing from SQL, on a level-vocabulary mismatch (an underscore level like own_view "
+    + "included), on a job title missing from either "
     + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
     + "blind on a renamed AREAS or TITLES export");
 

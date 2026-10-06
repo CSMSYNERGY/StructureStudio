@@ -419,6 +419,95 @@ Deno.test("an 'own' holder cannot grant 'view' on contacts", () => {
   assert(mayGrant("owner", {}, "contacts", "view"), "an owner is unaffected");
 });
 
+// ─── contacts:'own_view' (2026-10-06, migration 286) ─────────────────────────────────────
+// Carolyn: "a per-user setting the builder controls: edit or view only." A FIFTH contacts
+// level, own customers read-only, beside 'own' (own customers, can edit) which does not move.
+// Every property below has a silent failure mode: a level the resolver discards widens the
+// person to their title preset (a sales rep's is 'edit' on EVERY customer), and a level that
+// passes canEdit is not view-only at all.
+
+Deno.test("contacts:'own_view' resolves on a sales rep and on a dealer", () => {
+  assertEquals(effectiveAccess("user", "sales_rep", { contacts: "own_view" }).contacts, "own_view");
+  assertEquals(effectiveAccess("user", "dealer", { contacts: "own_view" }).contacts, "own_view");
+  assertEquals(effectiveAccess("user", null, { contacts: "own_view" }).contacts, "own_view", "a NULL title (a sales rep)");
+  assertEquals(effectiveAccess("user", "crew_leader", { contacts: "own_view" }).contacts, "own_view",
+    "a title whose preset omits contacts gains own-only reading");
+  assertEquals(AREAS.find((a) => a.key === "contacts")?.levels, ["none", "own_view", "own", "view", "edit"],
+    "narrowest first; the order is what preflight compares against migration 286");
+});
+
+Deno.test("contacts:'own_view' reads, is narrowed to their own customers, and does NOT write", () => {
+  const a = effectiveAccess("user", "sales_rep", { contacts: "own_view" });
+  assert(canRead(a, "contacts"), "they see their own customers");
+  assertFalse(canEdit(a, "contacts"), "view only: no edits, notes, texts, emails or files");
+  assert(ownContactsOnly(a), "the same rows as 'own' — RLS, the edge, the browser and the Worker all narrow on this");
+  // Designs and orders keep their own switches: view-only on customers is not view-only on sales.
+  assert(canEdit(a, "designs"), "a rep on own_view still builds and sends estimates (designs:edit)");
+  assert(canEdit(a, "orders"), "...and works orders (orders:edit)");
+});
+
+Deno.test("contacts:'own_view' fails every contacts:'edit' gate and passes contacts:'view'", () => {
+  const a = effectiveAccess("user", "dealer", { contacts: "own_view" });
+  assertEquals(checkGate({ area: "contacts", level: "edit" }, a),
+    "Your access does not let you change Contacts. Ask an owner or admin.");
+  assertEquals(checkGate({ area: "contacts", level: "view" }, a), null);
+  // crm_record's shape: either half is enough to open the record.
+  assertEquals(checkGate({ any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] }, a), null);
+});
+
+Deno.test("an owner carrying a stored own_view resolves edit and is not narrowed", () => {
+  const a = effectiveAccess("owner", "owner", { contacts: "own_view" });
+  assertEquals(a.contacts, "edit");
+  assertFalse(ownContactsOnly(a), "owners are absolute in every layer");
+  assert(canEdit(a, "contacts"));
+});
+
+Deno.test("own_view exists on contacts only: commissions and phone discard it", () => {
+  assertEquals(effectiveAccess("user", "sales_rep", { commissions: "own_view" }).commissions, "own", "the preset stands");
+  assertEquals(effectiveAccess("user", "sales_rep", { phone: "own_view" }).phone, "own", "the preset stands");
+  assertEquals(effectiveAccess("user", "office_staff", { phone: "own_view" }).phone, "view");
+  assertEquals(effectiveAccess("user", "sales_rep", { designs: "own_view" }).designs, "edit");
+  assertEquals(sanitizeAccess({ contacts: "own_view", commissions: "own_view", phone: "own_view", orders: "own_view" }, "sales_rep"),
+    { contacts: "own_view" }, "stored on contacts and nowhere else");
+});
+
+Deno.test("mayGrant: who may hand out own_view, and what an own_view holder may hand out", () => {
+  const own = effectiveAccess("admin", "admin", { contacts: "own" });
+  assert(mayGrant("admin", own, "contacts", "own_view"), "an 'own' holder may narrow someone to view only");
+  assert(mayGrant("admin", own, "contacts", "own"));
+  assertFalse(mayGrant("admin", own, "contacts", "view"), "re-pinned: an 'own' holder never widens");
+  assertFalse(mayGrant("admin", own, "contacts", "edit"));
+
+  const ownView = effectiveAccess("admin", "admin", { contacts: "own_view" });
+  assert(mayGrant("admin", ownView, "contacts", "own_view"), "passing on exactly what they hold");
+  assert(mayGrant("admin", ownView, "contacts", "none"), "taking it away is always allowed");
+  assertFalse(mayGrant("admin", ownView, "contacts", "own"), "own writes; they do not");
+  assertFalse(mayGrant("admin", ownView, "contacts", "view"), "rule 3: never wider than their own customers");
+  assertFalse(mayGrant("admin", ownView, "contacts", "edit"));
+
+  const viewer = effectiveAccess("admin", "admin", { contacts: "view" });
+  assert(mayGrant("admin", viewer, "contacts", "own_view"), "a read-only 'view' holder may hand out read-only own");
+  assertFalse(mayGrant("admin", viewer, "contacts", "own"), "...but not the writing 'own'");
+
+  for (const lv of ["none", "own_view", "own", "view", "edit"] as Level[]) {
+    assert(mayGrant("owner", {}, "contacts", lv), `an owner may grant ${lv}`);
+  }
+  // The whole-map door the Team screen calls.
+  assertEquals(mayGrantMap("admin", ownView, effectiveAccess("user", "sales_rep", { contacts: "own" })), "Contacts");
+  assertEquals(mayGrantMap("owner", effectiveAccess("owner", "owner", null), effectiveAccess("user", "sales_rep", { contacts: "own_view" })), null);
+});
+
+Deno.test("the default is today's behaviour: no preset starts view-only", () => {
+  assertEquals(PRESETS.dealer.contacts, "own", "the Dealer title stays Own · Edit");
+  assert(canEdit(effectiveAccess("user", "dealer", null), "contacts"));
+  for (const t of TITLES) {
+    assert(PRESETS[t.key].contacts !== "own_view", `${t.key}'s preset must not start view-only`);
+  }
+  assertEquals(effectiveAccess("user", "sales_rep", null).contacts, "edit");
+  // An unknown level still falls back to the preset rather than blanking it.
+  assertEquals(effectiveAccess("user", "sales_rep", { contacts: "own-view" }).contacts, "edit");
+});
+
 // ── APPROVE CHANGES — a SEPARATE area, not a level above `edit` (2026-09-07) ────────────
 // Carolyn: "there should be both the option to give approval for a change order, but they can
 // also make the change order if they are given permission." These pin that the two grants are
