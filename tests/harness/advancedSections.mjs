@@ -18,6 +18,9 @@
 //      a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
 //      3b: on Auto, the steps' and posts' −/+ step from the count Auto draws, and the posts' Auto chip
 //      keeps saying what Auto draws once a number is typed;
+//      3f (Carolyn 2026-10-06): under Number of steps, one line says the count is the treads you walk on,
+//      its (i) that the porch floor at the top is not counted; the box keeps its exact name and its
+//      −/+ theirs, and Porch posts has no note;
 //      3c (2026-10-03): a projecting porch's steps go down either side too, greyed out (saying why) on a
 //      deck under 2' 6"; one picked on a deeper deck stays picked there but is not drawn, the note saying
 //      so, and is drawn again once the deck is deepened (2026-10-04); a recessed porch offers the three
@@ -376,6 +379,33 @@ try {
   ok("3b: from Auto, + gives one post more than Auto draws", autoPosts >= 2 && postsUp === Math.min(8, autoPosts + 1), `Auto ${autoPosts} → ${postsUp}`);
   ok("3b: …and the chip still says what Auto draws, not the number typed", postsChip.trim() === `Auto (${autoPosts})` && await autoChip("porchPosts").getAttribute("aria-pressed") === "false", postsChip);
   await autoChip("porchPosts").click();
+
+  // 3f ── what the count counts (Carolyn 2026-10-06: the treads you walk on) ──────────────────────
+  const stepsF = page.locator('[data-ss-adv-f="porchStepCount"]');
+  const stepsNote = stepsF.locator(".ss-adv-note");
+  await stepsF.scrollIntoViewIfNeeded();
+  const noteInfo = await stepsNote.evaluateAll((ns) => ns.map((n) => {
+    const short = [...n.childNodes].filter((c) => c.nodeType === 3).map((c) => c.textContent).join("").replace(/\s+/g, " ").trim();
+    const row = n.parentElement.querySelector(".ss-adv-step"), box = n.closest(".is-full"), rise = box && box.querySelector('[data-ss-step-rise="adv"]');
+    return { short, h: Math.round(n.getBoundingClientRect().height), belowRow: !!row && n.getBoundingClientRect().top >= row.getBoundingClientRect().bottom - 1,
+      aboveRise: !rise || rise.getBoundingClientRect().top >= n.getBoundingClientRect().bottom - 1, rise: !!rise, hasWhy: !!n.querySelector("details.ss-adv-why") };
+  }));
+  ok("3f: under Number of steps, one note: \"The treads you walk on.\"", noteInfo.length === 1 && noteInfo[0].short === "The treads you walk on." && noteInfo[0].hasWhy, JSON.stringify(noteInfo));
+  ok("3f: …one line, under the −/+ row and above the rise readout", noteInfo.length === 1 && noteInfo[0].h <= 20 && noteInfo[0].belowRow && noteInfo[0].rise && noteInfo[0].aboveRise, JSON.stringify(noteInfo));
+  const stepsWhy = stepsNote.locator(".ss-adv-why");
+  const stepsWhyClosed = !(await stepsWhy.locator(".ss-adv-why-t").isVisible());
+  await stepsWhy.locator("summary").click();
+  await page.waitForTimeout(150);
+  const stepsWhyT = (await stepsWhy.locator(".ss-adv-why-t").innerText().catch(() => "")).trim();
+  ok("3f: …its (i) opens on a click: the porch floor at the top is not counted as a step",
+    stepsWhyClosed && stepsWhyT === "The porch floor at the top is not counted as a step.", JSON.stringify(stepsWhyT));
+  await shot(page, "ask-porch-steps-treads-note.png");
+  await stepsWhy.locator("summary").click();
+  await page.waitForTimeout(150);
+  ok("3f: the box keeps its exact name, and −/+ theirs", (await byLabel(page, "Number of steps").count()) === 1
+    && (await page.getByRole("button", { name: "Number of steps: one more", exact: true }).count()) === 1
+    && (await page.getByRole("button", { name: "Number of steps: one fewer", exact: true }).count()) === 1);
+  ok("3f: Porch posts has no note", (await page.locator('[data-ss-adv-f="porchPosts"] .ss-adv-note').count()) === 0);
 
   // 3c ── the steps by porch kind (2026-10-03) ─────────────────────────────────────────────────────
   const segOpts = () => page.locator('[data-ss-adv-f="porchSteps"] button').evaluateAll((bs) => bs.map((b) => `${b.textContent.trim()}${b.disabled ? "(off)" : ""}`).join("|"));

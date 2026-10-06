@@ -22394,6 +22394,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [activeTool, setActiveTool] = useState(null);
   const [items, setItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  // The Floorplan card's Measure toggle (Carolyn 2026-10-06, Q22: "a Measure feature you can turn on
+  // and off"). It starts OFF on every load, so the plan and the PDF look exactly as they did before
+  // it existed. A view setting for this page only: not saved with the design, not in config, not in
+  // localStorage. With it on, the selected wall item gets its two along-wall chips on the plan.
+  const [measureOn, setMeasureOn] = useState(false);
   // The door or window selected INSIDE a partition wall, { pid, oid }. It counts only while that
   // partition is the selection.
   const [selOpening, setSelOpening] = useState(null);
@@ -25462,6 +25467,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // so the export is a straight 2× DPR rasterization — same scale, same mgX/mgY,
   // same item positions. No coordinate conversion needed.
   const renderExportCanvas = () => {
+    // The plan's Measure chips are screen-only selection chrome, so they are deliberately not drawn here.
     const dpr = 2;
     const canvas = document.createElement("canvas");
     canvas.width = cW * dpr; canvas.height = cH * dpr;
@@ -28155,6 +28161,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 placeholder={`blank = ${d3PorchBlankStepCount(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`)}`}
                 {...calOptNumProps("ssc-fix-porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
                 style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              <span data-ss-step-what="ss-fix" style={{ display: "block", fontSize: 11, color: "#64748B", fontWeight: 600, marginTop: 2 }}>The treads you walk on, not counting the porch floor at the top.</span>
             </label>
           )}
         </>
@@ -31340,7 +31347,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           The placeholder's count is the one drawn, counted on the ground under the
                           flight (d3PorchBlankStepCount; review, 2026-09-29): over falling ground it
                           is more than the floor height alone gives, and on a steep fall more than
-                          the 12 a typed count may be, which the hint then says. */}
+                          the 12 a typed count may be, which the hint then says.
+                          Carolyn 2026-10-06: the count is the treads you walk on; the deck is not one. */}
                       {kind !== "none" && roof.porchSteps && (() => {
                         const autoSteps = d3PorchBlankStepCount(adminCal.spec, sel.size);
                         const st = pr ? pr.steps : rr && rr.steps;
@@ -31353,6 +31361,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             <input type="number" step="1" min="1" max="12" placeholder={`blank = ${autoSteps}`} data-ss-step-count="ss-grid"
                               {...calOptNumProps("porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
                               style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                            <div data-ss-step-what="ss-grid" style={hint}>The treads you walk on, not counting the porch floor at the top.</div>
                             {riseIn != null && (
                               <div data-ss-step-rise="ss-grid" style={{ ...hint, color: steep || shallow ? "#B45309" : "#A16207" }}>
                                 {`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}${pastBox ? ` Left blank, it draws ${autoSteps} steps; a number typed here can be 12 at most.` : ""}`}
@@ -31881,8 +31890,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // A small count with −/+ and an Auto chip (a blank key): the number of steps, the porch's posts.
     // On Auto, −/+ step from the count Auto draws (autoN, what a BLANK key builds), so "one more" is
     // always one more than what is on screen (review 2026-09-29: they stepped from the bottom of the band).
-    // The Auto chip is the same .ssd-chip as "Whole wall" and "Just under the eave".
-    const advCount = ({ f, label, value, band, write, autoLabel, autoN }) => {
+    // The Auto chip is the same .ssd-chip as "Whole wall" and "Just under the eave". `note` (optional) is
+    // advNoteEl's, under the row. Carolyn 2026-10-06: the count is the treads you walk on; the deck is not one.
+    const advCount = ({ f, label, value, band, write, autoLabel, autoN, note }) => {
       const n = Number(value) >= band[0] ? Math.round(Number(value)) : null;
       const base = n != null ? n : (autoN != null ? Math.round(autoN) : null);
       const clamp = (x) => Math.max(band[0], Math.min(band[1], x));
@@ -31900,6 +31910,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
             <button type="button" aria-pressed={n == null} className={n == null ? "ssd-chip is-on" : "ssd-chip"} style={advPill} onClick={() => write(null)}>{autoLabel}</button>
           </div>
+          {advNoteEl(note)}
         </div>
       );
     };
@@ -33183,7 +33194,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {kind !== "none" && roof.porchSteps && (
             <div key="stepCount" className="ss-adv-f is-full">
               {advCount({ f: "porchStepCount", label: "Number of steps", value: roof.porchStepCount, band: [1, 12],
-                write: (n) => calSetRoofOpt("porchStepCount", n), autoLabel: `Auto (${autoSteps})`, autoN: autoSteps })}
+                write: (n) => calSetRoofOpt("porchStepCount", n), autoLabel: `Auto (${autoSteps})`, autoN: autoSteps,
+                note: ["The treads you walk on.", "The porch floor at the top is not counted as a step."] })}
               {riseIn != null && advSay(`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}${pastBox ? ` Left on Auto, it draws ${autoSteps} steps; a number typed here can be 12 at most.` : ""}`,
                 steep || shallow, { "data-ss-step-rise": "adv" })}
             </div>
@@ -34398,16 +34410,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           + (selectedId && !planLocked && items.some((i) => i.id === selectedId && isVentItem(i) && i.wall) ? " is-dense" : "")}>
         <div className="ssd-tb-r">
           {/* Slot 1: the armed tool's hint, else the selected item's name, the one the 3D footer's
-              "Remove …" uses. One text node, so a getByText(name, exact) never lands on this label. */}
+              "Remove …" uses. One text node, so a getByText(name, exact) never lands on this label.
+              With Measure on and nothing selected it says what to do next, in the SAME fixed-height
+              .ssd-tb-selw box: selecting an item then swaps the text inside a 13px box, so the bar
+              cannot change height and the plan cannot move under the pointer mid-gesture (the
+              e44132fb bug, turned vertical). Kept short: the box is what the row has left over, and
+              a hint wider than that is clipped to nothing (199px at 768 with 3D on). */}
           {activeTool
             ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].partitionType ? "Click inside the building where the wall goes" : ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
-            : selectedId && !planLocked && (() => {
+            : selectedId && !planLocked ? (() => {
               const si = items.find((i) => i.id === selectedId);
               if (!si) return null;
               const sc = ITEMS[si.type];
               const nm = String(si.windowName || si.doorName || si.rampName || (sc && (sc.label || sc.shortLabel)) || si.planLabel || si.type);
               return <span className="ssd-tb-selw"><span className="ssd-tb-sel" title={nm}>{"Selected: " + nm}</span></span>;
-            })()}
+            })()
+            : measureOn && !planLocked
+              ? <span className="ssd-tb-selw"><span className="ssd-tb-sel" title="Select an item on a wall to measure it">Select a wall item to measure</span></span>
+              : null}
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
             // in place. Deliberate click only — dragging/nudging never opens it. Essential for
@@ -34607,7 +34627,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div className="ssd-plan">
         <div className="ssd-plan-head">
           <span className="ssd-plan-t">Floorplan</span>
-          {sel.size && <span className="ssd-plan-meta">{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
+          {sel.size && <span className="ssd-plan-meta" style={{ marginLeft: "auto" }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
+          {/* Measure (Carolyn 2026-10-06, Q22): a view toggle for the along-wall chips drawn in the
+              plan svg below. It changes nothing in the design, so it does not disarm a tool, clear
+              the selection or ask for the lead gate; it is hidden on a locked plan, where nothing
+              can be selected.
+              ⚠️ HERE, not in the plan toolbar. It started there, and the extra ~95px wrapped the
+              bar onto a second line at laptop and tablet widths the moment a vent, a catalog door
+              or a window was pressed, even with Measure off: the plan dropped 35px under the
+              pointer, the trailing click hit bare floor and the item deselected (the e44132fb
+              bug, turned vertical). That bar holds a selected item's actions and has no room to
+              spare. This header never changes with the selection, and the chip is no taller than
+              the header's own line (negative margins, the icon in a 12px box), so the plan sits
+              where it always did. The marginLeft:auto on the size keeps it beside the button.
+              The ssd-chip is-on look is the option chips'. 📐, because the Line tool is 📏. */}
+          {!planLocked && (
+            <button type="button" onClick={() => setMeasureOn((v) => !v)} aria-pressed={measureOn}
+              title="Show how far the selected item is from each end of its wall"
+              className={measureOn ? "ssd-chip is-on" : "ssd-chip"}
+              style={{ ...S.pill, flex: "0 0 auto", alignSelf: "center", gap: 4, margin: "-3px 0", padding: "2px 8px", fontFamily: "inherit", fontSize: 11.5, lineHeight: "14px", whiteSpace: "nowrap" }}>
+              <span className="ssd-tool-ic" style={{ fontSize: 12 }}>📐</span>Measure
+            </button>
+          )}
         </div>
         {/* The svg's colours are the palette's, but the building outline keeps stroke="#1E293B" as its
             ATTRIBUTE (helpers, the harness and snap.mjs find the plan by it) and is painted by the
@@ -35003,6 +35044,82 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
+          {/* ── ALONG-WALL DIMENSIONS FOR THE SELECTED ITEM, behind the Measure toggle ──────────────
+              Two measurements, one to each end of the wall, the way ShedPro draws them (Carolyn
+              2026-09-03): "we're not showing the measurements of light, so they don't know if
+              they're centered or not ... how far it is from here to here at the end."
+
+              e44132fb took them off the plan (2026-09-07, "that is why we have the grids"). They are
+              back behind the Floorplan card's Measure button, OFF until clicked (Carolyn 2026-10-06, Q22),
+              so with it off the plan draws exactly what it did. Why this is safe now: the
+              "glitchy" plan of 09-04..09-07 was never these chips. It was the wall-elevation panel
+              mounted OUTSIDE the svg, beside the plan in a flex row, which slid the plan sideways
+              mid-gesture so the trailing click missed and deselected. Nothing here leaves the svg,
+              so selecting an item cannot move the plan (planMeasure.mjs case C holds it there).
+
+              Three placement decisions, each load-bearing:
+              • Rendered HERE, as a sibling of the resize badge, NOT inside the item's own <g>.
+                That group carries `transform=rotate(...)` for east/west walls, so a chip drawn
+                inside it would hang sideways and the numbers would be unreadable on two of the
+                four walls.
+              • Drawn INSIDE the building. The band outside each wall already holds the
+                building's own "12 ft" dimensions and the FRONT/BACK/LEFT/RIGHT labels, and it
+                is also where the viewBox `frame` crops — inside, nothing can collide and
+                nothing can be clipped.
+              • No export twin, on purpose. renderExportCanvas draws no selection chrome at all,
+                and these follow the selection; they are a design-time aid, not part of the
+                customer's quote (Ahsan, 2026-09-04). The toggle does not change that.
+
+              Same test as ⇔ Center (wallOnly || wallSnap, on a wall), so the chips and Center /
+              ✓ Centered always show together; a loft, note, line, prop, partition or ceiling
+              device draws nothing. The two inks are placeDims', so the 2D and 3D agree on centred.
+              data-ss-measure is an inert test marker.
+
+              Live during a drag for free: onPtrMove commits to `items` on every pointer move,
+              and this reads `items`. A REFUSED move commits nothing, so the chips simply hold
+              their last legal reading instead of flickering — which is the honest behaviour. */}
+          {measureOn && selectedId && !planLocked && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            const sc = si && ITEMS[si.type];
+            if (!si || !sc || !(sc.wallOnly || sc.wallSnap)) return null;
+            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
+            if (!d) return null;                     // no wall to measure along
+            const isSlab = !!ssSlabModel(si.type, ITEMS);
+            // Clear the item itself: a wall slab is drawn inside the wall and would sit on top
+            // of a dimension line placed at a fixed inset.
+            const inset = (isSlab ? slabDepthFt(sc, si) : 0.5) * scale + 22;
+            const axis0 = d.isHoriz ? mgX : mgY;
+            const near = axis0 + (d.posFt - d.half) * scale;
+            const far = axis0 + (d.posFt + d.half) * scale;
+            const end = axis0 + d.wallLen * scale;
+            const cross = d.isHoriz
+              ? (si.wall === "north" ? mgY + inset : mgY + pH - inset)
+              : (si.wall === "west" ? mgX + inset : mgX + pW - inset);
+            const ink = d.centered ? "#059669" : "#1E293B";
+            const seg = (key, a, b, feet) => {
+              const mid = (a + b) / 2;
+              const label = fmtDimFtIn(feet);
+              const cw = Math.max(28, label.length * 6.5 + 12);
+              const x1 = d.isHoriz ? a : cross, y1 = d.isHoriz ? cross : a;
+              const x2 = d.isHoriz ? b : cross, y2 = d.isHoriz ? cross : b;
+              const cx = d.isHoriz ? mid : cross, cy = d.isHoriz ? cross : mid;
+              const tk = 4;                          // end-tick half length, perpendicular
+              return (
+                <g key={key} data-ss-measure={key} pointerEvents="none">
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <line x1={d.isHoriz ? x1 : x1 - tk} y1={d.isHoriz ? y1 - tk : y1}
+                        x2={d.isHoriz ? x1 : x1 + tk} y2={d.isHoriz ? y1 + tk : y1}
+                        stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <line x1={d.isHoriz ? x2 : x2 - tk} y1={d.isHoriz ? y2 - tk : y2}
+                        x2={d.isHoriz ? x2 : x2 + tk} y2={d.isHoriz ? y2 + tk : y2}
+                        stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <rect x={cx - cw / 2} y={cy - 9} width={cw} height={18} rx={4} fill={ink} />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fill="#FFF" fontSize={10} fontWeight="700">{label}</text>
+                </g>
+              );
+            };
+            return <>{seg("before", axis0, near, d.before)}{seg("after", far, end, d.after)}</>;
+          })()}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
             if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)

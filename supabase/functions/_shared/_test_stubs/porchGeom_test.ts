@@ -698,6 +698,20 @@ Deno.test("porchStepCount: the builder's number of steps, climbing the same heig
   assertEquals(JSON.stringify({ ...after, steps: null }), JSON.stringify({ ...before, steps: null }), "only the steps moved");
 });
 
+// Carolyn 2026-10-06: the count is the treads you walk on, and the porch floor at the top is not one.
+// The panels now say so in words; this pins that the number already meant it, typed or Auto.
+Deno.test("porchStepCount counts TREADS (Carolyn 2026-10-06)", () => {
+  const g = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { posts: 4 });
+  const s = F.d3PorchStepsGeom(g, 4, "center", 1.5, 3);
+  assertEquals(s.count, 3);
+  // 18 in from the grass to the deck over FOUR rises: three treads, then up onto the deck itself.
+  assertAlmostEquals(s.rise * 12, 4.5, 1e-9);
+  assertAlmostEquals(s.rise * (s.count + 1), 1.5, 1e-12);
+  // Auto counts the same way: 1.5 ft is 3 treads, the panels' "blank = 3".
+  assertEquals(F.d3PorchAutoStepCount(1.5), 3);
+  assertEquals(F.d3PorchStepsGeom(g, 4, "center", 1.5).count, 3);
+});
+
 // ── CENTRE STEPS GET A BAY IN THE MIDDLE (fix, 2026-09-25) ────────────────────────────────
 // The 8.5 ft rule gives 2 bays to any porch 8.5 to 17 ft wide, which stood a post at x = 0, at the
 // top of centred steps. Without porchPosts, centre steps take one bay more where the rule's count
