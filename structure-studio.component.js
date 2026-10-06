@@ -2890,9 +2890,10 @@ function wallHeightOptionsFor(C, styleKey, widthFt, includeInternal) {
 // This replaces the per-style `d3.claddingChoices` whitelist: the offered set is a builder's
 // Options rows now, not a checkbox grid buried in the 3D calibration spec.
 //
-// ⛔ THE IDS ARE UNCHANGED AND STILL CLOSED — get_config only ever emits the four D3_CLADDING
-// keys — so sel.cladding, every saved design, d3SidingOverride and the whole 3D chain are
-// untouched by this. Only WHICH of the four are offered, and what they are called, moved.
+// ⛔ THE IDS ARE STILL CLOSED — get_config only ever emits D3_CLADDING keys, five of them since
+// "vinyl" joined on 2026-10-06 (migration 285) — so sel.cladding, every saved design,
+// d3SidingOverride and the whole 3D chain are untouched by this. Only WHICH of them are offered,
+// and what they are called, moved.
 function claddingOptionsFor(C, styleKey, includeInternal) {
   const m = (C && C.claddingOptions) || {};
   const list = styleKey ? m[styleKey] : null;
@@ -2910,8 +2911,8 @@ function resolveCladding(C, styleKey, claddingId) {
   // includeInternal TRUE, for the same reason resolveWallHeight does it: this resolves a PRICE.
   return claddingOptionsFor(C, styleKey, true).find((o) => o.id === id) || null;
 }
-// DISPLAY ONLY. The built-in name is the fallback, so one place owns those four strings and a
-// tenant who renamed nothing reads exactly as they always did.
+// DISPLAY ONLY. The built-in name is the fallback, so one place owns those five strings and a
+// tenant who renamed nothing reads them there (lap's became 7" LP Lap Siding on 2026-10-06).
 // ⛔ This must NEVER feed d3NormalizeCladding — that resolves geometry, and it resolves it from
 // the id. A renamed cladding is still the same cladding to the renderer.
 function claddingLabelOf(opt, id) {
@@ -3495,7 +3496,16 @@ function computeSelectionRows(sel, paintColors, C, items) {
     if (rt) {
       const rc = pick(sel && sel.roofColor, (c) => (rt === "Metal" ? c.metal : c.shingle));
       rTotal = charge(rc);
-      rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
+      // THE METAL PROFILE (2026-10-06), worded as the quote words it (_shared/roofProfile.ts
+      // roofLineDesc): "Metal (Standing Seam) — Black" for a metal roof on standing seam, today's words
+      // for every other roof, and never a different amount. The design's own pick, else its style's
+      // starting value, else AG Panel. Spelled out here rather than through d3CustomerRoofProfile:
+      // designerPricing.ts lifts this function on its own.
+      const rpOf = (v) => { const s = String(v == null ? "" : v).toLowerCase().replace(/[\s_-]+/g, ""); return s === "agpanel" || s === "standingseam" ? s : null; };
+      const stR = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
+      const rProfile = rpOf(sel && sel.roofProfile) || rpOf(stR && stR.d3 && stR.d3.roofProfile) || "agpanel";
+      const rtShown = rProfile === "standingseam" && rt.toLowerCase().replace(/\s+/g, "") === "metal" ? `${rt} (Standing Seam)` : rt;
+      rDetail = (sel && sel.roofColor) ? `${rtShown} — ${sel.roofColor}` : `${rtShown} — (color TBD)`;
     }
     rows.push({ key: ssPriceRowKey("roof"), label: "Roof", detail: rDetail, total: showP ? rTotal : null,
       ...(showP ? ssPriceable(rTotal, 1) : {}) });
@@ -5131,8 +5141,11 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // The customer-facing exterior material. Carolyn's direction (2026-08-18): call it
 // CLADDING, not siding, and offer three genuinely different products rather than one
 // texture rotated:
-//   lap     horizontal boards, each course overlapping the one below (~6in exposure; a
-//           builder's own size per style since 275, see d3CladdingFor)
+//   lap     horizontal boards, each course overlapping the one below. "7in LP Lap Siding" since
+//           2026-10-06, drawn exactly as it always was (a ~7in board showing ~6in); a builder's
+//           own size per style since 275, see d3CladdingFor
+//   vinyl   the same boards at 4.5/7 of lap's course, "4.5in Vinyl Siding" (2026-10-06): a
+//           customer pick only, never a style's own standard siding
 //   panel   vertical 4ft x 8ft sheets with grooves cut INTO the face (T1-11 / EWGWG)
 //   agpanel metal sheets whose ribs stand OUT, overlapping at the rib (Panel-Loc Plus)
 // `batten` is kept as a FOURTH, non-customer-facing id so the tenants whose styles
@@ -5146,7 +5159,22 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // tileFtU/tileFtV are how many FEET one 512px texture tile covers, so the pattern is
 // anchored to the BUILDING rather than to each wall's own 0..1 UV span.
 const D3_CLADDING = {
-  lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
+  // "7\" LP Lap Siding", not "Lap Siding", since 2026-10-06. Carolyn (Q20): rename lap "and keep
+  // its profile, treating the current lap as 7"". So ONLY THE NAME CHANGED. The 6 in course drawn
+  // here was always the exposure of a ~7 in board, and it is now simply what "7 in" means in the 3D
+  // (D3_LAP_NOMINAL_IN below). The id never changed, a builder's own label_override still wins
+  // everywhere it is set, and a signed order keeps the name it was agreed under
+  // (claddingLineName.ts), so the rename raises no change orders. ASCII quote, never the inch prime:
+  // the quote PDF's standard fonts are WinAnsi only.
+  lap:     { id: "lap",     label: "7\" LP Lap Siding",  tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
+  // 4.5" VINYL (2026-10-06, the same answer): "the same profile at 4.5" spacing". Lap's own texture,
+  // relief, tile width and bump, at 4.5/7 of lap's course on the same nominal scale: stepFt and
+  // tileFtV both times 4.5/7, which keeps lap's 8 boards a tile, so the raster lands on the relief
+  // courses. Bit for bit what d3CladdingFor("lap", 4.5) draws. Written as numbers, not through
+  // D3_LAP_NOMINAL_IN, because designerPricing.ts lifts this literal on its own.
+  // ITS OWN ID, not a lap size: style_cladding holds one row per style per id, and a builder sells
+  // the 7 in lap and the 4.5 in vinyl side by side, each priced on its own (migration 285).
+  vinyl:   { id: "vinyl",   label: "4.5\" Vinyl Siding", tex: "lap",     relief: "lap",    stepFt: 0.5 * 4.5 / 7, tileFtU: 8.0, tileFtV: 4.0 * 4.5 / 7, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   // "AG Panel", not "Metal", since 2026-09-15. Carolyn 09-11 @07:30: "You don't have to call it
   // metal. You can just call it agpanel because they can type in here metal". The id never
@@ -5180,37 +5208,52 @@ const D3_CLADDING = {
 // beside resolveWallHeight. Migration 207 seeded those rows from d3.claddingChoices, so no
 // builder lost a narrowing they had set.
 //
-// The IDS above did not change and are still closed: get_config only ever emits keys of
-// D3_CLADDING, because we ship a texture and a relief profile per type and the renderer keys
-// on them. What moved is WHICH of them are offered, not what they are.
+// The IDS above are still closed: get_config only ever emits keys of D3_CLADDING, because we
+// ship a texture and a relief profile per type and the renderer keys on them. What moved is
+// WHICH of them are offered, not what they are. The one id added since is "vinyl" (2026-10-06),
+// together with style_cladding's CHECK (migration 285); a designer older than that drops it from
+// the dropdown (claddingOptionsFor), so it never reaches a renderer that has no entry for it.
+
+// THE NOMINAL LAP (2026-10-06). The inches a lap course size is written in: the scale of the
+// built-in names, on which lap's own drawing above IS 7 in (Carolyn: "treating the current lap as
+// 7""). The 275 Course box reads on this scale too: blank or 7 draws lap exactly as it always
+// was, and 4.5 draws the courses 4.5" Vinyl Siding has. Reading lap as a TRUE 7 in course instead
+// would change lap's two literals and vinyl's, and every lap wall with them; this number would not.
+const D3_LAP_NOMINAL_IN = 7;
 
 // Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
 // This is the whole backward-compatibility story and it needs NO migration: today `null`
 // and `"batten"` differ only in relief, and `panel` carries no relief, so every existing
-// tenant renders exactly as it does now.
+// tenant renders exactly as it does now. "vinyl" (2026-10-06) only ever arrives as the
+// customer's own pick (d3SidingOverride): no style stores it, and styleD3's sanitizer refuses it.
 function d3NormalizeCladding(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase();
   if (s === "lap" || s === "lapsiding" || s === "lap-siding") return "lap";
+  if (s === "vinyl") return "vinyl";
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
 }
 
 // THE CLADDING THE RENDERER DRAWS (275, 2026-10-05). A builder asked for "an option for 4.5" vinyl
-// siding": their lap row already sells it, renamed, but every lap wall was drawn in D3_CLADDING's 6 in
-// courses. exposureIn is that builder's own size for the lap row (style_cladding.exposure_in, inches,
-// 3..12), carried here as spec.sidingExposureIn. Every other case returns the D3_CLADDING entry
-// ITSELF, the very object the renderer has always used, so a building with no size draws exactly as
-// it did. With a size, lap's two vertical measures scale together: stepFt (the relief courses, and
-// the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV, which keeps
-// the raster's 8 boards per tile on the same courses. Both count from y = 0, so the texture and the
-// proud course lines stay in phase. The width of a tile (tileFtU) is grain, not courses, and stays.
+// siding": their lap row already sold it, renamed, but every lap wall was drawn in lap's one course.
+// exposureIn is a builder's own size for the LAP row (style_cladding.exposure_in, 3..12), carried
+// here as spec.sidingExposureIn, in inches on the nominal scale (D3_LAP_NOMINAL_IN, 2026-10-06):
+// 7 is lap's own drawing and 4.5 is 4.5" Vinyl Siding's. Every other case returns the D3_CLADDING
+// entry ITSELF, the very object the renderer has always used, so a building with no size draws
+// exactly as it did. With a size, lap's two vertical measures scale together: stepFt (the relief
+// courses, and the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV,
+// which keeps the raster's 8 boards per tile on the same courses. Both count from y = 0, so the
+// texture and the proud course lines stay in phase. The width of a tile (tileFtU) is grain, not
+// courses, and stays.
+// Keyed on the ID, not on relief "lap": vinyl shares lap's relief, and it is fixed at 4.5 (its name
+// says so), so a size never reaches it.
 function d3CladdingFor(siding, exposureIn) {
-  const base = D3_CLADDING[d3NormalizeCladding(siding)] || D3_CLADDING.panel;
+  const id = d3NormalizeCladding(siding);
+  const base = D3_CLADDING[id] || D3_CLADDING.panel;
   const n = exposureIn == null || exposureIn === "" ? NaN : Number(exposureIn);
-  if (base.relief !== "lap" || !(n >= 3 && n <= 12)) return base;
-  const stepFt = n / 12;
-  return { ...base, stepFt, tileFtV: base.tileFtV * stepFt / base.stepFt };
+  if (id !== "lap" || !(n >= 3 && n <= 12)) return base;
+  return { ...base, stepFt: base.stepFt * n / D3_LAP_NOMINAL_IN, tileFtV: base.tileFtV * n / D3_LAP_NOMINAL_IN };
 }
 
 // ── METAL ROOF PROFILE ────────────────────────────────────────────────────────────
@@ -5226,8 +5269,15 @@ function d3CladdingFor(siding, exposureIn) {
 // back into standing seam with d3.roofProfile = "standingseam". The default is never written to a
 // row, so the column only ever records the exception.
 //
-// A PROPERTY OF THE STYLE, never the customer's pick. The customer chooses Shingle or Metal and a
-// colour; a builder does not sell both profiles on one building. So only styleSpec is read.
+// PER DESIGN since 2026-10-06, the style's value only the STARTING one. Until then this was a property
+// of the style alone, on the premise that a builder does not sell both profiles on one building.
+// Carolyn, 10-06: "there is no standard it is per individual design". So a design carries its own
+// pick (sel.roofProfile, which a rep sets in the portal Designer's Roof options card), and
+// d3CustomerRoofProfile below hands it to d3ResolveStyleSpec, whose roofProfile the renderer has
+// always read. A design that has not picked draws its style's value (d3.roofProfile, labelled
+// "Default metal roof profile" in Settings), and a style that says nothing draws AG Panel, as before.
+// The quote's Roof line, the order screen and the crew card follow the same rule on the server
+// (_shared/roofProfile.ts).
 //
 // AG Panel draws the "agroof" raster: the Advantage Panel profile Ahsan sent (36 in coverage,
 // trapezoid major ribs 9 in apart and 3/4 in tall, two low stiffening ribs between, a lap at the
@@ -5248,6 +5298,19 @@ const D3_METAL_ROOF_PROFILES = {
 function d3NormalizeRoofProfile(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase().replace(/[\s_-]+/g, "");
   return s === "standingseam" ? "standingseam" : "agpanel";
+}
+// THE DESIGN'S OWN METAL PROFILE (2026-10-06): "agpanel" or "standingseam" when the design's roof is
+// Metal and it has picked one (sel.roofProfile, spelled as loosely as above), else null, and the
+// style's starting value stands. Junk is null, never AG Panel, so it cannot override a standing seam
+// style. A pick on a Shingle roof is ignored but kept, so a rep who switches the roof to shingle and
+// back finds it again. d3ResolveStyleSpec's 8th argument, passed by the five customer-facing calls
+// only: never by openCalEditor or the Advanced page's seed, whose object is saved as the STYLE, and
+// one design's pick must never become every design's. Named apart from d3RoofProfile (the roof
+// SHAPE's geometry) and styleD3's "roofProfile" self-check key (the AI's read of that shape).
+function d3CustomerRoofProfile(sel) {
+  if (!sel || sel.roofType !== "Metal") return null;
+  const s = String(sel.roofProfile == null ? "" : sel.roofProfile).trim().toLowerCase().replace(/[\s_-]+/g, "");
+  return s === "agpanel" || s === "standingseam" ? s : null;
 }
 
 // The ONE rule for roof orientation, and it is GEOMETRY -- never the door.
@@ -8810,8 +8873,9 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
 // d3CustomerFoundation, 2026-09-28) is the customer's foundation pick: "piers" stands
 // the building on piers whatever the style's own foundation is (see the end).
 // sidingExposureIn (from d3CladdingExposureIn, 275) is the lap course size, in inches, the
-// builder set on the lap siding the customer picked (see the end too).
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn) {
+// builder set on the lap siding the customer picked (see the end too). customerRoofProfile (from
+// d3CustomerRoofProfile, 2026-10-06) is the design's own metal profile, which beats the style's.
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn, customerRoofProfile) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -8837,7 +8901,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // Which metal a metal roof draws (D3_METAL_ROOF_PROFILES). Named here for the gableVent
     // reason below: the calibration panel round-trips through this resolver, and a key the
     // literal omits is erased from the column the first time a builder saves. null = AG Panel.
-    roofProfile: o.roofProfile === "agpanel" || o.roofProfile === "standingseam" ? o.roofProfile : (base.roofProfile || null),
+    // The design's own pick wins (2026-10-06, d3CustomerRoofProfile). Only the customer-facing calls
+    // pass it, so the object openCalEditor posts back is still the style's own.
+    roofProfile: customerRoofProfile === "agpanel" || customerRoofProfile === "standingseam" ? customerRoofProfile
+      : (o.roofProfile === "agpanel" || o.roofProfile === "standingseam" ? o.roofProfile : (base.roofProfile || null)),
     // A louvered gable vent, tenant override over the built-in default. This MUST be
     // named here: the literal drops what it does not list, and because openCalEditor
     // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
@@ -8930,10 +8997,11 @@ function d3SidingOverride(config, sel) {
 // THE LAP COURSE THE BUILDER SELLS (275, 2026-10-05). The size, in inches, a builder set on this
 // style's Lap Siding row (Settings → Options → Cladding, "Course (in)"; get_config emits it as the
 // entry's exposureIn only where set), when the customer picked that lap siding. null otherwise,
-// which draws the 6 in courses lap has always had: no pick, another cladding, a style or a tenant
-// without the row or the size, or a size outside 3..12 (the column's own CHECK, held here too so a
-// stray value can never reach the renderer). resolveCladding is the pricing lookup, internal-only
-// rows included, so a rep's pick draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
+// which draws the courses lap has always had (the 7 in): no pick, another cladding (4.5" Vinyl
+// Siding included: it is fixed at its size), a style or a tenant without the row or the size, or a
+// size outside 3..12 (the column's own CHECK, held here too so a stray value can never reach the
+// renderer). resolveCladding is the pricing lookup, internal-only rows included, so a rep's pick
+// draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
 function d3CladdingExposureIn(config, sel) {
   if (!config || !sel || sel.cladding !== "lap") return null;
   const o = resolveCladding(config, sel.style, "lap");
@@ -12642,8 +12710,9 @@ function buildShed3DModel(THREE, p) {
   // sky reflection when the renderer passes p.metalEnv. Without it the roof is
   // matte paint, never the near-black that metalness with nothing to reflect gave.
   //
-  // WHICH metal is the style's alone (D3_METAL_ROOF_PROFILES): AG Panel unless the style says
-  // standing seam. The customer's pick only decides metal vs shingle, exactly as before.
+  // WHICH metal (D3_METAL_ROOF_PROFILES) is the DESIGN's since 2026-10-06: d3ResolveStyleSpec puts the
+  // design's own pick in styleSpec.roofProfile, else the style's starting value, and AG Panel when
+  // neither says. The roof-type pick still decides metal vs shingle, exactly as before.
   const roofIsMetal = p.roofType === "Metal" ? true
     : p.roofType === "Shingle" ? false
     : !!(p.styleSpec && p.styleSpec.roofMaterial === "metal");
@@ -18008,7 +18077,8 @@ const SSD_CSS = [
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
   '.ssd-frame{--ssd-select-h:26px}',
   // One wrapping flex row of cards, each sized by the number of FIELDS it holds (Ahsan 2026-09-16, "i need
-  // uniformity in this bar"). --ssd-n on a card is its field count: Building size 1, Roof options 2,
+  // uniformity in this bar"). --ssd-n on a card is its field count: Building size 1, Roof options 2 (3 with
+  // the portal's metal Profile),
   // Cladding 1–3 (Siding when the style sells a cladding, Body and Trim when paint is on). A card grows by
   // its n from a basis of its fixed chrome: the 9px gaps between its fields plus 13px padding and 1px
   // border each side. So the spare width is shared out per field, not per card, and every field on a line
@@ -21964,7 +22034,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
   const rampCustom = rampMode === "custom" && placeableRamps.length > 0;
   const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+    const init = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
@@ -22247,9 +22317,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
-  // Cladding is still a fixed FOUR (we ship a texture and a relief profile for each; a tenant
-  // cannot invent a fifth) -- but WHICH of them a builder sells, what they call each one and
-  // what it costs is theirs now, per style, from Settings -> Options -> Cladding (207).
+  // Cladding is still a fixed set, FIVE since vinyl joined on 2026-10-06 (we ship a texture and a
+  // relief profile for each; a tenant cannot invent a sixth) -- but WHICH of them a builder sells,
+  // what they call each one and what it costs is theirs now, per style, from Settings -> Options ->
+  // Cladding (207).
   // Empty string = "builder's standard", i.e. fall through to the style's own d3.siding,
   // which is what every existing design does today.
   //
@@ -23739,7 +23810,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // from before roofType/roofColor shipped) must not inherit the previously opened
     // design's values for those keys. Mirrors the sel useState initializer.
     setSel(() => {
-      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+      const base = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
       C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
       return { ...base, ...(design.selections || {}) };
     });
@@ -23942,7 +24013,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // picked five clicks ago in the current session -- the same rule the design-load
     // path already follows (audit 2026-08-19).
     setSel(() => {
-      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+      const base = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
       C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
       return { ...base, ...vsel };
     });
@@ -24053,7 +24124,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
   const ventRoof2D = () => {
-    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel));
     return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -25685,7 +25756,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
       bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
     } else { bullets.push("Unpainted"); }
-    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
+    // A metal roof on standing seam is named, as on the quote (2026-10-06): "Roof — Metal (Standing Seam): Black".
+    const roofStd = sel.roofType === "Metal"
+      && (d3CustomerRoofProfile(sel) || d3NormalizeRoofProfile(selectedStyle && selectedStyle.d3 && selectedStyle.d3.roofProfile)) === "standingseam";
+    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${roofStd ? " (Standing Seam)" : ""}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
     const sdCount = items.filter((i) => i.type === "singleDoor").length;
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
@@ -28512,7 +28586,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
         painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
         scale, mgX, mgY,
-        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel)),
+        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel)),
         roofType: sel.roofType,
         roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
         fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
@@ -28699,7 +28773,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
           // unselected, so the estimate always shows the Roof line in order.
-          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "" } : {}),
+          // roofProfile (2026-10-06) is the design's own metal profile, ALWAYS named here, so "" is a
+          // real clear: submit-estimate falls back to the stored design's pick only when a body (from a
+          // designer older than this) does not name the key at all.
+          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "", roofProfile: sel.roofProfile || "" } : {}),
           // Cladding (Carolyn 2026-08-18). VISUAL ONLY in v1 -- it is recorded on the design
           // and reported here so the estimate template can surface it, but it carries no
           // price and adds no line to the estimate. Pricing bolts on later the way Roof and
@@ -28850,7 +28927,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // them back into the modal, and billing for a window that is nowhere on the drawing is
           // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
           // back the moment the dormer can hold it again.
-          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel));
           const dRoof = (dSpec && dSpec.roof) || {};
           if (!d3DormerWindowFit(fx, d3DormerWidthFt(dRoof, d3RoofAxes(dRoof, bldgW, bldgH).L), d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
@@ -30672,6 +30749,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     for sheds, Standing Seam for post-frame (Carolyn 09-11 @07:30: "standing seam
                     is used in the post frame ... but we need this for sheds").
 
+                    THE STYLE'S DEFAULT since 2026-10-06 (Carolyn: "there is no standard it is per
+                    individual design"): each design can pick its own in the Designer's Roof options,
+                    and this is where a design that has not picked starts. Relabelled to say so, without
+                    the sheds / post-frame wording. What it stores is unchanged.
+
                     Only "standingseam" is ever stored. AG Panel is the renderer's default, so
                     picking it writes null and the style goes on saying nothing, exactly like every
                     row that predates the field.
@@ -30682,14 +30764,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     with no control to see or clear it (review 2026-09-15). Both previews on this
                     panel pin the customer's pick to nothing and so only draw the profile once Roof
                     material is Metal; the hint says that rather than letting the choice look broken. */}
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Metal roof profile
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Default metal roof profile
                   <select value={d3NormalizeRoofProfile(adminCal.spec.roofProfile)} onChange={(e) => calSet({ roofProfile: e.target.value === "standingseam" ? "standingseam" : null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="agpanel">AG Panel (sheds)</option>
-                    <option value="standingseam">Standing Seam (post-frame)</option>
+                    <option value="agpanel">AG Panel</option>
+                    <option value="standingseam">Standing Seam</option>
                   </select>
-                  {adminCal.spec.roofMaterial !== "metal" && (
-                    <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
-                  )}
+                  <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>New designs start with this; each design can change it in the Designer.{adminCal.spec.roofMaterial !== "metal" ? " The preview shows it once Roof material is Metal." : ""}</span>
                 </label>
                 </>)}
                 {/* WHAT IT STANDS ON (2026-09-25). A top-level key with NO control until today: the
@@ -32113,11 +32193,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               note: spec.roofMaterial ? null : "Not set, the customer chooses.", unset: true })}
             {/* ALWAYS SHOWN, as the calibration grid shows it: a customer can pick Metal whatever this
                 style's own material is, and a copied style's Standing seam is carried and saved, so it must
-                be visible. The preview only draws it once the material is Metal, and the hint says so. */}
-            {advSeg({ f: "roofProfile", label: "Metal profile", value: d3NormalizeRoofProfile(spec.roofProfile),
+                be visible. The preview only draws it once the material is Metal, and the hint says so.
+                The style's DEFAULT since 2026-10-06: each design can pick its own in the Designer. */}
+            {advSeg({ f: "roofProfile", label: "Default metal profile", value: d3NormalizeRoofProfile(spec.roofProfile),
               pick: (v) => calSet({ roofProfile: v === "standingseam" ? "standingseam" : null }),
-              opts: [["agpanel", "AG Panel"], ["standingseam", "Standing seam"]],
-              note: spec.roofMaterial === "metal" ? null : ["Shown once Material is Metal.", "Used when a customer picks a metal roof, whatever this style's own material is."] })}
+              opts: [["agpanel", "AG Panel"], ["standingseam", "Standing Seam"]],
+              note: spec.roofMaterial === "metal" ? "New designs start with this; each design can change it in the Designer."
+                : ["Shown once Material is Metal.", "New designs start with this; each design can change it in the Designer."] })}
             {advSeg({ f: "eave", label: "Roof edge", value: roof.eave === "open" ? "open" : "fascia", pick: (v) => calSetRoofOpt("eave", v === "open" ? "open" : null),
               opts: [["fascia", "Boxed in"], ["open", "Rafter tails"]] })}
             {advNum({ k: "overhang", label: "Overhang", unit: "in", value: ohIn, min: 0, max: 24, step: 1,
@@ -33597,11 +33679,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const ssLockStyle = { display: "block", border: "none", padding: 0, margin: 0, minWidth: 0,
     ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) };
   // Section 02's cards are sized by how many fields each holds (--ssd-n, read by .ssd-s2 in SSD_CSS), and
-  // SSSizeCards gives every field in the section one width. Building size holds 1 and Roof options 2.
+  // SSSizeCards gives every field in the section one width. Building size holds 1 and Roof options 2, or
+  // 3 on a Metal roof in the portal, where the metal Profile sits between Type and Color (2026-10-06).
   // ssS2CladN counts the Cladding card's: Siding when the style sells a cladding, then Body and Trim as a
   // pair. ssS2Key is the fit key: which cards render, as their field counts.
+  const ssRoofProfileShown = embedded && roofTypes.length > 0 && sel.roofType === "Metal";
   const ssS2CladN = (claddingChoices.length > 0 ? 1 : 0) + (paintOpt ? 2 : 0);
-  const ssS2Key = [sizeOpts.length > 0 ? 1 : 0, roofTypes.length > 0 ? 2 : 0, ssS2CladN].join("-");
+  const ssS2Key = [sizeOpts.length > 0 ? 1 : 0, roofTypes.length > 0 ? (ssRoofProfileShown ? 3 : 2) : 0, ssS2CladN].join("-");
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
@@ -33948,8 +34032,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 };
                 // One card, Type then Color. Before a type is picked the Color field shows a greyed
                 // box the height of a select, so the row's controls still line up.
+                //
+                // PROFILE (2026-10-06, Carolyn: "there is no standard it is per individual design"). On a
+                // Metal roof in the PORTAL, AG Panel or Standing Seam between the two, starting at the
+                // style's default. A rep's pick: the public page never shows it, though a design a rep set
+                // still draws and quotes it there. v1 adds no charge, so the note under Standing Seam says
+                // to adjust the price. onRoofType leaves the pick alone: it is ignored until the roof is
+                // Metal again (d3CustomerRoofProfile), so switching to Shingle and back keeps it.
+                const rProfile = d3CustomerRoofProfile(sel) || d3NormalizeRoofProfile(selectedStyle && selectedStyle.d3 && selectedStyle.d3.roofProfile);
                 return (
-                  <div className="ssd-card" style={{ "--ssd-n": "2" }}>
+                  <div className="ssd-card" style={{ "--ssd-n": ssRoofProfileShown ? "3" : "2" }}>
                     <span className="ssd-card-t">Roof options</span>
                     <div className="ssd-flds">
                       <div className="ssd-fld">
@@ -33960,6 +34052,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
                       </div>
+                      {ssRoofProfileShown && (
+                        <div className="ssd-fld">
+                          <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Profile</span>
+                          <select value={rProfile} onChange={(e) => setSel((p) => ({ ...p, roofProfile: e.target.value }))}
+                            className="ssd-select ssd-field" data-ss-roof-profile="">
+                            <option value="agpanel">AG Panel</option>
+                            <option value="standingseam">Standing Seam</option>
+                          </select>
+                          {/* Only someone holding "Override prices" (migration 277) can adjust it, so a rep
+                              without that permission is sent to someone who can (review 2026-10-07). */}
+                          {rProfile === "standingseam" && (
+                            <span className="ssd-dlv-note" style={{ display: "block", marginTop: 4 }}>{canOverridePrice
+                              ? "No extra charge is added; adjust the price if needed."
+                              : "No extra charge is added; ask an owner or admin to adjust the price if needed."}</span>
+                          )}
+                        </div>
+                      )}
                       <div className="ssd-fld">
                         <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Color</span>
                         {sel.roofType
@@ -35050,7 +35159,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -36248,7 +36357,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}

@@ -31,6 +31,8 @@ import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { cladLineName } from "../_shared/claddingLineName.ts";
+// The Roof line's words: a metal roof on standing seam is named (2026-10-06, the profile per design).
+import { effectiveRoofProfile, roofLineDesc } from "../_shared/roofProfile.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate } from "../_shared/salesTax.ts";
 import {
@@ -291,7 +293,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // draft and the ISSUED steps below mark it sent. Read here only to skip that write for a
     // design already past draft; the write itself re-checks draft in its WHERE.
     // updated_at (2026-09-17) is the SS persist's compare-and-swap token (see "PERSIST" in 9-ALT).
-    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
+    // selections (2026-10-06): the design's own metal roof profile, for a body from a designer that
+    // predates the pick and so sends no roofProfile key (Line 3: Roof).
+    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot, selections")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -815,6 +819,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
   let buildingPrice = 0, priced = false;
   let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
+  // The matched style's d3, for the Roof line's metal profile (the style's value is the starting one
+  // for a design that has not picked). Null when no style matches or the read fails: AG Panel.
+  let styleD3: unknown = null;
 
   // ── Taxability, per catalog item (migration 148) ────────────────────────────────────────
   //
@@ -855,6 +862,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
+      styleD3 = styleRow.d3 ?? null;
       // The style's OWN wall height, which anything priced by wall AREA has to start from.
       // Read here rather than in the wall-height block because it is true whether or not the
       // customer bought an upgrade. See the resolvedWallHeightFt comment below for why this
@@ -1551,7 +1559,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //
   // ⚠️ EXTRACTED COPY EXISTS: _shared/attributeLines.ts carries this function and the
   // paint/roof line builders below verbatim — the order screen's attribute change orders
-  // (migration 127) price with it. Any change to this math MUST land in both files.
+  // (migration 127) price with it. Any change to this math MUST land in both files. (The Roof
+  // line's WORDS are shared outright since 2026-10-06: both build them with roofProfile.ts.)
   const colorAmount = (row: any): number => {
     const rate = Number(row?.rate) || 0;
     if (rate <= 0) return 0;
@@ -1614,14 +1623,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
   // roofType key, possibly empty). Type + Color in the description; amount is the roof color's rate.
+  //
+  // THE METAL PROFILE (2026-10-06, Carolyn: "there is no standard it is per individual design").
+  // A metal roof on standing seam reads "Metal (Standing Seam) — Black"; every other roof keeps the
+  // words it has always had, byte for byte, so no signed order sees its Roof line change. The
+  // profile is the design's own pick, else (a SIGNED design) the profile its agreed Roof line names,
+  // else its style's starting value, else AG Panel. The pick is the body's roofProfile when the
+  // body NAMES the key (the designer always sends it, "" when cleared, so "" is a real clear); a
+  // body that does not name it comes from a designer older than the pick, and then the stored
+  // design's own pick stands, so a resubmit from production's bundle keeps a profile a rep set on
+  // beta. Words only: the amount and the taxability are unchanged.
+  // The agreed line beats the style (review 2026-10-07): a builder who later sets the style to
+  // Standing Seam for future quotes must not reword an order signed as "Metal — Black", or this
+  // resubmit raises "Roof: options updated" for a roof nobody changed. See roofProfile.ts.
   if (Object.prototype.hasOwnProperty.call(selections, "roofType")) {
     const roofType = String(selections.roofType ?? "").trim();
     const roofColor = String(selections.roofColor ?? "").trim();
+    const roofPick = Object.prototype.hasOwnProperty.call(selections, "roofProfile")
+      ? (selections as Record<string, unknown>).roofProfile
+      : (existingDesign.selections as Record<string, unknown> | null)?.roofProfile;
+    const roofAgreed = (existingDesign.accepted_at || existingDesign.accepted_snapshot) ? agreedBaseline(existingDesign).lines : null;
     let roofAmount = 0;
-    let roofDesc = "No roof selected";
+    const roofDesc = roofLineDesc(roofType, roofColor, effectiveRoofProfile(roofPick, styleD3, roofAgreed));
     let roofTaxable = true;
     if (roofType) {
-      roofDesc = roofColor ? `${roofType} — ${roofColor}` : `${roofType} — (color TBD)`;
       if (roofColor && norm(roofColor) !== norm("TBD")) {
         try {
           const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";

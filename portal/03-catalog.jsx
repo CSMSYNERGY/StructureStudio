@@ -4797,16 +4797,20 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
 // they use... but keep the cladding as dropdown options as we have it worked into the 3D so
 // make sure you don't lose that."
 //
-// FOUR FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
-// each of the four, and a builder cannot invent a fifth. What is theirs is which ones they sell,
+// FIVE FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
+// each of the five, and a builder cannot invent a sixth. What is theirs is which ones they sell,
 // what each costs, and what the customer sees it called. The id underneath never changes, which
-// is what keeps the 3D renderer and every saved design working.
+// is what keeps the 3D renderer and every saved design working. The fifth, 4.5" Vinyl Siding,
+// joined on 2026-10-06 (migration 285) with lap's profile at its own course, and lap became
+// 7" LP Lap Siding the same day with its drawing unchanged (Carolyn, Q20). ASCII quotes in both
+// names: the quote PDF's standard fonts are WinAnsi only.
 //
 // Per STYLE rather than per tenant because a Greenhouse and a Lofted Barn do not sell the same
 // siding, and because the wall area — and so the price — differs anyway.
 const SS_CLADDING_ROWS = [
   { id: "panel", label: "Panel Siding" },
-  { id: "lap", label: "Lap Siding" },
+  { id: "lap", label: "7\" LP Lap Siding" },
+  { id: "vinyl", label: "4.5\" Vinyl Siding" },
   { id: "batten", label: "Board & Batten" },
   // The profile name, not "Metal" (Carolyn 09-11: "they can type in here metal").
   { id: "agpanel", label: "AG Panel" },
@@ -4855,7 +4859,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
     const m = {};
     (data.styles || []).forEach((st) => {
       const own = saved[st.id] || {};
-      // The four rows always render, whether or not the tenant has a row for each. A style with
+      // The five rows always render, whether or not the tenant has a row for each. A style with
       // no rows at all is not broken — it is a style offering builder's standard only — and it
       // must still be fillable, which a data-driven row list would not allow.
       m[st.id] = SS_CLADDING_ROWS.map((c) => {
@@ -4869,7 +4873,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           taxable: !r || r.taxable !== false,
           active: !r || r.active !== false,
           internalOnly: !!(r && r.internal_only),
-          // Lap only: how much of each board shows, in inches. Blank = the 3D's standard 6 in.
+          // Lap only: the board size in inches, the number in the siding's name (D3_LAP_NOMINAL_IN),
+          // which the 3D scales the courses by. Blank = the standard lap, 7 in. NOT the reveal: the
+          // standard 7 in board shows about 6 in, so asking "how much shows" got the wrong number.
           exposureIn: c.id === "lap" && r && r.exposure_in != null ? String(r.exposure_in) : "",
         };
       });
@@ -4894,11 +4900,11 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       if (badRate.length) {
         throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
       }
-      // The course size the same way: a typo must not become a silent 6 in.
+      // The course size the same way: a typo must not become a silent 7 in.
       const lapRow = rows.find((r) => r.claddingId === "lap");
       const course = lapRow ? String(lapRow.exposureIn == null ? "" : lapRow.exposureIn).trim() : "";
       if (courses && course !== "" && !(Number.isFinite(Number(course)) && Number(course) >= 3 && Number(course) <= 12)) {
-        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 6).");
+        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 7).");
       }
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
@@ -4940,7 +4946,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
               <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
-              {courses && <th style={S.th} title="Lap siding only: how much of each board shows, in inches. When a customer picks Lap Siding, the 3D draws the boards at this size. Blank = 6 in.">Course (in)</th>}
+              {courses && <th style={S.th} title={"7\" LP Lap Siding only: the board size in inches, the number in the siding's name (8 for an 8\" lap). When a customer picks it, the 3D scales the boards to match. Blank is the standard 7. For 4.5\" vinyl, offer the 4.5\" Vinyl Siding row instead."}>Course (in)</th>}
             </tr></thead>
             <tbody>
               {rows.map((r, i) => (
@@ -4978,7 +4984,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
                   {courses && (
                     <td style={S.td}>
                       {r.claddingId === "lap" && (
-                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="6"
+                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="7"
                           aria-label={`${st.label} lap siding course, inches`}
                           onChange={(e) => setRow(st.id, i, "exposureIn", e.target.value)}
                           style={{ ...S.input, width: 80 }} />
@@ -5008,12 +5014,15 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
         do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
         else is an upcharge. Rename any of them under <b>Shown
         as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
-        unaffected, because the siding itself is still the same one of our four.
+        unaffected, because the siding itself is still the same one of our five.
         {courses && (
           <>
-            {" "}On <b>Lap Siding</b> you can also set the <b>course</b>: how much of each board
-            shows, in inches (4.5 for a 4&frac12;&Prime; vinyl, say). When a customer picks Lap
-            Siding, the 3D draws the boards at that size; it does not change the price. Blank is 6 in.
+            {" "}On <b>7&quot; LP Lap Siding</b> you can also set the <b>course</b>: the board
+            size in inches, the number in the siding&rsquo;s name, so blank is the standard 7 and 8
+            is an 8&quot; lap. When a customer picks it, the 3D scales the boards to match; it does
+            not change the price.
+            For 4.5&quot; vinyl, offer the <b>4.5&quot; Vinyl Siding</b> row instead: it draws the
+            same boards at 4.5 in, and you price it on its own.
           </>
         )}
       </p>

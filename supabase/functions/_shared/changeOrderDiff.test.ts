@@ -10,6 +10,7 @@
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a machine
 // with no registry access — the same rule the other _shared tests follow.
 import { changeOrderDescription } from "./changeOrderDiff.ts";
+import { effectiveRoofProfile, roofLineDesc } from "./roofProfile.ts";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string) {
@@ -130,6 +131,46 @@ Deno.test("a rep's own price reads as an ordinary price change, and its list amo
   check("a moved list behind the same price is not a change", changeOrderDescription(after, relisted) === null,
     `got ${JSON.stringify(changeOrderDescription(after, relisted))}`);
   lacks("no sentence ever names a list figure the customer was not charged", changeOrderDescription(before, relisted), "12,000");
+});
+
+// ── The metal roof profile, per design (2026-10-06) ───────────────────────────────────────────
+// A design's Roof line now comes from roofLineDesc. What must hold for the 9 metal designs on the
+// platform (none standing seam, none with a pick): resubmitting one, or recolouring it on the order
+// screen, regenerates a Roof line identical to the one the customer signed, so no change order.
+const roofSnap = (desc: string, amount = 300) => ({
+  version: 1, discount: 0, lines: [
+    { kind: "building", itemKey: "", name: "10x12 Deluxe Gable", desc: "", qty: 1, amount: 9000 },
+    { kind: "roof", itemKey: "", name: "Roof", desc, qty: 1, amount },
+  ],
+});
+/** The Roof line's words exactly as both writers built them before 2026-10-06. */
+const legacyRoof = (t: string, c: string) => (!t ? "No roof selected" : c ? `${t} — ${c}` : `${t} — (color TBD)`);
+
+Deno.test("an AG Panel design signed before the profile existed regenerates its Roof line exactly: no change order", () => {
+  for (const [t, c] of [["Metal", "Black"], ["Metal", ""], ["Shingle", "Weathered Wood"], ["", ""]]) {
+    // Every way a design is "AG Panel": no pick on a style that says nothing, an explicit AG Panel
+    // pick, an empty pick, a junk pick, and a standing seam pick on a SHINGLE roof.
+    for (const [pick, d3] of [[undefined, {}], [undefined, null], ["agpanel", { roofProfile: "standingseam" }], ["", {}], ["shiny", {}]] as const) {
+      const signed = roofSnap(legacyRoof(t, c));
+      const regenerated = roofSnap(roofLineDesc(t, c, effectiveRoofProfile(pick, d3)));
+      const text = changeOrderDescription(signed, regenerated);
+      check(`${JSON.stringify([t, c, pick, d3])}: no change order`, text === null, `got ${JSON.stringify(text)}`);
+    }
+  }
+  const shingle = changeOrderDescription(roofSnap(legacyRoof("Shingle", "X")), roofSnap(roofLineDesc("Shingle", "X", effectiveRoofProfile("standingseam", {}))));
+  check("a standing seam pick on a shingle roof changes nothing", shingle === null, `got ${JSON.stringify(shingle)}`);
+});
+
+Deno.test("AG Panel → Standing Seam on a signed order is exactly \"Roof: options updated\", with no price sentence", () => {
+  const signed = roofSnap(roofLineDesc("Metal", "Black", effectiveRoofProfile(undefined, {})));
+  const after = roofSnap(roofLineDesc("Metal", "Black", effectiveRoofProfile("standingseam", {})));
+  const text = changeOrderDescription(signed, after);
+  const lines = (text ?? "").split("\n");
+  check("the Roof line is named as updated", lines[0] === "Roof: options updated", JSON.stringify(text));
+  check("and nothing else moved: only the unchanged Total follows", lines.length === 2 && lines[1] === "Total: $9,300.00 → $9,300.00", JSON.stringify(text));
+  lacks("no price sentence: v1 adds no charge", text, "price");
+  // And back again reads the same way.
+  check("Standing Seam → AG Panel likewise", changeOrderDescription(after, signed) === text, JSON.stringify(changeOrderDescription(after, signed)));
 });
 
 if (failures) throw new Error(`${failures} failed`);

@@ -1,19 +1,25 @@
 // A BUILDER'S OWN LAP COURSE (migration 275), driven in the real designer against the COMPILED bundle
-// and measured off the scene graph (__SS3D_DEBUG).
+// and measured off the scene graph (__SS3D_DEBUG). And, since 2026-10-06, the lap renamed 7" LP Lap
+// Siding with its drawing UNCHANGED, and 4.5" Vinyl Siding beside it as its own id (migration 285).
 //
 // A builder, on the portal 2026-10-03: "I will need an option for 4.5" vinyl siding". One of their
 // styles sells the lap row renamed "Vinyl Siding"; the builder types 4.5 in its "Course (in)" box and
 // get_config carries it as that entry's exposureIn. The style here is set up the same way: panel by
-// default, lap offered as "Vinyl Siding", 7 ft walls.
+// default, lap offered as "Vinyl Siding", 7 ft walls. The course size is on the scale of the built-in
+// names since 2026-10-06 (D3_LAP_NOMINAL_IN): blank or 7 is lap's own drawing, 4.5 is vinyl's.
 //
-//   A. NO SIZE (every builder today): the customer picks Vinyl Siding; the docked 3D draws lap at
-//      6 in, exactly as before: 13 course lines up a 7 ft wall (14 boards), 0.5 ft apart, the raster
-//      at 4 ft a tile (repeat 1/4).
-//   B. 4.5 IN: the same pick draws 0.375 ft courses: 18 lines up the same wall (about 18.7 boards),
-//      the raster at 3 ft a tile (repeat 1/3), so its boards land on the relief lines; rebuilt in place
+//   A. NO SIZE (every builder today): the customer picks Vinyl Siding; the docked 3D draws lap
+//      exactly as before the rename: 13 course lines up a 7 ft wall (14 boards), 0.5 ft apart, the
+//      raster at 4 ft a tile (repeat 1/4). THIS IS THE PROOF THE LAP DRAWING DID NOT MOVE.
+//   B. 4.5 IN: the same pick draws 4.5/7 of lap's course, 0.3214 ft: 21 lines up the same wall, the
+//      raster at 18/7 ft a tile (repeat 7/18), so its boards land on the relief lines; rebuilt in place
 //      in the dock. Picking Panel Siding or the builder's standard takes every lap line away; picking
-//      Vinyl again brings 4.5 back. The full-screen viewer draws the same 18 lines.
-//   C. a size the designer must ignore (2 in, outside 3..12): 6 in courses, as A.
+//      Vinyl again brings 4.5 back. The full-screen viewer draws the same 21 lines.
+//   C. a size the designer must ignore (2 in, outside 3..12): lap's own courses, as A.
+//   G. 4.5" VINYL SIDING, the fifth id: a style offering both under our built-in names. The dropdown
+//      shows 7" LP Lap Siding and 4.5" Vinyl Siding; vinyl draws B's 21 lines, and the full-screen
+//      viewer's scene digest (every mesh's world box, material colour and raster repeat) is IDENTICAL
+//      to B's; switched to 7" LP Lap Siding it draws A's 13, and in the viewer its scene is A's.
 //   D. THE QUOTE: with the four-corner page on (276) and Vinyl picked, the submitted PDF is the plan
 //      and the four-corner sheet; written to the shots folder as sample-quote-vinyl.pdf and
 //      corner-sheet-vinyl.jpg (made-up "Acme Sheds" and "Pat Tester").
@@ -32,7 +38,9 @@
 //
 // To prove the checks can fail, serve the tree before this change (git archive 135699d) as SS_BASE:
 // 5 checks fail, B's three 4.5 in checks and E's first (it draws 0.5 ft courses whatever the config
-// says) and D's sheet (no four-corner page before 276); A and C hold, as they should.
+// says) and D's sheet (no four-corner page before 276); A and C hold, as they should. Against the tree
+// before the vinyl (git archive ea0a0de0): B's and E's 4.5 in checks fail (they draw 0.375 ft, true
+// inches) and so does all of G (no vinyl in the dropdown); A and C hold, which is the point.
 //
 // Exit 0 = every assertion held.
 import { writeFileSync } from "node:fs";
@@ -47,7 +55,7 @@ const COLORS = { body: "#E9E4D8", trim: "#5B5F63", roof: "#3B3F45" };
 const D3 = { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, colors: COLORS, wallHeightFt: H, roofMaterial: "shingle" };
 const FIXTURES = { ramp: { mode: "simple", price: 0, method: "each", enabled: false, imageUrl: null, showImage: false }, items: [], windowColors: [] };
 
-const configFor = ({ exposureIn, corners } = {}) => {
+const configFor = ({ exposureIn, corners, vinyl } = {}) => {
   const cfg = {
     clientId: CLIENT,
     branding: { companyName: "Acme Sheds", accentColor: "#1D4ED8", headerBg: "#FFFFFF", tagline: null, logo: null },
@@ -57,7 +65,12 @@ const configFor = ({ exposureIn, corners } = {}) => {
     sizePricing: { dlx: { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 9000 } } },
     options: [], colors: [], wallHeightOptions: {},
     // As get_config emits it: the size is on the lap entry only when the builder typed one (275).
-    claddingOptions: { dlx: [
+    // `vinyl`: the style offers lap and vinyl side by side under our built-in names (285).
+    claddingOptions: { dlx: vinyl ? [
+      { id: "panel", label: null, basis: "sqft_option", rate: 0, charged: false },
+      { id: "lap", label: null, basis: "sqft_option", rate: 0, charged: false },
+      { id: "vinyl", label: null, basis: "sqft_option", rate: 2, charged: true },
+    ] : [
       { id: "panel", label: null, basis: "sqft_option", rate: 0, charged: false },
       { id: "lap", label: "Vinyl Siding", basis: "sqft_option", rate: 0, charged: false, ...(exposureIn !== undefined ? { exposureIn } : {}) },
     ] },
@@ -131,8 +144,39 @@ async function measure(page, handle) {
     return { strips, lines: wall.length, first: wall[0] ?? null, last: wall[wall.length - 1] ?? null, gaps: [...new Set(gaps)], repeat };
   }, { handle, H });
 }
+// A canonical, order-independent digest of everything the full-screen viewer drew (wings.mjs's, plus
+// each textured material's raster repeat): two builds, or two picks, with equal digests drew the same
+// thing.
+async function digest(page) {
+  return page.evaluate(() => {
+    const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+    E.scene.updateMatrixWorld(true);
+    const r3 = (v) => (Math.round(v * 1000) / 1000).toFixed(3);
+    const r6 = (v) => (Math.round(v * 1e6) / 1e6).toFixed(6);
+    const out = [];
+    [["roof", M.roofGroup], ["walls", M.wallsGroup], ["open", M.openingsGroup], ["interior", M.interiorGroup]].forEach(([name, grp]) => {
+      if (!grp) return;
+      grp.traverse((o) => {
+        if (!o.isMesh || !o.geometry) return;
+        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        const b = o.geometry.boundingBox;
+        const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+          const v = new V(x, y, z).applyMatrix4(o.matrixWorld);
+          [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+        }
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        const m = mats.map((q) => (q && q.color ? q.color.getHexString() : "-") + (q && q.map && q.map.repeat ? `@${r6(q.map.repeat.x)},${r6(q.map.repeat.y)}` : "")).join("/");
+        out.push(`${name} ${o.geometry.type} ${mn.map(r3).join(",")} ${mx.map(r3).join(",")} ${m}`);
+      });
+    });
+    return out.sort();
+  });
+}
 const said = (m) => `${m.lines} lines, first ${m.first} last ${m.last}, gaps ${JSON.stringify(m.gaps)}, repeat ${JSON.stringify(m.repeat && m.repeat.map((v) => +v.toFixed(4)))}, ${m.strips} strips`;
-const isLap = (m, stepFt, lines) => m.lines === lines && m.gaps.length === 1 && near(m.gaps[0], stepFt, 1e-4) && near(m.first, stepFt, 1e-4)
+// Every gap within 2e-4 ft of the course, not one distinct gap: the heights are rounded to 1e-4 ft,
+// so a course of 0.32142857 ft rounds to gaps of 0.3214 and 0.3215 (0.5 ft rounded to one).
+const isLap = (m, stepFt, lines) => m.lines === lines && m.gaps.length >= 1 && m.gaps.every((g) => near(g, stepFt, 2e-4)) && near(m.first, stepFt, 1e-4)
   && m.repeat && near(m.repeat[0], 1 / 8, 1e-9) && near(m.repeat[1], 0.5 / (4 * stepFt), 1e-9);
 
 // A close-up of the front-left corner in the full-screen viewer, so the courses can be counted by eye.
@@ -149,12 +193,15 @@ async function closeUp(page, path) {
   await page.locator("canvas").last().screenshot({ path });
 }
 
+const LAP_LOOK = { step: 0.5, lines: 13 };
+const VINYL_LOOK = { step: 0.5 * 4.5 / 7, lines: 21 };
+const DIGESTS = {};
 async function runLook(ctx, tag, exposureIn, ok, shots, { full = false } = {}) {
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
   await stubSupabase(page, { config: configFor({ exposureIn }), fixtures: FIXTURES });
-  const want = exposureIn === 4.5 ? { step: 0.375, lines: 18 } : { step: 0.5, lines: 13 };
+  const want = exposureIn === 4.5 ? VINYL_LOOK : LAP_LOOK;
   try {
     await startDesign(page);
     await dock(page);
@@ -180,6 +227,7 @@ async function runLook(ctx, tag, exposureIn, ok, shots, { full = false } = {}) {
     await openViewer(page);
     const v = await measure(page, "__ss3dEngine");
     ok(`${tag}: the full-screen viewer draws the same ${want.lines} lines`, isLap(v, want.step, want.lines), said(v));
+    DIGESTS[tag] = await digest(page);
     if (shots) await closeUp(page, join(shots, `${tag.replace(/\W+/g, "-")}-wall.png`));
     await closeViewer(page);
     ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
@@ -188,6 +236,97 @@ async function runLook(ctx, tag, exposureIn, ok, shots, { full = false } = {}) {
     if (shots) await page.screenshot({ path: join(shots, `${tag.replace(/\W+/g, "-")}-FAIL.png`) }).catch(() => {});
   } finally {
     await page.close();
+  }
+}
+
+// ── G. 4.5" Vinyl Siding, its own id, beside the 7" LP Lap Siding ──
+async function runVinyl(ctx, ok, shots) {
+  // Waits for the dock to have rebuilt with exactly `n` lap strips (4 walls' worth of course lines):
+  // "any strips" would read the model the previous pick left behind.
+  const waitStrips = (page, n) => page.waitForFunction((n) => {
+    let k = 0;
+    window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.geometry && q.geometry.type === "BoxGeometry" && Math.abs(q.geometry.parameters.height - 0.08) < 1e-6) k++; });
+    return k === n;
+  }, n, { timeout: 30000 }).catch(() => {});
+  const LAP_STRIPS = 52, VINYL_STRIPS = 84;
+
+  // G1: both names offered; vinyl, then the lap, then vinyl again in the dock; vinyl in the viewer.
+  {
+    const tag = "G vinyl";
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+    await stubSupabase(page, { config: configFor({ vinyl: true }), fixtures: FIXTURES });
+    try {
+      await startDesign(page);
+      const names = await sidingSelect(page).locator("option").allTextContents();
+      ok(`${tag}: the dropdown offers both under our names, 7" LP Lap Siding and 4.5" Vinyl Siding`,
+        JSON.stringify(names) === JSON.stringify(["Builder's standard", "Panel Siding", '7" LP Lap Siding', '4.5" Vinyl Siding']), JSON.stringify(names));
+      await dock(page);
+      await pickSiding(page, '4.5" Vinyl Siding');
+      await waitStrips(page, VINYL_STRIPS);
+      let m = await measure(page, "__ss3dPanel");
+      ok(`${tag}: 4.5" Vinyl Siding in the dock: ${VINYL_LOOK.lines} lines ${VINYL_LOOK.step.toFixed(4)} ft apart, the raster on the same courses`, isLap(m, VINYL_LOOK.step, VINYL_LOOK.lines), said(m));
+      await pickSiding(page, '7" LP Lap Siding');
+      await waitStrips(page, LAP_STRIPS);
+      m = await measure(page, "__ss3dPanel");
+      ok(`${tag}: switched to 7" LP Lap Siding: ${LAP_LOOK.lines} lines ${LAP_LOOK.step} ft apart, lap's own drawing`, isLap(m, LAP_LOOK.step, LAP_LOOK.lines), said(m));
+      await pickSiding(page, '4.5" Vinyl Siding');
+      await waitStrips(page, VINYL_STRIPS);
+      m = await measure(page, "__ss3dPanel");
+      ok(`${tag}: and back to vinyl: ${VINYL_LOOK.lines} lines again`, isLap(m, VINYL_LOOK.step, VINYL_LOOK.lines), said(m));
+      await openViewer(page);
+      const v = await measure(page, "__ss3dEngine");
+      ok(`${tag}: the full-screen viewer draws the same ${VINYL_LOOK.lines} lines`, isLap(v, VINYL_LOOK.step, VINYL_LOOK.lines), said(v));
+      const d = await digest(page);
+      const b = DIGESTS["B 4.5 in"];
+      if (b) {
+        const diff = d.filter((x, i) => x !== b[i]);
+        ok(`${tag}: its scene is B's (a lap row at 4.5) mesh for mesh: the same drawing under its own id`, d.length === b.length && diff.length === 0,
+          `${d.length} vs ${b.length} meshes, ${diff.length} differ: ${diff.slice(0, 2).join(" | ")}`);
+      }
+      if (shots) await closeUp(page, join(shots, "G-vinyl-4.5in-wall.png"));
+      await closeViewer(page);
+      ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+    } catch (e) {
+      ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+      if (shots) await page.screenshot({ path: join(shots, "G-vinyl-FAIL.png") }).catch(() => {});
+    } finally {
+      await page.close();
+    }
+  }
+
+  // G2: the 7" LP Lap Siding under our name, in the viewer: A's scene, mesh for mesh.
+  {
+    const tag = "G lap";
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+    await stubSupabase(page, { config: configFor({ vinyl: true }), fixtures: FIXTURES });
+    try {
+      await startDesign(page);
+      await dock(page);
+      await pickSiding(page, '7" LP Lap Siding');
+      await waitStrips(page, LAP_STRIPS);
+      await openViewer(page);
+      const v = await measure(page, "__ss3dEngine");
+      ok(`${tag}: 7" LP Lap Siding in the full-screen viewer: ${LAP_LOOK.lines} lines ${LAP_LOOK.step} ft apart`, isLap(v, LAP_LOOK.step, LAP_LOOK.lines), said(v));
+      const d = await digest(page);
+      const a = DIGESTS["A no size"];
+      if (a) {
+        const diff = d.filter((x, i) => x !== a[i]);
+        ok(`${tag}: its scene is A's (the lap with no size) mesh for mesh`, d.length === a.length && diff.length === 0,
+          `${d.length} vs ${a.length} meshes, ${diff.length} differ: ${diff.slice(0, 2).join(" | ")}`);
+      }
+      if (shots) await closeUp(page, join(shots, "G-lap-7in-wall.png"));
+      await closeViewer(page);
+      ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+    } catch (e) {
+      ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+      if (shots) await page.screenshot({ path: join(shots, "G-lap-FAIL.png") }).catch(() => {});
+    } finally {
+      await page.close();
+    }
   }
 }
 
@@ -282,7 +421,7 @@ async function runCalibration(ctx, ok, shots) {
     await pickSiding(page, "Vinyl Siding");
     await dock(page);
     const m = await measure(page, "__ss3dPanel");
-    ok(`${tag}: the customer's side draws Vinyl at 4.5 in on this page`, isLap(m, 0.375, 18), said(m));
+    ok(`${tag}: the customer's side draws Vinyl at 4.5 in on this page`, isLap(m, VINYL_LOOK.step, VINYL_LOOK.lines), said(m));
     // The builder's side: open this style's calibration and save it untouched.
     const btn = page.getByRole("button", { name: STYLE, exact: true });
     await btn.first().waitFor({ state: "visible", timeout: 30000 });
@@ -309,10 +448,11 @@ async function main() {
   const { ok, failed } = reporter();
   const shots = shotsDir("lapCourses");
   const { browser, ctx } = await launch({ width: 1440, height: 1000 });
-  const only = (process.env.SS_CASES || "A,B,C,D,E").split(",");
+  const only = (process.env.SS_CASES || "A,B,C,G,D,E").split(",");
   if (only.includes("A")) await runLook(ctx, "A no size", undefined, ok, shots);
   if (only.includes("B")) await runLook(ctx, "B 4.5 in", 4.5, ok, shots, { full: true });
   if (only.includes("C")) await runLook(ctx, "C size out of range", 2, ok, shots);
+  if (only.includes("G")) await runVinyl(ctx, ok, shots);
   if (only.includes("D")) await runQuote(ctx, ok, shots);
   if (only.includes("E")) await runCalibration(ctx, ok, shots);
   await browser.close();

@@ -87,6 +87,8 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
+// The metal roof profile is the design's own pick since 2026-10-06, its style's value the starting one.
+import { effectiveRoofProfile } from "../_shared/roofProfile.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 // The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
@@ -5888,7 +5890,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
 
-    const CLADDING_IDS = new Set(["panel", "lap", "batten", "agpanel"]);
+    // "vinyl" (4.5" Vinyl Siding) since 2026-10-06, with style_cladding's CHECK (migration 285):
+    // lap's profile at its own course, priced on its own row beside the 7" LP Lap Siding.
+    const CLADDING_IDS = new Set(["panel", "lap", "vinyl", "batten", "agpanel"]);
     // The product's shared pricing vocabulary (221). Kept as an explicit set rather than the
     // pricing_method enum: the values match it deliberately, but a value added to that enum for
     // another table must not silently become offerable here with no implementation behind it.
@@ -5900,7 +5904,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     for (const raw of payload.rows) {
       const row = raw as Record<string, unknown>;
       const cid = String(row?.claddingId ?? "").trim();
-      // Refused, not defaulted. A fifth id would reach D3_CLADDING[id] in the browser as
+      // Refused, not defaulted. A sixth id would reach D3_CLADDING[id] in the browser as
       // undefined and take the 3D wall material down with it, so it must never be stored.
       if (!CLADDING_IDS.has(cid)) { skipped.push(`row ${i}: "${row?.claddingId}" is not a cladding we ship`); i++; continue; }
       if (seen.has(cid)) { skipped.push(`${cid}: listed twice`); i++; continue; }
@@ -5922,11 +5926,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const basisRaw = String(row?.basis ?? "").trim();
       if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
 
-      // How much of each LAP board shows, in inches (exposure_in, 275): what the 3D draws the
-      // courses at, and nothing else — it never prices. Written only when the row NAMES it, so a
+      // The LAP board size in inches (exposure_in, 275; the number in the siding's name since
+      // 2026-10-06, not the reveal): what the 3D scales the courses by, and nothing else — it never prices. Written only when the row NAMES it, so a
       // portal that predates 275 (production's, until it is promoted) never touches a size a
-      // builder set. Blank is a real state, "the 3D's standard 6 in", and reaches the column as
-      // NULL. Refused, never coerced, on any other cladding or outside 3..12: the column's CHECK
+      // builder set. Blank is a real state, "the 3D's standard lap (7 in)", and reaches the column
+      // as NULL; a size is in the inches of the built-in names (2026-10-06), so 7 draws that same
+      // lap and 4.5 draws the vinyl's courses. Refused, never coerced, on any other cladding
+      // (4.5" Vinyl Siding included: it is fixed at its size) or outside 3..12: the column's CHECK
       // says the same, and a sentence here beats a constraint name in the skipped list. A blank on
       // another cladding is simply nothing to write.
       const courses: { exposure_in?: number | null } = {};
@@ -13557,12 +13563,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // that list was missing `batten` — see attributeLines.ts for what that cost.)
     const cladOverrides: Record<string, string> = {};
     let cladOffered: string[] = [];
+    // The style's d3, kept for the Roof line's metal profile (2026-10-06): a design that has not
+    // picked one draws and quotes its style's starting value, so a recolour here has to word the
+    // line the way submit-estimate did, or the roof's own description would change under it.
+    let styleD3: unknown = null;
     {
       const styleKey = String(sel.style ?? "").trim();
       if (styleKey) {
-        const stRow = await admin.from("building_styles").select("id")
+        const stRow = await admin.from("building_styles").select("id, d3")
           .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
         if (stRow.error) return dbFail(req, clientId, "read that design's style", stRow.error);
+        styleD3 = stRow.data?.d3 ?? null;
+        if (!stRow.data) {
+          // The exact key missed (a stored label, or a key differing in case or spacing), yet
+          // submit-estimate found the style by key OR label, normalised, and worded the Roof line
+          // from ITS d3. Match the d3 the same way, or a recolour here rewords a standing seam
+          // line as plain metal (review 2026-10-07). The cladding list above keeps its exact-key
+          // read: what is offered is not this change's question.
+          const all = await admin.from("building_styles").select("key, label, d3").eq("client_id", clientId);
+          if (all.error) return dbFail(req, clientId, "read that design's style", all.error);
+          const hit = ((all.data ?? []) as { key: string; label: string | null; d3: unknown }[])
+            .find((r) => attrNorm(r.key) === attrNorm(styleKey) || attrNorm(r.label) === attrNorm(styleKey));
+          styleD3 = hit?.d3 ?? null;
+        }
         if (stRow.data?.id) {
           const scRows = await admin.from("style_cladding").select("cladding_id, label_override")
             .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true).not("rate", "is", null);
@@ -13612,7 +13635,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: `Couldn't match "${sel.style} ${sel.size}" in your catalog — was the style or size renamed? Fix the catalog (or resubmit from the designer), then try again.` }, 400);
     }
     const paint = computePaintLine(palette, ctx, next.paintStatus, next.paintBody || "TBD", next.paintTrim || "TBD");
-    const roof = computeRoofLine(palette, ctx, next.roofType, next.roofColor);
+    // The design's effective metal profile (its own pick, else the profile its agreed Roof line
+    // names, else the style's), so a metal roof on standing seam keeps "Metal (Standing Seam) — …"
+    // through a recolour or a paint change, and every other roof keeps the words it was quoted with.
+    // The agreed line beats the style (review 2026-10-07): a style set to Standing Seam after this
+    // order was signed as "Metal — Black" must not add "Roof: options updated" to a paint change.
+    // The pick rides along in newSelections (...sel).
+    const roofAgreed = (d.accepted_at || d.accepted_snapshot) ? agreedBaseline(d).lines : null;
+    const roof = computeRoofLine(palette, ctx, next.roofType, next.roofColor, effectiveRoofProfile(sel.roofProfile, styleD3, roofAgreed));
 
     // deno-lint-ignore no-explicit-any
     const newSnap: any = JSON.parse(JSON.stringify(snap));
