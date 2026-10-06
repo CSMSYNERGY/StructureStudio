@@ -1142,8 +1142,14 @@ function Dashboard({ session }) {
     const t = setTimeout(() => setAdvancedHoldOver(true), ms);
     return () => clearTimeout(t);
   }, [tab, advancedAnswered]);
-  const viewingFetch = useCallback(async () => {
-    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
+  // The Contacts list's contacts, on the same audited route as the rest: `withContacts` adds the
+  // first page of the tenant's contacts (crmContacts + crmContactsTotal) to get_portal's answer, and
+  // `contactsFrom` is its "Show more", answered with that page alone. The Pipeline sends neither,
+  // so its get_portal carries no contacts at all.
+  const viewingFetch = useCallback(async (opts = null) => {
+    const contactsFrom = opts && opts.contactsFrom > 0 ? opts.contactsFrom : undefined;
+    const withContacts = opts && opts.withContacts ? true : undefined;
+    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId, contactsFrom, withContacts } });
     if (error) {
       let msg = error.message;
       try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
@@ -1151,7 +1157,8 @@ function Dashboard({ session }) {
     }
     // Backfill the real company name (a ?view= deep link seeds it with the slug).
     if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
-    return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [] };
+    return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [],
+      crmContacts: data.crmContacts || [], crmContactsTotal: data.crmContactsTotal || 0 };
   }, [viewing && viewing.clientId]);
   // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
   // admin console's "Open portal ↗") auto-opens that account once the operator

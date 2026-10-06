@@ -965,6 +965,43 @@ function buildContactTimeline(act) {
   return ev.filter((e) => e.t).sort((a, b) => (new Date(b.t)) - (new Date(a.t)));
 }
 
+// ── CONTACTS WITH NO DESIGN AND NO VISIT (2026-10-06) ───────────────────────────────────
+// The list below was built from designs and browsing leads only, so a contact with neither was
+// in nobody's list: one brought in from GoHighLevel (migration 282), saved from My Synergy Phone,
+// added by hand, or whose design was deleted. They opened as records and came up in the phone's
+// search, but not here, and the GoHighLevel import waits on this list showing them.
+//
+// So the list reads crm_contacts too, as a THIRD source, and shows a row for every live contact
+// that no design and no browsing lead in the list already carries (matched on the contact id,
+// which is the record the name opens). A builder's portal reads it from PostgREST under RLS, so
+// someone limited to their own customers gets exactly the contacts they can open; an operator's
+// view-as gets it from operator-portal's get_portal, the audited route the designs take.
+//
+// ONE PAGE AT A TIME. An import can bring thousands, so the first load asks for the newest page
+// and a total, and "Show more" asks for the next. Newest by first_seen_at (a GoHighLevel row's
+// own "date added"), never updated_at: every import stamps that with the moment it ran, so a
+// whole import would otherwise sit above every real customer. Page size and columns are
+// _shared/contactListPage.ts's, which the operator path reads with; its test fails on drift.
+const SS_CONTACT_LIST_PAGE = 500;
+const SS_CONTACT_LIST_COLS = "id, name, phone, email, source, first_seen_at, created_at";
+// "Show more" keeps reading pages until it has this many new rows to show, so a press never
+// comes back empty because the next page held only people who already have a design. Bounded,
+// so one press is never the whole table.
+const SS_CONTACT_MORE_ROWS = 100;
+const SS_CONTACT_MORE_PAGES = 8;
+// Where a contact came from, in a builder's words (crm_contacts.source: 130, 254, 282). A
+// 'design' or 'captured_lead' contact is here only once that design or visit is gone, or not
+// visible to this person, so it says no more than what the row is.
+const SS_CONTACT_SOURCE_LABELS = {
+  ghl_import: "Imported from GoHighLevel",
+  phone: "Saved from My Synergy Phone",
+  manual: "Added by hand",
+  import: "Imported",
+};
+function ssContactSourceLabel(source) {
+  return SS_CONTACT_SOURCE_LABELS[source] || "Contact only";
+}
+
 // ─── Leads table (contact-grouped view of designs) ───
 // Same RLS-scoped designs read as DesignsTable, but grouped by the person
 // (normalized phone → email → name) so a repeat shopper collapses into ONE lead
@@ -983,9 +1020,61 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const [rows, setRows] = useState(() => (fetchDesigns ? null : ssCacheGet("rest", "contacts", clientId))); // null = loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");  // free-text search across all fields
+  // Contacts with no design (see SS_CONTACT_LIST_PAGE above). `byId` is every contact read so far,
+  // `fetched` how many rows the pages have answered (the next page's offset), `total` how many live
+  // contacts the tenant has for this person. `lastPaint` is the last paint's inputs, so "Show more"
+  // can add rows without reading the designs again. `loadGen` lets a Refresh outrank a Show more
+  // that is still in flight.
+  const contactsRef = useRef({ byId: new Map(), fetched: 0, total: 0 });
+  const lastPaintRef = useRef(null);
+  const loadGenRef = useRef(0);
+  // The rows the last "Show more" added, so the table can go to the page they start on (below).
+  const jumpRef = useRef(null);
+  const [moreLeft, setMoreLeft] = useState(false);     // the server has contacts not read yet
+  const [moreContacts, setMoreContacts] = useState(0); // of those, at least this many have no design
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [moreErr, setMoreErr] = useState(null);
+
+  // One page of contacts starting at row `from`: PostgREST under RLS for the builder's own portal,
+  // get_portal's `contactsFrom` for an operator's view-as (12-shell's viewingFetch).
+  const readContactPage = useCallback(async (from) => {
+    if (fetchDesigns) {
+      const res = await fetchDesigns({ contactsFrom: from });
+      return { rows: res.crmContacts || [], total: res.crmContactsTotal || 0 };
+    }
+    const { data, error: err, count } = await sb.from("crm_contacts")
+      .select(SS_CONTACT_LIST_COLS, { count: "exact" })
+      .eq("client_id", clientId).is("merged_into", null)
+      .order("first_seen_at", { ascending: false }).order("id", { ascending: false })
+      .range(from, from + SS_CONTACT_LIST_PAGE - 1);
+    // PGRST103 (HTTP 416): the offset is past the end, because contacts were merged or reassigned
+    // since the last page. That is the end of the list, not an error, or every later press would
+    // fail the same way and say so.
+    if (err && err.code === "PGRST103") return { rows: [], total: from };
+    if (err) throw err;
+    const got = data || [];
+    return { rows: got, total: typeof count === "number" ? count : from + got.length };
+  }, [fetchDesigns]);
+
+  // Fold one page into what has been read. A row seen on an earlier page (the list moved between
+  // pages) is not added twice; an empty page ends the list whatever the total said, so a stale
+  // total can never keep "Show more" asking for nothing.
+  const takeContacts = (from, page) => {
+    const cr = contactsRef.current;
+    page.rows.forEach((c) => { if (c && c.id && !cr.byId.has(c.id)) cr.byId.set(c.id, c); });
+    cr.fetched = from + page.rows.length;
+    cr.total = page.rows.length ? Math.max(page.total, cr.fetched) : cr.fetched;
+  };
 
   const load = useCallback(async () => {
     setError(null);
+    loadGenRef.current += 1;
+    contactsRef.current = { byId: new Map(), fetched: 0, total: 0 };
+    setMoreErr(null); setMoreBusy(false);   // a Show more still in flight is dropped (loadGen)
+    // And none can start until this load paints: the previous paint's designs are not this load's,
+    // and a failed Refresh must not leave a Show more that repaints the list from before it.
+    lastPaintRef.current = null; jumpRef.current = null;
+    setMoreLeft(false); setMoreContacts(0);
     let list;
     let browsing = [];
     // Inventory masters are lot buildings, not contacts — exclude on both paths (they
@@ -1091,6 +1180,41 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         groups.set(lead.key, lead);
         if (pk) browsingByPhone.set(pk, lead);
       });
+      // CONTACTS WITH NO DESIGN AND NO VISIT. Matched on the contact id ONLY, every design's and
+      // every browsing lead's (a browsing lead hidden above under its person's design still counts):
+      // the id is the record the name opens, so a person who already has a row never gets a second.
+      // Not matched on phone or email the way browsing leads are: two live contacts sharing an
+      // email are two records (282 keeps an email with the contact that had it), and hiding one
+      // here would leave it in no list at all.
+      const linked = new Set();
+      rowsIn.forEach((r) => { if (r.contact_id) linked.add(r.contact_id); });
+      browsingIn.forEach((l) => { if (l.contact_id) linked.add(l.contact_id); });
+      const cr = contactsRef.current;
+      cr.byId.forEach((c) => {
+        if (linked.has(c.id)) return;
+        // First seen for both dates: the import's own run time is not activity (see the header).
+        const seen = c.first_seen_at || c.created_at;
+        groups.set("contact-" + c.id, {
+          key: "contact-" + c.id, contactOnly: true, source: c.source || "",
+          contactId: c.id,
+          name: c.name || "", email: c.email || "", phone: c.phone || "",
+          count: 0, firstSeen: seen, lastActivity: seen,
+          latestCode: null, topStatus: "contact",
+          search: " " + ssContactSourceLabel(c.source) + " no design yet",
+          codes: [],
+        });
+      });
+      // How many contacts with no design are still to come. Every contact not read yet either
+      // carries a design or visit (it is in `linked`, unread) or is one of these. That is a FLOOR,
+      // not a count: a visit can point at a contact that is gone (captured_leads.contact_id has no
+      // foreign key) and a design at one this person can't see, so it can read 0 while some are
+      // left. Whether to offer "Show more" is therefore the server's say alone (fetched < total).
+      let linkedUnread = 0;
+      linked.forEach((id) => { if (!cr.byId.has(id)) linkedUnread += 1; });
+      const left = cr.fetched < cr.total;
+      setMoreLeft(left);
+      setMoreContacts(left ? Math.max(0, cr.total - cr.byId.size - linkedUnread) : 0);
+      lastPaintRef.current = { linked, repaint: () => paint(rowsIn, browsingIn) };
       const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
       setRows(out);
       // Cache the GROUPED result, not the raw reads: regrouping is the expensive part of
@@ -1100,8 +1224,12 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     };
     if (fetchDesigns) {
       // Operator view-as: rows from operator-portal (service-role, audit-logged);
-      // live status sync skipped (owner-JWT-bound) — cached statuses show.
-      try { const res = await fetchDesigns(); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || []; }
+      // live status sync skipped (owner-JWT-bound) — cached statuses show. `withContacts` asks for
+      // the first page of contacts too: only this list does, so the Pipeline's get_portal carries none.
+      try {
+        const res = await fetchDesigns({ withContacts: true }); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || [];
+        takeContacts(0, { rows: res.crmContacts || [], total: res.crmContactsTotal || 0 });
+      }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
     // Both reads at once. They share nothing — browsing leads are matched to designs in
@@ -1113,7 +1241,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // opened quote Details but never submitted. RLS scopes the read to this tenant.
     // Additive — a failure there must never block the design list, which is why its result
     // is read defensively rather than destructured with the designs error.
-    const [dRes, clRes] = await Promise.all([
+    const [dRes, clRes, ccRes] = await Promise.all([
       // Style and size only (SEL_LIST_COLS) — this list groups people, and the two values it
       // folds into a lead's searchable text are the only part of the plan it ever reads.
       // Both paged (ssReadAllRows) — a single request stopped at PostgREST's 1000-row cap.
@@ -1127,10 +1255,14 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         .eq("client_id", clientId).order("updated_at", { ascending: false }).order("id", { ascending: true })
         .range(from, to), (l) => l.id)
         .then((r) => r, () => ({ data: [] })),
+      // The newest page of contacts (SS_CONTACT_LIST_PAGE). Additive like the browsing leads: if
+      // it fails, the list is exactly what it was before contacts with no design were shown.
+      readContactPage(0).then((r) => r, () => null),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
     list = (dRes.data || []).map(withListSelections).filter(notInventoryLead);
     browsing = clRes.data || [];
+    if (ccRes) takeContacts(0, ccRes);
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);
     // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows
@@ -1148,6 +1280,38 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 
   useEffect(() => { load(); }, [load]);
 
+  // SHOW MORE: the next pages of contacts, until there are SS_CONTACT_MORE_ROWS new rows to show,
+  // the server has no more, or SS_CONTACT_MORE_PAGES pages have been read. Then one repaint over
+  // the designs and leads already in hand.
+  //
+  // Always the NEWEST paint, read after every await, never one held from the click: the owner's
+  // list paints twice (cached statuses, then the GoHighLevel sync), and a press during the sync
+  // that repainted from the first paint put every synced status back to the cached one.
+  const showMoreContacts = async () => {
+    const gen = loadGenRef.current;
+    if (moreBusy || !lastPaintRef.current) return;
+    setMoreBusy(true); setMoreErr(null);
+    try {
+      const fresh = new Set();   // the rows this press adds, by their list key
+      for (let i = 0; i < SS_CONTACT_MORE_PAGES; i++) {
+        const cr = contactsRef.current;
+        if (cr.fetched >= cr.total) break;
+        const page = await readContactPage(cr.fetched);
+        if (gen !== loadGenRef.current) return;   // a Refresh started meanwhile; its read wins
+        const { linked } = lastPaintRef.current;  // same load, so a paint is in hand (load clears it)
+        page.rows.forEach((c) => { if (c && c.id && !cr.byId.has(c.id) && !linked.has(c.id)) fresh.add("contact-" + c.id); });
+        takeContacts(cr.fetched, page);
+        if (fresh.size >= SS_CONTACT_MORE_ROWS) break;
+      }
+      jumpRef.current = fresh.size ? fresh : null;
+      lastPaintRef.current.repaint();
+    } catch (_e) {
+      if (gen === loadGenRef.current) setMoreErr("Couldn't load more contacts. Try again.");
+    } finally {
+      if (gen === loadGenRef.current) setMoreBusy(false);
+    }
+  };
+
   // Status chips. NOTE this filters PEOPLE by their furthest-along design, because
   // `topStatus` is a max over the person's group — "Accepted" here means "has at least one
   // accepted design", not "all their designs are accepted". That is the useful reading for a
@@ -1156,6 +1320,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // no design behind it at all.
   const [statusFilter, setStatusFilter] = useState("all");
   const statusCounts = (rows || []).reduce((a, g) => { a[g.topStatus] = (a[g.topStatus] || 0) + 1; return a; }, {});
+  // A chip's name in a sentence. The two synthetic buckets (browsing leads, contacts with no
+  // design) are not designs.status values, so STATUS_LABELS has no word for them.
+  const chipName = (k) => (k === "browsing" ? "Browsing" : k === "contact" ? "Contact only" : STATUS_LABELS[k]);
   // Facet filters: last-activity date-range + contact-info presence.
   const [fFrom, setFFrom] = useState("");
   const [fTo, setFTo] = useState("");
@@ -1188,7 +1355,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       case "designs":      return g.count;
       case "firstSeen":    return g.firstSeen;
       case "lastActivity": return g.lastActivity;
-      case "status":       return g.browsing ? -2 : STATUS_RANK[g.topStatus]; // browsing < draft (-1) < sent
+      case "status":       return g.contactOnly ? -3 : g.browsing ? -2 : STATUS_RANK[g.topStatus]; // contact only < browsing < draft (-1) < sent
       default:             return g.lastActivity;
     }
   };
@@ -1204,6 +1371,17 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
+  // After "Show more", go to the page the first added contact is on. They are older than everything
+  // already listed, so in the default order they land past the last page, and the page on screen
+  // did not change at all: the press looked like it had done nothing. Under a search or a filter
+  // that none of them matches, the page stays where it is.
+  useEffect(() => {
+    const want = jumpRef.current;
+    if (!want || !rows) return;
+    jumpRef.current = null;
+    const at = sorted.findIndex((g) => want.has(g.key));
+    if (at >= 0) setPage(Math.floor(at / pageSize) + 1);
+  }, [rows]);
 
   // ── Details drawer (per contact): what they changed + their estimate activity ──
   const [detailsFor, setDetailsFor] = useState(null); // group key | null
@@ -1253,7 +1431,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       <CardHead
         title="Contacts"
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
-        desc="Everyone who submitted a design, grouped by contact — repeat visitors collapse into one lead. Read-only."
+        desc="Everyone who submitted a design, browsed your designer or is in your contacts, grouped by person — repeat visitors collapse into one lead. Read-only."
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       >
         {/* The status dots keep their own semantic colours — green/amber/red mean the same
@@ -1284,7 +1462,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           synthetic group built from captured_leads for people who never submitted anything. */}
       {rows && rows.length > 0 && (
         <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter}
-          extra={[["browsing", "Browsing", { fg: "#3D3672" }]]} />
+          extra={[["browsing", "Browsing", { fg: "#3D3672" }], ["contact", "Contact only", { fg: "#64748B" }]]} />
       )}
       {error && <div style={S.err}>{error}</div>}
       {/* The skeleton carries the real table's seven columns, so when the rows land they
@@ -1306,10 +1484,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       {rows && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
-            ? <>No contacts match “{query}”{statusFilter !== "all" ? <> in <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
+            ? <>No contacts match “{query}”{statusFilter !== "all" ? <> in <strong>{chipName(statusFilter)}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
             : hasFacets
               ? <>No contacts match the current filters. Adjust or <button onClick={clearFacets} style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 13, padding: 0, fontFamily: "inherit", textDecoration: "underline" }}>clear the filters</button>.</>
-              : <>No contacts are <strong>{statusFilter === "browsing" ? "Browsing" : STATUS_LABELS[statusFilter]}</strong> yet.</>}
+              : <>No contacts are <strong>{chipName(statusFilter)}</strong> yet.</>}
         </p>
       )}
       {rows && filtered.length > 0 && (
@@ -1328,7 +1506,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
               {paged.map((g) => {
                 // Browsing leads get the brand light blue rather than a fulfillment colour —
                 // they are interest, not an order state.
-                const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
+                const sc = g.browsing ? { bg: "#DBEAFF", fg: "#3D3672" } : g.contactOnly ? { bg: "#F1F5F9", fg: "#475569" } : (STATUS_COLORS[g.topStatus] || STATUS_COLORS.sent);
                 return (
                   <React.Fragment key={g.key}>
                   <tr>
@@ -1339,33 +1517,37 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           and you pop it up." It was briefly behind a small "Open record"
                           button beside Details, which is not what she demonstrated and not
                           where anyone would look. Falls back to plain text for a contact
-                          with no crm_contacts row yet — i.e. before the backfill has run. */}
+                          with no crm_contacts row yet — i.e. before the backfill has run.
+                          A contact with no design and no name (an import, a saved number) shows
+                          its phone or email instead, so the one link to its record is not a dash.
+                          The phone is crm_contacts' +1 form, so it is written the way people read
+                          one, as the rest of the portal writes it. */}
                       {g.contactId && onOpenRecord ? (
                         <button type="button" onClick={() => onOpenRecord(g.contactId)}
                           title="Open this contact's record"
                           style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
-                          {g.name || "—"}
+                          {g.name || (g.contactOnly && (g.phone ? phoneDisplay(g.phone) : g.email)) || "—"}
                         </button>
                       ) : (g.name || "—")}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
-                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.phone || ""}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.contactOnly && g.phone ? phoneDisplay(g.phone) : (g.phone || "")}</div>
                     </td>
-                    <td style={S.td}>{g.browsing ? "—" : g.count}</td>
+                    <td style={S.td}>{g.browsing || g.contactOnly ? "—" : g.count}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
-                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed quote details" : g.browsing ? "Entered name and phone at the designer gate" : undefined}
-                      style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : STATUS_LABELS[g.topStatus]}</span></td>
+                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed quote details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
+                      style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : g.contactOnly ? ssContactSourceLabel(g.source) : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                      {g.browsing && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
+                      {(g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
-                      {!g.browsing && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
+                      {!g.browsing && !g.contactOnly && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
                       {/* The "Open record" button that stood here is gone: the customer NAME
                           is the link now, which is what Carolyn demonstrated. "Details" stays
                           as the quick inline peek that does not leave the list. */}
-                      {!g.browsing && (
+                      {!g.browsing && !g.contactOnly && (
                         <button type="button" onClick={() => openDetails(g)}
                           style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
                           {detailsFor === g.key ? "Hide details" : "Details"}
@@ -1459,6 +1641,28 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
             </tbody>
           </table>
           <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="contact" />
+        </div>
+      )}
+      {/* SHOW MORE: older contacts with no design are read a page at a time (SS_CONTACT_LIST_PAGE).
+          Outside the table on purpose: a search that matches nothing yet may match them, so the
+          way to load them stays on screen when the table is empty. */}
+      {rows && (moreLeft || moreErr) && (
+        <div data-ss-contacts-more="" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 4px 2px", fontSize: 13, color: "#475569" }}>
+          {/* The number is a floor (see paint), so when it is 0 with contacts still unread the
+              sentence says so without one. */}
+          {moreLeft && (
+            <span>
+              {moreContacts > 0
+                ? <><strong>{moreContacts.toLocaleString()}</strong> older {moreContacts === 1 ? "contact" : "contacts"} with no design {moreContacts === 1 ? "isn't" : "aren't"} listed yet</>
+                : <>Some older contacts aren't loaded yet</>}
+              {(query || statusFilter !== "all" || hasFacets) ? ", so your search and filters don't cover them" : ""}.
+            </span>
+          )}
+          {moreErr && <span style={{ color: "#B91C1C" }}>{moreErr}</span>}
+          <button type="button" onClick={showMoreContacts} disabled={moreBusy}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", cursor: moreBusy ? "wait" : "pointer" }}>
+            {moreBusy ? "Loading…" : "Show more"}
+          </button>
         </div>
       )}
     </div>
