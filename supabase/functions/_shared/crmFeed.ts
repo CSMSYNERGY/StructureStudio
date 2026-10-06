@@ -797,16 +797,21 @@ function labelActivity(k: string): string {
 
 // Moved verbatim in spirit from portal/02-sales.jsx's diffVersionSelections. It lives here
 // now so the browser is not re-deriving on every render what the server already assembled.
+// The built-in names (D3_CLADDING); lap's became 7" LP Lap Siding and vinyl joined on 2026-10-06.
 const CLADDING_LABELS: Record<string, string> = {
-  panel: "Panel Siding", lap: "Lap Siding", batten: "Board & Batten", agpanel: "AG Panel",
+  panel: "Panel Siding", lap: '7" LP Lap Siding', vinyl: '4.5" Vinyl Siding', batten: "Board & Batten", agpanel: "AG Panel",
 };
+// The metal roof profile, a design's own pick since 2026-10-06 (roofProfile.ts). Without these a
+// switch read as the raw ids, "roofProfile: agpanel → standingseam".
+const ROOF_PROFILE_LABELS: Record<string, string> = { agpanel: "AG Panel", standingseam: "Standing Seam" };
 function diffSelections(a: Record<string, any>, b: Record<string, any>): string[] {
   const out: string[] = [];
   const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
   for (const k of keys) {
     const av = a?.[k], bv = b?.[k];
     if (String(av ?? "") === String(bv ?? "")) continue;
-    const pretty = (v: any) => (k === "cladding" ? (CLADDING_LABELS[String(v)] || String(v || "—")) : String(v || "—"));
+    const labels = k === "cladding" ? CLADDING_LABELS : k === "roofProfile" ? ROOF_PROFILE_LABELS : null;
+    const pretty = (v: any) => (labels ? (labels[String(v)] || String(v || "—")) : String(v || "—"));
     out.push(`${k}: ${pretty(av)} → ${pretty(bv)}`);
   }
   return out.slice(0, 8);

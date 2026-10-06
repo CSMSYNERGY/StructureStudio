@@ -15,6 +15,10 @@ import {
 } from "../_shared/inventoryLifecycle.ts";
 import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 import { calendarDayIn, isTimeZone, numOrNull } from "../_shared/scheduleInput.ts";
+// The crew card's roof type names a standing seam roof (2026-10-06, the metal profile per design).
+import { agreedRoofProfile, effectiveRoofProfile, normRoofProfile, roofTypeLabel } from "../_shared/roofProfile.ts";
+// What the customer signed, for a signed design that never picked a profile (review 2026-10-07).
+import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
 // Spec: SCHEDULING_SCOPE.md (mockup approved by Carolyn 2026-08-04).
@@ -195,14 +199,47 @@ function buildingLabelFrom(selections: Record<string, unknown> | null | undefine
   const size = String(selSize(selections));
   return [style, size].filter(Boolean).join(" ").trim();
 }
+// The Roof line a SIGNED design was agreed with (agreedBaseline, migration 153), for
+// appearanceFrom's metal profile; null for a design nobody has signed, which has agreed to nothing.
+// deno-lint-ignore no-explicit-any
+const agreedRoofLines = (design: any): unknown =>
+  design && (design.accepted_at || design.accepted_snapshot) ? agreedBaseline(design).lines : null;
 // Roof + colors snapshot for the building-first card, hexes resolved from the tenant's
 // colors catalog (label match, case-insensitive) so the card renders true swatches.
+//
+// THE METAL PROFILE (2026-10-06). A metal roof on standing seam is snapshotted as
+// "Metal (Standing Seam)", so the crew card reads "Metal (Standing Seam) roof"; every other roof
+// is written exactly as before. The profile is the design's own pick, else (a signed design) the
+// profile its agreed Roof line names, else its style's starting value (roofProfile.ts
+// effectiveRoofProfile). `agreedLines` is agreedRoofLines(design): null for an unsigned design.
+// The agreed line beats the style (review 2026-10-07), so a style flipped to Standing Seam after an
+// order was signed as "Metal — Black" never puts a roof on the card the customer did not buy.
+// The style is read only for a metal roof that neither the pick nor the agreement decides,
+// matched by key or label the way submit-estimate matches it, and that read can never fail
+// create_job: on any error the design's own pick (none) stands, which is AG Panel, which is plain
+// "Metal". A card made before this shipped keeps "Metal": cards are snapshots. Exported for
+// roofProfileServerWiring_test only.
 // deno-lint-ignore no-explicit-any
-async function appearanceFrom(admin: any, clientId: string, selections: any, paintColors: any) {
+export async function appearanceFrom(admin: any, clientId: string, selections: any, paintColors: any, agreedLines: unknown = null) {
   const sel = selections ?? {};
   const paint = paintColors ?? {};
+  let roofType = sel.roofType ? String(sel.roofType) : null;
+  if (roofType && roofType.trim().toLowerCase() === "metal") {
+    let styleD3: unknown = null;
+    const styleName = String(selStyle(sel) ?? "");
+    if (!(normRoofProfile(sel.roofProfile) ?? agreedRoofProfile(agreedLines)) && styleName.trim()) {
+      try {
+        const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
+        const { data, error } = await admin.from("building_styles").select("key, label, d3").eq("client_id", clientId);
+        // deno-lint-ignore no-explicit-any
+        const row = error ? null : ((data ?? []) as any[]).find((r) => norm(r.key) === norm(styleName) || norm(r.label) === norm(styleName));
+        styleD3 = row?.d3 ?? null;
+      } catch { /* the card still gets "Metal": a label is never worth failing the job over */ }
+    }
+    roofType = roofTypeLabel(roofType, effectiveRoofProfile(sel.roofProfile, styleD3, agreedLines));
+  }
   const out: Record<string, string | null> = {
-    roof_type: sel.roofType ? String(sel.roofType) : null,
+    roof_type: roofType,
     roof_color: sel.roofColor ? String(sel.roofColor) : null,
     body_color: paint.body ? String(paint.body) : null,
     trim_color: paint.trim ? String(paint.trim) : null,
@@ -1456,7 +1493,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const code = str(payload?.designShortCode);
         if (!code) return json({ error: "designShortCode is required for an order job." }, 400);
         const { data: design, error } = await admin
-          .from("designs").select("short_code, contact, selections, paint_colors, status, inventory_unit_id")
+          // accepted_at / accepted_snapshot / estimate_lines: the agreed Roof line, for the crew
+          // card's metal profile (appearanceFrom, 2026-10-07).
+          .from("designs").select("short_code, contact, selections, paint_colors, status, inventory_unit_id, accepted_at, accepted_snapshot, estimate_lines")
           .eq("client_id", clientId).eq("short_code", code).maybeSingle();
         if (error) throw error;
         if (!design) return json({ error: "That design isn't in your account." }, 404);
@@ -1517,7 +1556,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const dims = parseSize(selSize(design.selections));
         row.width_ft = row.width_ft ?? dims.widthFt;
         row.length_ft = row.length_ft ?? dims.lengthFt;
-        Object.assign(row, await appearanceFrom(admin, clientId, design.selections, design.paint_colors));
+        Object.assign(row, await appearanceFrom(admin, clientId, design.selections, design.paint_colors, agreedRoofLines(design)));
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
         // Creating this job IS the approval (migration 105) — a requested building becomes
@@ -1527,13 +1566,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.serial = unit.serial;
         row.design_short_code = null; // the unit's master design is reachable via the unit
         if (unit.design_short_code) {
-          const { data: master } = await admin.from("designs").select("selections, paint_colors")
+          const { data: master } = await admin.from("designs").select("selections, paint_colors, accepted_at, accepted_snapshot, estimate_lines")
             .eq("client_id", clientId).eq("short_code", unit.design_short_code).maybeSingle();
           row.building_label = row.building_label ?? str(buildingLabelFrom(master?.selections as Record<string, unknown>));
           const dims = parseSize(selSize(master?.selections));
           row.width_ft = row.width_ft ?? dims.widthFt;
           row.length_ft = row.length_ft ?? dims.lengthFt;
-          Object.assign(row, await appearanceFrom(admin, clientId, master?.selections, master?.paint_colors));
+          Object.assign(row, await appearanceFrom(admin, clientId, master?.selections, master?.paint_colors, agreedRoofLines(master)));
         }
       } else if (source === "repair") {
         const repair = await requireRow("repairs", payload?.repairId, "Repair");
