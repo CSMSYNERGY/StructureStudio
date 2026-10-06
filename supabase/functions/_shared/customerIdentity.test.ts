@@ -19,6 +19,7 @@ import {
   addressIsShared,
   addressStandingFrom,
   loadAddressStanding,
+  loadOwnedDesigns,
   matchedIdentities,
   ownsDesign,
   provenIdentityColumns,
@@ -211,6 +212,71 @@ Deno.test("loadAddressStanding: a failed read is an error, NEVER an unshared sta
   assertEquals((first.error as { code?: string })?.code, "57014");
   const second = await loadAddressStanding(fakeAdmin(rows, 2), "t1", EMAIL_SESSION);
   assertEquals(second.standing, null, "a failure on page two after a clean page one");
+});
+
+// ── loadOwnedDesigns: the customer's quote list ──────────────────────────────────────────────
+
+/** tenantRows with a short_code each, in the newest-first order the read asks for. */
+function codedRows(n: number, clientId = "t1"): (Row & { short_code: string })[] {
+  return tenantRows(n, clientId).map((r, i) => ({ ...r, short_code: `SS-${clientId}-${String(i).padStart(5, "0")}` }));
+}
+
+Deno.test("loadOwnedDesigns: finds a quote past the 1000-row cap — the unpaged read never saw it", async () => {
+  // Past PostgREST's 1000 rows: the old single read returned only the newest 1000 of these.
+  const rows = codedRows(2 * ADDRESS_SCAN_PAGE + 20);
+  rows[2 * ADDRESS_SCAN_PAGE + 10].contact = { phone: P, email: "someone@example.com" };
+  rows[5].contact = { phone: "816-300-3600" };
+  const admin = fakeAdmin(rows);
+  const res = await loadOwnedDesigns(admin, "t1", PHONE_SESSION, UNSHARED, "short_code, status, contact");
+  assertEquals(res.error, null);
+  assertEquals((res.rows ?? []).map((r) => r.short_code), [rows[5].short_code, rows[2 * ADDRESS_SCAN_PAGE + 10].short_code], "both, newest first");
+  assertEquals(admin.reads.map((r) => [r.from, r.to]),
+    [[0, ADDRESS_SCAN_PAGE - 1], [ADDRESS_SCAN_PAGE, 2 * ADDRESS_SCAN_PAGE - 1], [2 * ADDRESS_SCAN_PAGE, 3 * ADDRESS_SCAN_PAGE - 1]]);
+});
+
+Deno.test("loadOwnedDesigns: keeps only this session's designs in this tenant, and stops at a short page", async () => {
+  const rows = codedRows(7);
+  rows[2].contact = { phone: Q, email: "pat@example.com" };
+  rows.push({ ...codedRows(1, "t2")[0], contact: { phone: P, email: "pat@example.com" } });
+  const admin = fakeAdmin(rows);
+  const byEmail = await loadOwnedDesigns(admin, "t1", EMAIL_SESSION, UNSHARED, "short_code, status, contact");
+  assertEquals((byEmail.rows ?? []).map((r) => r.short_code), [rows[2].short_code]);
+  assertEquals(admin.reads.length, 1);
+  // The same address on a SHARED standing owns nothing by email.
+  const shared = await loadOwnedDesigns(fakeAdmin(rows), "t1", EMAIL_SESSION, { emailShared: true }, "short_code, status, contact");
+  assertEquals(shared.rows, []);
+  // A phone session owns nothing here: rows[2]'s phone is Q, and P is at another builder.
+  assertEquals((await loadOwnedDesigns(fakeAdmin(rows), "t1", PHONE_SESSION, UNSHARED, "short_code, contact")).rows, []);
+});
+
+Deno.test("loadOwnedDesigns: a design seen on two pages (one created mid-scan) is listed once", async () => {
+  const rows = codedRows(ADDRESS_SCAN_PAGE + 3);
+  rows[ADDRESS_SCAN_PAGE - 1].contact = { phone: P };
+  // A newest-first read whose second page starts one row early, as it does after an insert.
+  const shifted = {
+    reads: 0,
+    from(_t: string) {
+      const q = {
+        select: () => q, eq: () => q, order: () => q,
+        range: (from: number, to: number) => {
+          shifted.reads++;
+          const start = from === 0 ? 0 : from - 1;
+          return Promise.resolve({ data: rows.slice(start, to + 1 - (from === 0 ? 0 : 1)), error: null });
+        },
+      };
+      return q;
+    },
+  };
+  const res = await loadOwnedDesigns(shifted, "t1", PHONE_SESSION, UNSHARED, "short_code, contact");
+  assertEquals((res.rows ?? []).map((r) => r.short_code), [rows[ADDRESS_SCAN_PAGE - 1].short_code]);
+});
+
+Deno.test("loadOwnedDesigns: a failed read on any page is an error, never a short list", async () => {
+  const rows = codedRows(ADDRESS_SCAN_PAGE + 5);
+  rows[ADDRESS_SCAN_PAGE + 2].contact = { phone: P };
+  const second = await loadOwnedDesigns(fakeAdmin(rows, 2), "t1", PHONE_SESSION, UNSHARED, "short_code, contact");
+  assertEquals(second.rows, null);
+  assertEquals((second.error as { code?: string })?.code, "57014");
 });
 
 // ── both ──────────────────────────────────────────────────────────────────────────────────────

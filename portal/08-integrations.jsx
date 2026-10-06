@@ -38,13 +38,24 @@ const QBO_REASONS = {
   realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account. Disconnect it there first, or choose a different company at Intuit.",
   unconfigured: "QuickBooks isn't fully set up on the server yet. Tell CSM Synergy.",
   save: "The connection couldn't be saved. Try again, and tell CSM Synergy if it persists.",
-  // Connected, but the previous company's item mappings couldn't be cleared — so they are stale
-  // against the new company and would bill lines against whatever shares those ids.
-  item_map_stale: "Connected, but the old company's item mappings couldn't be cleared. Re-check the mappings below before sending an invoice.",
+  // Connected, but leftover item mappings (another company's, or ones saved before migration 265
+  // that say no company) couldn't be tidied up. Since 265 they are ignored (the grid and the
+  // invoice push read only the connected company's rows), so the risk is gone; what is left is a
+  // grid that may need filling in. Worded for no company in particular: the tidy-up runs on every
+  // connect, so a SAME-company reconnect can land here too, with no "old company" to speak of.
+  item_map_stale: "Connected, but some leftover item mappings couldn't be tidied up. They won't be used. Check the mappings below before sending an invoice.",
+  // Connected to a DIFFERENT company than the mappings were made for, so those were cleared
+  // (item numbers belong to one company's books). Without this the owner lands on an emptier
+  // grid than they left, with nothing saying why.
+  company_changed: "Connected to a different QuickBooks company, so the item mappings for the old one were cleared. Pick your items below before sending an invoice.",
   // Success, but with a consequence on an account this user can't see (migration 084). Worth
   // saying plainly: the usual cause is picking the wrong company at Intuit, and that is undone
   // by reconnecting the right one. The other account is never named.
   displaced_other: "Connected. This QuickBooks company was moved here from another StructureStudio account, so it no longer syncs there. If that wasn't intended, reconnect and choose a different company at Intuit.",
+  // Both at once: the company came from another account AND this account was mapped against a
+  // different one, so those mappings were cleared. displaced_other alone left the owner on an
+  // emptied grid with nothing saying why, the very case company_changed exists for.
+  displaced_company_changed: "Connected. This QuickBooks company was moved here from another StructureStudio account, so it no longer syncs there. The item mappings for the company you used before were cleared, so pick your items below before sending an invoice. If that wasn't intended, reconnect and choose a different company at Intuit.",
 };
 
 // realm_in_use optionally carries `company` — the QuickBooks company the user just authorised
@@ -68,8 +79,17 @@ function qboReasonText(reason, company) {
 // fetch landed, and focus was lost after every pick. Everything it reads arrives as props
 // (mappedId/setMapped/qboItems/mappings); it closes over nothing from the view. Qbo-prefixed
 // because the portal parts concatenate into one shared scope, like QBO_KINDS above.
-function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings }) {
+function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings, fallbackLabel }) {
   const val = mappedId(kind, itemKey, styleId);
+  // What the EMPTY choice means, said where it is picked. A line with no mapping of its own bills
+  // as the Fallback item, so "— not mapped —" on Delivery (left unmapped on purpose) read as
+  // "delivery doesn't go into QuickBooks" when it does, as the Fallback item: Carolyn's "a lot of
+  // options in here that are not going into QuickBooks" (2026-09-10). Two rows keep "— not
+  // mapped —": Fallback itself, and Discount, which the push never bills as an item (it sends
+  // QuickBooks' own discount line). With no Fallback picked, "not mapped" is true for every row:
+  // an unmapped line then stops the push.
+  const empty = placeholder
+    || (fallbackLabel && kind !== "fallback" && kind !== "discount" ? fallbackLabel : "— not mapped —");
   const items = qboItems || [];
   // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
   // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
@@ -88,7 +108,7 @@ function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMappe
   return (
     <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
       style={{ ...S.input, maxWidth: 340 }}>
-      <option value="">{placeholder || "— not mapped —"}</option>
+      <option value="">{empty}</option>
       {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
       {Object.keys(byGroup).sort().map((g) => (
         <optgroup key={g} label={g}>
@@ -175,7 +195,14 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "retry_qbo_push", shortCode } });
     setRetrying(null);
     if (e || (d && d.error)) { setMsg({ err: (e && e.message) || d.error }); return; }
-    setMsg({ ok: d && d.alreadyPushed ? "That invoice is already in QuickBooks." : "Pushed to QuickBooks." });
+    // otherCompany (migration 265): it went into the company this account was connected to
+    // before a switch. It stays there and is not copied into the new books; say where it is.
+    // Only reachable from a list gone stale in an open tab (pushed, then a switch, then Retry):
+    // qbo_pending lists invoices with no QuickBooks id, so a fresh page never offers one. The
+    // standing answer is the connection card's otherCompanyInvoices line.
+    setMsg({ ok: d && d.alreadyPushed
+      ? (d.otherCompany ? "That invoice is already in the QuickBooks company you were connected to before." : "That invoice is already in QuickBooks.")
+      : "Pushed to QuickBooks." });
     loadPending();
   };
 
@@ -271,7 +298,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     // Style overrides for the building line.
     (grid.styles || []).forEach((s) => pushRow("building", "", s.id));
     if (!rows.length) { setSaving(false); setMsg({ ok: "Nothing to save." }); return; }
-    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "save_item_map", rows } });
+    // companyTag: the company this grid was loaded against (list_item_map). The server refuses the
+    // save if the account has switched company since, rather than stamp these item ids, picked
+    // from the old company's list, as the new one's. Sent only when the grid carried one.
+    const tag = Object.prototype.hasOwnProperty.call(grid, "companyTag") ? { companyTag: grid.companyTag } : {};
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "save_item_map", rows, ...tag } });
     setSaving(false);
     if (e || (d && d.error)) { setMsg({ err: (d && d.error) || e.message }); return; }
     const parts = [];
@@ -296,7 +327,18 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   // Wiring for the module-scope QboItemSelect (hoisted — see its comment). The functions
   // are re-created each render, which is fine as PROPS: the component TYPE stays stable, so
   // nothing remounts.
-  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings };
+  // The Fallback row's CURRENT pick, unsaved edits included, so every other row's empty choice
+  // follows it as it changes. Named by its leaf, as the dropdowns list items; a saved name can be
+  // the full "Category:Item" path. No name to be had (an item gone from QuickBooks with no saved
+  // name) still says where the line goes, just without the name.
+  const fallbackPick = grid ? mappedId("fallback", "", null) : "";
+  const fallbackName = fallbackPick
+    ? String(((qboItems || []).find((i) => i.id === fallbackPick) || {}).name
+        || (((grid && grid.mappings) || []).find((m) => m.line_kind === "fallback" && m.qbo_item_id === fallbackPick) || {}).qbo_item_name
+        || "").split(":").pop().trim()
+    : "";
+  const fallbackLabel = fallbackPick ? (fallbackName ? `— use Fallback (${fallbackName}) —` : "— use Fallback —") : null;
+  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings, fallbackLabel };
 
   // The two cards in the shape they will occupy while qbo_status is out, rather than the word
   // "Loading" on an empty page — the SkelBar rationale in 01-core.jsx applies here verbatim.
@@ -399,6 +441,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                 <button onClick={connect} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8 }}>
                   {busy ? "Starting…" : "Reconnect QuickBooks"}
                 </button>
+              </div>
+            )}
+            {/* Invoices that went into the company this account used before a switch (migration
+                265). They stay there and are never pushed again; this is where the owner hears
+                it, since the "didn't reach QuickBooks" card below lists only invoices that never
+                got in anywhere. Counted by qbo_status from where each invoice was recorded. */}
+            {status.otherCompanyInvoices > 0 && (
+              <div style={{ fontSize: 12.5, color: "#475569", marginTop: 10 }}>
+                {status.otherCompanyInvoices === 1 ? "1 earlier invoice stays" : `${status.otherCompanyInvoices} earlier invoices stay`} in
+                the QuickBooks company you were connected to before. {status.otherCompanyInvoices === 1 ? "It wasn't" : "They weren't"} copied
+                into this one.
               </div>
             )}
           </div>
@@ -537,10 +590,37 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 // settings_email) is the enforcement point — this component only decides what to show.
 // email_status contract (portal-settings): { platformReady, domainStatus:
 //   "not_configured"|"pending"|"verified"|"failed", domain, fromName, fromLocal,
-//   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified}],
-//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt}] }.
+//   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified,tracking?}],
+//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt, openedAt, complainedAt}],
+//   existingDmarc: {present, policy, count, host} | null }.
+//   `tracking: true` marks the optional open-tracking record (B4); `openedAt` is migration 262's.
+//   `existingDmarc` is public DNS's answer for the sending domain (_shared/dmarcLookup.ts); null,
+//   or missing on an older server, means nobody knows, and then nothing is said about DMARC.
 // `failed` renders the same remediation panel as `pending` (plus lastError): the fix for
 // both is "add the records, check again", so a separate dead-end state helps nobody.
+
+// The wording fields a save's answer left out of what was sent, in the editor's own words. A
+// field the server knows comes back whenever it said something; one it doesn't know (an older
+// server build) is dropped with an ok, and this is the only place that shows. The photo switch
+// is stored only when it is OFF, so only an unticked box can go missing.
+const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]];
+function ssWordingDropped(sent, kept) {
+  const out = [];
+  for (const kind of ["estimate", "quote", "invoice"]) {
+    const s = (sent && sent[kind]) || {};
+    const k = (kept && kept[kind]) || {};
+    for (const [f, words] of SS_WORDING_FIELDS) {
+      if (typeof s[f] === "string" && s[f].trim() && !k[f] && out.indexOf(words) === -1) out.push(words);
+    }
+    if (kind !== "invoice" && s.picture === false && k.picture !== false && out.indexOf("photo setting") === -1) out.push("photo setting");
+  }
+  return out;
+}
+// "a", "a and b", "a, b and c".
+function ssJoinWords(list) {
+  return list.length < 2 ? (list[0] || "") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
+}
+
 function EmailSendingView({ clientId, viewingLabel = null }) {
   const [status, setStatus] = useState(null);   // email_status response; null = loading
   const [error, setError] = useState(null);
@@ -553,8 +633,13 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // Verification feedback + per-row copy state (pending state)
   // Tenant wording for the document emails (migration 138). Seeded from email_status.
   const [tplKind, setTplKind] = useState("estimate");
-  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro}, ... }
+  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro,closing,button,picture}, ... }
   const [tplMsg, setTplMsg] = useState(null);
+  const [tplBusy, setTplBusy] = useState(false);
+  // The wording's Preview: { kind, subject, html, photo } or { kind, err }. Kept per kind so a
+  // preview never sits under the wrong tab.
+  const [pv, setPv] = useState(null);
+  const [pvBusy, setPvBusy] = useState(false);
   // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
   // and an effect rather than a render-time set: the empty check would have been true
   // forever for a tenant with no saved copy, so setting state on it during render was an
@@ -645,6 +730,28 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     else setInboundNote("Not working yet — mail records can take up to an hour. Check again shortly.");
   });
 
+  // ── See when emails are opened (B4, migration 262) ─────────────────────────────────
+  // One button for the whole card: it switches open tracking on when it is off, and otherwise
+  // asks whether the tracking record is in DNS yet. The server never lets this touch the
+  // domain's sending status (portal-settings email_tracking_check).
+  //
+  // "checking" means Resend is looking right now (this press asked, or an earlier one did and it
+  // is not done). Another press before it finishes would only restart that look, so the note says
+  // when to come back instead of "not seen yet", which reads as "press it again".
+  // "not_found" means the last look is over and Resend did not see the record (it has been asked
+  // again). Saying "checking" there too would have the builder wait on a missing, mistyped or
+  // proxied record for good, so this note sends them back to what they added.
+  const [trackNote, setTrackNote] = useState(null);
+  const trackingCheck = () => {
+    setTrackNote(null);
+    act({ action: "email_tracking_check" }, (d) => {
+      if (d.openTracking === "on") setMsg({ ok: "Email opens are on — opened emails now show “Opened” on the customer's record." });
+      else if (d.openTracking === "not_found") setTrackNote("Our last look didn't find this record. Check it's added exactly as shown, and on Cloudflare set it to DNS only (the grey cloud). We've asked again, so press Check it in about 5 minutes.");
+      else if (d.openTracking === "checking") setTrackNote("Checking now. This takes a few minutes, so press Check it again in about 5 minutes.");
+      else setTrackNote("Not seen yet — add the record above at your DNS host, then check again. It can take up to an hour to appear.");
+    });
+  };
+
   const inboundDisconnect = () => {
     if (!window.confirm(
       "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your quotes and invoices are not affected.",
@@ -662,14 +769,52 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     load();
   };
 
+  // ── Your wording: save and preview ─────────────────────────────────────────────────
+  // Save sends every tab at once (the server stores the whole map) and then reads the answer:
+  // a server build that predates a field drops it from the map and still says ok, so "Saved."
+  // is only shown when everything that was sent came back (ssWordingDropped). What came back is
+  // put in the boxes, so the builder sees what is actually stored (spaces tidied, and so on);
+  // after a drop, what they typed stays on screen next to the message instead.
+  const saveWording = async () => {
+    const sent = tpl;
+    setTplBusy(true); setTplMsg(null);
+    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: sent } });
+    setTplBusy(false);
+    const e2 = (r && r.error) || (err && err.message);
+    if (e2) { setTplMsg({ err: e2 }); return; }
+    const dropped = ssWordingDropped(sent, r && r.copy);
+    if (dropped.length) {
+      setTplMsg({ err: `Saved, but this server build didn't keep your ${ssJoinWords(dropped)}, so your emails use ours there for now. Tell CSM Synergy.` });
+      return;
+    }
+    setTpl((r && r.copy) || {});
+    setTplMsg({ ok: "Saved." });
+  };
+  // Preview draws the wording in the boxes for the open tab, saved or not, so a builder can try
+  // words before committing them. The server renders the real email (their own header, footer
+  // and photo, a sample customer); it sends nothing.
+  const previewWording = async () => {
+    const kind = tplKind;
+    setPvBusy(true); setPv(null);
+    const { data: r, error: err } = await sb.functions.invoke("portal-settings", {
+      body: { action: "email_preview_template", kind, copy: tpl[kind] || {} },
+    });
+    setPvBusy(false);
+    let e2 = (r && r.error) || (err && err.message);
+    if (!e2 && !(r && typeof r.html === "string")) e2 = "The preview couldn't be made. Try again.";
+    // A server from before Preview existed answers "Unrecognised action".
+    if (e2 && /unrecognised action/i.test(e2)) e2 = "Preview isn't available on this server yet. Tell CSM Synergy.";
+    setPv(e2 ? { kind, err: e2 } : { kind, subject: r.subject || "", html: r.html, photo: r.photo || null });
+  };
+
   const fmtWhen = (iso) => {
     if (!iso) return "—";
     try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
     catch { return iso; }
   };
   const chipStyle = (s) => {
-    const good = s === "sent" || s === "delivered";
-    const bad = s === "failed" || s === "bounced";
+    const good = s === "sent" || s === "delivered" || s === "opened";
+    const bad = s === "failed" || s === "bounced" || s === "marked as spam";
     return {
       background: good ? "#F0FDF4" : bad ? "#FEF2F2" : "#F1F5F9",
       color: good ? "#15803D" : bad ? "#DC2626" : "#475569",
@@ -685,7 +830,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // halfway through. All three share this frame: heading, a line of explanation, a status line,
   // then label/field pairs. Nothing is reordered above: email_status is genuinely one cheap
   // call (an indexed client_settings row plus ten capped email_sends rows, and deliberately no
-  // vendor round trip) and its result IS the screen, so there is no slow leg to defer.
+  // vendor round trip; the one DNS question it asks runs beside the sends read and gives up
+  // after 2.5 s) and its result IS the screen, so there is no slow leg to defer.
   if (status === null) return (
     <div style={S.card}>
       <SkelBar w={214} h={14} />
@@ -729,7 +875,38 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     if (send) return String(send.host).replace(/^send\./, "");
     return String(status.domain || "").replace(/^www\./, "");
   })();
-  const dnsAdvisory = dns.length > 0 && dnsApex
+  // ── Is there a DMARC record already? (2026-10-05) ──
+  // This row used to show for every domain, and every builder domain waiting to connect already
+  // had a record, one of them p=reject. Following the row there either ADDS a second record
+  // (receivers then ignore both, so the domain has none) or swaps the builder's own policy for
+  // p=none. So email_status asks public DNS first (existingDmarc, _shared/dmarcLookup.ts):
+  //   • none there: the row, exactly as before;
+  //   • one: no row, and a line saying leave it as it is;
+  //   • two or more: no row, and a warning, because that is already broken;
+  //   • DNS couldn't say (null), or a server from before the check sent nothing: no row and no
+  //     line. Advising p=none blind is the mistake being fixed.
+  // The answer has to be about THIS domain: `host` is where the server looked (from the same
+  // DKIM host dnsApex reads) or where it found a record (this domain, or a parent whose record
+  // covers it). A host that is neither counts as unknown.
+  const dmarc = status.existingDmarc && typeof status.existingDmarc === "object" ? status.existingDmarc : null;
+  const dmarcHost = dmarc && typeof dmarc.host === "string" ? dmarc.host : "";
+  const dmarcNone = !!dmarc && dmarc.present === false && !!dnsApex && dmarcHost === "_dmarc." + dnsApex;
+  const dmarcFound = !!dmarc && dmarc.present === true && !!dnsApex && dmarcHost.startsWith("_dmarc.")
+    && ("." + dnsApex).endsWith("." + dmarcHost.slice("_dmarc.".length));
+  const dmarcCount = dmarcFound ? Number(dmarc.count) || 1 : 0;
+  const dmarcHave = dmarcFound && dmarcCount === 1;
+  // Two records at one name cancel each other out, and nothing else on the screen would say so:
+  // Resend never checks DMARC. Shown on the records card and on the verified one, because a
+  // domain that verified long ago can still be carrying the extra record.
+  const dmarcDupNote = dmarcFound && dmarcCount > 1 ? (
+    <p data-ss-dmarc="duplicate" style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 600, marginTop: 10, marginBottom: 10, lineHeight: 1.55 }}>
+      ⚠ Your domain has {dmarcCount} DMARC records (at <span style={{ fontFamily: "ui-monospace, monospace" }}>{dmarcHost}</span>).
+      {dmarcCount === 2
+        ? " Two records cancel each other out: inboxes ignore both, as if you had none. Ask whoever manages your DNS to delete the extra one."
+        : " More than one cancels them all out: inboxes ignore every one, as if you had none. Ask whoever manages your DNS to keep one and delete the rest."}
+    </p>
+  ) : null;
+  const dnsAdvisory = dns.length > 0 && dnsApex && dmarcNone
     ? [{
       type: "TXT",
       host: "_dmarc." + dnsApex,
@@ -752,6 +929,12 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // (Carolyn: "so many people are going to be like, I don't know anything about this").
   // Ordered before the advisory row so the required records stay together.
   const dnsRows = dns.concat(inboundRows, dnsAdvisory);
+  // The open-tracking record (B4) rides in `dns` with `tracking: true`. It is OPTIONAL — mail
+  // sends the same without it, only the opens go uncounted — so every place that lists it says
+  // so, and the verified screen gives it a card of its own. No tracking row at all means open
+  // tracking was never switched on (a domain verified before it existed).
+  const trackRows = dns.filter((r) => r.tracking);
+  const trackSt = trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";
 
   // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
   // Her words: "so many people are going to be like, I don't know anything about this."
@@ -769,12 +952,20 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // exactly what the portal shows without it is what put a live A/B test in Gmail's spam
   // folder (2026-08-21). A webmaster who adds three records and stops has done the work and
   // still gets spam-foldered, and nobody would know why.
+  // It goes in ONLY when the row is on screen, i.e. DNS said there is no record (dnsAdvisory
+  // is empty otherwise, which also drops its note below). Asking a webmaster to "add" one where
+  // a record exists is how a domain ends up with two, or with p=none in place of its own.
   const webmasterMailto = (() => {
     if (dnsRows.length === 0) return "";
     const dom = dnsApex || status.domain || "our domain";
-    const lines = dnsRows.map((r, i) => {
+    // The open-tracking row(s) (B4). Its per-row label stays SHORT because every version of this
+    // email below repeats it, and that budget is what keeps the required records in. The longer
+    // Cloudflare sentence is said once, in the full email's prose (the terse one drops it).
+    const optRows = dnsRows.filter((r) => r.tracking);
+    const oneOpt = optRows.length === 1;
+    const listOf = (rows) => rows.map((r, i) => {
       const bits = [
-        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : ""}`,
+        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : r.tracking ? "  (optional, email opens; DNS only on Cloudflare)" : ""}`,
         `   Name/Host: ${r.host}`,
         `   Value:     ${r.value}`,
       ];
@@ -782,6 +973,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       if (r.priority != null) bits.push(`   Priority:  ${r.priority}`);
       return bits.join("\n");
     }).join("\n\n");
+    const lines = listOf(dnsRows);
     const body = [
       `Hi,`,
       ``,
@@ -794,6 +986,10 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       dnsAdvisory.length > 0
         ? `Note on the DMARC record: it is marked recommended rather than required. Our provider\ndoes not check it, so nothing will report it missing — but without it mail from a new\ndomain frequently lands in spam. "p=none" only asks for reports; it never blocks mail.`
         : ``,
+      // Cloudflare proxies a new CNAME by default, and a proxied one is invisible to the provider.
+      ...(optRows.length > 0
+        ? [``, `Note on the ${oneOpt ? "record" : "records"} marked optional: ${oneOpt ? "it lets" : "they let"} us see when our emails are opened.\nIf our DNS is on Cloudflare, set ${oneOpt ? "it" : "them"} to "DNS only" (the grey cloud), not "Proxied" —\nwith the proxy on, our provider can't see ${oneOpt ? "it" : "them"}.`]
+        : []),
       ``,
       `Nothing else needs changing — this does not affect the website or existing email.`,
       `Please let me know once they are in and I will run the verification check.`,
@@ -809,25 +1005,46 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     // 1024-bit DKIM value alone is ~218 chars and percent-encoding inflates every newline
     // to 3. So the prose is what gets dropped, never a record: the records ARE the email.
     if (full.length <= 1900) return full;
-    const terse = [
+    const terseOf = (list, extra) => build([
       `Hi,`,
       ``,
       `Please add these DNS records for ${dom}:`,
       ``,
-      lines,
+      list,
       ``,
       dnsAdvisory.length > 0 ? `The DMARC record is recommended, not required — without it mail from a new domain\noften lands in spam. "p=none" only asks for reports; it never blocks mail.` : ``,
+      ...(extra ? [``, extra] : []),
       ``,
       `This does not affect the website or existing email. Thanks!`,
-    ].filter((l) => l !== undefined).join("\n");
-    const short = build(terse);
-    // Even terse can overflow (many records, or a long domain). Better a short email the
+    ].filter((l) => l !== undefined).join("\n"));
+    const short = terseOf(lines);
+    if (short.length <= 1900) return short;
+    // Still too long. The open-tracking record is the one OPTIONAL row (mail sends the same
+    // without it), so it goes before any required one does: a webmaster with SPF, DKIM, the
+    // reply MX and DMARC can finish the part that matters. The opens card still shows it, with
+    // its Copy button, and says the email left it out (webmasterHasTracking). The line saying so
+    // goes next if it has to: without it this is exactly the email a domain with no tracking
+    // record gets, so switching opens on never costs a required record.
+    if (optRows.length > 0) {
+      const required = listOf(dnsRows.filter((r) => !r.tracking));
+      for (const extra of [
+        oneOpt
+          ? `One more record is optional: it lets us see when emails are opened. I will send it separately.`
+          : `${optRows.length} more records are optional: they let us see when emails are opened. I will send them separately.`,
+        null,
+      ]) {
+        const m = terseOf(required, extra);
+        if (m.length <= 1900) return m;
+      }
+    }
+    // Even that can overflow (many records, or a long domain). Better a short email the
     // webmaster can reply to than a long one that arrives cut in half -- the on-screen
     // table with its per-row Copy buttons is still the complete source.
-    return short.length <= 1900
-      ? short
-      : build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
+    return build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
   })();
+  // Whether that email carries the open-tracking record, so the opens card does not promise it
+  // when a long domain pushed it out.
+  const webmasterHasTracking = trackRows.length > 0 && trackRows.every((r) => webmasterMailto.includes(encodeURIComponent(`Name/Host: ${r.host}`)));
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
 
   const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
@@ -923,6 +1140,14 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               your mail.
             </p>
           )}
+          {/* The record is already there (existingDmarc): no row to add, and the builder told not
+              to touch it, since "fixing" it to ours would weaken or cancel theirs. */}
+          {dmarcHave && (
+            <p data-ss-dmarc="present" style={{ fontSize: 12, color: ACCENT, marginTop: 10, marginBottom: 10, lineHeight: 1.55 }}>
+              ✓ You already have a DMARC record{dmarc.policy ? <> (<strong>p={dmarc.policy}</strong>)</> : null}. Leave it as it is — don't add another one.
+            </p>
+          )}
+          {dmarcDupNote}
           {dnsRows.length > 0 && (
             <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #C7D2FE", borderRadius: 8 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
@@ -947,6 +1172,19 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       </td>
                       <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
                         {r.type}
+                        {/* The open-tracking CNAME (B4) is optional: verification never waits on it.
+                            Cloudflare proxies a new CNAME by default, which hides it from Resend,
+                            so the one host most builders use gets named. */}
+                        {r.tracking && (
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#1B7895" }}>
+                            optional · email opens
+                          </span>
+                        )}
+                        {r.tracking && (
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 600, color: "#64748B" }}>
+                            DNS only (grey cloud) on Cloudflare
+                          </span>
+                        )}
                         {/* An MX WITHOUT its priority cannot be created — the tenant DNS panel refuses
                             it, so the number has to sit on screen next to the type. */}
                         {r.priority != null && (
@@ -1031,6 +1269,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 Deactivating instantly reverts to sending through your CRM — nothing else changes.
               </p>
             </div>
+            {dmarcDupNote}
             {/* Verified is not forever: a DNS host migration, a zone rebuild or a webmaster
                 tidying up "unused" TXT records drops these silently, and the first symptom is
                 mail going to spam. The records have to stay reachable AFTER verification, not
@@ -1176,6 +1415,99 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             )}
           </div>
 
+          {/* ── See when emails are opened (B4) ──────────────────────────────────────────
+              Carolyn, 2026-10-01: a prospective client "asked to be able to see if an email is
+              read or not." Only rendered once sending is verified: the tracking record lives on
+              the sending domain, so there is nothing to offer before that. */}
+          <div style={S.card}>
+            <div style={S.h2}>See when emails are opened</div>
+            {trackSt === "off" && (
+              <div>
+                <p style={{ fontSize: 13, color: "#475569", marginTop: 0, marginBottom: 12, lineHeight: 1.6 }}>
+                  Switch this on and an email you send shows <strong>Opened</strong> on the customer's
+                  record — in the portal and in the phone app — once they open it. It needs one more
+                  record at your DNS host. Your email keeps sending the same either way.
+                </p>
+                <button type="button" onClick={trackingCheck} disabled={busy}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                  {busy ? "Switching on…" : "Turn on"}
+                </button>
+                {trackNote && <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginTop: 8 }}>{trackNote}</div>}
+              </div>
+            )}
+            {trackSt === "waiting" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 5, background: "#F59E0B", flexShrink: 0 }} />
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>One record to add</div>
+                </div>
+                <p style={{ fontSize: 12.5, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
+                  Add this at the same place you added the others. If your DNS is on Cloudflare, set
+                  it to <strong>DNS only</strong> (the grey cloud), not Proxied. Cloudflare turns the
+                  proxy on by default, and with it on we can't see the record. Until it is in place
+                  nothing is counted as opened — your email keeps sending the same either way.
+                </p>
+                <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                  <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={S.th}>Type</th>
+                        <th style={S.th}>Host</th>
+                        <th style={S.th}>Value</th>
+                        <th style={{ ...S.th, width: 90 }} aria-label="Copy" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trackRows.map((r, i) => (
+                        <tr key={i}>
+                          <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
+                            {r.type}
+                            {r.verified && <span title="In place" style={{ color: "#16A34A", fontWeight: 800, marginLeft: 6 }}>✓</span>}
+                          </td>
+                          <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.host}</td>
+                          <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.value}</td>
+                          <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                            <button type="button" onClick={() => copy(r.value, "tr" + i)}
+                              style={{ ...S.btn(copied === "tr" + i ? "#15803D" : "#F1F5F9", copied === "tr" + i ? "#FFF" : "#334155"), border: "1px solid #E2E8F0", padding: "5px 10px", fontSize: 11.5 }}>
+                              {copied === "tr" + i ? "✓ Copied" : copied === "fail:tr" + i ? "Copy failed" : "Copy"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+                  <button type="button" onClick={trackingCheck} disabled={busy}
+                    style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "Checking…" : "Check it"}
+                  </button>
+                  {trackNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{trackNote}</span>}
+                </div>
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 10, marginBottom: 0, lineHeight: 1.5 }}>
+                  {webmasterHasTracking
+                    ? <>Someone else manages your DNS? The “Email these records to my webmaster” button
+                      above includes this one too.</>
+                    : <>Someone else manages your DNS? Copy this record to them yourself: your domain
+                      name is long, so the “Email these records to my webmaster” email above has no
+                      room for it.</>}
+                </p>
+              </div>
+            )}
+            {trackSt === "on" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ width: 10, height: 10, borderRadius: 5, background: "#16A34A", flexShrink: 0 }} />
+                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>On — opened emails show “Opened” on the customer's record</div>
+              </div>
+            )}
+            {/* THE CAVEAT IS PART OF THE FEATURE. An open is the provider's guess from a tracking
+                image: a builder who reads "Opened" as proof, or "not opened" as "never read",
+                will chase the wrong customer. Same sentence as the record page's tooltip. */}
+            <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, marginBottom: 0, lineHeight: 1.5 }}>
+              Opens are approximate: some mail apps block the tracking image, and some open emails automatically.
+            </p>
+          </div>
+
           <div style={S.card}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
               <div style={S.h2}>Send a test email</div>
@@ -1198,18 +1530,23 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             )}
             {/* ── YOUR WORDING ────────────────────────────────────────────────────────
                 Carolyn, 2026-08-21: "I don't know what it's going to take to create like a
-                template that they can edit."
+                template that they can edit, you know, for images and all of that stuff too."
+                Her CRM quote email is a picture, the details, then a "View Shed Quote" button.
 
-                What is editable is the SUBJECT and the OPENING LINE — the two things that
-                are genuinely the builder's voice. The branded header, the quote/total rows,
-                the buttons and the PDF links stay ours, because those are the parts that DO
-                something and a wording edit has no business near them. Logo and colours are
-                already theirs under Branding, which is the "images" half of the ask.
-                Plain text only: markup is refused with a message, not silently stripped. */}
-            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                What is editable is the builder's voice: the SUBJECT, the OPENING LINE, a
+                CLOSING MESSAGE under the links, the BUTTON'S WORDS, and whether the BUILDING
+                PHOTO shows (quotes and estimates; it is the style's own photo, behind its
+                "Image on estimate" switch under Structures). The branded header, the quote/total
+                rows, where the button goes and the PDF links stay ours, because those are the
+                parts that DO something and a wording edit has no business near them. Logo and
+                colours are already theirs under Branding.
+                Plain text only: markup is refused with a message, not silently stripped. The
+                limits match the server's (_shared/emailTemplates.ts TEMPLATE_LIMITS), so what is
+                saved is what was typed. */}
+            <div data-ss-email-wording style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
-                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name) and they fill in automatically.
                 {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
                     email no longer prints the total, so the customer meets the price on the
                     quote itself. {total} still fills in — saved wording must never print a
@@ -1224,31 +1561,100 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                 ))}
               </div>
-              <input
-                value={(tpl[tplKind] && tpl[tplKind].subject) || ""}
-                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), subject: e.target.value } }))}
-                placeholder={"Subject — e.g. Your " + tplKind + " {number} from {business}"}
-                style={{ ...S.input, marginBottom: 6 }} />
-              <textarea
-                value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
-                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
-                rows={3}
-                placeholder={tplKind === "quote"
-                  ? "Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready."
-                  : "Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."}
-                style={{ ...S.input, resize: "vertical" }} />
-              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
-                  onClick={async () => {
-                    setBusy(true); setTplMsg(null);
-                    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: tpl } });
-                    setBusy(false);
-                    const e2 = (r && r.error) || (err && err.message);
-                    setTplMsg(e2 ? { err: e2 } : { ok: "Saved." });
-                  }}>Save wording</button>
+              {(() => {
+                const cur = tpl[tplKind] || {};
+                const setField = (f, v) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), [f]: v } }));
+                const fieldLbl = { fontSize: 11.5, fontWeight: 700, color: "#475569", margin: "6px 0 3px" };
+                const docWord = tplKind === "invoice" ? "invoice" : tplKind;
+                return (
+                  <>
+                    <div style={fieldLbl}>Subject</div>
+                    <input data-ss-wording="subject" aria-label="Subject" maxLength={300}
+                      value={cur.subject || ""}
+                      onChange={(e) => setField("subject", e.target.value)}
+                      placeholder={"e.g. Your " + tplKind + " {number} from {business}"}
+                      style={S.input} />
+                    <div style={fieldLbl}>Opening line</div>
+                    <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
+                      value={cur.intro || ""}
+                      onChange={(e) => setField("intro", e.target.value)}
+                      rows={3}
+                      placeholder={tplKind === "quote"
+                        ? "e.g. Thanks for designing with {business}! Your quote {number} is ready."
+                        : "e.g. Thanks for designing with {business}! Your {total} quote is ready."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                    <div style={fieldLbl}>Closing message <span style={{ fontWeight: 500, color: "#94A3B8" }}>(under the button)</span></div>
+                    <textarea data-ss-wording="closing" aria-label="Closing message" maxLength={1000}
+                      value={cur.closing || ""}
+                      onChange={(e) => setField("closing", e.target.value)}
+                      rows={3}
+                      placeholder={"e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                    <div style={fieldLbl}>Button text</div>
+                    <input data-ss-wording="button" aria-label="Button text" maxLength={40}
+                      value={cur.button || ""}
+                      onChange={(e) => setField("button", e.target.value)}
+                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Quote" : "e.g. View Your Estimate"}
+                      style={{ ...S.input, maxWidth: 340 }} />
+                    {tplKind !== "invoice" && (
+                      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+                        <input data-ss-wording="picture" type="checkbox" checked={cur.picture !== false}
+                          onChange={(e) => setField("picture", e.target.checked)}
+                          style={{ width: 15, height: 15, marginTop: 1, cursor: "pointer", flexShrink: 0 }} />
+                        <span>
+                          <b>Show the building photo</b>
+                          <span style={{ display: "block", color: "#64748B", fontSize: 12, marginTop: 1 }}>
+                            The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures.
+                          </span>
+                        </span>
+                      </label>
+                    )}
+                  </>
+                );
+              })()}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                <button type="button" disabled={tplBusy} onClick={saveWording}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: tplBusy ? 0.6 : 1 }}>{tplBusy ? "Saving…" : "Save wording"}</button>
+                <button type="button" disabled={pvBusy} onClick={previewWording}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: pvBusy ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
                 {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
                 {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
               </div>
+              {/* THE PREVIEW IS THE SERVER'S RENDER of the real email, so it cannot drift from what
+                  a customer gets. It is drawn in a frame with sandbox="" (no scripts, no forms,
+                  links that can't open) from srcdoc, so nothing in it can reach this page. */}
+              {pv && pv.kind === tplKind && (
+                <div data-ss-email-preview style={{ marginTop: 12 }}>
+                  {pv.err ? (
+                    <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{pv.err}</div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 6, wordBreak: "break-word" }}>
+                        <span style={{ color: "#64748B", fontWeight: 700 }}>Subject:</span> <b data-ss-preview-subject>{pv.subject}</b>
+                      </div>
+                      {pv.photo === "none" && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
+                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
+                        </div>
+                      )}
+                      {/* "not_own": the photos ARE there and ticked, but were copied from another
+                          account's catalog, so they live in that account's folder and no email (or
+                          estimate) may show them. The "none" sentence would send them to a screen
+                          where every tick is already on. */}
+                      {pv.photo === "not_own" && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
+                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
+                        </div>
+                      )}
+                      <iframe title={"Preview of your " + tplKind + " email"} sandbox="" srcDoc={pv.html}
+                        style={{ display: "block", width: "100%", height: 560, border: "1px solid #E2E8F0", borderRadius: 8, background: "#F1F5F9" }} />
+                      <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
+                        A made-up customer and number, with your own business details. Nothing is sent. Save to use these words.
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             {sends.length > 0 && (
               <div style={{ marginTop: 14 }}>
@@ -1258,7 +1664,17 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     <div key={sd.id || i} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", border: "1px solid #F1F5F9", borderRadius: 8, padding: "7px 10px" }}>
                       <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, minWidth: 56 }}>{sd.kind || "email"}</span>
                       <span style={{ fontSize: 12.5, color: "#1E293B", fontWeight: 600, flex: "1 1 180px", minWidth: 0, wordBreak: "break-all" }}>{sd.to}</span>
-                      <span style={chipStyle(sd.status)}>{sd.status || "—"}</span>
+                      {/* "opened" once the customer opened it (migration 262) — unless it bounced
+                          since, which is the news that matters. "marked as spam" beats both: the
+                          email arrived, and the one thing to do is not email them again. */}
+                      {(() => {
+                        const shown = sd.complainedAt ? "marked as spam"
+                          : sd.openedAt && sd.status !== "bounced" ? "opened" : sd.status;
+                        const tip = shown === "marked as spam" ? "They marked this email as spam. Don't email them again."
+                          : shown === "opened" ? "Opens are approximate: some mail apps block the tracking image, and some open emails automatically."
+                          : undefined;
+                        return <span style={chipStyle(shown)} title={tip}>{shown || "—"}</span>;
+                      })()}
                       <span style={{ fontSize: 11.5, color: "#94A3B8", flexShrink: 0 }}>{fmtWhen(sd.createdAt)}</span>
                       {(sd.status === "failed" || sd.status === "bounced") && (sd.error || sd.bounceReason) && (
                         <span style={{ fontSize: 11.5, color: "#DC2626", flexBasis: "100%" }}>{sd.error || sd.bounceReason}</span>
@@ -1487,6 +1903,13 @@ function ssLevelLabel(areaKey, lv) {
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
+  // Override prices (migration 277) is a yes/no as well: may this person type a line's price in
+  // the Designer. "Edit" would read as editing something else.
+  if (areaKey === "price_override") return ({ none: "No", edit: "Can change prices" })[lv] || lv;
+  // My Synergy Phone (254): four levels, and the middle two are about WHOSE calls, not read-vs-write —
+  // 'own' makes and takes calls and sees their own, 'view' also sees the team's (the Calls
+  // report, the Team tab in the apps), 'edit' also changes the phone settings.
+  if (areaKey === "phone") return ({ none: "No access", own: "Own calls", view: "Team calls", edit: "Edit" })[lv] || lv;
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
@@ -2168,9 +2591,31 @@ function CommissionsReport({ clientId }) {
   // ⛔ Do not add a fifth client-side guard. The database holds this now.
   //
   // What still protects the money is `reconciling`: figures painted before compute finishes
-  // are the last computed ones, so they are labelled as such and every control that COMMITS
+  // are not the reconciled ones, so they are labelled as such and every control that COMMITS
   // to a number stays disabled until the post-compute read lands. Money never paints
   // optimistically — it just no longer makes the whole tab wait.
+  //
+  // ⏱ SINCE 2026-10-02 THE PAINT RUNS BESIDE compute, NOT BEFORE IT, and compute returns the
+  // post-compute ledger itself (`withEntries`), so an open is two calls side by side instead of
+  // three in a row (the three took 4.6 s on beta from Pakistan, 2026-10-01). What that changes,
+  // and why it holds:
+  //   • The paint can now land MID-compute — some lines updated, new ones missing, retired ones
+  //     still shown. Still safe for the same reason as above: `reconciling` stays true until the
+  //     ledger compute returned (read after every one of its writes) is on screen.
+  //   • `settled` is the guard against the paint arriving LATE: once that ledger is applied, an
+  //     older read may not repaint or re-cache over it. Without it a slow paint (cold isolate,
+  //     a preflight) would put pre-compute rows back on screen with the controls enabled — the
+  //     double-pay class described above.
+  //   • WHO may reconcile is decided by the server: compute with withEntries answers a caller
+  //     without rate access with the ledger and no 403, so the tab asks everyone the same way
+  //     and a rep's open files no refusal row. The old "only if painted.canSeeRates" check is
+  //     gone with it.
+  //   • No ledger back (compute failed, was refused, or an older server ignored withEntries):
+  //     today's path — wait for the paint, then read list_entries AFTER compute. If that read
+  //     fails too and nothing from this run is on screen, the tab falls back to the empty
+  //     scaffold, exactly as a failed first read always did; cached figures are never left
+  //     armed. A caller with no Commissions access at all files one more 403 per open than
+  //     before (the tab is hidden at that level).
 
   // Entries only. This is what every mutation needs: the server actions do their own writes,
   // so re-running compute after each one bought nothing and cost the user eight seconds of
@@ -2186,29 +2631,41 @@ function CommissionsReport({ clientId }) {
     const run = (async () => {
       setErr(null);
       setReconciling(true);
-      // 1. Paint the ledger as it stands. This is the leg that used to wait behind compute.
-      let painted = null;
-      try { painted = await refreshEntries(); }
-      catch (e) { setErr(e.message); setData({ entries: [] }); }
-      // 2. Reconcile from GHL behind the paint, then repaint — but ONLY for someone the
-      //    server says may run it. compute is gated on canSeeRates (portal-commissions), so
-      //    a rep's call was a guaranteed 403 on every single mount, and the invoke wrapper
-      //    files every 4xx as severity='info'. A refusal that fires by construction for the
-      //    whole team is precisely what the `having count(*) > 20` triage query is meant to
-      //    catch, so this one drowned that signal instead of reporting anything.
-      //    ⚠️ Keyed off the response we JUST received, never off `data` — that is seeded
-      //    from ssCacheGet and can be another session's copy. And it still runs whenever
-      //    that response is missing (a failed read): an owner's reconcile is the money path
-      //    and must never be skipped just because we could not vouch for the caller.
-      if (!painted || painted.canSeeRates) {
-        try { await call({ action: "compute" }); await refreshEntries(); }
-        catch (_e) { /* transient, or a caller we could not vouch for — the painted rows stand */ }
+      // The cache key is built from whoever is signed in WHEN THE ANSWER LANDS (ssCacheKey reads
+      // ssCurrentUserId). A slow compute that outlives a sign-out and a different sign-in on this
+      // machine must not seed that person's tab with this run's ledger, so a run only writes for
+      // the user it started as (2026-10-02, review finding).
+      const who = ssCurrentUserId;
+      const put = (r) => { if (ssCurrentUserId !== who) return; setData(r); ssCachePut("portal-commissions", "list_entries", clientId, r); };
+      let settled = false;   // the post-compute ledger is applied: older reads may not repaint or re-cache
+      let fresh = false;     // some read from THIS run is on screen (not just the cache seed)
+      // 1. Paint the ledger as it stands, BESIDE the reconcile (see the note above). A cache hit is
+      //    already painted by the useState seed, so it needs no paint leg.
+      const paint = ssCacheGet("portal-commissions", "list_entries", clientId) ? null
+        : call({ action: "list_entries" })
+          .then((r) => { if (!settled) { put(r); fresh = true; } return r; })
+          .catch((e) => { if (!settled) { setErr(e.message); setData({ entries: [] }); fresh = true; } return null; });
+      // 2. Reconcile, and get the ledger as it stands AFTER every write compute made.
+      let ledger = null;
+      try { const c = await call({ action: "compute", withEntries: true }); ledger = c && c.ledger ? c.ledger : null; }
+      catch (_e) { /* transient, refused, or an older server: fall back below */ }
+      if (ledger) { settled = true; setErr(null); put(ledger); }
+      else {
+        // Today's path: a read that STARTS after compute. Let the paint finish first so it
+        // cannot land on top of this one.
+        if (paint) await paint;
+        settled = true;
+        try { await refreshEntries(); }
+        catch (e) {
+          // As a failed first read always did: never leave cached figures armed.
+          if (!fresh) { setErr(e.message); setData({ entries: [] }); }
+        }
       }
       setReconciling(false);
     })().finally(() => { inflight.current = null; });
     inflight.current = run;
     return run;
-  }, [refreshEntries]);
+  }, [refreshEntries, clientId]);
   useEffect(() => { load(); }, [load]);
 
   // What every control that COMMITS to a figure is disabled by. `busy` alone is not enough
@@ -2674,17 +3131,27 @@ function CommissionsReport({ clientId }) {
 // Saves to client_users.prefs (migration 165) through save_prefs, which is gated "self" --
 // the handler keys strictly off the caller's own user id and never off anything in the body.
 //
-// ⚠️ CARD ORDERING IS NOT HERE, and that is her call rather than an omission. On the same
-// call, right after describing it: "and then, OBVIOUSLY LATER, I'm just like giving like the
-// big scope is allowing them to organize their cards in the way that they want them to be."
-// The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
-// waiting; the UI is not built because she scoped it out.
+// THE RECORD CARD ORDER CARD (2026-10-05). Carolyn on the same call @39:00: "they can put their
+// cards in the order that they want them, and they can have a different order under a contact,
+// and a different order under a deal." She called it "obviously later" then; it is built now as
+// an up/down list here, the Settings home Ahsan proposed @42:28 and she agreed to, rather than
+// dragging on the record: it works by keyboard and on a phone, and it needs no new server write.
+// It saves the FULL key list for a kind, the cards that only show sometimes (Sales tax) included,
+// so they keep their place; CrmRecord reads it through crmOrderSections (02-sales.jsx). save_prefs
+// has kept cardOrder since 2026-08-29 (the column is migration 165's), and the card still checks
+// the echo the way the reply-to card does.
 //
-// ⚠️ THE REPLY-TO CARD BELOW DOES NOT WORK YET, and it says so on screen when it doesn't.
-// save_prefs rebuilds prefs from a WHITELIST and writes the result over the whole column, so
-// `replyToEmail` is accepted and discarded until the server edit in
-// .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
-// deliberately shipped first so the two can land independently.
+// THE REPLY-TO CARD BELOW has worked since 2026-09-06, when save_prefs learned to keep
+// `replyToEmail`. Since 2026-10-05 it covers every email a customer gets from us, not only the
+// ones typed in a record: a quote, an invoice or a change order carries the address of whoever
+// sent it, and a confirmation the customer set off themselves carries their assigned rep's
+// (supabase/functions/_shared/repReplyTo.ts has the rule, and why an operator is never named).
+// If save_prefs ever stops keeping the key, the card still says so on screen rather than "Saved."
+//
+// The address goes into a mail header, so this box and the server check it with the SAME rule:
+// REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
+// _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
+const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
@@ -2698,11 +3165,43 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const [addrBusy, setAddrBusy] = useState(false);
   const [addrMsg, setAddrMsg] = useState(null);
   const savedAddr = (prefs && prefs.replyToEmail) || "";
+  // ── The email signature card's own state ────────────────────────────────────────
+  // Seeded from prefs and not re-synced, for the same reason as the reply-to address above.
+  const [sig, setSig] = useState(((prefs && prefs.emailSignature) || ""));
+  const [sigBusy, setSigBusy] = useState(false);
+  const [sigMsg, setSigMsg] = useState(null);
+  const savedSig = (prefs && prefs.emailSignature) || "";
+  // ── The record card order card's own state ──────────────────────────────────────
+  // The SAVED list per kind, or null for "never arranged" (the registry order). Seeded from prefs
+  // and moved on screen at once, so a run of presses doesn't wait on the server between them;
+  // the saves queue behind each other (saveOrder) and only the last arrangement has to land.
+  const seedOrder = (p) => {
+    const co = (p && p.cardOrder) || {};
+    const one = (k) => (Array.isArray(co[k]) && co[k].length ? co[k] : null);
+    return { contact: one("contact"), design: one("design") };
+  };
+  const [cardOrder, setCardOrder] = useState(() => seedOrder(prefs));
+  const [orderBusy, setOrderBusy] = useState(false);
+  const [orderMsg, setOrderMsg] = useState(null);
+  const orderWant = useRef(null);
+  const orderSaving = useRef(false);
+  const orderKept = useRef(seedOrder(prefs));
 
-  // One writer for both cards. save_prefs takes the WHOLE prefs map and replaces the stored
+  // One writer for every card. save_prefs takes the WHOLE prefs map and replaces the stored
   // blob with it, so every save has to carry the keys it is not changing -- hence the spread.
+  //
+  // THE SPREAD IS OF WHAT THIS PAGE LAST ASKED FOR, not of the `prefs` prop (review 2026-10-05).
+  // The prop is the copy from the render a save started in, and the card order's queue (saveOrder)
+  // keeps sending from that render: press ▼ twice, switch the Pipeline default while the first
+  // save is out, and the queued order save put the old default back on the server while the card
+  // said "Saved.". Every save merges its own keys into prefsWant first, so each one carries every
+  // card's latest choice, whichever lands last. This page is the only writer of these prefs, so
+  // nothing else can move them underneath it. (A save that fails leaves its value on screen, and
+  // the next save of any card now stores it: the same thing the screen already shows.)
+  const prefsWant = useRef(prefs || {});
   const commit = async (patch) => {
-    const body = { action: "save_prefs", prefs: { ...(prefs || {}), ...patch } };
+    prefsWant.current = { ...prefsWant.current, ...patch };
+    const body = { action: "save_prefs", prefs: prefsWant.current };
     const { data, error } = await sb.functions.invoke("portal-settings", { body });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
     // Hand the saved map back so the shell stops serving the stale one -- otherwise the
@@ -2718,10 +3217,11 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     setBusy(false);
   };
 
-  // Same shape the server applies to a recipient address in crm_send_email. Checked here so
-  // a typo is caught while the person is still looking at the field -- server-side it is
-  // dropped silently, which would read as the setting refusing to save for no reason.
-  const looksLikeEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+  // The server's own rule (REPLY_ADDRESS_RE above, 320 characters at most). Checked here so a
+  // typo, a name in angle brackets or a second address is caught while the person is still
+  // looking at the field -- server-side it is dropped silently, which would read as the setting
+  // refusing to save for no reason.
+  const looksLikeEmail = (v) => v.length <= 320 && REPLY_ADDRESS_RE.test(v);
 
   const saveAddr = async () => {
     const next = addr.trim();
@@ -2733,10 +3233,10 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       // ⚠️ THE WHITELIST CHECK, and it is not defensive padding -- it is the one signal that
       // separates "saved" from "accepted and thrown away". save_prefs rebuilds the prefs blob
       // from a fixed list of keys and writes the result over the whole column, so a key it
-      // does not know is dropped with an { ok: true } response and no error anywhere. Until
-      // the server edit in .temp/HANDOFF-reply-to-prefs.md lands, EVERY save of this field
-      // takes that path. Reporting it plainly costs four lines; not reporting it costs
-      // somebody an afternoon on a setting that says "Saved." and does nothing.
+      // does not know is dropped with an { ok: true } response and no error anywhere. Every
+      // server since 2026-09-06 keeps this one; an older build, or one that refuses the
+      // address, still lands here. Reporting it plainly costs four lines; not reporting it
+      // costs somebody an afternoon on a setting that says "Saved." and does nothing.
       if (next && kept !== next) {
         setAddrMsg({ err: "Saved, but this server build didn't keep the address — replies will keep going to your login email for now. Tell CSM Synergy." });
       } else {
@@ -2744,6 +3244,84 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       }
     } catch (e) { setAddrMsg({ err: e.message }); }
     setAddrBusy(false);
+  };
+
+  // The server trims it and keeps at most 1,000 characters (_shared/emailSignature.ts); the box
+  // stops at the same length, so what is saved is what was typed. The kept value is shown back
+  // all the same, and an empty answer to a non-empty save is the whitelist check again: an older
+  // server build drops the key and still says ok.
+  const saveSig = async () => {
+    const next = sig.trim();
+    setSigBusy(true); setSigMsg(null);
+    try {
+      const back = await commit({ emailSignature: next });
+      const kept = (back && back.emailSignature) || "";
+      if (next && !kept) {
+        setSigMsg({ err: "Saved, but this server build didn't keep the signature — your emails go out without one for now. Tell CSM Synergy." });
+      } else {
+        setSig(kept);
+        setSigMsg({ ok: next ? "Saved. It goes under every email you send a customer." : "Removed — your emails go out without a signature." });
+      }
+    } catch (e) { setSigMsg({ err: e.message }); }
+    setSigBusy(false);
+  };
+
+  // The cards one kind of record can show, in this person's order: every card, the ones that
+  // only show sometimes included, because the saved list has to give each of them a place.
+  const cardsFor = (kind) => crmOrderSections(CRM_SECTIONS.filter((s) => s.kinds.indexOf(kind) !== -1), cardOrder[kind]);
+
+  // ONE SAVE AT A TIME, THE LATEST ARRANGEMENT LAST. Each press moves the card on screen and asks
+  // for a save; a press while one is in flight only replaces what the next save sends. Two saves
+  // racing would land in either order, and save_prefs replaces the whole blob, so the older one
+  // could win. Every save carries both kinds in full (`send`). The loop goes on calling the
+  // `commit` of the render it started in, which is safe only because commit spreads prefsWant (a
+  // ref) rather than that render's `prefs`: another card saved mid-run rides along.
+  const saveOrder = async (next) => {
+    orderWant.current = next;
+    if (orderSaving.current) return;
+    orderSaving.current = true; setOrderBusy(true); setOrderMsg(null);
+    let said = null;
+    try {
+      while (orderWant.current) {
+        const want = orderWant.current;
+        orderWant.current = null;
+        const send = {};
+        for (const k of ["contact", "design"]) if (want[k]) send[k] = want[k];
+        const back = await commit({ cardOrder: send });
+        // The whitelist check again (see saveAddr): a server that drops the key still says ok.
+        const kept = seedOrder(back);
+        orderKept.current = kept;
+        const same = ["contact", "design"].every((k) => JSON.stringify(kept[k]) === JSON.stringify(send[k] || null));
+        said = same
+          ? { ok: "Saved." }
+          : { err: "Saved, but this server build didn't keep the order — records keep the usual order for now. Tell CSM Synergy." };
+        if (!same && !orderWant.current) setCardOrder(kept);
+      }
+    } catch (e) {
+      // Back to what the server last kept, so the list never shows an order no record will use.
+      orderWant.current = null;
+      setCardOrder(orderKept.current);
+      said = { err: e.message };
+    }
+    orderSaving.current = false; setOrderBusy(false); setOrderMsg(said);
+  };
+
+  const moveCard = (kind, key, step) => {
+    const keys = cardsFor(kind).map((s) => s.key);
+    const i = keys.indexOf(key);
+    const j = i + step;
+    if (i < 0 || j < 0 || j >= keys.length) return;
+    keys[i] = keys[j]; keys[j] = key;
+    const next = { ...cardOrder, [kind]: crmMergeCardOrder(cardOrder[kind], keys) };
+    setCardOrder(next);
+    saveOrder(next);
+  };
+
+  const resetCardOrder = (kind) => {
+    if (!cardOrder[kind]) return;
+    const next = { ...cardOrder, [kind]: null };
+    setCardOrder(next);
+    saveOrder(next);
   };
 
   return (
@@ -2769,6 +3347,69 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
 
+      {/* ── RECORD CARD ORDER — Carolyn 2026-08-28 @39:00 ──────────────────────────────
+          Next to the Pipeline default because Ahsan put the two together on that call ("all of
+          these settings for contact cards, the pipeline cards, and the default one"). Two lists,
+          because she asked for "a different order under a contact, and a different order under a
+          deal".
+
+          ⚠️ THE ARROWS ARE NEVER `disabled`. Chrome drops focus from a button the moment it
+          becomes disabled, so the ▲ on a card that has just reached the top would throw a
+          keyboard user's place back to the start of the page. aria-disabled says the same thing
+          to a screen reader, and moveCard ignores a step past either end. */}
+      <div style={S.card}>
+        <div style={S.h2}>Record card order</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Put the cards down the side of a customer's record in the order you want them. Your own
+          order, not the business's — everyone on your team arranges their own.
+        </p>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+          {[["contact", "On a contact"], ["design", "On a deal"]].map(([kind, label]) => {
+            const cards = cardsFor(kind);
+            return (
+              <div key={kind} data-ss-card-order={kind} style={{ flex: "1 1 240px", minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", flex: 1 }}>{label}</div>
+                  <button onClick={() => resetCardOrder(kind)} aria-disabled={!cardOrder[kind]}
+                    style={{ background: "none", border: "none", padding: 0, fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                      color: cardOrder[kind] ? ACCENT : "#CBD5E1", cursor: cardOrder[kind] ? "pointer" : "default" }}>
+                    Reset to default
+                  </button>
+                </div>
+                <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+                  {cards.map((s, i) => (
+                    <div key={s.key} data-ss-card-order-row={s.key}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderTop: i ? "1px solid #F1F5F9" : "none", background: "#FFF" }}>
+                      <span style={{ width: 18, fontSize: 11.5, color: "#94A3B8", textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "#334155" }}>{s.title}</div>
+                        {s.note && <div style={{ fontSize: 11.5, color: "#94A3B8", lineHeight: 1.35 }}>{s.note}</div>}
+                      </div>
+                      {[[-1, "▲", "up"], [1, "▼", "down"]].map(([step, glyph, word]) => {
+                        const off = (step < 0 && i === 0) || (step > 0 && i === cards.length - 1);
+                        return (
+                          <button key={word} onClick={() => moveCard(kind, s.key, step)}
+                            aria-label={`Move ${s.title} ${word}`} aria-disabled={off} title={off ? "" : `Move ${word}`}
+                            style={{ width: 30, height: 28, flexShrink: 0, border: "1px solid #E2E8F0", borderRadius: 6, background: off ? "#F8FAFC" : "#FFF",
+                              color: off ? "#CBD5E1" : "#475569", fontSize: 11, cursor: off ? "default" : "pointer", fontFamily: "inherit", padding: 0 }}>
+                            {glyph}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {(orderBusy || orderMsg) && (
+          <div style={{ marginTop: 10, fontSize: 12, color: orderBusy ? "#64748B" : (orderMsg.err ? "#DC2626" : "#15803D") }}>
+            {orderBusy ? "Saving…" : (orderMsg.err || orderMsg.ok)}
+          </div>
+        )}
+      </div>
+
       {/* ── WHERE REPLIES GO — Carolyn 2026-09-04 @35:06 ────────────────────────────
           "the company has to set up their domain to work. And then every user should be able
           to go in and say, when somebody replies to an email, send it here. But that should
@@ -2788,13 +3429,36 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           address: the customer's reply reaches this address AND the customer's record in
           StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
           behaviour, which is what she was comparing us to, and the first person to notice a
-          reply still landing in the app would reasonably call it a bug. */}
+          reply still landing in the app would reasonably call it a bug.
+
+          WHICH EMAILS (2026-10-05). Every email a customer gets from us: the ones typed in a
+          record, and the quotes, invoices and change orders a person sends. The confirmations a
+          customer sets off themselves (accepting a quote, signing an invoice) go to the rep the
+          customer is assigned to, so the card says that too. The rule is the server's
+          (_shared/repReplyTo.ts); keep this wording in step with it.
+
+          WHAT IT CAN'T PROMISE ON EVERY ACCOUNT. The card shows on every tenant, but the copy
+          only rides on email StructureStudio itself sends: on a CRM tenant the quotes and
+          invoices go out from GoHighLevel, which this setting never touches. And a reply lands
+          on the record only once the company has set up replies (Settings → Email Settings);
+          until then it reaches the inbox alone. Most customers have no assigned rep yet, so the
+          confirmation line says "if they have one". Worded to be true everywhere rather than
+          switched per tenant, because a rep has no right to read the email settings it would
+          need. */}
       <div style={S.card}>
         <div style={S.h2}>Where replies to your emails go</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          When you email a customer from StructureStudio and they hit Reply, their reply lands on
-          the customer's record here — and, if you fill this in, in your own inbox at the same
-          time. Leave it blank to use the email address you sign in with.
+          When a customer hits Reply on an email you sent them from StructureStudio, whether it's a
+          message, a quote, an invoice or a change order, their reply comes to your own inbox too,
+          and lands on the customer's record here once your company has set up replies under
+          Settings → Email Settings. Leave this blank to use the email address you sign in with, or
+          fill it in to get those replies somewhere else.
+        </p>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          This is for email StructureStudio sends. A quote or invoice your CRM sends for you follows
+          the CRM's own settings. A customer's reply to the confirmation they get after accepting a
+          quote or signing an invoice goes to the person that customer is assigned to, if they have
+          one.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
           <input
@@ -2814,6 +3478,43 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           </button>
         </div>
         {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+      </div>
+
+      {/* ── YOUR EMAIL SIGNATURE — Carolyn 2026-10-01 ─────────────────────────────────
+          "The other thing that is like super, super important in this is to be able to set up
+          email signatures in the settings ... if I'm sitting here typing a message, I want to
+          see my signature right here."
+
+          Per PERSON, so it lives in My Profile beside the reply-to address: each rep signs their
+          own emails. It goes under the emails a person writes (a record's Email tab, My Synergy
+          Phone) and under test emails. Quotes and invoices are NOT signed: they have their own
+          branded footer, and signing them is a later change. Plain text on purpose; the server
+          escapes it into the HTML, so no signature can carry markup into a customer's inbox. */}
+      <div style={S.card}>
+        <div style={S.h2}>Your email signature</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Added to the end of every email you write to a customer, and to test emails. Plain
+          text, up to 1,000 characters. Quotes and invoices keep their own footer.
+        </p>
+        <textarea
+          value={sig}
+          disabled={sigBusy}
+          maxLength={1000}
+          rows={4}
+          onChange={(e) => { setSig(e.target.value); setSigMsg(null); }}
+          placeholder={"Jane Smith\nSales, Your Company\n(555) 201-8890"}
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5, opacity: sigBusy ? 0.6 : 1 }}
+        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+          <button
+            onClick={saveSig}
+            disabled={sigBusy || sig.trim() === savedSig}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (sigBusy || sig.trim() === savedSig) ? 0.5 : 1 }}>
+            Save
+          </button>
+          <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{sig.length}/1000</span>
+        </div>
+        {sigMsg && <div style={{ marginTop: 10, fontSize: 12, color: sigMsg.err ? "#DC2626" : "#15803D" }}>{sigMsg.err || sigMsg.ok}</div>}
       </div>
     </div>
   );
@@ -3468,7 +4169,7 @@ function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   );
 }
 
-function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false }) {
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false, view3d = false }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
   // `company` slug for them — it points at their first visible tab instead (see 12-shell).
@@ -3483,7 +4184,8 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
           cannot save half a form between them — see the note at the top of SettingsView. */}
       {/* Building serial numbers ride with Business Details (Carolyn 2026-09-11). They are a
           shop-wide counter, not a property of any one lot, which is why they left Locations. */}
-      {sub === "company" && (<><SettingsView section="company" /><SerialNumbersCard /></>)}
+      {/* view3d: Business Details shows the four-corner quote switch only where 3D is unlocked. */}
+      {sub === "company" && (<><SettingsView section="company" view3d={view3d} /><SerialNumbersCard /></>)}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
@@ -3501,10 +4203,12 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
-  const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
+  // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
+  // ssPhoneOffered answer, or the rail would offer a Phone tab the body clamps to Structures.
+  const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /portal/settings/branding, a link people hold, would fall back to Structures.
   const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
@@ -3551,13 +4255,14 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       )}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
-      {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
+      {/* `advanced` is the Advanced mode switch (06-3d.jsx AdvancedModeCard), null where it must not show. */}
+      {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} view3d={view3d} canBill={canBill} advanced={advanced} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
-          viewingLabel={viewingLabel}
+          viewingLabel={viewingLabel} view3d={view3d}
           /* Location tax rates and the Tax tab's codes are settings_crm — the area that owns the
              company rate — not the team/branding areas Locations rides on. Same unclamped reading as ssCompanyTabs: an
              owner/admin, or a null map (a platform operator in view-as, whose rights come
@@ -3579,6 +4284,15 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
+      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
+          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
+          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
+          operator in view-as, whose rights come from app_operators). 'own' never writes here:
+          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
+          refuses regardless. */}
+      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
+        onOpenTexting={() => setSub("sms")} />}
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}

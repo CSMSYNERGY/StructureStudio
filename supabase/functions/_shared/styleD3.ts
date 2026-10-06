@@ -70,7 +70,15 @@ const CLAMPS: Record<string, [number, number]> = {
   // off switch, which is why every lower bound here is 0 rather than a real minimum.
   leanToWidthFt: [0, 16],     // feet the appendage projects past the eave wall
   leanToDropFt: [0, 6],       // how far its outer edge falls below the main eave
-  dormerWidthFt: [0, 12],     // along the ridge
+  // Along the ridge, and up to the whole building (2026-10-04). It was 12, so a 16 ft dormer typed on
+  // the Advanced page was saved as 12 without a word. This side never knows the building's size, so
+  // the cap is the longest building anything here draws: the dimensions card's length band
+  // (DIM_BANDS.lengthFt below, the panel's CAL_DIM_BANDS), 100 ft, past the Advanced page's 60
+  // (ADV_MAX_FT), whose dormer box runs to the previewed building's length. A literal, since DIM_BANDS
+  // is declared further down and reading it here would throw at load. The renderer holds the width to
+  // whatever building it is drawn on (d3DormerWidthFt), so a wide dormer on a smaller size stays
+  // inside its gable ends.
+  dormerWidthFt: [0, 100],
   dormerRiseFt: [0, 6],       // above the slope it sits on
   dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
   // porchTruss has no range: it is a boolean, handled beside porchEnd rather than in the
@@ -132,6 +140,24 @@ const CLAMPS: Record<string, [number, number]> = {
   // past a foot and a half is a second storey, not a step.
   rearStepFt: [0, 56],
   rearEaveRiseFt: [-1.5, 1.5],
+
+  // ── WHERE AN APPENDAGE MEETS THE BUILDING, AND HOW MANY STEPS (2026-09-28, Carolyn's call) ──────
+  // Absent is today's render exactly, for the lean-to reason at the top of this table: one table
+  // serves beta and production, and an older renderer does not read a key it has never heard of.
+  //
+  // leanToAttachFt / wingAttachFt: with roof.leanToAttach / roof.wingAttach set, how far the
+  // appendage's roof meets the building ABOVE the eave (attach "roof": up the main roof's slope) or
+  // BELOW it (attach "wall": down the sidewall), in vertical feet. "Slide it up here, and slide it
+  // down on the side here" (09-28 @9:20). Without its enum the number describes nothing and the
+  // renderer ignores it; it is stored regardless, like leanToSide, so switching back remembers it.
+  // 8 ft up a roof is past any lean-to a portable building carries; 10 ft down a centre wall is
+  // past the tallest raised centre.
+  leanToAttachFt: [0, 8],
+  wingAttachFt: [0, 10],
+  // How many steps come down off the projecting porch's deck: the TREADS, the count the panel's
+  // readout already says ("3 steps"). Absent is the renderer's own count, one per 7.5 inches of
+  // height. A WHOLE number, rounded after the clamp like porchPosts. Kept only with porchSteps.
+  porchStepCount: [1, 12],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -147,11 +173,18 @@ const D3_LEANTO_SIDES = ["left", "right"] as const;
 // every tenant's column the first time anyone opened and saved the calibration panel --
 // the same reasoning `eave` below is built on.
 const D3_DORMER_TYPES = ["gable", "transom"] as const;
-// Which gable end a recessed porch opens at. ABSENT means "front", like dormerType's absent
-// "gable": the renderer tests `!== "back"`, so a row that predates this field keeps its exact
-// render and styleD3.test.ts's deep-equal on `roof` keeps passing. Emitting a default here
-// would write it into every tenant's column the first time anyone saved the panel.
-const D3_PORCH_ENDS = ["front", "back"] as const;
+// Which wall the porch is on. ABSENT means "front", like dormerType's absent "gable": the renderer
+// tests `!== "back"`, so a row that predates this field keeps its exact render and styleD3.test.ts's
+// deep-equal on `roof` keeps passing. Emitting a default here would write it into every tenant's
+// column the first time anyone saved the panel.
+// "left" and "right" (2026-10-05, the 09-28 call: "we may actually also need to be able to have it on
+// the sides") are the west and east walls in the new frame (roof.front or roof.highSide set), as seen
+// standing at the front, which stays the front. Outside the frame the renderers read them as "front",
+// production's `!== "back"` included, so a side porch on a style with no front draws where it always
+// would have. Neither prompt offers them: the generator and the check still say front or back, so
+// parseModelSpec drops a model reply's side wall (it reads as the front, as it always did) and
+// applySelfCheck never moves a porch onto or off a side wall. Only a builder's save stores one.
+const D3_PORCH_ENDS = ["front", "back", "left", "right"] as const;
 // ── THE FRONT, and the frame every left/right/front/back is read in (2026-09-24) ─────────────
 // FRONT is the wall you walk up to: the one carrying the porch, or the main door when there is
 // no porch. The builder's size "WxL" is W = that wall's length, L = the depth front to back.
@@ -171,11 +204,167 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 // renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
-const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"] as const;
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList", "wingCornersMeet"] as const;
+// ── EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) ─────────────────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "I want this wing to be like this and this wing to be like
+// this". { left?, right?, front?, back? }, one entry per wall a wing can stand on, each OVERRIDING the
+// shared key for that one wing: widthFt (wingWidthFt's band), pitch (wingPitch's), attach ("auto" is
+// Automatic whatever wingAttach says, "roof"/"wall" as wingAttach) and attachFt (wingAttachFt's).
+// roof.wingSide still says which sides carry a wing and wingWidthFt is still the on switch. ABSENT is
+// today's render: every wing reads the shared keys. An older renderer never reads it (an unknown roof
+// key), and the Advanced page keeps the shared keys equal to the first wing's so it still draws
+// something close. A field that is not a number or a known word is dropped, an empty entry is dropped,
+// and an object with no entry left is not stored. A wing key: a shed drops it with the rest.
+export const D3_WING_SIDE_KEYS = ["left", "right", "front", "back"] as const;
+export const D3_WING_SIDE_ATTACH = ["auto", "roof", "wall"] as const;
+const D3_WING_SIDE_CLAMPS: Record<string, [number, number]> = { widthFt: [0, 16], pitch: [0, 1.5], attachFt: [0, 10] };
+function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const side of D3_WING_SIDE_KEYS) {
+    const o = src[side];
+    if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+    const e = o as Record<string, unknown>;
+    // In the contract's order: widthFt, pitch, attach, attachFt.
+    const clean: Record<string, unknown> = {};
+    for (const k of ["widthFt", "pitch", "attach", "attachFt"]) {
+      if (k === "attach") {
+        if ((D3_WING_SIDE_ATTACH as readonly string[]).includes(String(e.attach))) clean.attach = String(e.attach);
+        continue;
+      }
+      // A blank box is no number at all, not 0 (review, 2026-09-30: Number("") stored widthFt 0).
+      if (typeof e[k] === "string" && (e[k] as string).trim() === "") continue;
+      const n = num(e[k]);
+      if (n !== null) clean[k] =Math.min(D3_WING_SIDE_CLAMPS[k][1], Math.max(D3_WING_SIDE_CLAMPS[k][0], n));
+    }
+    if (Object.keys(clean).length) out[side] = clean;
+  }
+  return Object.keys(out).length ? out : null;
+}
 // roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
-export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
+// "leftSide" / "rightSide" (2026-10-03): one flight off the deck's left or right END instead, centred
+// along it, as seen from the same spot; a projecting porch only, since a recessed porch has no deck
+// end to leave by. A recessed porch takes the three front words (2026-10-03), off the floor's edge
+// in its opening. The production designer before these reads an unknown word as no steps.
+export const D3_PORCH_STEPS_FRONT = ["left", "center", "right"] as const;
+export const D3_PORCH_STEPS = [...D3_PORCH_STEPS_FRONT, "leftSide", "rightSide"] as const;
+// roof.leanToAttach / roof.wingAttach (2026-09-28): does the appendage's roof meet the building ON
+// THE ROOF (above the eave, up the main roof's slope) or ON THE WALL (below the eave)? Carolyn,
+// 09-28 @17:40: "they need to specify if it goes on the roof or if it goes on the sidewall ... I
+// don't think we want it to just automatically switch." So it is the builder's word, stored as
+// given, and the renderer never flips it. ABSENT is today's render: a lean-to hung at the eave, and
+// wings whose centre section is pushed up out of the way of a steep wing roof.
+export const D3_ATTACH = ["roof", "wall"] as const;
+// ── AS MANY LEAN-TOS AS THEY WANT, EACH WHERE THEY WANT (roof.leanTos, 2026-09-29) ─────────────────
+// Carolyn, 09-29: "they start with a core building, then they can add a lean-to and specify where they
+// want it, and add another one and specify where they want it ... as many lean-tos ... wherever they
+// want." An ARRAY of up to six, each on one building wall as seen standing in front of the FRONT wall
+// (the renderer's frame, the one gradeFallToward is read in: front is south, left is west):
+//   wall      "left" | "right" | "front" | "back"                        required
+//   widthFt   how far it sticks out, 0.5..16                             required
+//   dropFt    how far its outer edge sits below where it meets, 0..6     absent: 1
+//   attach    "roof" | "wall": where its roof meets the building          absent: at the eave, or at
+//             wall height on a gable end ("roof" means nothing there, and is ignored, never switched)
+//   attachFt  how far up the roof / down the wall, 0..8                  kept like leanToAttachFt
+//   lengthFt  how much of the wall it runs along, 2..60                  absent: the whole wall
+//   offsetFt  where along the wall, from the wall's middle, -30..30      absent: centred; toward the
+//             RIGHT on the front and back walls, toward the FRONT on the left and right walls
+//   enclosed  true: walled in with the building's siding                 absent: open on posts
+//   meetPorch true: meets a projecting porch beside it as one roof round   absent: runs past it
+//             the corner, when the two match (2026-10-05, the renderer's d3PorchJoins; only true is kept)
+// An entry without a known wall or a width is dropped; so is a key outside that list. A non-empty
+// list REPLACES the single lean-to (leanToWidthFt, leanToDropFt, leanToSide, leanToAttach,
+// leanToAttachFt), whose keys are then dropped here; absent, those keys are today's lean-to exactly.
+// Production's older designer ignores an unknown roof key, so a style with the list draws there with
+// no lean-to at all -- missing, which is honest, and its own save round-trips the list untouched.
+export const D3_LEANTO_WALLS = ["left", "right", "front", "back"] as const;
+export const D3_LEANTOS_MAX = 6;
+export const LEANTO_BANDS: Record<string, readonly [number, number]> = {
+  widthFt: [0.5, 16], dropFt: [0, 6], attachFt: [0, 8], lengthFt: [2, 60], offsetFt: [-30, 30],
+};
+const D3_LEANTO_LEGACY_KEYS = ["leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"] as const;
+export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const e of raw) {
+    if (out.length >= D3_LEANTOS_MAX) break;
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const src = e as Record<string, unknown>;
+    if (!(D3_LEANTO_WALLS as readonly string[]).includes(String(src.wall))) continue;
+    const band = (k: string): number | null => {
+      const n = num(src[k]);
+      if (n === null) return null;
+      const [lo, hi] = LEANTO_BANDS[k];
+      return Math.min(hi, Math.max(lo, n));
+    };
+    // Over half a foot wide or it is no lean-to: the renderer's rule (d3LeanToList, and the single
+    // lean-to's leanToWidthFt > 0.5), so a list the 3D would draw nothing of never deletes the single
+    // lean-to's keys or the roof step (review, 2026-09-30). Clamped only from above.
+    const w0 = num(src.widthFt);
+    if (w0 === null || !(w0 > 0.5)) continue;
+    const widthFt = Math.min(LEANTO_BANDS.widthFt[1], w0);
+    const lt: Record<string, unknown> = { wall: String(src.wall), widthFt };
+    const dropFt = band("dropFt");
+    if (dropFt !== null) lt.dropFt = dropFt;
+    if ((D3_ATTACH as readonly string[]).includes(String(src.attach))) lt.attach = String(src.attach);
+    const attachFt = band("attachFt");
+    if (attachFt !== null) lt.attachFt = attachFt;
+    const lengthFt = band("lengthFt");
+    if (lengthFt !== null) lt.lengthFt = lengthFt;
+    const offsetFt = band("offsetFt");
+    if (offsetFt !== null) lt.offsetFt = offsetFt;
+    if (src.enclosed === true) lt.enclosed = true;
+    if (src.meetPorch === true) lt.meetPorch = true;
+    out.push(lt);
+  }
+  return out.length ? out : null;
+}
+// ── STACKABLE WINGS (roof.wingList, 2026-10-01) ─────────────────────────────────────────────────
+// The client, on the 09-29 call: "they can add as many wings, as many lean-tos ... wherever they want". An ordered list,
+// inner to outer on each wall; a wing's parent is the previous entry on the same wall. Structural rule
+// = the renderer's d3WingListEntries (stubs/wingList_test fuzz-tests the two): an object, a wall word,
+// a width over 0.5 ft, the first 16 such. A size never drops an entry here: the renderer says why a wing
+// is not drawn at a size, and the wing stays saved.
+export const D3_WINGLIST_WALLS = ["left", "right", "front", "back"] as const;
+export const D3_WINGLIST_MAX = 16;
+export const WINGLIST_BANDS: Record<string, readonly [number, number]> = {
+  widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26],
+};
+// A LOCAL number parser, not the shared num(): a blank box is no number at all (num("") is 0). The
+// twins' d3WlNum is this line for line, so the sanitiser and the renderer keep the same entries.
+const wlNum = (v: unknown): number | null => {
+  if (typeof v === "string" && v.trim() === "") return null;
+  const n = typeof v === "string" ? Number(v) : v;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+};
+export function sanitizeWingList(raw: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const e of raw) {
+    if (out.length >= D3_WINGLIST_MAX) break;
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const src = e as Record<string, unknown>;
+    if (typeof src.wall !== "string" || !(D3_WINGLIST_WALLS as readonly string[]).includes(src.wall)) continue;
+    const w0 = wlNum(src.widthFt);
+    if (w0 === null || !(w0 > 0.5)) continue;
+    const band = (k: string): number | null => {
+      const n = wlNum(src[k]);
+      if (n === null) return null;
+      const [lo, hi] = WINGLIST_BANDS[k];
+      return Math.min(hi, Math.max(lo, n));
+    };
+    const wl: Record<string, unknown> = { wall: src.wall, widthFt: Math.min(16, w0) };
+    const pitch = band("pitch"); if (pitch !== null) wl.pitch = pitch;
+    if (typeof src.attach === "string" && (D3_ATTACH as readonly string[]).includes(src.attach)) wl.attach = src.attach;
+    const attachFt = band("attachFt"); if (attachFt !== null) wl.attachFt = attachFt;
+    const eaveFt = band("eaveFt"); if (eaveFt !== null) wl.eaveFt = eaveFt;
+    out.push(wl);
+  }
+  return out.length ? out : null;
+}
 // ── WHAT THE BUILDING STANDS ON (top-level `foundation`; blocks and piers 2026-09-25) ──────────
 // "slab" and "skids" draw at grade, as they always have. "blocks" (stacked 8x8x16 concrete blocks
 // under the runners) and "piers" (round concrete piers) RAISE THE FLOOR off the ground: every
@@ -196,6 +385,29 @@ export const D3_RAISED_FOUNDATIONS = ["blocks", "piers"] as const;
 // a unit error); anything past it is inches or a hallucination and is dropped, wallHeightFt's rule.
 export const FLOOR_HEIGHT_FT: readonly [number, number] = [0.3, 6];
 const FLOOR_HEIGHT_ACCEPT_FT = 8;
+// ── GROUND THAT FALLS AWAY (top-level gradeFallFt / gradeFallToward, 2026-09-28) ─────────────────
+// Carolyn, 09-28 @16:04 and @18:53, on the Tri Home: "these piers are, like, deeper here", drawing the
+// ground falling away from the corner. floorHeightFt stays the height at the FRONT; gradeFallFt is how
+// much LOWER the ground is at the far side, toward gradeFallToward, so the piers there stand that
+// much taller. Raised foundations only (blocks, piers): a slab or skids sits on the grade by
+// definition. Absent or 0 is today's level ground; absent toward with a fall is "back", at RENDER
+// time, and is never written here.
+export const GRADE_FALL_FT: readonly [number, number] = [0, 6];
+export const D3_GRADE_FALL_TOWARD = ["back", "left", "right"] as const;
+// ── THE GROUND AT EACH CORNER (top-level gradeCornersFt, 2026-09-29) ─────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "we need to be able to put in where the zero is ... put in four
+// points ... which one is that zero, and then if it drops down like 18 inches, two feet, they put in
+// four corners." { fl, fr, bl, br } -- front-left, front-right, back-left, back-right, in the fall's
+// frame (front = south, back = north, left = west, right = east, seen facing the front) -- each how
+// many feet LOWER the ground is at that corner, held to GRADE_FALL_FT; a missing, junk or negative
+// corner is 0. The renderer takes the drops from the HIGHEST corner (the smallest number is its zero)
+// and floorHeightFt is the floor's height over that corner. Raised foundations, like the fall, and
+// since 2026-10-03 a slab too (Ahsan: the ground at each corner under a concrete slab), which has no
+// floor height and no fall: its highest corner is where the slab meets the ground, and the renderer
+// carries the pour down to the lower corners. Stored only when some corner is below 0 ft, as all four
+// numbers; and it REPLACES the fall: beside it gradeFallFt / gradeFallToward are dropped (the renderer
+// ignores them when it is present). Skids and no foundation keep no corners.
+export const D3_GRADE_CORNERS = ["fl", "fr", "bl", "br"] as const;
 const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
 const num = (v: unknown): number | null => {
@@ -223,8 +435,29 @@ export type D3Spec = {
   gableVent?: { widthFrac: number };
   foundation?: string;
   floorHeightFt?: number;
+  gradeFallFt?: number;
+  gradeFallToward?: string;
+  gradeCornersFt?: { fl: number; fr: number; bl: number; br: number };
   claddingChoices?: string[];
 };
+
+// The four corners of a gradeCornersFt value, each held to GRADE_FALL_FT (anything that is not a
+// number above 0 is 0), or null when it is not an object or no corner is above 0. The sanitiser's
+// reading and the carry-forward's, so a stored value is re-held exactly as a sent one.
+// Whether a sent gradeCornersFt overrides the fall: the renderer's own test (d3GradeFall), any object.
+const cornersObject = (v: unknown): boolean => !!v && typeof v === "object";
+function gradeCorners(v: unknown): { fl: number; fr: number; bl: number; br: number } | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const src = v as Record<string, unknown>;
+  const out = { fl: 0, fr: 0, bl: 0, br: 0 };
+  let any = false;
+  for (const k of D3_GRADE_CORNERS) {
+    const n = num(src[k]);
+    out[k] = n !== null && n > 0 ? Math.min(GRADE_FALL_FT[1], n) : 0;
+    if (out[k] > 0) any = true;
+  }
+  return any ? out : null;
+}
 
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object") return { ok: false, error: "A 3D spec object is required." };
@@ -247,16 +480,25 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
                    // 2026-09-25, appended for the same reason.
                    "porchPosts", "porchPitch",
                    // 2026-09-28, the roof step, appended for the same reason.
-                   "rearStepFt", "rearEaveRiseFt"]) {
+                   "rearStepFt", "rearEaveRiseFt",
+                   // 2026-09-28, appended for the same reason.
+                   "leanToAttachFt", "wingAttachFt", "porchStepCount"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
   // A post count is a count. Rounded AFTER the clamp, so it stays inside 2..8 either way.
   if (typeof roof.porchPosts === "number") roof.porchPosts = Math.round(roof.porchPosts);
+  // A step count is a count, the same rule.
+  if (typeof roof.porchStepCount === "number") roof.porchStepCount = Math.round(roof.porchStepCount);
   // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
   // regardless so toggling the width back up remembers the side.
   if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
     roof.leanToSide = String(rawRoof.leanToSide);
+  }
+  // Where the lean-to's roof meets the building (2026-09-28). The leanToSide posture: a known word
+  // is stored whether or not the width is on, anything else is dropped, absence is never filled in.
+  if ((D3_ATTACH as readonly string[]).includes(String(rawRoof.leanToAttach))) {
+    roof.leanToAttach = String(rawRoof.leanToAttach);
   }
   // Which of the two dormer shapes. Like leanToSide, stored whether or not dormerWidthFt is
   // currently above zero, so turning the width back up remembers the shape. Not in the
@@ -264,9 +506,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_DORMER_TYPES as readonly string[]).includes(String(rawRoof.dormerType))) {
     roof.dormerType = String(rawRoof.dormerType);
   }
-  // Which gable end the porch opens at. Stored whether or not porchDepthFt is currently above
+  // Which wall the porch is on. Stored whether or not porchDepthFt is currently above
   // zero, exactly like leanToSide and dormerType, so turning the depth back up remembers the
-  // end. Out of the numeric loop for the same reason: clamped() destructures CLAMPS[key] and
+  // end. A side wall is stored with or without the new frame, like the others: a front set later
+  // puts the porch back on the side wall it was given. Out of the numeric loop for the same reason: clamped() destructures CLAMPS[key] and
   // would throw on a key with no entry.
   if ((D3_PORCH_ENDS as readonly string[]).includes(String(rawRoof.porchEnd))) {
     roof.porchEnd = String(rawRoof.porchEnd);
@@ -344,7 +587,8 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     // and a renderer that one day reads them there would be reading a leftover.
     delete roof.porchAttachFt;
     delete roof.porchWidthFt;
-    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too.
+    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too. Its steps and their
+    // count are not (2026-10-03): a recessed porch has steps too, held by the steps rule below.
     delete roof.porchPosts;
     delete roof.porchPitch;
   }
@@ -365,18 +609,34 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_WING_SIDES as readonly string[]).includes(String(rawRoof.wingSide))) {
     roof.wingSide = String(rawRoof.wingSide);
   }
+  // Where the wings' roofs meet the centre section (2026-09-28): leanToAttach's posture, and a wing
+  // key, so a shed drops it with the rest of the set just below.
+  if ((D3_ATTACH as readonly string[]).includes(String(rawRoof.wingAttach))) {
+    roof.wingAttach = String(rawRoof.wingAttach);
+  }
+  // Each wing's own numbers (roof.wingSides, 2026-09-29): stored whether or not a side is on right now,
+  // like wingSide, so turning a wing back on brings the same wing back. A wing key: gone on a shed below.
+  const wingSides = sanitizeWingSides(rawRoof.wingSides);
+  if (wingSides) roof.wingSides = wingSides;
   // Wings need a ridge to stand either side of. On a shed the whole set goes, numbers included —
   // after the numeric loop, which is where the numbers were written.
   if (type === "shed") {
     for (const k of D3_WING_KEYS) delete roof[k];
   }
   // Where the porch's steps leave its deck (2026-09-25). The enum posture above, and the porch
-  // rule porchAttachFt follows: steps come off a PROJECTING porch's deck, so without one they
-  // describe nothing and are dropped rather than stored for later.
-  if ((D3_PORCH_STEPS as readonly string[]).includes(String(rawRoof.porchSteps))
-      && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
-    roof.porchSteps = String(rawRoof.porchSteps);
+  // rule porchAttachFt follows: steps come off a porch, so without one they describe nothing and
+  // are dropped rather than stored for later. A PROJECTING porch takes any of the five; a RECESSED
+  // one (2026-10-03) only the three along its front, since its sides are the building's walls.
+  const projecting = typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5;
+  const recessed = !projecting && typeof roof.porchDepthFt === "number" && roof.porchDepthFt > 0.5;
+  const stepsWord = String(rawRoof.porchSteps);
+  if ((projecting && (D3_PORCH_STEPS as readonly string[]).includes(stepsWord))
+      || (recessed && (D3_PORCH_STEPS_FRONT as readonly string[]).includes(stepsWord))) {
+    roof.porchSteps = stepsWord;
   }
+  // A step COUNT needs steps to count (2026-09-28). Without porchSteps it describes nothing, and it
+  // goes rather than lying in wait for the next porch: the porchAttachFt rule.
+  if (!("porchSteps" in roof)) delete roof.porchStepCount;
   // ── THE ROOF STEP (2026-09-28) ─────────────────────────────────────────────────────────────────
   // rearStepFt and rearEaveRiseFt describe ONE thing, the rear roof section, so they are kept
   // together or not at all: one without the other is dropped, and so is a step of half a foot or
@@ -387,19 +647,39 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // level ridge to keep) whose ridge runs front to back, so the back wall is a gable wall. On an
   // "eave" front both keys go; with no front they stay, because the old frame runs a portrait
   // footprint's ridge front to back and only the size can say which (the renderer asks it). Never
-  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, and never
-  // with a porch at the back, which the rear section would stand over. Dropped rather than stored
-  // for later, the porch attach height's rule: an inert key is a trap for the next edit.
+  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, never with a
+  // porch at the back, which the rear section would stand over, and never with a porch on a SIDE wall
+  // (2026-10-05), one of the eave walls the step's wedge runs along. A side wall is one only in the new
+  // frame (a front set): with no front, left or right is the front, and the step stays (d3RoofStep).
+  // Dropped rather than stored for later, the porch attach height's rule: an inert key is a trap for
+  // the next edit.
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): a non-empty one replaces the single lean-to, whose keys
+  // go, and it is written LAST, after every other roof key, so no stored spec's key order moves.
+  const leanTos = sanitizeLeanTos(rawRoof.leanTos);
+  if (leanTos) for (const k of D3_LEANTO_LEGACY_KEYS) delete roof[k];
+  // THE WING LIST (roof.wingList, 2026-10-01): a wing key, so never on a shed. It deletes no legacy wing
+  // or lean-to key (production's older designer still reads those), refuses the roof step like any wing,
+  // and is written LAST of all, after the lean-to list, so no stored spec's key order moves.
+  const wingList = type === "shed" ? null : sanitizeWingList(rawRoof.wingList);
   const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
   const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
   if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
-      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt")
-      && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
+      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt") && !leanTos && !wingList
+      && !((roof.porchEnd === "back" || (roof.front != null && (roof.porchEnd === "left" || roof.porchEnd === "right")))
+        && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
     roof.rearStepFt = Math.max(4, stepAt);
   } else {
     delete roof.rearStepFt;
     delete roof.rearEaveRiseFt;
   }
+  if (leanTos) roof.leanTos = leanTos;
+  if (wingList) roof.wingList = wingList;
+  // WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05): the Advanced page's switch. A side wing
+  // and an end wing that match run one roof around the corner they share, with a hip, instead of the side
+  // wing's stepping up over the end wing's. It means something only beside a wing list, so it is kept only
+  // with one, written after it, and only as `true` (absent is off, today's building). Production's older
+  // designer reads nothing of it; no prompt names it, and a model reply's list is dropped, so it goes too.
+  if (wingList && rawRoof.wingCornersMeet === true) roof.wingCornersMeet = true;
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot
@@ -474,6 +754,30 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
       d3.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
     }
+    // The ground falling away under it (2026-09-28). Raised foundations only, like floorHeightFt.
+    // 0 is level ground and is not stored; the direction is stored whether or not there is a fall,
+    // like leanToSide, so turning the fall back up remembers where to.
+    const gf = num(src.gradeFallFt);
+    if (gf !== null && gf > 0) d3.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
+    if ((D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(src.gradeFallToward)) {
+      d3.gradeFallToward = src.gradeFallToward;
+    }
+    // The ground at each corner (2026-09-29): all four, when some corner is lower than 0 ft, in place
+    // of the fall. An explicit null (the current panels' "level ground") or all zeros stores nothing.
+    // ANY corners OBJECT drops the fall, all zeros too (review, 2026-09-30): the renderer's d3GradeFall
+    // ignores the fall beside any gradeCornersFt object and draws level ground, so what is stored is
+    // what was previewed. null (or no key) leaves the fall to its own keys.
+    const gc = gradeCorners(src.gradeCornersFt);
+    if (gc) d3.gradeCornersFt = gc;
+    if (cornersObject(src.gradeCornersFt)) {
+      delete d3.gradeFallFt;
+      delete d3.gradeFallToward;
+    }
+  } else if (d3.foundation === "slab") {
+    // A slab's corners (2026-10-03): the same four numbers, on the same terms. A slab has no fall and
+    // no floor height to keep beside them, so they are all there is.
+    const gc = gradeCorners(src.gradeCornersFt);
+    if (gc) d3.gradeCornersFt = gc;
   }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
@@ -517,19 +821,68 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 //
 // Mutates `clean` (the sanitised spec about to be written). The stored height is held to the
 // sanitiser's band again, because this is the one place a stored value is written back unread.
-export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown): void {
-  if (frame === PROMPT_FRAME_FRONT) return;
+//
+// A SLAB'S CORNERS (2026-10-03). Every panel before today sends gradeCornersFt null on every save
+// (12-shell's ssD3WithFall, the operator page's calSpecToSend) and never drew a slab's corners, so
+// from a slab that null means "this panel has nothing to say about them", not "level ground". Only a
+// request that says it knows them -- `slabGround: true`, which the panels that draw them put in the
+// body beside frame -- clears them with null. A slab that stays a slab keeps its stored corners over
+// any save that omits the key or sends that older null; an object sent is what is stored (the
+// sanitiser's reading of it); leaving the slab (skids, a raised floor, nothing) carries none.
+export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown, slabGround?: boolean): void {
   if (!sent || typeof sent !== "object") return;
   const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
+  const s = sent as Record<string, unknown>;
+  if (was && was.foundation === "slab" && clean.foundation === "slab") {
+    const told = "gradeCornersFt" in s && (s.gradeCornersFt != null || slabGround === true);
+    if (!told) {
+      const gc = gradeCorners(was.gradeCornersFt);
+      if (gc) clean.gradeCornersFt = gc;
+    }
+    return;
+  }
   if (!was || !isRaisedFoundation(was.foundation)) return;
-  const incoming = (sent as Record<string, unknown>).foundation;
-  if (!(incoming === undefined || incoming === null || incoming === "slab")) return;
-  clean.foundation = was.foundation as string;
-  const fh = num(was.floorHeightFt);
-  if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
-    clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
-  } else {
-    delete clean.floorHeightFt;
+  if (frame !== PROMPT_FRAME_FRONT) {
+    const incoming = s.foundation;
+    if (incoming === undefined || incoming === null || incoming === "slab") {
+      clean.foundation = was.foundation as string;
+      const fh = num(was.floorHeightFt);
+      if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+        clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+      } else {
+        delete clean.floorHeightFt;
+      }
+    }
+  }
+  // The ground's fall (2026-09-28) rides with a raised floor that is still raised, and FRAME DOES
+  // NOT DECIDE IT (review BC-1, 2026-09-29). frame "front" only says a designer knows blocks, piers
+  // and floorHeightFt, and every designer built from 09-25 up to the fall's merge sends it while its
+  // d3ResolveStyleSpec drops gradeFallFt / gradeFallToward (it names every top-level key it keeps).
+  // So ABSENCE means "this client has never heard of it", for every frame, and the stored value is
+  // carried. The panel that knows the fall ALWAYS sends both keys, null when there is none (12-shell's
+  // onSaveSpec and the operator page's save), so its clear is an explicit null and lands. Only the
+  // fields the request did not send are carried, each re-held to its band, and only onto a floor
+  // that is raised. The sanitiser never stores the null itself.
+  if (!isRaisedFoundation(clean.foundation)) return;
+  // The ground at each corner (2026-09-29) extends the same rule. ABSENCE means "this client has never
+  // heard of it" -- production's designer, and every panel before today, omit the key -- so a stored
+  // value is carried over any save that omits it, whatever the frame, re-held to its band. The panels
+  // that know it send it on every save (12-shell's ssD3WithFall, the operator page's calSpecToSend),
+  // null when there is none, so their "level ground" lands. Carried or sent, it replaces the fall:
+  // a fall is neither carried nor kept beside it.
+  if (!("gradeCornersFt" in s)) {
+    const gc = gradeCorners(was.gradeCornersFt);
+    if (gc) clean.gradeCornersFt = gc;
+  }
+  if (clean.gradeCornersFt || cornersObject(s.gradeCornersFt)) {
+    delete clean.gradeFallFt;
+    delete clean.gradeFallToward;
+    return;
+  }
+  const gf = num(was.gradeFallFt);
+  if (!("gradeFallFt" in s) && gf !== null && gf > 0) clean.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
+  if (!("gradeFallToward" in s) && (D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(was.gradeFallToward)) {
+    clean.gradeFallToward = was.gradeFallToward as string;
   }
 }
 
@@ -1603,6 +1956,18 @@ export function parseModelSpec(text: string, dims?: KnownDims | null, measure = 
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
+  // roof.wingList (2026-10-01) is the Advanced page's alone: no prompt names it, and a model reply that
+  // invents one does not get a stacked building drawn from a video. Dropped before the sanitiser, so the
+  // invented list cannot refuse a roof step the model drew beside it.
+  const rawRoof = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).roof : null;
+  if (rawRoof && typeof rawRoof === "object") delete (rawRoof as Record<string, unknown>).wingList;
+  // A porch on a SIDE wall (roof.porchEnd "left" or "right", 2026-10-05) is the Advanced page's and the
+  // calibration panel's alone: no prompt offers one, and the v2 one says the porch is on the front. A model
+  // reply that names a side wall gets the front, exactly as it did before the sanitiser kept the words, so
+  // a draft never puts a porch on a wall nobody asked about, and the check can still correct the frame.
+  if (rawRoof && typeof rawRoof === "object" && ["left", "right"].includes(String((rawRoof as Record<string, unknown>).porchEnd))) {
+    delete (rawRoof as Record<string, unknown>).porchEnd;
+  }
   const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
   if (!measure || !clean.ok) return clean;
   return { ok: true, d3: applyMeasuredPitches(clean.d3, text, dims?.lengthFt).d3 };
@@ -2200,6 +2565,36 @@ export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boole
   return measured.some((p) => Math.abs(p - pitch) <= MEASURED_PITCH_LOCK_TOLERANCE + 1e-9);
 }
 
+// ─── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED TOO (2026-09-29) ─────────────────────────────
+// The v2 draft now measures a gable's eave overhang from two enlarged close-ups of its corners
+// (overhangZoom.ts), where the reads had judged it at 6 in on two buildings whose eaves stand 12 and
+// 16 in past the walls. The self-check's step 2 would go on judging it by eye, as a share of the wall's
+// height in a whole frame: the very reading the close-ups replace. So an overhang the close-ups
+// measured is treated like a measured pitch and like the builder's own tape measure: selfCheckPrompt
+// says it is not the check's to change, and applySelfCheck drops a correction to it.
+//
+// True only when both hold, read off the ledger row (draft_tokens and drafted), so the answer is the
+// same for every round of one generation:
+//   * draft_tokens.overhangZoom.after is a number: the close-up ran and gave an overhang (it is null
+//     when too few of its asks held up, and the record is absent when none was tried);
+//   * the drafted spec is a gable whose overhang is that number, within
+//     MEASURED_OVERHANG_LOCK_TOLERANCE for rounding: a draft whose overhang came from anywhere else is
+//     not a measured one.
+// Anything else, anything malformed included, is false, and the check goes on exactly as before. A
+// builder who typed the overhang never gets here (the close-up is not run for them): their eave keeps
+// its own path, the dims chip, unchanged.
+export const MEASURED_OVERHANG_LOCK_TOLERANCE = 0.01;
+export function measuredOverhangLock(draftTokens: unknown, drafted: unknown): boolean {
+  const tokens = measureObject(draftTokens);
+  const zoom = tokens ? measureObject(tokens.overhangZoom) : null;
+  const spec = measureObject(drafted);
+  const roof = spec ? measureObject(spec.roof) : null;
+  if (!zoom || !roof || roof.type !== "gable") return false;
+  const after = zoom.after, overhang = roof.overhang;
+  if (!isCoord(after) || !isCoord(overhang)) return false;
+  return Math.abs(after - overhang) <= MEASURED_OVERHANG_LOCK_TOLERANCE + 1e-9;
+}
+
 // ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
 // A walk-around of a lofted barn drafted kneeU 0.55 / kneeRise 0.35 / ridgeRise 0.75. Every
 // number was in range, the type said gambrel, and the read-back looked right. Rendered, the
@@ -2727,9 +3122,11 @@ export function roofStepAtSize(roof: Record<string, unknown> | null | undefined,
   const want = num(cfg.rearStepFt), rise0 = num(cfg.rearEaveRiseFt);
   if (cfg.type !== "gable" || want === null || rise0 === null || !(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
   const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
-  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5) return null;
+  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5 || sanitizeLeanTos(cfg.leanTos) || sanitizeWingList(cfg.wingList)) return null;
   const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
-  if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
+  // A porch at the back, or on a side wall (left or right: the new frame only, a gable front here).
+  const sidePorch = front === "gable" && (cfg.porchEnd === "left" || cfg.porchEnd === "right");
+  if ((cfg.porchEnd === "back" || sidePorch) && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
   // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.
   if (!(front === "gable" || lengthFt >= widthFt)) {
     return { drawn: null, why: "on this footprint its ridge runs from side to side, so the back wall is not a gable end" };
@@ -2790,6 +3187,11 @@ export function selfCheckPrompt(opts: {
   // change and the rules list it beside the other measured fields. Absent or false, the prompt is
   // byte for byte the one every check sent before this.
   pitchLocked?: boolean;
+  // measuredOverhangLock's answer for the row (2026-09-29), the same way: true says the draft's eave
+  // overhang was measured from close-ups of the roof's corners, so step 2 says it is not the check's to
+  // change and the rules list it. A builder-measured eave keeps its own words, which win. Absent or
+  // false, the prompt is byte for byte the one every check sent before this.
+  overhangLocked?: boolean;
 }): string {
   const { dims, draft } = opts;
   const pitchLocked = opts.pitchLocked === true;
@@ -2821,6 +3223,9 @@ export function selfCheckPrompt(opts: {
   // allow-list for the same generation, so a correction would be thrown away in any case; this
   // is what stops the model spending its effort on a field that cannot land.
   const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
+  // ...and where the draft MEASURED it from close-ups (measuredOverhangLock, 2026-09-29), the same
+  // posture: only where the builder did not, whose words stay as they were.
+  const overhangLocked = opts.overhangLocked === true && measuredEave === null;
   const present = views.length
     ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
     : "none";
@@ -2930,7 +3335,14 @@ export function selfCheckPrompt(opts: {
   if (hasWings) {
     const ya = wallN + (num(roof.wingWidthFt) ?? 0) * (num(roof.wingPitch) ?? 0.25);
     const c = num(roof.centerEaveFt);
-    eaveWalls.push(`about ${about(c !== null ? Math.max(c, ya + 1) : ya + 3)} ft for the centre section's eave`);
+    // With a wing attach (roof.wingAttach, 2026-09-28) the renderer's d3Massing takes the centre's eave
+    // as asked, held only 1 ft over the walls, and a blank one is 3 ft over a 3:12 wing roof: the
+    // stored wingPitch is unread while an attach is set. The ruler says what that renderer draws.
+    const attach = roof.wingAttach === "roof" || roof.wingAttach === "wall";
+    const centre = attach
+      ? (c !== null ? Math.max(c, wallN + 1) : wallN + (num(roof.wingWidthFt) ?? 0) * 0.25 + 3)
+      : (c !== null ? Math.max(c, ya + 1) : ya + 3);
+    eaveWalls.push(`about ${about(centre)} ft for the centre section's eave`);
   }
   const eaveRuler = eaveWalls.length
     ? `
@@ -3062,7 +3474,10 @@ effort here.
 
 ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
    and it is already in the draft. It is not yours to change: a correction to roof.overhang
-   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : overhangLocked ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). IT WAS MEASURED: it was worked out
+   from enlarged close-ups of the roof's two eave corners, cut from the builder's own frames,
+   not judged by eye. It is not yours to change: a correction to roof.overhang will be thrown
+   away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
    viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
    Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
    were given, in the frame and in the render, and convert: a roof that projects a
@@ -3168,7 +3583,7 @@ RULES FOR THE ANSWER:
     "changed": []. That is a complete, correct answer. Stop there.
   * Every field in "corrections" must also appear in "changed". Anything not in both is
     ignored.
-  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null && !overhangLocked ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
   * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
     not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
   * "unclear" is better than a guess. A field the frames genuinely do not settle should be
@@ -3408,7 +3823,11 @@ export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCh
 // worked out from the reads' own points, so roof.pitch comes off the allow-list for this generation
 // the way roof.overhang does for a measured eave, and a correction to it lands in `dropped`. The
 // caller passes it on a v2 check only. Absent (every existing caller) is false: the list is unchanged.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false):
+//
+// `overhangLocked` (2026-09-29) is measuredOverhangLock's answer, the same way for roof.overhang: the
+// close-ups measured it, so it comes off the list as a builder-measured eave's does, and lets go on
+// the pitch lock's terms (below). v2 only, and absent is false.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false, overhangLocked = false):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -3441,9 +3860,13 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   const typeWanted = declared.includes("roof.type")
     ? ((read.corrections as { roof?: { type?: unknown } }).roof ?? {}).type
     : undefined;
-  const lockPitch = pitchLocked && roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
-  const allow = measuredEave || lockPitch
-    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
+  const gableStays = roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
+  const lockPitch = pitchLocked && gableStays;
+  // The measured overhang's lock holds on the same terms: the close-ups measured a GABLE's eave corners,
+  // so an answer that turns the roof into something else was not looking at the building they measured.
+  const lockOverhang = overhangLocked === true && gableStays;
+  const allow = measuredEave || lockPitch || lockOverhang
+    ? rules.allow.filter((f) => !((measuredEave || lockOverhang) && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
     : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
@@ -3477,6 +3900,23 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   for (const field of [...wanted.keys()]) {
     if (field !== "roof.type") continue;
     if ((D3_ROOF_TYPES as readonly string[]).includes(String(wanted.get(field)))) continue;
+    dropped.push(field);
+    wanted.delete(field);
+  }
+  // NO CHECK MOVES A PORCH ONTO OR OFF A SIDE WALL (2026-10-05). Neither check prompt knows the side
+  // walls: the v2 one says the porch defines the front and that roof.porchEnd's only correction is to
+  // "front". A correction that would MOVE a porch onto a side wall is dropped: no prompt offers one, and
+  // before the sanitiser kept the words, that is where it went. Both modes; prompts untouched.
+  // The other half is a fence, not a feature: the server's check judges the row's draft, which is the
+  // model's (parseModelSpec drops a model's side wall), so it never meets a side porch today. Should a
+  // draft ever carry one, with the porch ON, a render with it on the left wall would read to the v2 check
+  // as a building facing the wrong way, and roof.porchEnd, roof.front and roof.highSide are dropped
+  // rather than let it swing the porch back to the front. A stray side word with no porch blocks nothing.
+  const sideEnd = (v: unknown) => v === "left" || v === "right";
+  const draftRoof = (base.d3 as { roof?: { porchEnd?: unknown; porchOutFt?: unknown; porchDepthFt?: unknown } }).roof;
+  const draftSide = sideEnd(draftRoof?.porchEnd) && ((num(draftRoof?.porchOutFt) ?? 0) > 0.5 || (num(draftRoof?.porchDepthFt) ?? 0) > 0.5);
+  for (const field of draftSide ? ["roof.porchEnd", "roof.front", "roof.highSide"] : ["roof.porchEnd"]) {
+    if (!wanted.has(field) || (!draftSide && !sideEnd(wanted.get(field)))) continue;
     dropped.push(field);
     wanted.delete(field);
   }
@@ -3927,11 +4367,13 @@ export function selfCheckRequest(opts: {
   earlier?: readonly string[];
   // v2 only (measuredPitchLock, 2026-09-26). The legacy prompt is frozen and never sees it.
   pitchLocked?: boolean;
+  // v2 only (measuredOverhangLock, 2026-09-29), the same way.
+  overhangLocked?: boolean;
 }): { abortMs: number; body: Record<string, unknown> } {
   const viewpoints = opts.pairs.map((p) => p.viewpoint);
   const text = opts.mode === "legacy"
     ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
-    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked });
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked, overhangLocked: opts.overhangLocked });
   const content: unknown[] = [{ type: "text", text }];
   for (const p of opts.pairs) {
     content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });
@@ -4013,6 +4455,10 @@ export type DraftReading = {
   // The read's measure.step block (2026-09-29), on a read that gave a roof step and marked it: the
   // draft crops the joint out of the frame these points name (_shared/stepZoom.ts).
   stepPoints?: Record<string, unknown>;
+  // The read's measure.pitch block (2026-09-29), on a gable read that gave one, whether or not its
+  // pitch was taken from it: its two tips are where the eaves' overhang is, and the draft cuts its
+  // close-ups of them out of the frame these points name (_shared/overhangZoom.ts).
+  pitchPoints?: Record<string, unknown>;
 };
 export function readDraftReply(body: string, dims?: KnownDims | null, measure = false): DraftReading {
   // deno-lint-ignore no-explicit-any
@@ -4024,8 +4470,14 @@ export function readDraftReply(body: string, dims?: KnownDims | null, measure = 
   const d3 = spec && spec.ok ? spec.d3 : null;
   if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
   const measured = applyMeasuredPitches(d3, reply.text, dims?.lengthFt);
-  const stepPoints = measured.sources.stepSource ? parseMeasure(reply.text)?.step : undefined;
-  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources, ...(stepPoints ? { stepPoints } : {}) };
+  const gable = measured.d3.roof?.type === "gable";
+  const blocks = measured.sources.stepSource || gable ? parseMeasure(reply.text) : null;
+  const stepPoints = measured.sources.stepSource ? blocks?.step : undefined;
+  const pitchPoints = gable ? blocks?.pitch : undefined;
+  return {
+    data, reply, d3: measured.d3, drafted: true, pitch: measured.sources,
+    ...(stepPoints ? { stepPoints } : {}), ...(pitchPoints ? { pitchPoints } : {}),
+  };
 }
 
 // One read as draft_tokens keeps it: its sanitised roof, plus where its pitch came from on a

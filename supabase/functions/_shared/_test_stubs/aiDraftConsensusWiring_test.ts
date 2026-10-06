@@ -72,6 +72,8 @@ const PARAMS = [
   "draftReadSample",
   // 2026-09-26: the stagger and the retry, and the plain sentence for an upstream failure.
   "DRAFT_READ_RETRY", "draftUpstreamFailure",
+  // 2026-09-29: the two close-ups after the consensus (never tried here: noZoom, below).
+  "runStepZoom", "runOverhangZoom",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -80,6 +82,11 @@ const RUN = new AsyncFunction(
 
 const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
 const FRAMES = Array.from({ length: 12 }, (_, i) => `https://example.test/walk/f${i + 1}.jpg`);
+// The close-ups after the consensus (the roof step's and the eave overhang's, 2026-09-29) are
+// aiDraftOverhangZoomWiring_test's. Here neither is tried, so the reads' own numbers stand exactly as
+// this file pins them.
+// deno-lint-ignore require-await
+const noZoom = async () => ({ riseFt: null, overhangFt: null, record: null, input: 0, output: 0 });
 // `streamed` (2026-09-25) is the branch's parameter: true only for the new shell's v2 press, which
 // answers behind a heartbeat and thinks at effort "high" (aiDraftStreamWiring_test). Every case here
 // that does not name it is a request that is not streamed, so it pins the plain request unchanged.
@@ -151,6 +158,7 @@ async function run(s: Scenario, plans: Plan[]) {
       s.lean ? "low" : s.streamed ? "high" : "medium",
       draftReadSample,
       s.retry ?? NO_STAGGER, draftUpstreamFailure,
+      noZoom, noZoom,
     );
     // A return from inside the block is a Reply; falling off its end is the success object.
     const answered = out && "status" in out && "body" in out ? out as Reply : null;

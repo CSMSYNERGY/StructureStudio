@@ -17,9 +17,7 @@
 // Shape follows _shared/adminGate.ts: return {ok:false,status,body} rather than a
 // Response, so each function keeps its own CORS headers.
 
-// Same specifier every function in this project uses — mixing jsr: and esm.sh would
-// bundle two copies of supabase-js into each function.
-import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "./verifyCaller.ts";
 import {
   canEdit,
   canRead,
@@ -78,6 +76,10 @@ export type TenantCtx = {
    * who did it, we must not do it.
    */
   auditStrict: (action: string, rowCount?: number | null, note?: string | null) => Promise<void>;
+  /** How the caller was verified: "local" (token checked here + resolve_caller) or "network"
+   *  (GoTrue's getUser). For Server-Timing — a fast path that has quietly switched itself off
+   *  looks exactly like a slow day otherwise. */
+  authPath: "local" | "network";
 };
 
 export type Resolved =
@@ -119,11 +121,13 @@ function makeAudit(admin: Admin, actor: { userId: string; email: string } | null
  * Resolve which tenant this request acts on, and whether the caller may write to it.
  *
  * Gate ORDER is load-bearing:
- *   1. auth.getUser() first. The bare anon key is a valid JWT with no `sub`, so it dies
- *      here — BEFORE targetClientId is ever read. That is the primary defence, not the
- *      operator lookup below.
+ *   1. Who is calling, first: the token verified here plus resolve_caller's session check,
+ *      or auth.getUser() when that cannot decide. The bare anon key is a valid JWT with no
+ *      `sub` (and no `kid`), so it falls to getUser and dies there — BEFORE targetClientId
+ *      is ever read. That is the primary defence, not the operator lookup below.
  *   2. Parse the body (here, not in the caller) so a malformed body from an
  *      unauthenticated caller still 401s rather than 400s — preserving today's precedence.
+ *      The session check in step 1 runs before the body for the same reason.
  *   3. Own-tenant mapping, then the operator override.
  */
 export async function resolveTenant(
@@ -172,45 +176,12 @@ export async function resolveTenant(
     staffActions?: Set<string>;
   },
 ): Promise<Resolved> {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) {
-    // WHICH failure this was is the one thing the log could never say. Every cause
-    // collapsed into this single string with `userErr` thrown away, so 34 "Not signed in."
-    // rows across four weeks could not distinguish a tab that sent the BARE ANON KEY
-    // because its session had momentarily vanished from a real token being rejected — and
-    // those two want opposite fixes. Classify instead of guessing. It costs no round trip,
-    // and naming the credential back to the caller that just sent it leaks nothing (the
-    // reason is deliberately a fixed enum, never `userErr.message`, which is provider text
-    // this project's error contract keeps out of the browser).
-    // Classify STRUCTURALLY rather than by comparing against SUPABASE_ANON_KEY. That env
-    // value and the literal baked into the browser bundle live in two different deploy
-    // pipelines, and the day they drift the classifier would invert in silence — reporting
-    // "a real token was refused" for precisely the case where no user token was sent, which
-    // is worse than the one ambiguous string it replaces. The shape is the fact: an anon key
-    // is a well-formed JWT whose payload carries role "anon" and no `sub`.
-    const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
-    const claims: Record<string, unknown> | null = (() => {
-      try {
-        const part = bearer.split(".")[1];
-        if (!part) return null;
-        const b = part.replace(/-/g, "+").replace(/_/g, "/");
-        return JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
-      } catch { return null; }
-    })();
-    const reason = !bearer
-      ? "missing"
-      : (claims && !claims.sub && claims.role === "anon") ? "anon_key" : "rejected";
-    return { ok: false, status: 401, body: { error: "Not signed in.", reason } };
-  }
+  // 1. Who is calling — _shared/verifyCaller.ts: the token checked here plus resolve_caller's
+  //    session check, or getUser() when that cannot decide. On the fast path the caller's
+  //    client_users row comes back in the same query, so step 3 has nothing to fetch.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return who;
+  const { user, mapping: knownMapping, authPath } = who.caller;
 
   // 2. Body.
   // deno-lint-ignore no-explicit-any
@@ -239,11 +210,15 @@ export async function resolveTenant(
   //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
   //    exists, which would lock the user out entirely. portal.html already guards this
   //    the same way (its "audit #F6" comment); these functions did not.
-  const { data: mapRows, error: mapErr } = await admin
-    .from("client_users")
-    .select("client_id, role, title, access")
-    .eq("user_id", user.id)
-    .limit(1);
+  //    On the fast path resolve_caller has already read this same row (same columns, same
+  //    unordered limit 1), so there is nothing to fetch.
+  const { data: mapRows, error: mapErr } = knownMapping
+    ? { data: knownMapping, error: null }
+    : await admin
+      .from("client_users")
+      .select("client_id, role, title, access")
+      .eq("user_id", user.id)
+      .limit(1);
   if (mapErr) return { ok: false, status: 500, body: { error: mapErr.message } };
   const mapping = mapRows && mapRows[0];
 
@@ -288,6 +263,7 @@ export async function resolveTenant(
         action,
         audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
         auditStrict: (act, n = null, note = null) => a(act, n, note, true),
+        authPath,
       },
     };
   }
@@ -447,6 +423,7 @@ export async function resolveTenant(
       action,
       audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
       auditStrict: (act, n = null, note = null) => a(act, n, note, true),
+      authPath,
     },
   };
 }

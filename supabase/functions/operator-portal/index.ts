@@ -1,7 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { parseContactsFrom, readContactListPage } from "../_shared/contactListPage.ts";
 
 // Operator account-switcher backend (portal.html "Accounts" tab): lets a platform
 // operator (app_operators row — Carolyn / Ahsan / support) open any tenant's portal
@@ -22,6 +24,9 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //   { action: "get_portal", clientId }    → the tenant's designs + versions + name,
 //     byte-compatible with what portal.html's DesignsTable/LeadsTable read for the
 //     owner's own tenant. Every call is audit-logged to admin_audit (cross-tenant PII).
+//     With `withContacts: true` it carries the first page of the tenant's contacts too
+//     (crmContacts + crmContactsTotal); with `contactsFrom: n` it answers only the page of
+//     contacts starting at row n. Each page of contacts is audited with its own row count.
 //   { action: "list_users", clientId }    → the people under one tenant
 //   { action: "save_user", … }            → correct a user's name/phone
 //   { action: "send_reset_link", clientId, userId } → email that user a set-password link,
@@ -34,6 +39,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 
 function json(body: unknown, status = 200) {
@@ -72,20 +79,17 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const admin = createClient(supabaseUrl, serviceKey);
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  // 1. Real user check (the bare anon key passes the gateway but has no user) — the shared
+  //    check in _shared/verifyCaller.ts: token verified here + one session query, getUser()
+  //    only when that cannot decide.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return json(who.body, who.status);
+  const { user } = who.caller;
 
   // 2. Operator membership — service role (app_operators has no browser policies).
-  const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
     // can_write gates the write actions below; support_only decides which actions exist
@@ -367,6 +371,20 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
       }
       case "get_portal": {
         const clientId = await assertClient(admin, payload.clientId);
+        // CONTACTS WITH NO DESIGN (2026-10-06): the Contacts list's third source, one page of the
+        // tenant's live contacts (_shared/contactListPage.ts says why the page and the order). The
+        // first page rides along with everything below ONLY when the list asks (`withContacts`):
+        // the Pipeline reads get_portal too and shows no contacts, so it is sent none. "Show more"
+        // asks again with `contactsFrom` and gets that page alone: the designs it already holds
+        // are not read, sent or counted a second time. Every page sent is audited under its own
+        // name with its row count, the first one included.
+        const contactsFrom = parseContactsFrom(payload.contactsFrom);
+        const withContacts = payload.withContacts === true;
+        if (contactsFrom > 0) {
+          const page = await readContactListPage(admin, clientId, contactsFrom);
+          await audit("operator_get_portal_contacts", clientId, page.rows.length, `from=${contactsFrom}`);
+          return json({ ok: true, clientId, crmContacts: page.rows, crmContactsTotal: page.total });
+        }
         // The UNION of the owner portal's own two reads, so DesignsTable and LeadsTable
         // render unchanged in view-as. Both halves are load-bearing and have drifted before:
         //   contact_id  -> LeadsTable (02-sales.jsx:764) builds each person's record link from
@@ -374,10 +392,16 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         //                  degrades to inert text, so an operator cannot open a contact at all.
         //   ss_quote_*  -> DesignsTable renders them (02-sales.jsx:463/:512); without them the
         //                  Quote # column reads "-" for every SS-mode quote.
+        //   ss_invoice_sent_at -> the Delete design dialog (2026-10-05): a StructureStudio invoice
+        //                  leaves the design 'accepted', and without the stamp the dialog promises
+        //                  to delete a quote PDF the server keeps.
         // Adding a column to either owner read means adding it here too.
-        const [designs, versions, cfg, leads] = await Promise.all([
+        //   total_cents, expected_close_date -> the Pipeline card's value and close date
+        //                  (migration 206). The owner read gained them and this one did not, so
+        //                  in view-as every card read "No quote yet" with no close date.
+        const [designs, versions, cfg, leads, contacts] = await Promise.all([
           admin.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, total_cents, expected_close_date")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
           admin.from("design_versions")
             .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
@@ -388,15 +412,20 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
           admin.from("captured_leads")
             .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
             .eq("client_id", clientId).order("updated_at", { ascending: false }),
+          // The first page of contacts, when asked for. Additive like the browsing leads: a failure
+          // here leaves the list exactly as it was before contacts with no design were shown.
+          withContacts ? readContactListPage(admin, clientId, 0).catch(() => ({ rows: [], total: 0 })) : null,
         ]);
         if (designs.error) throw designs.error;
         if (versions.error) throw versions.error;
         await audit("operator_get_portal", clientId, (designs.data || []).length);
+        if (contacts) await audit("operator_get_portal_contacts", clientId, contacts.rows.length, "from=0");
         return json({
           ok: true, clientId,
           companyName: (cfg.data && (cfg.data as any).company_name) || clientId,
           designs: designs.data || [], versions: versions.data || [],
           capturedLeads: leads.error ? [] : (leads.data || []),
+          ...(contacts ? { crmContacts: contacts.rows, crmContactsTotal: contacts.total } : {}),
         });
       }
       default:

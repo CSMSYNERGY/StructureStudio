@@ -521,6 +521,108 @@ Deno.test("⚠️ 'What we drew' says the porch's pitch and posts as BUILT when 
   assertEquals(F.ssDrewWords({ roof }, {}), F.ssDrewWords({ roof }));
 });
 
+// Where the wing roofs meet (roof.wingAttach, 2026-09-28) is said as BUILT once the panel hands over the
+// massing it drew (review, 2026-09-29): a distance moved down to clear the eave, a wing roof that cannot
+// reach the roof and meets the wall under it, a middle held 1 ft over the walls.
+Deno.test("'What we drew' says a wing attach as built when it has the massing, as stored without it", () => {
+  const roof = { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 12, centerEaveFt: 14, wingAttach: "wall", wingAttachFt: 0.25 };
+  assertStringIncludes(F.ssDrewWords({ roof }), "meets the middle section's wall 0 ft 3 in below its eave, and the middle section's walls rise to 14 ft.");
+  const clamped = { attach: "wall", Hc: 14, wings: [{ meets: "wall", meetFt: 13 / 12 }] };
+  assertStringIncludes(F.ssDrewWords({ roof }, null, undefined, clamped), "meets the middle section's wall 1 ft 1 in below its eave, and the middle section's walls rise to 14 ft.");
+  const up = { ...roof, wingAttach: "roof", wingAttachFt: 1 };
+  const cannot = { attach: "roof", Hc: 14, wings: [{ meets: "wall", meetFt: 0.5 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: up }, null, undefined, cannot), "under its own roof that meets the middle section's wall 0 ft 6 in below its eave");
+  const low = { attach: "roof", Hc: 11, wings: [{ meets: "roof", meetFt: 1 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, centerEaveFt: 10 } }, null, undefined, low), "runs up onto the middle section's roof, 1 ft above its eave, and the middle section's walls rise to 11 ft.");
+  // Without an attach, a massing changes nothing (today's sentence, the stored centre).
+  const { wingAttach: _a, wingAttachFt: _b, ...plain } = roof;
+  assertEquals(F.ssDrewWords({ roof: plain }, null, undefined, { Hc: 15, wings: [{}] }), F.ssDrewWords({ roof: plain }));
+  // A massing for another mode than the style's (a stale one) is not used.
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, cannot), F.ssDrewWords({ roof }));
+});
+
+// (review, 2026-09-29) On the roof at 0 the wing roof meets the middle section AT its eave -- it does not run
+// up onto its roof -- and two wings that meet it differently (an off-centre ridge) are said one by one.
+Deno.test("'What we drew' says a wing roof at 0 meets the middle at its eave, and two different wings each", () => {
+  const up = { type: "gable", wingSide: "both", wingWidthFt: 6, centerEaveFt: 10, wingAttach: "roof", wingAttachFt: 0 };
+  const at0 = F.ssDrewWords({ roof: up });
+  assertStringIncludes(at0, "A lower wing 6 ft wide runs along each side under its own roof that meets the middle section at its eave, and the middle section's walls rise to 10 ft.");
+  assert(!/runs up onto/.test(at0), at0);
+  const built0 = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 0 }, { wall: "east", meets: "roof", meetFt: 0 }] };
+  assertEquals(F.ssDrewWords({ roof: up }, null, undefined, built0), at0);
+  // The wall at 0 keeps its own words.
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, wingAttach: "wall" } }), "meets the middle section's wall at its eave");
+  // Two wings built differently: the one sentence, then each by its wall.
+  const odd = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 2.5 }, { wall: "east", meets: "wall", meetFt: 1 / 12 }] };
+  const two = F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, odd);
+  assertStringIncludes(two, "A lower wing 6 ft wide runs along each side under its own roof, and the middle section's walls rise to 10 ft. " +
+    "The left wing has a roof that runs up onto the middle section's roof, 2 ft 6 in above its eave; the right wing has a roof that meets the middle section's wall 0 ft 1 in below its eave.");
+  // Two wings built alike are one sentence, as before.
+  const same = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 2.5 }, { wall: "east", meets: "roof", meetFt: 2.5 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, same), "under its own roof that runs up onto the middle section's roof, 2 ft 6 in above its eave, and the middle section's walls rise to 10 ft.");
+  assert(!/The left wing/.test(F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, same)));
+});
+
+// STACKABLE WINGS (roof.wingList, 2026-10-01). A list style also carries the older designer's one-wing-per-side
+// approximation (wingSide / wingWidthFt / wingPitch), which is not the building drawn here. Once the panel
+// hands over the list massing it drew, 'What we drew' says the list in one sentence and nothing from those
+// keys; with nothing drawn at that size it says nothing about wings.
+Deno.test("⚠️ 'What we drew' says a wing list in one sentence from the massing, never the fallback keys", () => {
+  const roof = { type: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 14, wingPitch: 0.32142857142857145,
+    wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }, { wall: "right", widthFt: 8 }] };
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 16.5, list: true, wings: [{}, {}, {}], ends: [] }),
+    "3 wings, set on the Advanced page, with the middle section's walls at 16 ft 6 in.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 12, list: true, wings: [{}], ends: [] }),
+    "1 wing, set on the Advanced page, with the middle section's walls at 12 ft.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 17, list: true, wings: [{}, {}], ends: [{}] }),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft.");
+  const none = F.ssDrewWords({ roof }, null, undefined, { Hc: 9, list: true, wings: [], ends: [] });
+  assert(!/wing/i.test(none), none);
+  // Beside the other features the sentence stands alone for the wings.
+  const porch = F.ssDrewWords({ roof: { ...roof, front: "gable", porchOutFt: 6 } }, null, undefined, { Hc: 16.5, list: true, wings: [{}, {}, {}], ends: [] });
+  assertStringIncludes(porch, "3 wings, set on the Advanced page, with the middle section's walls at 16 ft 6 in.");
+  assert(!/lower wing/i.test(porch), porch);
+});
+
+// WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05): the corners the massing joined, said after
+// the list's sentence, as built; a near-miss is drawn as before and says nothing more.
+Deno.test("'What we drew' names the corners a wing list's roofs run around, as built", () => {
+  const roof = { type: "gable", pitch: 0.5, centerEaveFt: 17, wingCornersMeet: true,
+    wingList: [{ wall: "left", widthFt: 8 }, { wall: "right", widthFt: 8 }, { wall: "front", widthFt: 8 }] };
+  const built = (joins: string[], near: string[] = []) => ({ Hc: 17, list: true, wings: [{}, {}], ends: [{}],
+    corners: { joins: joins.map((name) => ({ name })), near: near.map((name) => ({ name, why: ["width"] })) } });
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["front-left", "front-right"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the front-left and front-right corners as one, with a hip.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["front-right"], ["front-left"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the front-right corner as one, with a hip.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["back-left", "back-right", "front-left"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the back-left, back-right and front-left corners as one, with a hip.");
+  // A near-miss only, or no corners at all (the switch off): the list's sentence alone.
+  for (const b of [built([], ["front-left"]), { Hc: 17, list: true, wings: [{}, {}], ends: [{}] }]) {
+    assertEquals(F.ssDrewWords({ roof }, null, undefined, b), "3 wings, set on the Advanced page, with the middle section's walls at 17 ft.");
+  }
+});
+
+// ⚠️ An edit to the wing list is an edit to the roof: it clears an unfixed roof "No" (calQuestionSig).
+Deno.test("⚠️ the roof question's slice holds the wing list", () => {
+  const [a, b] = ["  const calQuestionSig = (key) => {", "  // ⚠️ ANSWERED IS NOT AGREED."];
+  const sigFor = new Function("adminCal", `${lift(CMP, "structure-studio.component.js", a, b)}; return calQuestionSig;`) as (cal: unknown) => (key: string) => string;
+  const sig = (spec: Record<string, unknown>, key: string) => sigFor({ spec })(key);
+  const roof = { type: "gable", front: "gable", pitch: 0.5, overhang: 1 };
+  const base = { roof, wallHeightFt: 9, colors: { body: "#3a3d3f" }, roofMaterial: "metal" };
+  const one = { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }] } };
+  for (const [what, from, to] of [
+    ["a list added", base, one],
+    ["a wing added on a wing", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] } }],
+    ["a wing's width changed", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 7 }] } }],
+    ["the list taken off", one, base],
+    ["the corners switch turned on", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }], wingCornersMeet: true } }],
+  ] as const) {
+    assert(sig(from, "roof") !== sig(to, "roof"), `${what}: the roof's slice moves`);
+    for (const k of ["porch", "walls", "colours"]) assertEquals(sig(from, k), sig(to, k), `${what}: the ${k} question's slice does not`);
+  }
+});
+
 // ── The roof step (2026-09-28), in words ──────────────────────────────────────────────────
 
 Deno.test("the roof step reads in the words of its panel controls, and 'What we drew' says it", () => {

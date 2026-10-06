@@ -96,3 +96,36 @@ export function numberEventTarget(
   const phone = /^1\d{10}$/.test(digits) ? "+" + digits : /^\d{10}$/.test(digits) ? "+1" + digits : null;
   return { sid: /^PN[0-9a-f]{32}$/i.test(sid) ? sid : null, phone };
 }
+
+// ⚠️ ONE NUMBER IS THE BUSINESS'S TEXTING NUMBER; THE OTHERS ARE JUST NUMBERS. Since migration 266
+// the Phone tab puts a business's extra numbers into the same Messaging Service (portal-settings
+// phone_buy_number and phone_number_texting), and each one gets its own registration verdict.
+// Only the main texting number's (client_settings.sms_number) is a verdict on the business's
+// texting: its registration is what turns texting on, and its refusal is what "Needs attention"
+// is about. Every number event used to be read that way, so a refused extra number flagged texting
+// as broken while the main number sent normally (and told the builder to release "this number"
+// without saying which), and an extra number that registered cleared a note about the main
+// registration. An extra number's verdict now lands on its own sms_numbers row only (the Phone
+// tab shows it beside that number), and a refusal is logged.
+/** What a number-registration verdict does BEYOND its own sms_numbers row:
+ *    "activate"     the main number registered: texting goes live (sms_registrations 'active',
+ *                   client_settings.sms_status 'active', any attention note cleared);
+ *    "attention"    the main number was refused: the registration needs attention;
+ *    "extra_failed" another of the business's numbers was refused: logged, nothing else;
+ *    "none"         anything else.
+ *  `eventPhone` is the E.164 the event is about (the matched row's, else the payload's). With no
+ *  main number on record, or no phone to compare, the number counts as the main one, which is
+ *  what every number event meant before 266. */
+export function numberVerdictEffect(input: {
+  status: string;
+  numberMatched: boolean;
+  eventPhone: string | null | undefined;
+  mainNumber: string | null | undefined;
+}): "activate" | "attention" | "extra_failed" | "none" {
+  const main = String(input.mainNumber ?? "").trim();
+  const phone = String(input.eventPhone ?? "").trim();
+  const isMain = !main || !phone || phone === main;
+  if (input.status === "registered") return input.numberMatched && isMain ? "activate" : "none";
+  if (input.status === "failed") return isMain ? "attention" : "extra_failed";
+  return "none";
+}

@@ -115,7 +115,9 @@ async function run(label, S, path) {
     if (url.includes("/auth/v1/user")) return json(route, USER);
     if (url.includes("/auth/v1/")) return json(route, SESSION);
     const fn = /\/functions\/v1\/([a-z0-9-]+)/.exec(url);
-    if (fn) calls.push({ fn: fn[1], action: body.action, at: Date.now() - t0 });
+    // `warm` marks the ?warm=1 isolate pings (12-shell's operator warm-up and rail hover): they carry
+    // no action, so an action-filtered count would never see them.
+    if (fn) calls.push({ fn: fn[1], action: body.action, warm: /[?&]warm=1/.test(url), at: Date.now() - t0 });
     if (url.includes("/portal-billing")) {
       return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: {}, status: "active" }, wallet: null });
     }
@@ -140,8 +142,10 @@ async function run(label, S, path) {
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   // Past the held rpc, then long enough for anything it unblocks (a mount, its first calls, the
-  // URL rewrite) to have happened.
-  await page.waitForTimeout((S.supportDelayMs || 0) + 2500);
+  // URL rewrite) to have happened — INCLUDING 12-shell's operator warm-up, which pings 3.5 s after
+  // the last operator flag resolves (2026-10-02). At +2500 the run ended before that timer, so a
+  // warm ping a support account must never send could not have been seen in B, D or E.
+  await page.waitForTimeout((S.supportDelayMs || 0) + 6000);
   const out = {
     label, calls, pageErrors,
     seen: await page.evaluate(() => window.__navSeen),
@@ -179,6 +183,7 @@ try {
   ok("B: ProjectsTab never mounts: no list_boards", sent(B, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(B, "portal-projects")));
   ok("B: the address bar leaves /portal/projects", B.path !== "/portal/projects", B.path);
   ok("B: no Admin item and no admin-catalog call", !B.seen.admin && sent(B, "admin-catalog").length === 0);
+  ok("B: no portal-projects request of ANY kind, ?warm=1 included", sent(B, "portal-projects").length === 0, JSON.stringify(sent(B, "portal-projects")));
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
 
   // ── C: a platform operator, same reload, same held rpc, still gets Admin ──
@@ -190,6 +195,9 @@ try {
   ok("C: …but only after is_support_operator answered false", !!firstAdmin && answeredAt(C) !== null && firstAdmin.at >= answeredAt(C),
     `first admin-catalog at ${firstAdmin && firstAdmin.at} ms, rpc answered at ${answeredAt(C)} ms`);
   ok("C: the deep link survives the wait (still /portal/admin)", C.path === "/portal/admin", C.path);
+  const cWarm = sent(C, "admin-catalog").filter((c) => c.warm);
+  ok("C: the operator warm-up pings admin-catalog (?warm=1), after is_support_operator answered false",
+    cWarm.length > 0 && answeredAt(C) !== null && cWarm[0].at >= answeredAt(C), JSON.stringify(cWarm));
   ok("C: Projects and Accounts are drawn too", C.nav.projects && C.nav.accounts);
   ok("C: no uncaught page errors", C.pageErrors.length === 0, C.pageErrors.join(" | "));
 
@@ -209,6 +217,8 @@ try {
   const E = await run("E", { operator: true, support: true, supportDelayMs: 800, canProjects: true }, "/portal/projects");
   ok("E: pre-250 rpc: the Projects item is never drawn", !E.seen.projects);
   ok("E: pre-250 rpc: ProjectsTab never mounts: no list_boards", sent(E, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(E, "portal-projects")));
+  ok("E: pre-250 rpc: no portal-projects request of ANY kind, ?warm=1 included", sent(E, "portal-projects").length === 0, JSON.stringify(sent(E, "portal-projects")));
+  ok("E: no admin-catalog request of any kind", sent(E, "admin-catalog").length === 0, JSON.stringify(sent(E, "admin-catalog")));
   ok("E: no uncaught page errors", E.pageErrors.length === 0, E.pageErrors.join(" | "));
 
   // ── G: a CSM team member with the Projects area (not an operator), is_support_operator FAILS ──

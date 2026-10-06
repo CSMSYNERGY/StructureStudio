@@ -185,6 +185,42 @@ because `SchedJobEditor` seeds its form state once and React keeps it; it is now
 defects remain in **Repairs, Delivery Schedule and Drivers & Territories** — Carolyn scoped
 this pass to Build Schedule, so they are a known follow-up, not an oversight.
 
+## The customer behind a row — Carolyn, 2026-08-28 (decision 29)
+
+29. **A JOB OR A STOP OPENS ITS CUSTOMER, THROUGH THE POPUP.** Carolyn, 2026-08-28 @39:00, on
+    the Build Schedule: *"when I click this card here, it does the same thing as when I'm here,
+    and I click the [contact] ... I think we'll do the same kind of structure from both the
+    build schedule and the delivery schedule."* Then: *"What happens when I hit the back button
+    up here? I want to make sure that ... they function the same way."*
+    - **The card click is still the popup** (decisions 24/25; the crew drag relies on a card
+      being a card). The customer's name in the popup header is the link, "Alex Tester ›", so
+      the Board, Calendar and Table views all reach it the same way, and it sits outside the
+      editor's `canEdit` block, so someone who can only view the board gets it too. On the
+      Delivery Schedule the stop's name is the link, in the Loads view and the Table view.
+      She wavered on this ("I don't know if I want to continue this"), so if she wants the
+      card itself to open the customer, that is a one-line change of the card's click, not a
+      new feature.
+    - **Which rows link:** an ORDER job or stop, and a SOLD unit's sale stop (it carries the
+      buyer's design code). Never a spec build or the shop-to-lot haul (their code, if any, is
+      the builder's own design), never a repair or manual row. `portal-schedule` adds
+      `customer_link: { code, contactId }` to those rows in `build_board` and `loads`, only
+      while the design still EXISTS (live data has rows pointing at deleted designs);
+      `contactId` is null for a design with no customer. Neither table carries a contact: the
+      link is the code, and `designs.contact_id` is the customer. contacts:'own' sees only
+      their own customers' links (`crm_visible_contact_ids`, the record page's rule). Optional
+      and never fatal: a failed read costs the links, logged, and the board still opens.
+    - **Where it goes is the Pipeline's rule:** the contact record, on that deal, when there
+      is a customer and the reader has the CRM and Contacts; else the design's own record (a
+      crew leader holds designs and not contacts); else the name stays plain text (a crew
+      member holds neither). Unsaved edits in the popup, or an open stop/load form on the
+      Delivery Schedule, ask before leaving.
+    - **Back parity:** the record's own Back returns to the schedule it came from (`recordCtx`
+      in the shell, kept in the history entry, so a hop away and the browser's Back onto the
+      record keep it and the deal), and each schedule reopens on the view and week it left,
+      kept per browser tab for today only (`schedViewLoad`, sessionStorage), so a tab left open
+      overnight still starts on this week. The browser's Back does the same, since the shell
+      pushes history.
+
 ## Post-launch refinements from beta testing (2026-08-04 → 08-05)
 
 The decisions below supersede parts of the original spec. Migrations 092–095.

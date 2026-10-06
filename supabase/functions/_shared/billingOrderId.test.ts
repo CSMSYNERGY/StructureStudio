@@ -13,7 +13,7 @@
 //     dropped cancellation leaves a lapsed tenant with full access indefinitely — the exact
 //     failure that function's own file header was written about.
 
-import { foreignOrderPrefixOf } from "./billingOrderId.ts";
+import { foreignOrderPrefixOf, ssClientIdOf } from "./billingOrderId.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -56,12 +56,12 @@ Deno.test("case does not smuggle one of ours past the guard", () => {
 Deno.test("the shape that caused the 2026-09-02 retry loop is foreign", () => {
   // Hyphen-separated. The first version of this rule required an underscore and missed it
   // entirely: 18 redeliveries, 18 fault rows, for a subscription that was never ours.
-  assert(isForeign("sub-zW4xVuZ5K7yWubw6Z4ot-CPI_YEARLY-1788299064953"));
+  assert(isForeign("sub-AAAAAAAAAAAAAAAAAAAA-CPI_YEARLY-1700000000000"));
 });
 
 Deno.test("Framed-UP's shapes stay foreign — what the rule was first written for", () => {
-  assert(isForeign("fu_19c4bccd-1866-47ec-9884-bc58b6078b25_starter_monthly"));
-  assert(isForeign("cs_db589321-45f5-4801-8d15-1ce4b87dd3bb_starter"));
+  assert(isForeign("fu_00000000-0000-4000-8000-000000000002_starter_monthly"));
+  assert(isForeign("cs_00000000-0000-4000-8000-000000000001_starter"));
 });
 
 Deno.test("either separator counts, because we do not get to choose theirs", () => {
@@ -76,7 +76,7 @@ Deno.test("an order id with NO prefix is not called foreign", () => {
   // The safe direction, and deliberate. Acking something we cannot identify would drop a real
   // change; retrying it only costs a redelivery. A bare gateway id is exactly the shape an
   // update or delete arrives with.
-  for (const o of ["", "12463916652", "noseparatorhere"]) {
+  for (const o of ["", "4100009999", "noseparatorhere"]) {
     assertEquals(foreignOrderPrefixOf(o), null, JSON.stringify(o));
   }
 });
@@ -96,4 +96,43 @@ Deno.test("null and undefined are survivable, not a crash", () => {
 Deno.test("the returned prefix carries its separator, so a note reads correctly", () => {
   assertEquals(foreignOrderPrefixOf("fu_x"), "fu_");
   assertEquals(foreignOrderPrefixOf("sub-x"), "sub-");
+});
+
+// ── ssClientIdOf: which tenant one of OUR order ids names ────────────────────────────────────
+//
+// Its second reader decides whether billing-webhook ACKS a 0-row update/delete/pause (the tenant
+// was deleted) or keeps retrying it (the add has not landed yet). So it must name the tenant exactly
+// for ours, and return null for everything else: a null keeps the retry, which is the safe side.
+// Tenant slugs below are made up.
+
+Deno.test("ssClientIdOf reads the tenant out of portal-billing's two shapes", () => {
+  assertEquals(ssClientIdOf("ss_acme-sheds_simple_layout_annual"), "acme-sheds");
+  assertEquals(ssClientIdOf("ss_acme-sheds_crm_monthly"), "acme-sheds");
+  // The first-charge variant. Without the optional hop the tenant came back as "first".
+  assertEquals(ssClientIdOf("ss_first_x_plan"), "x");
+  assertEquals(ssClientIdOf("ss_first_acme-sheds_full_suite_annual"), "acme-sheds");
+  assertEquals(ssClientIdOf("ss_a1-b2_p"), "a1-b2", "digits and hyphens are slug characters");
+});
+
+Deno.test("ssClientIdOf is null for every order id that is not ours", () => {
+  for (
+    const o of [
+      "cs_00000000-0000-4000-8000-000000000001_starter", // other products on the shared gateway
+      "fu_00000000-0000-4000-8000-000000000002_starter_monthly",
+      "sub-AAAAAAAAAAAAAAAAAAAA-CPI_YEARLY-1700000000000",
+      "", "4100009999", "ss_", "ss_noplan", "ss__x", // absent, a bare gateway id, or no tenant segment
+      "SS_acme-sheds_crm_monthly", "ss_Acme_crm", // only portal-billing mints these, always lowercase
+    ]
+  ) {
+    assertEquals(ssClientIdOf(o), null, JSON.stringify(o));
+  }
+  assertEquals(ssClientIdOf(null as unknown as string), null);
+  assertEquals(ssClientIdOf(undefined as unknown as string), null);
+});
+
+Deno.test("a positively foreign order id never also names a tenant of ours", () => {
+  // The webhook tries foreignOrderPrefixOf first; the two rules must never both claim one id.
+  for (const o of ["cs_x_y", "fu_x_y", "sub-x-y", "acme_x_y", "ss_acme-sheds_crm_monthly", "ss_first_x_plan"]) {
+    assert(!(foreignOrderPrefixOf(o) !== null && ssClientIdOf(o) !== null), o);
+  }
 });

@@ -238,3 +238,82 @@ Deno.test("a delta BEATS a stale legacy absolute on the same design", () => {
   // PRICED field has to win, or the customer is charged for one height and shown another.
   assertEquals(d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", { wallHeightDeltaIn: 6, wallHeight: 10 }, 8), 8.5);
 });
+
+// ── One increase, hauled on the narrow widths and built on site on the wide one (272) ──────────
+// Bug report 2026-10-02: a builder needed 12" of extra wall height on a 14' wide building that is
+// built on site. +12" stays a normal hauled upgrade on the 8, 10 and 12 wide, and the same +12"
+// is sold on the 14 wide as a building assembled on site, with its own rate and on-site fee. Before
+// 272 the resolver took the FIRST +12 row and then checked its width, so on the 14 it found the
+// hauled row, failed the width and priced nothing while the estimate billed the on-site row.
+
+const PAIR = {
+  showPricing: true,
+  wallHeightOptions: {
+    deluxe: [
+      { deltaIn: 12, ratePerLf: 4.75, widthsFt: [8, 10, 12] },
+      { deltaIn: 12, ratePerLf: 6.5, widthsFt: [14], buildOnSite: true, bosFeeBasis: "each", bosFeeRate: 750 },
+    ],
+  },
+};
+type Row = { deltaIn: number; ratePerLf: number | null; buildOnSite?: boolean };
+
+Deno.test("the same increase resolves HAULED at 12 wide and BUILT ON SITE at 14 wide", () => {
+  const at12 = resolveWallHeight(PAIR, "deluxe", 12, 12) as Row | null;
+  assertEquals(at12?.ratePerLf, 4.75);
+  assertFalse(!!at12?.buildOnSite, "12 wide is hauled: no Built On Site line");
+  const at14 = resolveWallHeight(PAIR, "deluxe", 12, 14) as Row | null;
+  assertEquals(at14?.ratePerLf, 6.5, "14 wide prices the on-site row's own rate");
+  assert(at14?.buildOnSite, "14 wide is built on site");
+  for (const w of [8, 10]) {
+    assertEquals((resolveWallHeight(PAIR, "deluxe", 12, w) as Row | null)?.ratePerLf, 4.75, `${w} wide is the hauled row`);
+  }
+  assertEquals(resolveWallHeight(PAIR, "deluxe", 12, 16), null, "a width neither row lists prices nothing");
+});
+
+Deno.test("with no width given the resolver behaves as it always did: the first row for the increase", () => {
+  assertEquals((resolveWallHeight(PAIR, "deluxe", 12) as Row | null)?.ratePerLf, 4.75);
+  assertEquals(wallHeightOptionsFor(PAIR, "deluxe").length, 2, "the style offers both rows at all");
+});
+
+Deno.test("each width's picker lists the increase once, flagged on site only where it is", () => {
+  for (const w of [8, 10, 12]) {
+    const opts = wallHeightOptionsFor(PAIR, "deluxe", w) as Row[];
+    assertEquals(opts.map((o) => o.deltaIn), [12], `${w} wide`);
+    assertFalse(!!opts[0].buildOnSite, `${w} wide is not on site`);
+  }
+  const at14 = wallHeightOptionsFor(PAIR, "deluxe", 14) as Row[];
+  assertEquals(at14.map((o) => o.deltaIn), [12]);
+  assert(at14[0].buildOnSite, "the 14 wide button reads '+12 · on site'");
+});
+
+Deno.test("the drawn and priced height follow the row the width picks", () => {
+  // Both rows are +12, so the wall is 9 ft either way; what changes is whether it prices at all.
+  assertEquals(d3CustomerWallHeightFt(PAIR, STYLE_8FT, "deluxe", { wallHeightDeltaIn: 12 }, 12), 9);
+  assertEquals(d3CustomerWallHeightFt(PAIR, STYLE_8FT, "deluxe", { wallHeightDeltaIn: 12 }, 14), 9);
+  assertEquals(d3CustomerWallHeightFt(PAIR, STYLE_8FT, "deluxe", { wallHeightDeltaIn: 12 }, 16), 0, "not offered at 16: no override");
+});
+
+Deno.test("two rows at one width price NOTHING, the way the server refuses them", () => {
+  // The Settings save refuses a pair that shares a width; this pins what happens if one exists
+  // anyway. submit-estimate answers 400 rather than guess, so the preview must not show a price.
+  const overlap = {
+    wallHeightOptions: {
+      deluxe: [
+        { deltaIn: 12, ratePerLf: 4.75, widthsFt: [8, 10, 12, 14] },
+        { deltaIn: 12, ratePerLf: 6.5, widthsFt: [14], buildOnSite: true },
+      ],
+    },
+  };
+  assertEquals(resolveWallHeight(overlap, "deluxe", 12, 14), null);
+  assertEquals((resolveWallHeight(overlap, "deluxe", 12, 12) as Row | null)?.ratePerLf, 4.75, "a width only one row lists still prices");
+});
+
+Deno.test("the server picks the row by width too, and refuses two at one width", () => {
+  // Pinned by SHAPE, like the clamp above. The old read was one row per increase (maybeSingle),
+  // which ERRORS when a style lists the increase twice and would refuse every such quote.
+  const SERVER = Deno.readTextFileSync(new URL("../../submit-estimate/index.ts", import.meta.url));
+  assertFalse(/\.eq\("delta_in", wallHeightDeltaIn\)\.maybeSingle\(\)/.test(SERVER), "submit-estimate no longer reads a single row per increase");
+  assert(SERVER.includes("const whFits = whOffered.filter("), "submit-estimate filters the increase's rows by the building's width");
+  assert(SERVER.includes("if (whFits.length > 1) {"), "and refuses two rows at one width");
+  assert(SERVER.includes("const wh = whFits[0];"), "and prices the one row that fits");
+});

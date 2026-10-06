@@ -51,7 +51,10 @@ export async function launch({ width = 1280, height = 900 } = {}) {
   const browser = await chromium.launch({
     channel: process.env.PW_CHANNEL === "bundled" ? undefined : "chrome",
     headless: process.env.HEADED ? false : true,
-    args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+    // HARNESS_CHROME_ARGS adds flags, for example "--disable-quic --disable-features=EncryptedClientHello"
+    // on a network where Chrome's HTTP/3 or ECH to Cloudflare fails (curl works, Chrome gets ERR_FAILED).
+    args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+      ...(process.env.HARNESS_CHROME_ARGS ? process.env.HARNESS_CHROME_ARGS.split(/\s+/).filter(Boolean) : [])],
   });
   const ctx = await browser.newContext({ viewport: { width, height } });
   return { browser, ctx };
@@ -257,5 +260,5 @@ export function purePorch() {
     ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
   ];
   const body = regions.map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan };`)();
+  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan, d3RecessedPorchFrame, d3RecessedPorchReadout, d3LeanTosReadout, d3PorchJoins };`)();
 }

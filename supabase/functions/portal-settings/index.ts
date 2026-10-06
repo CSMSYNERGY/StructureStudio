@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
+import { timedFetch, withServerTiming, type ServerTiming } from "../_shared/serverTiming.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
@@ -12,12 +13,21 @@ import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
   rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
   rsInboundRecords, rsReceivingEnabled, rsInboundReady,
+  rsEnableOpenTracking, rsOpenTrackingActive, rsOpenTrackingConfigured, rsTrackingRecords, rsCheckOpenTracking,
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+// Email Settings asks public DNS whether the sending domain already has a DMARC record before
+// it advises one (2026-10-05).
+import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
+// The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
+import { buildReplyAddress } from "../_shared/emailInbound.ts";
+import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
+// Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
+import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
-import { sendTenantSms } from "../_shared/smsSend.ts";
-import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { replyFromNumber, sendTenantSms } from "../_shared/smsSend.ts";
+import { changeOrderEmail, cleanTemplateCopy, estimateEmail, invoiceEmail, templatePreviewEmail, TEMPLATE_KINDS, tenantStylePhotoUrl, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsAfterAck, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
@@ -48,8 +58,9 @@ import {
 // The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
 // `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
 import {
-  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupSwitchRefusal, paidLookup,
-  parseVerifyTax, quoteSentRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
+  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupPriceCents, lookupSwitchRefusal, paidLookup,
+  parseVerifyTax, quoteSentRefusal, VERIFY_TAX_METER, verifiedTax, type VerifyWallet, verifyLookupRefusal, verifyPriceRefusal,
+  verifyQuoteRefusal, verifyWalletFrom, verifyWalletRefusal,
 } from "../_shared/taxSpend.ts";
 // Why a guarded acceptance promote matched no row. customer-accept's, shared so push_to_invoice's
 // rep attestation answers a re-price that lands mid-promote exactly the way a customer's does.
@@ -60,8 +71,14 @@ import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+// The customer block, the logo and the per-builder validity on every quote / invoice PDF this
+// function prints (2026-10-05), and the Settings field behind the validity (migration 269).
+import { pdfCustomerFrom } from "../_shared/estimatePdf.ts";
+import { pdfLogoSources } from "../_shared/pdfLogo.ts";
+import { parseQuoteValidDays, QUOTE_VALID_DAYS_MAX, QUOTE_VALID_DAYS_MIN, readQuoteValidDays } from "../_shared/quoteValidity.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
+import { FLOOR_PLANS, OBJECT_PATH, LEGACY_ROOT_ERA_END, crmInvoiceExists, floorPlanKey, isOwnFloorPlanKey, invoiceExists, removeDesignObjects } from "../_shared/designStorageKeys.ts";
 import {
   CLADDING_OPTIONS,
   claddingLabel,
@@ -78,8 +95,17 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 // A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
+import { rtpImportNumber, rtpImportOverhead } from "../_shared/rtpImportValues.ts";
+// The Conversations page's calls go through the record timeline's own visibility rule.
+import { scopeCallRows } from "../_shared/crmFeed.ts";
+// The Conversations page (crm_inbox). Its own module, so crmFeed (which the phone-api Worker
+// bundles too) is untouched; this function is its only importer.
+import {
+  buildInbox, INBOX_AT_COLUMN, INBOX_EMAIL_KINDS, InboxReadError, parseInboxRequest,
+  type InboxContact, type InboxSource, type InboxTable,
+} from "../_shared/crmInbox.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
-import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
+import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
 import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
 // The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
@@ -87,6 +113,8 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 import { runStepZoom } from "../_shared/stepZoom.ts";
+// The eave overhang, read from close-ups of the gable's corners beside the roof step's (2026-09-29).
+import { runOverhangZoom } from "../_shared/overhangZoom.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video several times (five since
 // 2026-09-26, DRAFT_CONSENSUS_CALLS) and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
@@ -94,6 +122,8 @@ import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftC
 import { draftReadSample } from "../_shared/styleD3.ts";
 // ...and a pitch at least two reads measured is locked in the self-check (2026-09-26).
 import { measuredPitchLock } from "../_shared/styleD3.ts";
+// ...and so is an overhang the close-ups measured (2026-09-29).
+import { measuredOverhangLock } from "../_shared/styleD3.ts";
 // A read the API could not serve is sent again, the five reads' first sends are staggered, and an
 // upstream failure is told to the builder in a plain sentence (2026-09-26).
 import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
@@ -113,12 +143,54 @@ import {
 import { SELF_CHECK_CLAIM_WINDOW_MS } from "../_shared/styleD3.ts";
 // The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
 import { draftIdemKey } from "../_shared/styleD3.ts";
+// One hauled and one built-on-site row per wall-height increase, sharing no width (272), once
+// WALL_HEIGHT_SITE_PAIRS is on. This function is the module's only importer.
+import { bindWallHeightWrites, wallHeightClash, wallHeightListedTwice, type WallHeightRowShape } from "../_shared/wallHeightRows.ts";
+// "Offered on": the building styles a catalog fixture is sold on (272). admin-catalog imports the
+// same module (cloneStyleIds), so a change to it deploys both functions.
+import { keepTenantStyleIds, NO_STYLE_TICKED, readStyleIds } from "../_shared/fixtureStyleIds.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
 // client this function builds is the SERVICE ROLE and the service role is BYPASSRLS.
 import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
+// ownPhoneOnly is the phone area's twin of ownContactsOnly: RANK scores 'own' and 'view' the
+// same, so it is the only thing that can tell "my calls" from "the team's calls". Every Team
+// read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
+import { ownPhoneOnly } from "../_shared/access.ts";
+import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
+// Migration 266: more than one number, each with a name and maybe a person (phone.ts).
+import {
+  callerNumberFor, carriesRoute, MAX_NUMBERS, ONE_NUMBER_PER_PERSON, parseAssignee, parseNumberLabel, pickNumber, suggestedMembersFor,
+} from "./phone.ts";
+// Plan phase 6: a number for calls, bought with portal-sms's own purchase helper (one purchase
+// path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
+import {
+  areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
+  numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, twilioCreds, voiceEnv, type HoldResult, type SwitchNumber,
+} from "./phoneNumber.ts";
+import { attachToTexting, TEXTING_JOIN_FAILED } from "./phoneNumber.ts";
+import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
+// Migration 266: a later number joins the builder's texting setup with portal-sms's own helpers.
+import { attachNumberToService, clearNumberSmsUrl, numberInService } from "../_shared/twilioTrustHub.ts";
+// Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
+// number, OPERATOR-ONLY. The Twilio flow is the shared module's; the order and the refusals are
+// phoneTrust.ts, both driven against stubs by tests/phone/phoneTrust_test.ts.
+import { fetchCustomerProfile, fetchTrustProduct, numberOnProfile, parseVoiceIntegrityInfo, setupVoiceTrust, type VoiceIntegrityInfo } from "../_shared/twilioTrustHub.ts";
+import {
+  callerIdView, chooseTrustProfile, parseTrustProduct, runTrustSetup, runTrustStatus, TRUST_COLS, TRUST_COLUMNS, TRUST_LOCK_MS,
+  TRUST_OPERATOR_SENTENCE, trustOperatorAllowed, type TrustRow,
+} from "./phoneTrust.ts";
+import { isInternalTenant } from "../_shared/internalTenant.ts";
+// CSM Synergy's own GoHighLevel contacts into its CRM (migration 282): the GoHighLevel read and the
+// walk. This function is the module's only importer.
+import {
+  importDeadlines, importSummary, parseImportRequest, runGhlContactImport, type ImportRow, type ImportStop, type PageCounts,
+} from "../_shared/ghlContactImport.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
+import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
+// Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
+import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -143,6 +215,14 @@ const GATES: GateTable = {
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
   save_profile: "self",
+  // Quick sends (Carolyn 2026-09-30): each person's OWN saved messages, the list My Synergy Phone
+  // keeps, read and counted for the record's Email and SMS boxes. "self", not a contacts gate and
+  // not a crm_ name: they are per person, not per customer (a contacts:'edit' gate would need a
+  // CONTACT_ROW_SCOPE entry and there is no contact to find), and the handler keys strictly off
+  // the session's userId and clientId. "self" counts as a write, so a read-only operator is
+  // refused too; the branch refuses every operator in view-as (see QUICK SENDS below).
+  quick_sends_list: "self",
+  quick_send_used: "self",
 
   // ── Structures ───────────────────────────────────────────────────────────
   // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
@@ -197,6 +277,11 @@ const GATES: GateTable = {
   save_style_model:          { area: "settings_structures", level: "edit" },
   set_style_model_status:    { area: "settings_structures", level: "edit" },
   style_model_url:           { area: "settings_structures", level: "edit" },
+  // The builder's Advanced mode switch (Settings → Designer, migration 270). The Designer settings
+  // page's own area, as a write. That is the floor: the branch ALSO requires an owner or admin (or a
+  // platform operator in view-as), because the page it opens saves new styles through setup3d, which
+  // is built for them alone. A team member an owner has given Structures (edit) is refused there.
+  save_advanced_mode:        { area: "settings_structures", level: "edit" },
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
@@ -299,6 +384,9 @@ const GATES: GateTable = {
   email_status:         { area: "settings_email", level: "view" },
   email_connect_domain: { area: "settings_email", level: "edit" },
   email_save_template: { area: "settings_email", level: "edit" },
+  // The wording screen's Preview: draws the wording in the boxes (saved or not) around sample
+  // data and the builder's own header and footer. A read: it writes nothing and sends nothing.
+  email_preview_template: { area: "settings_email", level: "view" },
   email_verify_domain:  { area: "settings_email", level: "edit" },
   email_activate:       { area: "settings_email", level: "edit" },
   email_send_test:      { area: "settings_email", level: "edit" },
@@ -309,6 +397,10 @@ const GATES: GateTable = {
   email_inbound_connect:    { area: "settings_email", level: "edit" },
   email_inbound_verify:     { area: "settings_email", level: "edit" },
   email_inbound_disconnect: { area: "settings_email", level: "edit" },
+  // "See when emails are opened" (B4, migration 262): switches Resend's open tracking on for the
+  // verified sending domain and checks its tracking record. Same area: it changes every email the
+  // business sends (each carries the tracking image once it is on).
+  email_tracking_check:     { area: "settings_email", level: "edit" },
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
@@ -327,12 +419,27 @@ const GATES: GateTable = {
   // stays `any` so the design record still opens for exactly the people it always did.
   crm_record:            { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
   crm_feed:              { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
+  // The Conversations page: every customer's newest email, text or call. Contacts ALONE, not
+  // crm_record's `any`: there is no design half here, every row is a person. contacts:'own'
+  // passes the gate and is narrowed row by row in the branch (visibleContactIds), and calls
+  // follow the phone level there as well. The crm_ prefix brings the CRM subscription check.
+  crm_inbox:             { area: "contacts", level: "view" },
   crm_send_email:        { area: "contacts", level: "edit" },
   crm_save_note:         { area: "contacts", level: "edit" },
   crm_delete_note:       { area: "contacts", level: "edit" },
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
+  // My Synergy Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
+  // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
+  // makes a caller limited to their own customers the new contact's owner.
+  crm_create_contact:    { area: "contacts", level: "edit" },
+  // CSM Synergy's own GoHighLevel contacts into its CRM (migration 282). ⚠️ THIS LINE IS THE FLOOR
+  // ONLY: the branch is OPERATOR-ONLY (trustOperatorAllowed: an operator who can write, never
+  // support-only) and runs on our own account alone (internal_account), before GoHighLevel is
+  // called. CONTACT_ROW_SCOPE marks it tenantWide, so a caller limited to their own customers is
+  // refused; the crm_ prefix brings the CRM subscription check. A dry run unless dryRun: false.
+  crm_import_ghl_contacts: { area: "contacts", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -445,6 +552,64 @@ const GATES: GateTable = {
   // the approve area: attesting is part of raising a change, not part of allowing one, and
   // Carolyn asked for those to be separate switches.
   attest_change_order: { area: "change_orders", level: "edit" },
+  // The order's money after the Change orders card acknowledges a change in the browser —
+  // attest_change_order's money block on its own. Takes no money from the caller; it
+  // recomputes from what is already acknowledged, so it sits with the card's own writes.
+  apply_change_order_money: { area: "change_orders", level: "edit" },
+
+  // ── My Synergy Phone (calling settings + the Calls report) ───────────────────────────
+  // The `phone` area (none/own/view/edit), which _shared/access.ts and area_level_for carry.
+  // Plan section 7: making and taking calls needs any read level; changing phone settings
+  // needs edit. ⚠️ `view` here is the FLOOR, and RANK lets 'own' through it: the two reads
+  // below answer an 'own' caller with their own slice only (their status, their number,
+  // their own calls) and ask ownPhoneOnly() before handing over anything team-wide.
+  phone_settings_get: { area: "phone", level: "view" },
+  phone_calls_report: { area: "phone", level: "view" },
+  // Who answers the number, ring order, hours, forwarding, greeting. Owners and admins hold
+  // phone:edit by preset.
+  phone_settings_save: { area: "phone", level: "edit" },
+  // Call recording (migration 263): on/off, the announcement's wording, transcripts, how long
+  // recordings are kept. ⚠️ phone:'edit' IS THE FLOOR: the branch also requires the business
+  // OWNER (role 'owner'), decided 2026-10-04. Recording customers is the business's legal
+  // decision, so an admin, and an operator in view-as, are refused.
+  phone_recording_save: { area: "phone", level: "edit" },
+  // The per-tenant switch (client_settings.phone_status, plan D9). Same altitude as the setup
+  // it switches on. ⚠️ phone:'edit' IS THE FLOOR, NOT THE RULE, until builder launch: turning
+  // calling ON (and the three number actions below) also needs a CSM Synergy operator unless
+  // PHONE_SELF_SERVE=on — the branch asks phoneRolloutRefusal (phone.ts). Turning it OFF never
+  // needs more than this line; the switch is also the safety control.
+  phone_status_set: { area: "phone", level: "edit" },
+  // "Sign out all devices" for ONE team member (a lost phone, someone leaving). It retires
+  // every My Synergy Phone device they have by bumping their device generation. Ending their
+  // Structure Studio sign-ins as well is refused for a CSM Synergy operator's team row unless
+  // the caller is an operator too (signoutPlan in phone.ts).
+  phone_signout_user: { area: "phone", level: "edit" },
+  // Plan phase 6, the owner's self-serve number for calls. Searching spends nothing. BUYING
+  // spends money every month, so the branch ALSO asks settings_billing:'edit' (the level
+  // portal-sms's buy_number is gated on) and an operator's canBill, and takes portal-sms's
+  // sms_number_monthly wallet hold; phone:'edit' here is the floor. Connecting a number points
+  // its voice webhooks at the Worker and buys nothing. All three are behind the same rollout
+  // check as turning calling on.
+  phone_search_numbers: { area: "phone", level: "edit" },
+  phone_buy_number: { area: "phone", level: "edit" },
+  phone_enable_number: { area: "phone", level: "edit" },
+  // Migration 266: put a calling-only number into the builder's texting setup once texting is on
+  // (a later number whose join at purchase did not finish, or one bought before texting cleared).
+  // Spends nothing; behind the same rollout check as the three above. It changes the business's
+  // texting registration, so the branch ALSO asks settings_billing:'edit' and an operator's canBill
+  // (the purchase's check, and the level portal-sms keeps texting setup to); phone:'edit' here is
+  // the floor.
+  phone_number_texting: { area: "phone", level: "edit" },
+  // Plan phase 6, caller-ID trust (plan §14): register the number for SHAKEN/STIR or Voice
+  // Integrity, and read back where Twilio's review stands. ⚠️ THESE LINES ARE THE FLOOR ONLY:
+  // both branches are OPERATOR-ONLY (phoneOperatorGate — an operator in view-as with can_write, or
+  // an app_operators member with can_write; never a support-only one), always, and
+  // PHONE_SELF_SERVE does not open them. They submit the builder's legal identity to a Twilio
+  // review, and nothing runs them automatically. Status is "edit" too, not "view" (review BE-3):
+  // it WRITES the number row (the statuses, and clears a Trust Product Twilio no longer has), and
+  // a READ-level line is where resolveTenant waves a read-only operator through.
+  phone_trust_setup: { area: "phone", level: "edit" },
+  phone_trust_status: { area: "phone", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -466,6 +631,11 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // Lets the browser remember this preflight instead of re-asking before nearly every call.
+  // Without it Chrome keeps a preflight for 5 s, so a click paid a whole extra round trip to
+  // the function first — measured 2026-10-01 at 0.4–1.7 s from Pakistan, and still a full
+  // round trip from anywhere. Chrome caps the value at 7200 (2 h); Firefox honours 86400.
+  "Access-Control-Max-Age": "86400",
 };
 
 function json(body: unknown, status = 200) {
@@ -474,6 +644,9 @@ function json(body: unknown, status = 200) {
     headers: { ...cors, "Content-Type": "application/json" },
   });
 }
+
+// Server-Timing (auth / db / total / region on every POST) lives in _shared/serverTiming.ts since
+// 2026-10-05, unchanged, so sync-design-status can send the same header.
 
 // 5xx responses whose app_errors row was already written at the return site, with more detail
 // than the wrapper can see (withErrorLog's `alreadyFiled` option skips them). Only the AI draft
@@ -574,6 +747,7 @@ function draftAnswer(
  *
  * `where` completes "Couldn't …" and is the correlation key — keep it short, specific and
  * stable, because it is both user-facing text and the thing you grep app_errors for.
+ * `extra` rides alongside for a caller whose answer already carried a machine field (`reason`).
  */
 function dbFail(
   req: Request,
@@ -582,6 +756,7 @@ function dbFail(
   // deno-lint-ignore no-explicit-any
   err: any,
   status = 500,
+  extra: Record<string, unknown> = {},
 ) {
   logEdgeError({
     fn: "portal-settings",
@@ -594,6 +769,7 @@ function dbFail(
   return json({
     error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
     ref: where,
+    ...extra,
   }, status);
 }
 
@@ -605,8 +781,12 @@ function maskId(v: string | null): string | null {
 // ── Email sending helpers ───────────────────────────────────────────────────────
 // The Settings → Email DNS table's rows, snapshotted onto client_settings.email_dns_records
 // so email_status can render without a Resend round trip. Shape is the EmailSendingView
-// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX.
-type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number };
+// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX,
+// and, once open tracking is switched on (B4), the tracking CNAME, marked `tracking: true`: the
+// screen shows it apart from the sending records and as optional, because email sends the same
+// without it — only the opens go uncounted. A tracking row may also carry `askedAt`: when
+// email_tracking_check last asked Resend to look for it (see trackingAskedAt).
+type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number; tracking?: true; askedAt?: string };
 function dnsRecordsOf(d: RsDomain): DnsRow[] {
   // Resend returns a VARIABLE list (today: DKIM TXT + SPF TXT + SPF MX), not a fixed pair,
   // so this maps rather than hand-builds. resend.ts already normalised the shape.
@@ -616,6 +796,7 @@ function dnsRecordsOf(d: RsDomain): DnsRow[] {
   //
   // priority is carried because an MX WITHOUT one cannot be created — dropping it would hand
   // the tenant a record their DNS panel refuses.
+  const tracking = new Set(rsTrackingRecords(d));
   return d.records
     .map((r) => ({
       type: r.type,
@@ -623,10 +804,40 @@ function dnsRecordsOf(d: RsDomain): DnsRow[] {
       value: r.value,
       verified: r.verified,
       ...(r.priority != null ? { priority: r.priority } : {}),
+      ...(tracking.has(r) ? { tracking: true as const } : {}),
     }))
     // A row with no host is a shape we can't render or copy — drop it rather than showing
     // an empty record a tenant would dutifully paste into their DNS.
     .filter((r) => r.host && r.value);
+}
+
+/** Where open tracking stands on a domain read, in the words the opens card uses: "off" (never
+ *  switched on), "waiting" (on, but its record is not in DNS yet, so nothing is counted) or
+ *  "on" (opens are being counted). */
+function openTrackingState(d: RsDomain): "off" | "waiting" | "on" {
+  return rsOpenTrackingActive(d) ? "on" : rsOpenTrackingConfigured(d) ? "waiting" : "off";
+}
+
+/** When email_tracking_check last asked Resend to look for the tracking record, as epoch ms, read
+ *  off the stored snapshot's tracking rows (null when it never did, or a newer snapshot from another
+ *  action dropped the stamp: then the "pending" gate in rsCheckOpenTracking is the only one). Kept
+ *  on the snapshot so the "once per few minutes" rule holds across isolates without a column. */
+function trackingAskedAt(rows: unknown): number | null {
+  if (!Array.isArray(rows)) return null;
+  let at: number | null = null;
+  for (const r of rows) {
+    const row = (r && typeof r === "object" ? r : {}) as Partial<DnsRow>;
+    const t = row.tracking === true && typeof row.askedAt === "string" ? Date.parse(row.askedAt) : NaN;
+    if (Number.isFinite(t) && (at == null || t > at)) at = t;
+  }
+  return at;
+}
+
+/** A Resend failure as the enum-ish text app_errors may hold (never the provider message). */
+function rsErrText(e: unknown): string {
+  return e instanceof ResendApiError
+    ? `resend ${e.status}/${e.name_ || "unknown"}`
+    : String((e as Error)?.message ?? e ?? "unknown error").slice(0, 300);
 }
 
 /**
@@ -701,9 +912,18 @@ async function regenerateQuotePdf(
   input: { quoteNumber: string; snap: any; planUrl: unknown },
 ): Promise<string | null> {
   try {
-    const { data: cs } = await admin.from("client_settings")
-      .select("business_name, business_phone, business_website, business_address, quote_terms")
-      .eq("client_id", clientId).maybeSingle();
+    // The customer ("Prepared for") and the validity are read HERE, beside the settings, rather
+    // than threaded through the six callers: each would need `contact` in its own design select,
+    // and one that forgot would quietly re-print the quote without the customer on it. In
+    // parallel, so the re-print waits no longer than it did. Each read degrades on its own: no
+    // contact prints no block, and quoteValidity's read gives 30 on any failure.
+    const [{ data: cs }, { data: who }, valid] = await Promise.all([
+      admin.from("client_settings")
+        .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms")
+        .eq("client_id", clientId).maybeSingle(),
+      admin.from("designs").select("contact").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      readQuoteValidDays(admin, clientId),
+    ]);
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
     const planUrl = input.planUrl && String(input.planUrl).startsWith(expectedPdfPrefix) ? String(input.planUrl) : null;
@@ -717,6 +937,9 @@ async function regenerateQuotePdf(
       },
       estimateNumber: input.quoteNumber,
       dateIso: new Date().toISOString(),
+      validityDays: valid.days,
+      customer: pdfCustomerFrom(who?.contact, shortCode),
+      logoSources: pdfLogoSources(cs?.business_logo_url, supabaseUrl, clientId),
       // deno-lint-ignore no-explicit-any
       lines: lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
       discount: Number(input.snap?.discount) || 0,
@@ -804,54 +1027,8 @@ function firstNameOf(contact: any): string | null {
 // and the only record of which file belongs to which design is designs/design_versions
 // .image_url — a column the anon-callable save_design RPC writes verbatim. So a stored URL
 // is untrusted input: it may say WHICH of this design's objects to remove, never WHOSE.
-const FLOOR_PLANS = "floor-plans";
-const OBJECT_PATH = `/storage/v1/object/public/${FLOOR_PLANS}/`;
-
-// The only tails our uploader has ever produced: none (the pre-2026-06-15 `<code>.pdf`
-// shape) or submitQuote's `-${Date.now()}` suffix.
-const KEY_TAIL = /^(-[0-9]+)?\.(pdf|png)$/;
-
-// The bucket-root era — slash-less object names, before per-tenant prefixes. It is CLOSED:
-// the newest row referencing one was created 2026-06-12, the first prefixed row 2026-06-15,
-// and migration 031's storage INSERT policy now requires a "<slug>/" prefix, so no new root
-// object can be created. The date therefore records finished history, not policy. Only a
-// design row from that era may name a root object; a row with no parseable created_at is
-// treated as newer, which is the safe direction.
-const LEGACY_ROOT_ERA_END = Date.parse("2026-06-14T00:00:00Z");
-
-/** Object key from a stored public URL, or null if it is not one of our floor-plan URLs. */
-function floorPlanKey(u: unknown): string | null {
-  if (typeof u !== "string" || !u) return null;
-  let path: string;
-  try { path = new URL(u.trim()).pathname; } catch { return null; } // not a URL at all
-  if (!path.startsWith(OBJECT_PATH)) return null;
-  const key = path.slice(OBJECT_PATH.length);
-  // Percent-escapes are REJECTED, never decoded: decodeURIComponent throws on a lone "%",
-  // withErrorLog would turn that into a 500, and the design would become undeletable.
-  // Nothing legitimate needs them — the code alphabet is [A-HJ-NP-Z2-9] and the tail is
-  // digits. new URL() has already resolved any "../" and dropped query/fragment.
-  // Only the PATH is pinned, deliberately not the host: the key is checked against
-  // server-derived values below, so an off-host URL can still only name this design's own
-  // object, whereas anchoring on SUPABASE_URL would reject every row under
-  // `functions serve` or behind a future storage CDN and silently orphan every file.
-  return key && key.length <= 300 && !key.includes("%") ? key : null;
-}
-
-/** Could THIS design's own uploads have produced `key`? Both inputs are server-resolved and
- *  neither is ever read from the request body. shortCode comes from the matched row, and
- *  designs.short_code is globally UNIQUE (designs_short_code_key), so it names at most one
- *  design anywhere — that uniqueness IS the authorization test here, not the date gate above.
- *  clientId is the resolved tenant slug: straight from client_users on the ordinary
- *  owner/admin path, assertClient-validated only on the operator-override path. So it is NOT
- *  shape-guaranteed here and must not need to be — plain string ops only, and no RegExp is
- *  ever built from either value, which is what keeps this correct whatever a slug contains. */
-function isOwnFloorPlanKey(key: string, clientId: string, shortCode: string, legacyOk: boolean): boolean {
-  let name = key;
-  if (key.startsWith(`${clientId}/`)) name = key.slice(clientId.length + 1);
-  // Another tenant's prefix, or a root object this row is too new to have created.
-  else if (key.includes("/") || !legacyOk) return false;
-  return name.startsWith(shortCode) && KEY_TAIL.test(name.slice(shortCode.length));
-}
+// The key rules (floorPlanKey, designObjectKind and the removal plan) live in
+// _shared/designStorageKeys.ts since 2026-10-05, where they are unit-tested.
 
 // Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
 // [{ style, width, length, price, active, inclusions: { item_key: qty } }].
@@ -868,8 +1045,25 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   if (st.error) throw st.error;
   const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
+  // A cell resolves against every style's label OR key, hidden styles included — and nothing
+  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
+  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
+  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
+  // reported them imported. A name more than one style answers to now resolves to nobody and
+  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
+  // sending; both operator consoles reach admin-catalog's copy with no such guard.)
   const styleByName = new Map<string, any>();
-  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
+  for (const s of st.data ?? []) {
+    for (const tok of [s.label, s.key]) {
+      const t = String(tok ?? "").trim().toLowerCase();
+      if (!t) continue;
+      styleByName.set(t, s);
+      const ids = claimedBy.get(t) ?? new Set<string>();
+      ids.add(String(s.id));
+      claimedBy.set(t, ids);
+    }
+  }
   const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
   const maxSort = new Map<string, number>();   // style_id -> highest sort_order
   for (const z of sz.data ?? []) {
@@ -904,6 +1098,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const styleName = String(row?.style ?? "").trim();
     const wv = num(row?.width), lv = num(row?.length);
     if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
+    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
+      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
+      continue;
+    }
     const style = styleByName.get(styleName.toLowerCase());
     if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
     if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
@@ -912,7 +1110,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const w = wv.n, l = lv.n;
     const pr = num(row?.price);
-    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    // Negative is refused with the unparseable: nothing in the product means a building priced
+    // below zero: submit-estimate would email it as a negative building line, while the
+    // designer's preview clamps the line to $0, so the customer saw one number and got another.
+    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
     const price = pr.blank ? null : pr.n;
     const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
     const label = `${fmt(w)}x${fmt(l)}`;
@@ -933,7 +1134,9 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
-      if (!itemKey) continue;
+      // A partition wall is never part of a size's price (278): no inclusion row is written for one,
+      // whatever a sheet exported before that change carries in its column.
+      if (!itemKey || itemKey === "partitionWall") continue;
       let qty = parseInclusionQty(val);
       if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
       const incRes = qty > 0
@@ -945,7 +1148,7 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
-Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
+Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request, st: ServerTiming) => {
   // When this request reached the function. The gateway's 150 s idle timeout runs from the
   // request, not from any one call inside it, so a budget that must end before it is measured
   // from here (calibrate_style_ai's model abort).
@@ -980,9 +1183,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // `targetClientId` to act on another tenant — that is what makes the portal's "view as"
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
-  const admin = createClient(supabaseUrl, serviceKey);
+  const admin = createClient(supabaseUrl, serviceKey, { global: { fetch: timedFetch(st) } });
+  const authStart = performance.now();
   const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
+  st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
+  st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
   const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
@@ -1023,6 +1229,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // viewed owner's map). Re-testing the role here would be a second copy of that rule, and
   // the version of this filter that forgets it empties the owner's own dashboard.
   const ownContacts = ownContactsOnly(access);
+
+  // WHAT THIS CALLER MAY SEE OF THE PHONE, for the calls in a record's timeline (review SSB-5).
+  // The record page's gate is contacts or designs and says nothing about calls; crmFeed applies
+  // this the way the phone-api Worker applies it to the same rows: no phone access, no calls;
+  // phone:'own', only their own (crmFeed callVisibleToOwn); literal view/edit, all of them.
+  const phoneFeedScope = (contactOwner: string | null) => ({
+    level: (!canRead("phone") ? "none" : ownPhoneOnly(access) ? "own" : "team") as "none" | "own" | "team",
+    userId: isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null,
+    contactOwner,
+  });
 
   /**
    * Which of these contact ids may this caller see? Returns null when the check itself
@@ -1164,8 +1380,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     codeKeys?: string[];
     /** Not per-contact at all — refuse a narrowed caller outright. See set_opt_out's twin. */
     tenantWide?: boolean;
+    /** Makes a NEW contact, so there is no existing row to check. A narrowed caller is let
+     *  through because the branch makes THEM the owner of what it creates (owner_user_id =
+     *  the caller), so the row is theirs by construction. The branch must keep doing that;
+     *  it is the whole of this rule's safety. */
+    creates?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
+    crm_create_contact:    { creates: true },
+    // Reads a whole GoHighLevel location and writes the whole tenant's customer list.
+    crm_import_ghl_contacts: { tenantWide: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
     crm_delete_note:       { rowTable: "crm_notes" },
     crm_save_activity:     { rowTable: "crm_activities", contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -1195,6 +1419,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (rule.tenantWide) {
       return json({ error: "That list covers the whole business, and you only have access to your own customers." }, 403);
     }
+    // A new row cannot be somebody else's customer yet; the branch assigns it to the caller.
+    if (rule.creates) return null;
 
     const ids: string[] = [];
     const codes: string[] = [];
@@ -1295,7 +1521,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // it (see SELF_ACTIONS): a "user" account still needs to be able to fill in its own name.
   if (action === "get_profile") {
     const { data, error } = await admin
-      .from("client_users").select("full_name, phone, role").eq("user_id", userId).maybeSingle();
+      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", userId).maybeSingle();
     if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
@@ -1304,6 +1530,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       email: userEmail,
       // Drives the one-time nudge: users predating migration 060 have neither.
       needsDetails: !(data?.full_name || "").trim(),
+      // The signature crm_send_email puts under this person's emails, exactly as it will go out
+      // (cleanSignature is what the send runs too). My Synergy Phone shows it under its Email box;
+      // the portal reads it off the prefs `status` already returns. "" when there is none.
+      emailSignature: cleanSignature((data?.prefs as Record<string, unknown> | null)?.emailSignature) ?? "",
     });
   }
 
@@ -1347,20 +1577,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 }
 
   if (action === "status") {
-    // The caller's own preferences row. Best-effort: a failure here must never stop the
-    // bootstrap call that every role depends on to learn its access map.
-    let myPrefs: Record<string, unknown> | null = null;
-    if (userId) {
-      const { data: pr } = await admin.from("client_users")
-        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
-      myPrefs = (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
+    // ALL THE READS AT ONCE (2026-10-01). Nothing below depends on another read's answer —
+    // each keys on clientId or userId alone — and `status` is the portal shell's bootstrap,
+    // awaited on every boot, so five sequential round trips were five times the wait for the
+    // first paint. Each read keeps its own tolerance exactly as before (see the notes on each
+    // below); only the waiting is shared. The pre-232 branding retry stays sequential: it runs
+    // only when the first branding read fails, which is rare by design.
+    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes, validRes, cornerRes] = await Promise.all([
+      // The caller's own preferences row. Best-effort: a failure here must never stop the
+      // bootstrap call that every role depends on to learn its access map.
+      userId
+        ? admin.from("client_users").select("prefs").eq("user_id", userId).limit(1).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      admin
+        .from("client_settings")
+        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
+        .eq("client_id", clientId)
+        .maybeSingle(),
+      // Designer branding lives in client_configs (drives the public ?client= link). See the
+      // fallback note below.
+      admin
+        .from("client_configs")
+        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
+        .eq("client_id", clientId)
+        .maybeSingle(),
+      // The builder's default login-code channel (migration 231) — see the note below.
+      canRead("settings_crm")
+        ? admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      // My Synergy Phone's on/off for this tenant (migration 254) — see the note below.
+      canRead("phone")
+        ? admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      // How long quotes stay good for (migration 269) — see the note below.
+      readQuoteValidDays(admin, clientId),
+      // The four-corner page on the quote (migration 276) — see the note below.
+      admin.from("client_settings").select("quote_corner_views").eq("client_id", clientId).maybeSingle(),
+    ]);
+    const pr = prRes.data;
+    const myPrefs: Record<string, unknown> | null =
+      (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
         ? pr.prefs as Record<string, unknown> : null;
-    }
-    const { data, error } = await admin
-      .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
-      .eq("client_id", clientId)
-      .maybeSingle();
+    const { data, error } = settingsRes;
     if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
     //
@@ -1373,12 +1631,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // list turns that into "stylesPerRow reads as default" instead; a save that carries
     // stylesPerRow then fails loudly on the missing column and writes nothing (one UPDATE).
     // Apply 232 first anyway — this is the seatbelt, not the plan.
-    let { data: cfg, error: cfgErr } = await admin
-      .from("client_configs")
-      .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
-      .eq("client_id", clientId)
-      .maybeSingle();
-    if (cfgErr) {
+    let { data: cfg } = cfgFirst;
+    if (cfgFirst.error) {
       ({ data: cfg } = await admin
         .from("client_configs")
         .select("company_name, tagline, logo_url, accent_color, header_bg")
@@ -1389,9 +1643,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // PURPOSE: `status` is the portal shell's bootstrap, so naming customer_login_default in the
     // select above would fail this action — and black out every tenant's portal — if this deploys
     // before 231 is applied. A failed read shows "text", which is what the default means anyway.
-    const { data: loginPref, error: loginPrefErr } = canRead("settings_crm")
-      ? await admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
-      : { data: null, error: null };
+    const { data: loginPref, error: loginPrefErr } = loginPrefRes;
+    // Is My Synergy Phone switched on for this tenant (client_settings.phone_status, plan D9)? The
+    // shell needs it to decide whether Call is offered on a contact and whether the Calls page
+    // is in the rail. ITS OWN READ, AND TOLERANT, for the same reason as the one above: naming
+    // phone_status in the main select would black out every tenant's portal if this deploys
+    // before migration 254. A failed read answers null ("not known"), which the browser treats
+    // as off. Asked only of people with some phone access — nobody else has a use for it.
+    const { data: phoneRow, error: phoneRowErr } = phoneRes;
+    const phoneStatus: "on" | "off" | null = canRead("phone") && !phoneRowErr
+      ? ((phoneRow as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off")
+      : null;
+    // How many days a quote stays good for (client_settings.quote_valid_days, migration 269). ITS
+    // OWN READ, AND TOLERANT, for the same reason as the two above. A failed read answers null,
+    // and the Settings card then hides the box rather than offer a number it could not save.
+    const quoteValidDays: number | null = validRes.ok ? validRes.days : null;
+    // Does page 2 of the quote show the building from all four corners (client_settings.
+    // quote_corner_views, migration 276)? ITS OWN READ, AND TOLERANT, for the same reason as the
+    // three above. A failed read answers null and the Settings card hides the switch; a tenant with
+    // no settings row reads off, which is the column's default.
+    const { data: cornerRow, error: cornerErr } = cornerRes;
+    const quoteCornerViews: boolean | null = cornerErr
+      ? null
+      : (cornerRow as { quote_corner_views?: boolean } | null)?.quote_corner_views === true;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1411,9 +1685,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
         betaMode: Boolean(data?.beta_mode),
         betaEmail: data?.beta_email ?? null,
-        // Who issues the paperwork (migration 121). Defaults TRUE for every tenant, so a
-        // row that predates the column — or a tenant with no client_settings row at all —
-        // reads as "invoice through the CRM", i.e. today's behaviour.
+        // Who issues the paperwork (migration 121). Anything but an explicit false reads as
+        // "invoice through the CRM", the same test submit-estimate makes, so a row that
+        // predates the column keeps the path it had and a tenant with no client_settings row
+        // at all reads as CRM mode until its first save. That save creates the row, and since
+        // migration 280 a new row starts false (StructureStudio paperwork); 280 moved no
+        // existing row.
         invoiceInGhl: data?.invoice_in_ghl !== false,
         // MAY they invoice through the CRM at all (migration 217)? Carolyn 2026-09-07:
         // "The feature for payments to go through GHL should only show in Junior Barns as he
@@ -1477,12 +1754,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // both wrong and a small information leak.
       prefs: myPrefs,
       ...crm,
+      // "on" | "off" | null (no phone access, or not readable yet). See the read above.
+      phoneStatus,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
       businessWebsite: data?.business_website ?? null,
       businessAddress: data?.business_address ?? null,
       businessLogoUrl: data?.business_logo_url ?? null,
       quoteTerms: data?.quote_terms ?? null,
+      quoteValidDays,
+      quoteCornerViews,
       showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
@@ -1522,7 +1803,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // alongside the CRM routing address — so it is validated rather than merely trimmed, and an
     // unusable value is DROPPED rather than stored: a malformed address in a header is a send
     // Resend may 422 outright, and a 422 is a permanent verdict, so the whole email is lost
-    // rather than retried.
+    // rather than retried. The check is _shared/repReplyTo.ts's cleanReplyAddress, the same one
+    // every sender applies on the way OUT (since 2026-10-05) and the My Profile box applies
+    // before it saves, so the three can't disagree about what counts as an address.
     //
     // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
     // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
@@ -1532,10 +1815,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
     // string is how the UI clears it, and correctly arrives here as "drop the key".
-    if (typeof raw.replyToEmail === "string") {
-      const addr = raw.replyToEmail.trim().slice(0, 320);
-      if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) clean.replyToEmail = addr;
+    {
+      const addr = cleanReplyAddress(raw.replyToEmail);
+      if (addr) clean.replyToEmail = addr;
     }
+    // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
+    // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
+    // email_send_test put it under what this person sends. Same rule as the reply-to above: an
+    // empty value is how the UI clears it, and arrives here as "drop the key".
+    const emailSignature = cleanSignature(raw.emailSignature);
+    if (emailSignature) clean.emailSignature = emailSignature;
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -1580,6 +1869,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite, 300);
     if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl, 1000);
     if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms, 8000);
+    // How long quotes stay good for (migration 269), printed as "Valid until" on every quote PDF
+    // and used as the CRM estimate's expiry. Blank puts the default (30) back; anything but a
+    // whole number of days in range is refused here with a sentence rather than at the column's
+    // CHECK. The Settings card sends it only when `status` could read the column, so an ordinary
+    // save never names it on a database without 269.
+    if ("quoteValidDays" in payload) {
+      const days = parseQuoteValidDays(payload.quoteValidDays);
+      if (days == null) {
+        return json({ error: `Quotes have to stay good for a whole number of days, from ${QUOTE_VALID_DAYS_MIN} to ${QUOTE_VALID_DAYS_MAX}.` }, 400);
+      }
+      updates.quote_valid_days = days;
+    }
+    // The four-corner page on the quote (migration 276). A real boolean or a refusal: this switch
+    // changes what every customer's quote looks like, so a stray "false" string (truthy) must not
+    // turn it on. The Settings card sends it only when `status` could read the column, so an
+    // ordinary save never names it on a database without 276.
+    if ("quoteCornerViews" in payload) {
+      if (typeof payload.quoteCornerViews !== "boolean") {
+        return json({ error: "The four-corner page setting has to be on or off." }, 400);
+      }
+      updates.quote_corner_views = payload.quoteCornerViews;
+    }
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
@@ -1718,7 +2029,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const nextRequired = "coUnlockRequired" in payload
         ? Boolean(updates.co_unlock_required)
         : curCo?.co_unlock_required === true;
-      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curCo?.invoice_in_ghl !== false;
+      // No row yet: the upsert below creates one, and since migration 280 it starts in paperwork
+      // mode (invoice_in_ghl false). So judge the mode it WILL have, not "anything but false is
+      // the CRM" — that rule is for rows that exist (submit-estimate, email, the status read).
+      const nextInGhl = "invoiceInGhl" in payload
+        ? Boolean(payload.invoiceInGhl)
+        : (curCo ? curCo.invoice_in_ghl !== false : false);
 
       // 1. In CRM mode GoHighLevel owns the documents. There is nothing of ours to print a
       //    fee line on, so the money would simply never be charged.
@@ -1765,9 +2081,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // from the Quotes & Invoices card, which always posts this key.
       const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
       if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
+      // A tenant with NO row is not on the CRM path: this save creates its row, and since
+      // migration 280 a new row starts false. Reading it as CRM mode let a lone starting quote
+      // number through without the invoice number and tax rate, into a paperwork-mode row with
+      // two of the three missing: a shopper's quote then takes a number and is refused for want
+      // of a rate (submit-estimate's no_tax_rate), and the next one takes another.
       const nextInGhl = "invoiceInGhl" in payload
         ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
-        : curInv?.invoice_in_ghl !== false;
+        : (curInv ? curInv.invoice_in_ghl !== false : false);
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
@@ -2026,7 +2347,70 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes] = await Promise.all([
+    // WALLET, read here rather than only in portal-billing, because the calibration panel has to
+    // say what one press of Generate costs BEFORE the builder clicks. Learning the price from a 402
+    // after waiting thirty seconds for a generation is the worst possible ordering.
+    //
+    // THE MONEY LINE READS THIS (2026-10-05). The panel said "you are charged $20 once" from a
+    // hard-coded string while the meter was off, so the copy and the meter disagreed. The shell now
+    // hands this object to the designer and calChargeOf (both twins) turns it into one of three
+    // lines: the price, "free right now", or no money claim at all. `exempt` is
+    // wallet_accounts.metered_exempt, the one exemption wallet_hold honours (it holds an exempt
+    // tenant at 0), so an exempt tenant is no longer told a price it never pays. Safe for older
+    // bundles: before this, nothing in the portal read `wallet` at all.
+    //
+    // ALL READS AT ONCE (2026-10-02), the same move as `status`. The wallet pair keys on clientId and
+    // a constant kind and never needed the catalog's answer, yet it waited for all sixteen table
+    // reads to land first: one more serial round trip on every catalog call. It starts with them
+    // now. This promise never rejects, and it is outside the error loop below, so a wallet failure
+    // still cannot fail the catalog.
+    //
+    // ⚠️ A FAILED READ IS `null`, NOT "METER OFF" (2026-10-05). Errors used to read as 0 balance /
+    // null price / meter off, which nothing displayed. Now the panel says "Generating is free right
+    // now" on meterActive false, so a usage_prices read that failed would have told a builder on an
+    // armed meter that it was free. Either read failing, or a throw, gives wallet = null, which the
+    // panel says as one generation with no money claim either way. So does a MISSING price row:
+    // wallet_hold answers that as meter_unknown and the press is refused (503), not run free, so
+    // "off" would be the same wrong promise.
+    //
+    // NO BALANCE HERE (2026-10-05). The catalog's gate is Structures or Options at view, which the
+    // default admin preset and a support operator without billing both pass, and portal-billing
+    // withholds the balance from exactly those callers. Nothing read it here anyway: the money line
+    // needs only the price, the meter and the exemption. If a balance is ever wanted beside the
+    // button, gate it the way portal-billing's `mine` does.
+    const walletRead = (async (): Promise<{ priceCents: number | null; meterActive: boolean; exempt: boolean } | null> => {
+      try {
+        const [acct, price] = await Promise.all([
+          admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
+          admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
+        ]);
+        if (acct.error || price.error || !price.data) return null;
+        return {
+          // Redacted when visible is false, the same posture portal-billing takes on
+          // billing_plans.price_cents — the projection and the revoke are both load-bearing.
+          priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
+          meterActive: Boolean(price.data?.active),
+          // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
+          // creates the row at the default (false) on the first hold.
+          exempt: acct.data?.metered_exempt === true,
+        };
+      } catch (_) { return null; }
+    })();
+    // Cladding offered per style (207), with each lap row's course size (style_cladding.exposure_in,
+    // migration 275) in the same read. On a database before 275 PostgREST answers 42703 for the whole
+    // select, so it is read again without the column and `courses` answers false: the card then
+    // hides its "Course (in)" box rather than offer one it cannot save, and every other column of
+    // the card still loads. Any other error is returned as it is, into the error loop below.
+    const CLADDING_COLUMNS = "id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order";
+    const claddingRead = (async () => {
+      const read = (cols: string) => admin.from("style_cladding").select(cols).eq("client_id", clientId).order("sort_order");
+      const res = await read(`${CLADDING_COLUMNS}, exposure_in`);
+      if (res.error && String((res.error as { code?: string }).code ?? "") === "42703") {
+        return { ...(await read(CLADDING_COLUMNS)), courses: false };
+      }
+      return { ...res, courses: !res.error };
+    })();
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, wallet] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -2037,14 +2421,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
       // Height off floor for wall-mounted items, and shows the master default where the tenant
       // has not overridden it.
-      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in"),
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // style_ids (272): the "Offered on" ticks. This select needs 272 applied; before it, the
+      // whole catalog read fails on the unknown column.
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -2053,7 +2439,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only, build_on_site, bos_fee_basis, bos_fee_rate").eq("client_id", clientId).order("delta_in"),
       // Cladding offered per style (207). The card renders a FIXED four rows per style, so a
       // style with no rows is not "broken" — it is a style offering builder's standard only.
-      admin.from("style_cladding").select("id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // Read above (claddingRead), for the lap course size and its fallback.
+      claddingRead,
       // Insulation rates (177) for the Options tab matrix.
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
@@ -2061,6 +2448,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
       // is simply one offering no site work yet.
       admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
+      walletRead,
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
@@ -2071,7 +2460,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
+    // A partition wall (278) is left out until it has a price, unless the read asks for it
+    // (withUnpriced: every catalog read from the portal that ships its Interior items card sends it,
+    // 01-core.jsx). Production's portal from before 278 then never lists one, so it never asks a
+    // builder to price an item its designer cannot draw yet. Only this item: a general rule would also
+    // take unpriced shelves (171) away from the tenants who have not priced them. Remove once
+    // production carries the new Interior items card.
+    const pricedKeys = new Set((lpRows.data ?? []).filter((r: any) => r.rate != null).map((r: any) => r.item_key));
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
+      .filter((i: any) => payload.withUnpriced === true || i.item_key !== "partitionWall" || pricedKeys.has(i.item_key))
       .map((i: any) => {
         const t = typeByKey[i.item_key] || {};
         // Tenant override wins, master default fills in. null (not 0) means "not set", which is
@@ -2081,39 +2478,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key,
           archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false,
           wallSnap: !!t.wall_snap, depthIn: depth != null ? Number(depth) : null,
-          heightOffFloorIn: off != null ? Number(off) : null };
+          heightOffFloorIn: off != null ? Number(off) : null,
+          // Out of the customer's palette until priced (171, 278): the Options card starts its rate
+          // blank instead of 0 and does not save a blank one, so a Save for something else cannot offer it free.
+          hiddenUntilPriced: !!t.hidden_until_priced };
       });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
     // builder click a button that can only fail: the Anthropic key is an edge secret, so the
-    // browser has no other way to know whether the feature is configured.
-    // WALLET, read here rather than only in portal-billing, because the calibration panel
-    // has to show "$20 · balance $140" BEFORE the builder clicks. Learning the price from
-    // a 402 after waiting thirty seconds for a generation is the worst possible ordering.
-    // Fails soft to nulls: a wallet read that errors must not blank the whole catalog.
-    let wallet: { balanceCents: number; heldCents: number; priceCents: number | null; meterActive: boolean } | null = null;
-    try {
-      const [acct, price] = await Promise.all([
-        admin.from("wallet_accounts").select("balance_cents, held_cents").eq("client_id", clientId).maybeSingle(),
-        admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
-      ]);
-      wallet = {
-        balanceCents: Number(acct.data?.balance_cents ?? 0),
-        heldCents: Number(acct.data?.held_cents ?? 0),
-        // Redacted when visible is false, the same posture portal-billing takes on
-        // billing_plans.price_cents — the projection and the revoke are both load-bearing.
-        priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
-        meterActive: Boolean(price.data?.active),
-      };
-    } catch (_) { wallet = null; }
-
+    // browser has no other way to know whether the feature is configured. `wallet` is read with
+    // the sixteen above (walletRead).
     return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], cladding: claddingRes.data ?? [], insulation: insulationRes.data ?? [],
       // Null for a tenant who has never opened the card — the portal falls back to the same
       // defaults the table declares, so the form is never blank.
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
       foundation: foundationRes.data ?? [],
+      // Can the Cladding card offer a lap course size (275)? False only on a database before it.
+      claddingCourses: claddingRes.courses === true,
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
@@ -2141,6 +2524,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // 2026-09-15 (see the note above the row scope). Errors reading billing fail CLOSED — a
   // paid gate that fails open is no gate (the wallet's posture).
   const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
+  // rtp_data's five reads START here, alongside the entitlement check below, instead of after it
+  // (2026-10-02): the check is two or three round trips of its own, and the reads never needed its
+  // answer. Nothing is RETURNED until the check has passed — the rtp_data branch awaits these only
+  // after it — so an unpaid tenant still gets the teaser and nothing else. Every read is
+  // read-only (rtp_compute_prices is STABLE; for a tenant with no BOM it loops over nothing). The
+  // .catch only marks the promise handled, so a refusal path that never awaits it cannot leave an
+  // unhandled rejection behind.
+  const rtpDataReads = action === "rtp_data"
+    ? Promise.all([
+      admin.from("rtp_materials").select("id, category, name, unit_cost, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("rtp_bom_lines").select("id, size_id, material_id, section, qty, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("rtp_overhead_lines").select("id, label, kind, value, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.rpc("rtp_compute_prices", { p_client_id: clientId }),
+    ])
+    : null;
+  rtpDataReads?.catch(() => {});
   if (RTP_ACTIONS.has(action)) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
@@ -2275,13 +2675,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
 
   if (action === "rtp_data") {
-    const [mats, bom, ovh, cs, prev] = await Promise.all([
-      admin.from("rtp_materials").select("id, category, name, unit_cost, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
-      admin.from("rtp_bom_lines").select("id, size_id, material_id, section, qty, sort_order").eq("client_id", clientId).order("sort_order"),
-      admin.from("rtp_overhead_lines").select("id, label, kind, value, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
-      admin.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle(),
-      admin.rpc("rtp_compute_prices", { p_client_id: clientId }),
-    ]);
+    // Started above the entitlement check (rtpDataReads); awaited only now that it has passed.
+    const [mats, bom, ovh, cs, prev] = await rtpDataReads!;
     for (const r of [mats, bom, ovh, cs, prev]) if (r.error) return dbFail(req, clientId, "load your real-time pricing", r.error);
     return json({
       ok: true, entitled: true,
@@ -2422,9 +2817,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const m = raw as { category?: unknown; name?: unknown; unitCost?: unknown };
       const name = String(m.name ?? "").trim();
       const category = String(m.category ?? "").trim();
-      const unitCost = Number(m.unitCost);
+      // rtpImportNumber, not Number(): a cell the browser could not parse arrives as null
+      // (JSON's NaN), which Number() reads as a valid $0 — see _shared/rtpImportValues.ts.
+      const unitCost = rtpImportNumber(m.unitCost);
       if (!name) continue;
-      if (!Number.isFinite(unitCost) || unitCost < 0) { skipped.push(`material "${name}": invalid cost "${m.unitCost}"`); continue; }
+      if (!Number.isFinite(unitCost) || unitCost < 0) {
+        skipped.push(`material "${name}": the cost isn't a usable number — ${idByName.has(name.toLowerCase()) ? "kept its current cost" : "not added"}`);
+        continue;
+      }
       const existingId = idByName.get(name.toLowerCase());
       const res = existingId
         ? await admin.from("rtp_materials").update({ category, unit_cost: unitCost, active: true, updated_at: new Date().toISOString() }).eq("id", existingId).select("id").maybeSingle()
@@ -2458,18 +2858,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       { const e = tooMany(lines, "lines"); if (e) { skipped.push(`${styleName} ${width}x${length}: ${e}`); continue; } }
       const rows: Record<string, unknown>[] = [];
       const seen = new Set<string>();
+      // A quantity that is not a number ("12 ea", "two" — null on the wire, see
+      // _shared/rtpImportValues.ts) or is negative used to read as 0 = "not used", and since this
+      // block FULL-REPLACES the size's bill of materials the line was deleted and the building
+      // re-priced without it. saveBom in the portal refuses the same input; here the size is left
+      // as it was and named instead. A blank cell still arrives as 0 and still means "not used".
+      const badQty: string[] = [];
       for (const [i, ln] of (lines as unknown[]).entries()) {
         const l = ln as { material?: unknown; section?: unknown; qty?: unknown };
         const matName = String(l.material ?? "").trim();
         const section = SECTIONS.has(String(l.section ?? "")) ? String(l.section) : "other";
-        const qty = Number(l.qty);
+        const qty = typeof l.qty === "string" && l.qty.trim() === "" ? 0 : rtpImportNumber(l.qty);
         const materialId = idByName.get(matName.toLowerCase());
         if (!materialId) { if (matName) skipped.push(`${styleName} ${width}x${length}: material "${matName}" is not on the Materials sheet`); continue; }
-        if (!Number.isFinite(qty) || qty <= 0) continue; // blank/zero qty = not used on this building
+        if (!Number.isFinite(qty) || qty < 0) { badQty.push(matName); continue; }
+        if (qty === 0) continue; // blank/zero qty = not used on this building
         const key = `${materialId}|${section}`;
         if (seen.has(key)) { skipped.push(`${styleName} ${width}x${length}: "${matName}" listed twice under ${section}`); continue; }
         seen.add(key);
         rows.push({ client_id: clientId, size_id: sizeId, material_id: materialId, section, qty, sort_order: i });
+      }
+      if (badQty.length) {
+        skipped.push(`${styleName} ${width}x${length}: not updated — these quantities aren't usable numbers: ${badQty.join(", ")}`);
+        continue;
       }
       const del = await admin.from("rtp_bom_lines").delete().eq("size_id", sizeId).eq("client_id", clientId);
       if (del.error) { skipped.push(`${styleName} ${width}x${length}: ${del.error.message}`); continue; }
@@ -2481,22 +2892,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── Overhead: replace only when the sheet is present in the upload ──
+    // All or nothing (rtpImportOverhead): the lines are one ordered formula, so a bad line
+    // leaves the CURRENT overhead in place rather than replacing it with the rest of the sheet.
     if (overhead) {
-      const KINDS = new Set(["multiplier", "percent_of_price", "flat"]);
-      const rows: Record<string, unknown>[] = [];
-      for (const [i, ln] of (overhead as unknown[]).entries()) {
-        const l = ln as { label?: unknown; kind?: unknown; value?: unknown };
-        const label = String(l.label ?? "").trim();
-        const kind = String(l.kind ?? "");
-        const value = Number(l.value);
-        if (!label || !KINDS.has(kind) || !Number.isFinite(value) || value < 0) { skipped.push(`overhead line ${i + 1}: invalid`); continue; }
-        rows.push({ client_id: clientId, label, kind, value, sort_order: i, active: true });
-      }
-      const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
-      if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
-      if (rows.length) {
-        const ins = await admin.from("rtp_overhead_lines").insert(rows);
-        if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+      const ovh = rtpImportOverhead(overhead as unknown[]);
+      if (ovh.invalid.length) {
+        // First, not last: the portal shows only the first few skipped lines.
+        skipped.unshift("Overhead sheet NOT applied — your current overhead lines are unchanged. Fix these and upload again:", ...ovh.invalid);
+      } else {
+        const rows = ovh.rows.map((r) => ({ client_id: clientId, ...r, active: true }));
+        const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
+        if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
+        if (rows.length) {
+          const ins = await admin.from("rtp_overhead_lines").insert(rows);
+          if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+        }
       }
     }
 
@@ -2516,6 +2926,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, enabled: on });
   }
 
+  // ── The builder's Advanced mode switch (Settings → Designer, migration 270) ─────────────────
+  // Carolyn 2026-09-28: a builder turns the Advanced page on for themselves in Settings, so not
+  // everybody sees it. Free, no grant, no plan: this sets one boolean, and portal-billing's
+  // entitlement carries it back as `advancedMode` (01-core.jsx ssAdvancedOn). The page still needs 3D,
+  // and it says so; turning the switch on without 3D is allowed and harmless, and turning it OFF must
+  // always work, so neither direction asks about 3D here.
+  //
+  // OWNER OR ADMIN, restated here as delete_design does: the GATES line is only the floor. The page
+  // this opens saves new styles through setup3d, which the shell builds for whoever may run the
+  // account and nobody else, and the switch is offered to the same people (12-shell.jsx
+  // advancedMayRun). In view-as that is a PLATFORM operator: a support operator wears the owner's
+  // map, not the owner's chair, and is refused here as the shell never offers them the switch. A
+  // read-only operator never gets this far (resolveTenant refuses writes for them).
+  if (action === "save_advanced_mode") {
+    if (operator ? operator.supportOnly : (role !== "owner" && role !== "admin")) {
+      return json({ error: "Only an account owner or admin can turn Advanced mode on or off." }, 403);
+    }
+    // Refuse, never coerce: "false" as a string must not read as on.
+    if (typeof payload.enabled !== "boolean") return json({ error: "enabled must be true or false." }, 400);
+    const enabled = payload.enabled;
+    const where = enabled ? "turn Advanced mode on" : "turn Advanced mode off";
+    const now = new Date().toISOString();
+    // UPDATE first, and create a row only when there is none AND the switch goes on. NOT an upsert:
+    // a created row takes every column's default, and ramp_enabled defaults to TRUE while
+    // get_fixtures reads a missing row's ramps as OFF, so a bare create would put an unpriced ramp
+    // on that builder's public designer as a side effect of this switch (live 2026-10-05: one tenant
+    // has no row). The create therefore names ramp_enabled false, which keeps what their public
+    // designer shows today. Off with no row is already off: nothing to write.
+    // .select() so a zero-row update is visible: PostgREST calls it a success.
+    const upd = await admin.from("client_settings")
+      .update({ advanced_mode: enabled, updated_at: now }).eq("client_id", clientId).select("client_id");
+    if (upd.error) return dbFail(req, clientId, where, upd.error);
+    let wrote = upd.data?.length ?? 0;
+    if (wrote === 0 && enabled) {
+      let ins = await admin.from("client_settings")
+        .insert({ client_id: clientId, advanced_mode: true, ramp_enabled: false, updated_at: now });
+      // The row appeared between the two calls (another save created it): it is there now, so the
+      // update is the right write, and it leaves that row's ramps alone.
+      if (ins.error?.code === "23505") {
+        ins = await admin.from("client_settings").update({ advanced_mode: true, updated_at: now }).eq("client_id", clientId);
+      }
+      if (ins.error) return dbFail(req, clientId, where, ins.error);
+      wrote = 1;
+    }
+    await audit("portal_advanced_mode", wrote, `advanced_mode=${enabled}`);
+    return json({ ok: true, advancedMode: enabled });
+  }
+
   // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
   // only DEFAULT rows (style_id IS NULL); per-style overrides stay DB-managed and are
   // still honored at estimate time. Manual upsert (not PostgREST onConflict) because the
@@ -2528,18 +2986,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
     if (itemsRes.error) return dbFail(req, clientId, "load your option list", itemsRes.error);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
-    const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
+    const exRes = await admin.from("layout_item_pricing").select("id, item_key, pricing_method, rate").eq("client_id", clientId).is("style_id", null);
     if (exRes.error) return dbFail(req, clientId, "load your current option prices", exRes.error);
     const idByKey = new Map<string, string>();
-    for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
+    const exByKey = new Map<string, { pricing_method: string; rate: number | null }>();
+    for (const r of exRes.data ?? []) { idByKey.set(r.item_key, r.id); exByKey.set(r.item_key, r); }
     let saved = 0; const skipped: string[] = [];
     for (const row of payload.rows) {
       const itemKey = String(row?.item_key ?? "").trim();
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
+      // A partition wall (278) is priced only from the card that knows it (partitionAware, sent by the
+      // portal that ships the Interior items card). Production's card from before it sends every row it
+      // lists on Save, and a price set there would put a Partition Wall button on production's designer,
+      // which cannot draw one (it places a sliver no quote charges). The catalog hides an unpriced one
+      // from that card already; this is the backstop, and it never asks for a price. A priced one that
+      // card only sends back unchanged is passed over quietly. Remove once production carries the new
+      // Interior items card.
+      if (itemKey === "partitionWall" && payload.partitionAware !== true) {
+        const ex = exByKey.get(itemKey);
+        const unchanged = !!ex && ex.pricing_method === method && Number(ex.rate) === rate;
+        if (!unchanged) skipped.push(ex ? "Partition Wall: its price can be changed after the next app update" : "Partition Wall: opens with the next app update, nothing to set yet");
+        continue;
+      }
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
+      // A partition wall (migration 278) is charged per foot of wall, per square foot of wall or each;
+      // the other four mean nothing for one wall, and submit-estimate would quietly charge them each.
+      if (itemKey === "partitionWall" && !["each", "lineal_ft", "sqft_option"].includes(method)) {
+        skipped.push(`${itemKey}: a partition wall is priced each, per foot (lineal ft) or per square foot of wall (sqft option)`);
+        continue;
+      }
+      // ...and it is only OFFERED once it has a price above $0: a first price of 0 would put it on every
+      // customer's designer, free. The card leaves an untouched (blank) one out of the Save, so this
+      // only says no to a 0 typed for a wall that has no price yet.
+      if (itemKey === "partitionWall" && !idByKey.has(itemKey) && !(rate > 0)) {
+        skipped.push(`${itemKey}: not offered until it has a price above $0`);
+        continue;
+      }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
       // Optional per-item image (shown on the estimate line for this product). Only written
       // when the row carries an imageUrl field, so a save from an older client never blanks
@@ -2615,7 +3100,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const r = await fetch(`https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
       prodStatus = r.status; prodOk = r.ok; prodBody = (await r.text()).slice(0, 600);
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
+      // The runtime's network text (it names the URL it failed on) goes to app_errors, the same
+      // as the body below; the builder gets our sentence. Filed here, so the wrapper adds no copy.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `verify_save_ghl: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "verify_save_ghl" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel to verify — try again in a few minutes." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!prodOk) {
       // An authored hint, never GoHighLevel's raw body. This used to paste 600 characters
@@ -2709,7 +3203,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     try {
       r = await fetch(`https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
+      // Network text to app_errors, our sentence to the builder — as verify_save_ghl above.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `list_ghl_pipelines: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "list_ghl_pipelines" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel — try Refresh again shortly." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!r.ok) {
       // Authored hint, not GoHighLevel's raw body — same reasoning as verify_save_ghl above.
@@ -2866,12 +3368,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // the tenant's GHL. Ahsan's call 2026-07-30 was "allow, but make them type it".
   //
   // THREE things have to go, and only the first is obvious:
-  //   1. the storage PDFs — the stored image_url columns say WHICH objects, but never get to
-  //      say whose: every derived key must match a name this design's own uploads could have
-  //      produced (see isOwnFloorPlanKey). The filename cannot simply be rebuilt from the
-  //      short_code — three historical shapes exist and the current one carries a Date.now()
-  //      suffix — but all three are DERIVABLE from (client_id, short_code), which is what
-  //      makes validating them possible where reconstructing them is not.
+  //   1. the storage files — the plan PDFs, and since 2026-10-05 the quote documents and the
+  //      picture cards too (_shared/designStorageKeys.ts has the rules and why). The stored URL
+  //      columns and a listing of the tenant folder say WHICH objects, but never get to say
+  //      whose: every key must match a name this design's own uploads could have produced.
+  //      The plan PDF's name cannot simply be rebuilt from the short_code — three historical
+  //      shapes exist and the current one carries a Date.now() suffix — but all of them are
+  //      DERIVABLE from (client_id, short_code), which is what makes validating them possible
+  //      where reconstructing them is not.
   //   2. design_versions — there is NO foreign key to designs (verified: zero FKs on either
   //      table), so nothing cascades. Left behind, the rows stay readable by the tenant's own
   //      RLS policy and by list_design_versions/load_design_version, which key on short_code —
@@ -2892,6 +3396,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "set_expected_close") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!/^SS-[A-HJ-NP-Z2-9]{6,12}$/.test(shortCode)) return json({ error: "Unknown design." }, 400);
+    // ROW SCOPE (207), the same check every other designs:edit write here makes. A Dealer holds
+    // designs:edit with contacts:'own', so the gate alone let them move the close date on a
+    // colleague's deal they cannot see in any list, by posting its short code.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     // null clears the date; anything else must be a real calendar date. The check is not
     // cosmetic: `new Date("2026-02-31")` rolls into March rather than failing, so a typo
@@ -2943,7 +3451,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Scoped by BOTH client_id and short_code. A code from another tenant matches nothing and
     // returns the same 404 as a code that never existed — no existence oracle.
     const { data: design, error: findErr } = await admin.from("designs")
-      .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at")
+      .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at, ss_quote_number, ss_quote_pdf_url, plan_image_url, view3d_image_url, ss_invoice_sent_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (findErr) return dbFail(req, clientId, "find that design", findErr);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
@@ -2965,6 +3473,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
+    // 0. HAS AN INVOICE BEEN MADE FROM IT? The ledger is read ONCE, before anything is removed,
+    //    and gives two answers. `invoiced` (invoiceExists) is for the quote documents in storage
+    //    (step 2): any invoice, CRM or StructureStudio, was made from them, so they stay. It reads
+    //    the ledger AND the StructureStudio send stamp, not status alone; its comment has the live
+    //    rows that made that necessary. `crmInvoiced` (crmInvoiceExists) is for the CRM estimate
+    //    (step 3), and is the 09-02 rule unchanged: a StructureStudio invoice was never made from
+    //    an estimate in the CRM. A failed read stops here as a 500, not a guess: guessing "no
+    //    invoice" would delete the documents an invoice was made from, and the action is
+    //    idempotent, so a retry is free.
+    const { data: inv, error: invErr } = await admin.from("invoice_sends")
+      .select("invoice_id, invoice_number, invoice_pdf_url, status")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (invErr) return dbFail(req, clientId, "check that design for an invoice", invErr);
+    const invoiced = invoiceExists(st, inv, design.ss_invoice_sent_at);
+    const crmInvoiced = crmInvoiceExists(st, inv);
+
     // 1. Version rows first — we need their image_urls, and they are the invisible leftovers.
     //    A failed read is a 500, not a shrug: carrying on would delete the rows at step 3 with
     //    every version PDF unaccounted for. The action is idempotent, so a retry is free and
@@ -2975,39 +3499,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // 2. Storage. Every candidate key must be one THIS design could have produced — under
     //    this tenant's prefix and carrying this design's globally-unique short_code. That
-    //    reduces image_url from a path to a yes/no, so no value a caller can store selects
-    //    another tenant's file, or another design's file within this tenant. Keys that fail
-    //    the test are kept and counted, never guessed at.
+    //    reduces a stored URL (or a listed name) from a path to a yes/no, so no value a caller
+    //    can store selects another tenant's file, or another design's file within this tenant.
+    //    Stored values that fail the test are kept and counted, never guessed at. The quote
+    //    documents' keys are derived from the row, and the invoice gate above decides whether
+    //    they go; <code>-invoice.pdf never does. removeDesignObjects never throws: a storage
+    //    failure must not block the row delete, or the design becomes undeletable and the
+    //    tenant is stuck. filesRemoved is what storage actually removed.
     const createdAt = Date.parse(String(design.created_at ?? ""));
     const legacyOk = Number.isFinite(createdAt) && createdAt < LEGACY_ROOT_ERA_END;
-    const keys = new Set<string>();    // ours — safe to remove
-    const kept = new Set<string>();    // distinct stored values we declined to act on
-    const foreign = new Set<string>(); // …and the namespaces they named, for triage
-    for (const u of [design.image_url, ...(versions ?? []).map((v: any) => v.image_url)]) {
-      if (!u) continue; // drafts carry no PDF
-      const key = floorPlanKey(u);
-      if (key && isOwnFloorPlanKey(key, clientId, design.short_code, legacyOk)) { keys.add(key); continue; }
-      kept.add(String(u).slice(0, 300));
-      // Only the namespace, and only if it is slug-SHAPED: a real cross-tenant plant names a
-      // real slug. Anything else is caller-authored free text, and app_errors is shapes and
-      // counts — not a place to let a caller choose what an operator reads.
-      const slash = key ? key.indexOf("/") : -1;
-      if (key && slash > 0 && !key.startsWith(`${clientId}/`)) {
-        const ns = key.slice(0, slash);
-        foreign.add(/^[a-z0-9][a-z0-9-]{0,63}$/.test(ns) ? ns : "(non-slug)");
-      }
-    }
-    let filesRemoved = 0;
-    if (keys.size) {
-      // Best-effort: a storage failure must not block the row delete, or the design becomes
-      // undeletable and the tenant is stuck. Orphaned objects are unlisted (migration 042
-      // dropped the anon SELECT policy) and cost only space. Refusing a key is best-effort
-      // for the same reason — it must never turn into an error the tenant cannot clear.
-      const rm = await admin.storage.from(FLOOR_PLANS).remove([...keys]);
-      // What storage actually removed. remove() does not error on a key that isn't there, and
-      // the old count was the pre-dedupe request length, so it over-reported both ways.
-      filesRemoved = rm.error ? 0 : (rm.data?.length ?? 0);
-    }
+    const files = await removeDesignObjects(admin.storage, {
+      clientId, shortCode: design.short_code, legacyOk, invoiced,
+      storedUrls: [design.image_url, design.plan_image_url, design.view3d_image_url,
+        ...(versions ?? []).map((v: any) => v.image_url)],
+      hasQuoteDoc: Boolean(design.ss_quote_pdf_url),
+    });
+    const filesRemoved = files.filesRemoved;
 
     // 3. The estimate in the tenant's CRM. GHL exposes DELETE /invoices/estimate/:id; altId +
     //    altType scope it to the sub-account. They are NOT sent the way the rest of this file
@@ -3022,7 +3529,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //        and the dialog tells the operator to void the invoice in the CRM first. The check
     //        reads invoice_sends rather than trusting `status` alone, because status is a
     //        cached projection that sync-design-status can downgrade on a GHL blip — the
-    //        claim ledger is the durable fact that an invoice was created.
+    //        claim ledger is the durable fact that an invoice was created. It is crmInvoiced,
+    //        not `invoiced`: a StructureStudio invoice leaves no CRM invoice to void.
     //    (b) BEST-EFFORT, exactly like storage. A tenant's key may predate this feature and
     //        lack the estimates scope; a 401/403/5xx must never make the design undeletable
     //        and strand the local rows. The outcome is returned, audited, and (on failure)
@@ -3036,10 +3544,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //        survive. Old page ⇒ no flag ⇒ old behaviour, exactly.
     let estimate: "none" | "deleted" | "skipped_invoiced" | "not_connected" | "failed" = "none";
     let estimateError: string | null = null;
+    // A 404 from the CRM is reported as "deleted" (the old dialog's wording depends on that
+    // value), and flagged separately so the audit can tell a real delete from "already gone".
+    let estimateAlreadyGone = false;
     if (design.ghl_estimate_id && payload.deleteEstimate === true) {
-      const { data: inv } = await admin.from("invoice_sends")
-        .select("invoice_id").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-      if (inv?.invoice_id || st === "invoiced" || st === "delivered") {
+      if (crmInvoiced) {
         estimate = "skipped_invoiced";
       } else {
         const { data: creds } = await admin.from("client_settings")
@@ -3071,6 +3580,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             // CRM, or a half-finished earlier attempt), so it counts as done rather than as an
             // error the operator has to interpret. That is also what makes a retry safe.
             estimate = (r.ok || r.status === 404) ? "deleted" : "failed";
+            estimateAlreadyGone = !r.ok && r.status === 404;
             // Keep GHL's own words. A bare status turned a one-line DTO complaint into a
             // month of guessing; the body is their validation output, so it carries no
             // customer data. Capped because it lands in an error row, not a log stream.
@@ -3103,8 +3613,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Durable: deleting a customer's design is not something we accept losing the record of.
     // Signature is (action, rowCount, note) — the tenant is already implicit in the resolved
     // context, so passing clientId here would silently land in rowCount.
+    // quote= says what happened to the quote documents (removed | kept | failed | none), and
+    // estimate=already_gone separates a CRM 404 from a real delete, so the next audit of this
+    // feature can prove one rather than infer it. list=failed marks a run that could not list
+    // the folder (older picture cards may be left); remove=failed one whose storage remove
+    // failed outright (every file it named may be left).
     await auditStrict("portal_delete_design", 1 + (versionsDeleted ?? 0),
-      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${kept.size} estimate=${estimate}`);
+      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${files.refused.length} ` +
+        `quote=${files.quote} estimate=${estimateAlreadyGone ? "already_gone" : estimate}` +
+        `${files.listFailed ? " list=failed" : ""}${files.removeFailed ? " remove=failed" : ""}`);
     // A CRM estimate we could not remove is a real leftover in someone else's system, and the
     // row that pointed at it is now gone — so it goes in error_events, where support can find
     // it, rather than living only in a banner the operator dismisses. The estimate id is the
@@ -3116,20 +3633,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         context: { shortCode, estimateId: String(design.ghl_estimate_id ?? ""), status: st },
       });
     }
+    // A failed storage remove leaves this design's public files behind (the quote PDF prints the
+    // customer's name and address), and the row that pointed at them is now gone. So it gets a
+    // durable row support can find and sweep from. Counts only, never a key or a URL: the code
+    // and the tenant folder are enough to list what is left.
+    if (files.removeFailed) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "delete_design_files_failed",
+        message: `delete_design could not remove ${files.planned} stored file(s)`,
+        context: { shortCode, keys: files.planned, quote: files.quote, status: st },
+      });
+    }
     // A stored URL naming something this design could not have produced is not something a
     // tenant does by accident, so it gets a durable row rather than a substring in a note
     // nobody greps. Counts and namespace slugs only — never the URL itself, and never any
     // customer data (the app_errors doctrine).
-    if (kept.size) {
+    if (files.refused.length) {
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "delete_design_key_refused",
-        message: `delete_design kept ${kept.size} unrecognised object key(s)`,
-        context: { shortCode, refused: kept.size, namespaces: [...foreign].slice(0, 5) },
+        message: `delete_design kept ${files.refused.length} unrecognised object key(s)`,
+        context: { shortCode, refused: files.refused.length, namespaces: files.namespaces.slice(0, 5) },
       });
     }
+    // quote / quotePdfKept / quoteNumber / estimateAlreadyGone are additions; every field the
+    // previous dialog reads keeps its old values.
     return json({
-      ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: kept.size,
-      estimate, estimateNumber: design.ghl_estimate_number ?? null, estimateError,
+      ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: files.refused.length,
+      estimate, estimateNumber: design.ghl_estimate_number ?? null, estimateError, estimateAlreadyGone,
+      quote: files.quote, quotePdfKept: files.quote === "kept", quoteNumber: design.ss_quote_number ?? null,
     });
   }
 
@@ -3218,12 +3749,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     d3: unknown; d3_photos: unknown; d3_video_frames: unknown; updated_at: string | null;
   };
   const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    // building_styles.id is a uuid, so a malformed one would answer 22P02 and turn a bad id
+    // into a 500; it is simply not one of this tenant's styles.
+    if (styleId && !isUuid(styleId)) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     // d3, the two media columns and updated_at ride along for the late-save guard in
     // save_style_d3 / save_style_media (styleSaveGuard.ts); every other caller ignores them.
     let q = admin.from("building_styles").select("id, key, model_status, model_url, d3, d3_photos, d3_video_frames, updated_at").eq("client_id", clientId);
     q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
     const { data, error } = await q.maybeSingle();
-    if (error) return { err: json({ error: error.message }, 500) };
+    if (error) return { err: dbFail(req, clientId, "find that style", error) };
     if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     return { style: data as Style3D };
   };
@@ -3294,8 +3828,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // foundation null (or a draft's "slab") and never floorHeightFt, so a save without frame
     // "front" keeps the stored pair (carryForwardFoundation). The current panel sends frame "front"
     // and gets what it sent. Before the guard too, so an old panel's re-save of a raised style
-    // compares as the duplicate it is.
-    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame);
+    // compares as the duplicate it is. `slabGround` (2026-10-03): the panel draws a slab's corners, so
+    // its null clears them there; an older panel's null keeps them.
+    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame, payload.slabGround === true);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
@@ -3328,7 +3863,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // has written it since, which closes the gap between that read and this update.
     if (decision === "write") write = found.style!.updated_at ? write.eq("updated_at", found.style!.updated_at) : write.is("updated_at", null);
     const { data: wrote, error, count } = await write.select("updated_at");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that style's 3D setup", error);
     if (!count) {
       if (decision === "write") {
         const again = await findStyleFor3D(styleValue, styleId);
@@ -3451,7 +3986,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       magic = new Uint8Array(await headRes.arrayBuffer());
     } catch (e) {
-      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+      return dbFail(req, clientId, "read that scan", { message: e instanceof Error ? e.message : String(e) }, 502);
     }
     // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
     const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
@@ -3463,7 +3998,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
       model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
     }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "record that scan", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, modelPath: rawPath });
   }
@@ -3489,7 +4024,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
     const { error, count } = await admin.from("building_styles")
       .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "change that style's 3D status", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, status });
   }
@@ -3505,7 +4040,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const path = found.style!.model_url;
     if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
     const signed = await admin.storage.from("models").createSignedUrl(path, 600);
-    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    if (signed.error || !signed.data) return dbFail(req, clientId, "open that scan", signed.error ?? { message: "no signed URL returned" });
     return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
   }
 
@@ -3529,7 +4064,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // anon get_config).
     const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that photo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -3772,11 +4307,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawCap = capRow?.ai_style_daily_cap;
     const dailyCap = (typeof rawCap === "number" && rawCap >= 0) ? rawCap : DEFAULT_DAILY_CAP;
     // Unlimited skips the COUNT entirely rather than running a query whose answer cannot matter.
+    const capSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     if (dailyCap > 0) {
-      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { count: used, error: capErr } = await admin.from("ai_style_calls")
         .select("id", { count: "exact", head: true })
-        .eq("client_id", clientId).gt("called_at", since);
+        .eq("client_id", clientId).gt("called_at", capSince);
       // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
       // not brick calibration, and the per-call cost is cents.
       if (capErr) {
@@ -3818,6 +4353,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
     }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
+    // ── THE CAP, COUNTED AGAIN WITH THIS PRESS'S OWN ROW IN IT ─────────────────────────────────
+    // The count above runs before this press's row exists, so presses sent together all read the
+    // same number, all pass, and all insert: it bounded only presses sent one after another, and
+    // with the meter disarmed (every tenant today) nothing else stops a burst from drafting on our
+    // Anthropic key as many times as it has requests. So it is counted again now, every row in the
+    // window ours included: more than the cap means this press is past it, and its row goes. Two
+    // presses that straddle the cap at the same instant can both refuse — the safe direction for
+    // a spend cap, and the next press lands. Fails open like the count above.
+    if (dailyCap > 0 && ledgerRow?.id) {
+      const { count: withOurs, error: recountErr } = await admin.from("ai_style_calls")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).gt("called_at", capSince);
+      if (recountErr) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+          message: `AI calibration cap recount failed, allowing the call: ${recountErr.message}`,
+        });
+      } else if ((withOurs ?? 0) > dailyCap) {
+        await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        return json({ error: `Daily limit reached (${dailyCap} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+      }
+    }
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
     // Ordered deliberately: the API-key check, then the daily cap, then the ai_style_calls
@@ -3933,50 +4490,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // leaves a closed_unknown that blocks ALL future top-ups.
       // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
       // and the cooldown caps it at once an hour.
-      try {
-        const [{ data: acct }, { data: cust }] = await Promise.all([
-          admin.from("wallet_accounts")
-            .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at")
-            .eq("client_id", clientId).maybeSingle(),
-          admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
-        ]);
-        // Bind the vault id BEFORE the decision so its presence is provable rather than
-        // implied: autoTopupDecision refuses without a card, but the type checker cannot know
-        // that, and a non-null assertion on a money path is a comment pretending to be code.
-        const vaultId = cust?.vault_id ? String(cust.vault_id) : "";
-        const decision = autoTopupDecision(acct, Boolean(vaultId), Date.now());
-        if (decision.fire && vaultId) {
-          // Stamp the cooldown BEFORE charging, not after. A burst of generations can cross
-          // the threshold several times in seconds; the failure to design against is five
-          // recharges, not a late one. If the charge then fails, the stamp costs at most an
-          // hour's delay before the next attempt.
-          await admin.from("wallet_accounts")
-            .update({ auto_topup_last_at: new Date().toISOString() }).eq("client_id", clientId);
-          const r = await chargeTopup(admin, {
-            clientId, vaultId, amountCents: decision.amountCents,
-            actorUserId: null, auto: true,
-          });
-          if (!r.ok && !r.blocking) {
-            // A DECLINE switches auto-recharge off rather than retrying hourly forever. An
-            // expired card declines identically every time, and a loop against it earns real
-            // declines on the merchant account. The Billing tab shows this reason; turning it
-            // back on is a human act.
-            await admin.from("wallet_accounts")
-              .update({ auto_topup_enabled: false, auto_topup_disabled_reason: String(r.error).slice(0, 300) })
-              .eq("client_id", clientId);
-            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_declined", message: `Auto top-up declined, switched off: ${r.error}` });
-          } else if (!r.ok) {
-            // Blocking (gateway-unknown, or charged-but-not-credited). Leave it ENABLED:
-            // the closed_unknown attempt row already blocks every further top-up, and
-            // support's reconciliation is what should restore normal service — switching it
-            // off here would make a resolved incident look like a card problem.
-            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_unresolved", message: `Auto top-up needs a human: ${r.error}` });
-          }
-        }
-      } catch (e) {
-        await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_crashed", message: `Auto top-up check failed (generation unaffected): ${(e as Error).message}` })
-          .catch(() => undefined);
-      }
+      //
+      // THE MECHANICS LIVE IN _shared/walletAutoTopup.ts since 2026-10 (migration 259), shared with
+      // the wallet-autotopup function that phone usage billing calls: the decision, the cooldown
+      // stamp, the charge, the decline switch-off. It never throws, and its app_errors rows are
+      // still filed under portal-settings when this is the caller.
+      await runAutoTopup(admin, clientId, req, { fn: "portal-settings" });
     }
 
     // From here on, every exit path must either capture or release the hold. A generation
@@ -4237,20 +4756,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the same answers measure) replaces the consensus's rearEaveRiseFt. Anything that fails leaves
     // the consensus exactly as it was. What it did is recorded in draft_tokens.stepZoom, and its
     // tokens join the draft's usage, so the capture's cost basis includes them.
+    //
+    // ── HOW FAR THE EAVES OVERHANG, READ FROM TWO CLOSE-UPS (2026-09-29, the same way) ──────────
+    // The reads judged the overhang at 6 in on two gables whose eaves stand 12 and 16 in past the
+    // walls. Each read marks the gable's two roof tips (measure.pitch, kept on the reading as
+    // `pitchPoints`), which is where the overhang is; enlarged 6 times and asked about together, the
+    // two corners read within 0.13 ft of the truth on both buildings (_shared/overhangZoom.ts has the
+    // numbers). So on a GABLE consensus whose overhang the builder did not measure (dims.overhangIn:
+    // a builder's number always wins, and applyKnownDims has already put it in), and that has no
+    // lean-to (runOverhangZoom tries nothing beside one: overhangGableWidthFt), the answers' median,
+    // to the nearest inch, replaces the consensus's roof.overhang. Recorded in
+    // draft_tokens.overhangZoom, its tokens joining the cost basis like the step's; the self-check
+    // then leaves it alone (measuredOverhangLock).
+    //
+    // SIDE BY SIDE: the two close-ups run in parallel, so a draft that needs both waits for the
+    // slower one, never for the two added up. Each has its own budget rule (45 s of the draft left),
+    // and neither outlasts aiSignal: the image library's load takes no signal, so the cut is waited
+    // for only until it fires (_shared/closeUp.ts), and that close-up records the error.
+    // Each lands on its own through the sanitiser, and anything that fails leaves its field exactly
+    // as the consensus had it.
     // (No type annotations in this block: the draft wiring tests run it as plain JavaScript.)
-    const stepRoof = consensus ? consensus.d3.roof : null;
-    if (consensus && callsUsage && v2Prompt && dims && stepRoof && typeof stepRoof.rearStepFt === "number" && typeof stepRoof.rearEaveRiseFt === "number") {
-      const zoom = await runStepZoom({
-        blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRoof.rearEaveRiseFt,
-        wallFt: dims.wallHeightFt, leftMs: t0 + draftAbortMs - Date.now(), apiKey, model: aiModelFields(true), signal: aiSignal,
-      });
-      if (zoom.record) {
-        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + zoom.input;
-        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + zoom.output;
-        callsUsage.tokens.stepZoom = zoom.record;
+    const zoomRoof = consensus ? consensus.d3.roof : null;
+    const stepRise0 = zoomRoof && typeof zoomRoof.rearStepFt === "number" && typeof zoomRoof.rearEaveRiseFt === "number" ? zoomRoof.rearEaveRiseFt : null;
+    const overhangAsked = !!zoomRoof && zoomRoof.type === "gable" && !!dims && (dims.overhangIn === undefined || dims.overhangIn === null);
+    if (consensus && callsUsage && v2Prompt && dims && zoomRoof && (stepRise0 !== null || overhangAsked)) {
+      const leftMs = t0 + draftAbortMs - Date.now();
+      const [stepZoom, overhangZoom] = await Promise.all([
+        stepRise0 === null ? null : runStepZoom({
+          blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRise0,
+          wallFt: dims.wallHeightFt, leftMs, apiKey, model: aiModelFields(true), signal: aiSignal,
+        }),
+        !overhangAsked ? null : runOverhangZoom({
+          blocks: calls.map((c) => c.reading?.pitchPoints ?? null), photoUrls, roof: zoomRoof,
+          widthFt: dims.widthFt, lengthFt: dims.lengthFt, leftMs, apiKey, model: aiModelFields(true), signal: aiSignal,
+        }),
+      ]);
+      if (stepZoom && stepZoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + stepZoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + stepZoom.output;
+        callsUsage.tokens.stepZoom = stepZoom.record;
       }
-      if (zoom.riseFt !== null) {
-        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...stepRoof, rearEaveRiseFt: zoom.riseFt } });
+      if (overhangZoom && overhangZoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + overhangZoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + overhangZoom.output;
+        callsUsage.tokens.overhangZoom = overhangZoom.record;
+      }
+      if (stepZoom && stepZoom.riseFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...consensus.d3.roof, rearEaveRiseFt: stepZoom.riseFt } });
+        if (clean.ok) consensus.d3 = clean.d3;
+      }
+      if (overhangZoom && overhangZoom.overhangFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...consensus.d3.roof, overhang: overhangZoom.overhangFt } });
         if (clean.ok) consensus.d3 = clean.d3;
       }
     }
@@ -4925,6 +5481,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ...and only while the spec this round judges is still a gable: a round that follows one which
     // turned the roof into a shed is not told its pitch was measured.
     const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+    // ── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED THE SAME WAY (2026-09-29, measuredOverhangLock) ──
+    // The draft measured the gable's overhang from enlarged close-ups of its corners, and step 2 of
+    // the check would judge it again by eye in a whole frame, the reading the close-ups replaced. So
+    // it is the builder-measured eave's posture again: the prompt says it is not the check's to change,
+    // and applySelfCheck drops a correction to it. Off the ROW, v2 only, and only while the spec this
+    // round judges is still a gable. A builder who typed the overhang keeps their own path (dims).
+    const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
@@ -4949,7 +5512,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
     const plan = selfCheckRequest({
       mode: checkMode, dims, draft: draftRead.d3, pairs,
-      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked,
     });
     const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
@@ -5007,8 +5570,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
     // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
-    // for roof.pitch where the reads measured it (above).
-    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);
+    // for roof.pitch where the reads measured it (above), and `overhangLocked` for roof.overhang
+    // where the close-ups did.
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -5020,7 +5584,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}) },
       });
     }
 
@@ -5142,6 +5706,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body, so this
     // is what stops a crafted styleId writing heights onto another builder's catalog.
+    // building_styles.id is a uuid: a malformed one would answer 22P02 and file a 500 fault,
+    // when it is simply not one of this tenant's styles (findStyleFor3D's guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
@@ -5152,12 +5719,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (szRes.error) return dbFail(req, clientId, "read that style's sizes", szRes.error);
     const allWidths = [...new Set((szRes.data ?? []).map((z: { width_ft: number }) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((x, y) => x - y);
 
-    const exRes = await admin.from("style_wall_heights").select("id").eq("client_id", clientId).eq("style_id", styleId);
+    // Each row's KEY (increase + built on site) and widths as well as its id: since 272 an increase
+    // can be listed twice, so the save has to know which row holds which key (bindWallHeightWrites)
+    // and what a row it leaves alone still offers (wallHeightClash).
+    const exRes = await admin.from("style_wall_heights").select("id, delta_in, build_on_site, widths_ft").eq("client_id", clientId).eq("style_id", styleId);
     if (exRes.error) return dbFail(req, clientId, "read your current wall heights", exRes.error);
-    const existingIds = new Set((exRes.data ?? []).map((r: { id: string }) => String(r.id)));
+    type ExistingWallHeight = { id: string; delta_in: number; build_on_site: boolean | null; widths_ft: number[] | null };
+    const existing = new Map(((exRes.data ?? []) as ExistingWallHeight[]).map((r) => [String(r.id), r]));
+    const existingIds = new Set(existing.keys());
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
-    const seenDeltas = new Set<number>();
+    // Rows that passed every check, written below once the WHOLE list has been checked.
+    const plans: (WallHeightRowShape & { rid: string; patch: Record<string, unknown> })[] = [];
     let i = 0;
     for (const raw of payload.rows) {
       const row = raw as Record<string, unknown>;
@@ -5172,8 +5745,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!Number.isInteger(deltaIn) || deltaIn <= 0 || deltaIn > 48) {
         skipped.push(`row ${i}: "${row?.deltaIn}" is not a whole number of inches between 1 and 48${unchanged}`); i++; continue;
       }
-      if (seenDeltas.has(deltaIn)) { skipped.push(`+${deltaIn} in: listed twice${unchanged}`); i++; continue; }
-      seenDeltas.add(deltaIn);
+      // "Listed twice" is no longer a per-row skip: an increase may appear once hauled and once
+      // built on site (272). The whole list is checked below, once every row has been read, and
+      // still refuses a second row while the pair is switched off (WALL_HEIGHT_SITE_PAIRS).
 
       // Refuse, never coerce — the rate posture everywhere in this file. A blank rate is a
       // deliberate "offer it later": the row is stored unpriced and get_config withholds it.
@@ -5236,19 +5810,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         widths_ft: widthsFt,
         updated_at: new Date().toISOString(),
       };
-      const res = isExisting
-        ? await admin.from("style_wall_heights").update(patch).eq("id", rid).eq("client_id", clientId)
-        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...patch }).select("id").maybeSingle();
-      if (res.error) { skipped.push(`+${deltaIn} in: ${res.error.message}`); i++; continue; }
-      if (!isExisting && (res as { data?: { id?: string } }).data?.id) keptIds.add(String((res as { data: { id: string } }).data.id));
-      saved++; i++;
+      plans.push({ rid: isExisting ? rid : "", deltaIn, buildOnSite, widthsFt, patch });
+      i++;
     }
+
+    // ONE HAULED AND ONE BUILT-ON-SITE ROW PER INCREASE, SHARING NO WIDTH (272). This replaced
+    // "listed twice": a builder sells +12" hauled on the 8-12 wide and the same +12" built on site
+    // on the 14 wide (bug report 2026-10-02), and the width is what tells the two rows apart when
+    // the designer and submit-estimate pick one. Checked on the list as it WILL BE, so a row this
+    // save leaves alone (it failed a check above and keeps what it has) counts with what it still
+    // offers. Refused WHOLE rather than row by row: skipping one row of a clashing pair could leave
+    // that row's OLD widths in place, sharing the very width the builder was moving. The portal
+    // checks the same rule before it sends, so this is the backstop for a stale or crafted save.
+    const leftAlone: WallHeightRowShape[] = [...keptIds]
+      .filter((id) => !plans.some((p) => p.rid === id))
+      .map((id) => existing.get(id) as ExistingWallHeight)
+      .map((r) => ({ deltaIn: Number(r.delta_in), buildOnSite: r.build_on_site === true, widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null }));
+    // ⚠️ The pair is SWITCHED OFF until production runs the new resolveWallHeight: a designer from
+    // before 272 prices the first row it finds for an increase, so a pair saved under it previews
+    // one price and bills another. While WALL_HEIGHT_SITE_PAIRS is not "on", an increase is listed
+    // once, the rule before 272, whichever tree deployed this function (wallHeightRows.ts says how
+    // to switch it on). Read per request, so setting the secret needs no redeploy.
+    const sitePairs = Deno.env.get("WALL_HEIGHT_SITE_PAIRS") === "on";
+    const asSaved = [...plans, ...leftAlone];
+    const clash = (sitePairs ? null : wallHeightListedTwice(asSaved)) ?? wallHeightClash(asSaved, allWidths);
+    if (clash) return json({ error: `Nothing was saved. ${clash}` }, 400);
+
+    // Rows the list no longer mentions go FIRST, so deleting the +12 row and adding a new +12 row in
+    // one save does not collide with the row being removed. The set was fixed by the loop above,
+    // before anything was written: ids absent from the payload only, never a row that failed a check.
     const sweep = [...existingIds].filter((id) => !keptIds.has(id));
     let deleted = 0;
     if (sweep.length) {
       const del = await admin.from("style_wall_heights").delete().in("id", sweep).eq("client_id", clientId);
       if (del.error) return dbFail(req, clientId, "remove the wall heights you deleted", del.error);
       deleted = sweep.length;
+    }
+    // Each row lands on the existing row that already holds its key where there is one, so ticking
+    // Built on site on one +12 row and unticking it on the other in the same save never meets the
+    // unique key half-way through (bindWallHeightWrites says why that is safe in any order).
+    const pool = plans.filter((p) => p.rid).map((p) => {
+      const r = existing.get(p.rid) as ExistingWallHeight;
+      return { id: p.rid, deltaIn: Number(r.delta_in), buildOnSite: r.build_on_site === true };
+    });
+    const targets = bindWallHeightWrites(pool, plans);
+    for (let n = 0; n < plans.length; n++) {
+      const target = targets[n];
+      const res = target
+        ? await admin.from("style_wall_heights").update(plans[n].patch).eq("id", target).eq("client_id", clientId)
+        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...plans[n].patch });
+      if (res.error) { skipped.push(`+${plans[n].deltaIn} in: ${res.error.message}`); continue; }
+      saved++;
     }
     return json({ ok: true, saved, deleted, skipped });
   }
@@ -5270,6 +5882,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body — this is
     // what stops a crafted styleId writing cladding onto another builder's catalog.
+    // A malformed uuid is not one of their styles either (save_wall_heights' guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
@@ -5308,6 +5922,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const basisRaw = String(row?.basis ?? "").trim();
       if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
 
+      // How much of each LAP board shows, in inches (exposure_in, 275): what the 3D draws the
+      // courses at, and nothing else — it never prices. Written only when the row NAMES it, so a
+      // portal that predates 275 (production's, until it is promoted) never touches a size a
+      // builder set. Blank is a real state, "the 3D's standard 6 in", and reaches the column as
+      // NULL. Refused, never coerced, on any other cladding or outside 3..12: the column's CHECK
+      // says the same, and a sentence here beats a constraint name in the skipped list. A blank on
+      // another cladding is simply nothing to write.
+      const courses: { exposure_in?: number | null } = {};
+      if (row && "exposureIn" in row) {
+        const exRaw = row.exposureIn == null ? "" : String(row.exposureIn).trim();
+        if (exRaw !== "" && cid !== "lap") { skipped.push(`${cid}: only lap siding takes a course size`); i++; continue; }
+        if (exRaw !== "") {
+          const n = Number(exRaw);
+          if (!Number.isFinite(n) || n < 3 || n > 12) { skipped.push(`${cid}: "${exRaw}" is not a course size from 3 to 12 inches`); i++; continue; }
+          courses.exposure_in = n;
+        } else if (cid === "lap") {
+          courses.exposure_in = null;
+        }
+      }
+
       const patch = {
         label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
         rate,
@@ -5316,6 +5950,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         active: row?.active !== false,
         internal_only: row?.internalOnly === true,
         sort_order: i,
+        ...courses,
         updated_at: new Date().toISOString(),
       };
       const up = await admin.from("style_cladding")
@@ -5625,7 +6260,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "save_insulation") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
-    const TYPES = new Set(["batt", "spray_foam"]);
+    // rigid_foam needs migration 272's widened ins_type check: saved ahead of it, the row is
+    // refused by the database and comes back in skipped[] with the rest of the save intact.
+    const TYPES = new Set(["batt", "spray_foam", "rigid_foam"]);
     const AREAS = new Set(["floor", "walls", "roof"]);
 
     // The master switch, presence-guarded so a save that does not mention it cannot flip it.
@@ -5661,10 +6298,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // what makes the customer's toggle disappear.
       const rateRaw = String(row?.ratePerSqft ?? "").trim();
       if (rateRaw === "") {
-        const del = await admin.from("insulation_offerings").delete()
+        const del = await admin.from("insulation_offerings").delete({ count: "exact" })
           .eq("client_id", clientId).eq("ins_type", insType).eq("area", area);
         if (del.error) { skipped.push(`${insType}/${area}: ${del.error.message}`); continue; }
-        cleared++; continue;
+        // Counted from what was really deleted. The card sends every cell of the matrix, so
+        // counting blanks reported cells that were never offered as "no longer offered", and
+        // since 272 added a third type that is a whole untouched Rigid Foam row on every save.
+        cleared += del.count ?? 0; continue;
       }
       const rate = Number(rateRaw);
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${insType}/${area}: "${rateRaw}" is not a usable dollar amount`); continue; }
@@ -5925,6 +6565,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
       }
     }
+    // Offered on (272): the building styles this item is sold on, for EVERY category, presence-
+    // guarded like its neighbours so a spreadsheet or an older portal that never sends it leaves
+    // the builder's ticks alone. null = every style (the living default, the shape above); an
+    // array = exactly those. An empty one is refused: it would hide the item on every style while
+    // it still reads as offered. The CALLERS keep only this tenant's styles.
+    if (has("styleIds")) {
+      const s = readStyleIds(row.styleIds);
+      if (s.err) return { err: `${name}: ${s.err}` };
+      if (s.value !== undefined) rec.style_ids = s.value;
+    }
     // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
     // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
     // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
@@ -5998,6 +6648,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
+    if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     if (!("door_style" in rec)) rec.door_style = "auto";
@@ -6013,6 +6664,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data } = await admin.from("window_colors").select("id").eq("client_id", clientId).in("id", ids);
     const ok = new Set((data ?? []).map((r: any) => String(r.id)));
     rec.window_color_ids = ids.filter((x) => ok.has(String(x)));
+  };
+
+  // This tenant's building-style ids, for the Offered on ticks (272). The uuid[] column has no
+  // foreign key, so this is the one check that a style id is this builder's own. A failed read is
+  // reported as one, never taken as "none of them are yours".
+  const tenantStyleIds = async (): Promise<{ ids?: Set<string>; error?: unknown }> => {
+    const { data, error } = await admin.from("building_styles").select("id").eq("client_id", clientId);
+    if (error) return { error };
+    return { ids: new Set((data ?? []).map((r: any) => String(r.id).toLowerCase())) };
   };
 
   // The FK on fixture_items.fixed_color_id accepts ANY colors row — including another
@@ -6040,6 +6700,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (v.err) return json({ error: v.err }, 400);
     { const p = await fixedColorProblem(v.rec!); if (p) return json({ error: p }, 400); }
     await filterWindowColorIds(v.rec!);
+    // Offered on (272): only this builder's styles stay. None left is refused like an empty list,
+    // never saved as "nowhere".
+    if (Array.isArray(v.rec!.style_ids)) {
+      const t = await tenantStyleIds();
+      if (t.error) return dbFail(req, clientId, "check the styles that line is offered on", t.error);
+      const kept = keepTenantStyleIds(v.rec!.style_ids as string[], t.ids!);
+      if (!kept.length) return json({ error: `${v.rec!.name}: none of those building styles are in your catalog any more. Reload the page, then ${NO_STYLE_TICKED}.` }, 400);
+      v.rec!.style_ids = kept;
+    }
     const id = String(payload?.id ?? "").trim();
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
@@ -6131,6 +6800,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (wc.error) return dbFail(req, clientId, "read your window colors", wc.error);
       windowColorIds = new Set((wc.data ?? []).map((r: any) => String(r.id)));
     }
+    // Offered on (272). The sheet has no such column, so this read happens only for a caller that
+    // sent the field; each row then keeps only this builder's styles.
+    let styleIds: Set<string> | null = null;
+    if (payload.rows.some((r: any) => r && Object.prototype.hasOwnProperty.call(r, "styleIds"))) {
+      const t = await tenantStyleIds();
+      if (t.error) return dbFail(req, clientId, "read your building styles", t.error);
+      styleIds = t.ids!;
+    }
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
@@ -6146,6 +6823,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         v.rec!.window_color_ids = (v.rec!.window_color_ids as unknown[]).filter((x) => windowColorIds!.has(String(x)));
         if ((v.rec!.window_color_ids as unknown[]).length < before) {
           skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some colors aren't in your window color list — dropped`);
+        }
+      }
+      if (styleIds && Array.isArray(v.rec!.style_ids)) {
+        const before = (v.rec!.style_ids as string[]).length;
+        const kept = keepTenantStyleIds(v.rec!.style_ids as string[], styleIds);
+        // None of them this builder's: the row's other columns still go in, its styles stay as they were.
+        if (!kept.length) {
+          delete v.rec!.style_ids;
+          skipped.push(`${String(row?.name ?? "row " + (i + 1))}: none of those building styles are in your catalog — styles left as they were`);
+        } else {
+          v.rec!.style_ids = kept;
+          if (kept.length < before) skipped.push(`${String(row?.name ?? "row " + (i + 1))}: some building styles aren't in your catalog — dropped`);
         }
       }
       const rid = String(row?.id ?? "").trim();
@@ -6321,23 +7010,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // One read for the tax card: who issues the paperwork, the company rate, each location's
   // local rate, and whether verified lookups are switched on for this tenant. `configured` says
   // only whether the platform holds Avalara credentials — a boolean, never the credentials or
-  // the account behind them. No prices: both tax meters are disarmed, and a price read, when one
-  // is needed, follows the catalog action's redaction rather than riding a settings payload.
+  // the account behind them.
+  //
+  // `lookupPriceCents` (2026-10-05) is what one Verify press costs the builder's wallet, for the
+  // Verify confirm: the tax_lookup meter's price, or null when a press costs nothing (disarmed —
+  // both tax meters are today — unpriced, or an exempt tenant: billing_exempt or the wallet's
+  // metered_exempt, the two chargeTaxCalculation skips) or the price is redacted (visible false,
+  // the catalog action's and portal-billing's rule). Read here and not on `status`, which every
+  // signed-in employee gets; this action is settings_crm:view, the area that owns the button. A
+  // failed price read is null, never a failed card, and a failed wallet read counts as not exempt
+  // (a stated price the press then doesn't cost is the safe way to be wrong): verify_tax checks
+  // the figure the confirm stated against the charge before any spend (verifyPriceRefusal).
   //
   // Every location is listed, inactive ones too, with `active` on each: an inactive lot never
   // prices a quote (taxChain), and the card should be able to say why a rate is not applying.
   // `usage24h` is null when the ledger cannot be counted — unknown, not zero.
   if (action === "tax_settings") {
-    const [csRes, locRes, usage24h] = await Promise.all([
-      admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled")
+    const [csRes, locRes, usage24h, priceRes, walletRes] = await Promise.all([
+      admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled, billing_exempt")
         .eq("client_id", clientId).maybeSingle(),
       admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
         .eq("client_id", clientId).order("sort_order").order("created_at"),
       countLookups24h(admin, clientId),
+      admin.from("usage_prices").select("price_cents, active, visible").eq("kind", VERIFY_TAX_METER).maybeSingle()
+        .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
+      admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle()
+        .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (locRes.error) return dbFail(req, clientId, "load your locations' tax rates", locRes.error);
     const cs = csRes.data;
+    const exempt = cs?.billing_exempt === true ||
+      (!walletRes.error && (walletRes.data as { metered_exempt?: unknown } | null)?.metered_exempt === true);
     return json({
       ok: true,
       // Same reading as status's invoiceInGhl: a row predating the column is CRM mode.
@@ -6348,6 +7052,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       companyLabel: cs?.ss_tax_label ?? "Sales tax",
       dailyCap: DAILY_TAX_LOOKUP_CAP,
       usage24h,
+      lookupPriceCents: priceRes.error ? null : lookupPriceCents(priceRes.data, exempt),
       locations: (locRes.data ?? []).map(locationTaxView),
     });
   }
@@ -7220,7 +7925,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the first THROW, and none of these throws — a failed read comes back on `.error` and is
     // turned into `undefined` by the same line that always did it.
     const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut] = await Promise.all([
-      buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true }),
+      buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true, phone: phoneFeedScope(contact?.owner_user_id ?? null) }),
       // Focus = open activities, soonest first. This is the crm_activities_focus index.
       admin.from("crm_activities")
         .select("id, kind, subject, due_at, assignee_user_id, short_code")
@@ -7379,11 +8084,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             : Promise.resolve({ data: null, error: null }),
         ]);
         const smsCfg = cfgRes.data;
+        // The number a text from this composer goes out from (migration 266): the one this
+        // customer last texted with, else the reader's own, else the main number; crm_send_sms
+        // asks the same question when they press Send.
+        const replyFrom = smsCfg && smsCfg.sms_status === "active" && contact
+          ? await replyFromNumber(admin, clientId, { contactId: contact.id ?? null, userId: userId ?? null })
+          : null;
         return {
           ready: !!(smsCfg && smsCfg.sms_status === "active" && smsCfg.sms_number),
           // The tenant's own number, shown in the composer so a rep knows which number the
           // customer will see. Never the platform's, and never another tenant's.
-          from: (smsCfg && smsCfg.sms_status === "active") ? (smsCfg.sms_number ?? null) : null,
+          from: (smsCfg && smsCfg.sms_status === "active") ? (replyFrom ?? smsCfg.sms_number ?? null) : null,
           optedOut: !!(contact && contact.sms_opt_out_at),
           // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
           // rather than let someone type a message and discover it on Send. Asked as "is there a
@@ -7513,8 +8224,135 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const seen = await visibleContactIds([rawContactId]);
     if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
     const contactId = rawContactId && seen.has(rawContactId) ? rawContactId : null;
-    const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true });
+    // Whose a missed call is depends on the contact's owner, for a phone:'own' viewer only.
+    let contactOwner: string | null = null;
+    const scope0 = phoneFeedScope(null);
+    if (contactId && scope0.level === "own") {
+      const { data: oc, error: ocErr } = await admin.from("crm_contacts").select("owner_user_id")
+        .eq("client_id", clientId).eq("id", contactId).maybeSingle();
+      if (ocErr) return dbFail(req, clientId, "check who this customer is assigned to", ocErr);
+      contactOwner = (oc as { owner_user_id?: string | null } | null)?.owner_user_id ?? null;
+    }
+    const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true, phone: { ...scope0, contactOwner } });
     return json({ ok: true, feed });
+  }
+
+  // ── CONVERSATIONS: every customer's newest email, text or call ─────────────────────────
+  // Carolyn, 2026-08-21 @45:22: "So conversations would be email, all of it. In the way that
+  // GoHighLevel has that ... except I want that bar at the top that shows that I can sort and see
+  // just that." And @42:45: "I want to be able to see my calls." One row per customer, newest
+  // first, with an All / Email / Texts / Calls filter; a row opens the customer's record, where
+  // the replying happens (Email and SMS tabs). No reply box here, and no read/unread state:
+  // "waiting on you" is derived from who spoke last.
+  //
+  // The rules (paging, grouping, Mine) live in _shared/crmInbox.ts. This branch only reaches the
+  // tables, and narrows on the way, the same three ways the record page does:
+  //   • contacts:'own' sees only their own customers (visibleContactIds). If that check fails the
+  //     page is refused; it never falls back to everyone;
+  //   • calls only for someone with phone access, and phone:'own' only the calls that are theirs:
+  //     the record timeline's own rule (crmFeed scopeCallRows, phoneFeedScope), with each call's
+  //     customer's owner deciding whose a missed call is;
+  //   • a customer merged into another record is left out. The merge moved their messages to the
+  //     record they were merged into, so nothing is lost.
+  // Customers who only ever got a quote or an invoice by email are not listed: those sends carry no
+  // contact_id, the same as in My Synergy Phone's list. Texts from numbers that aren't a contact
+  // stay in My Synergy Phone too (there is no page here for a bare number).
+  //
+  // ONE CALL A PAGE. Every portal-settings call carries about 2 s of fixed cost, so the page never
+  // makes a second one: the filter's extra facts ride on the first page's answer.
+  if (action === "crm_inbox") {
+    const req0 = parseInboxRequest(payload);
+    if ("error" in req0) return json({ error: req0.error }, 400);
+    const me = isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null;
+    const seesCalls = canRead("phone");
+    const callScope = phoneFeedScope(null);
+    // deno-lint-ignore no-explicit-any
+    const ownerOf = (r: any): string | null => {
+      const c = Array.isArray(r?.crm_contacts) ? r.crm_contacts[0] : r?.crm_contacts;
+      return c?.owner_user_id ?? null;
+    };
+    // deno-lint-ignore no-explicit-any
+    const callVisible = (r: any) => scopeCallRows([r], { ...callScope, contactOwner: ownerOf(r) }).length === 1;
+    // What scopeCallRows needs, and whose customer it is (phone_calls has a foreign key to
+    // crm_contacts, so the owner rides along on the same read).
+    const CALL_SCOPE_COLS = "contact_id, status, placed_by, answered_by, transferred_from, rang_user_ids, crm_contacts(owner_user_id)";
+    const TABLE: Record<InboxTable, string> = { sms: "sms_messages", emailIn: "email_inbound", emailOut: "email_sends", calls: "phone_calls" };
+    const COLS: Record<InboxTable, string> = {
+      sms: "id, contact_id, direction, body, num_media, sent_by, created_at",
+      emailIn: "id, contact_id, subject, received_at",
+      emailOut: "id, contact_id, subject, sent_by, created_at",
+      calls: `id, direction, started_at, answered_at, duration_s, ${CALL_SCOPE_COLS}, phone_voicemails(id)`,
+    };
+    // deno-lint-ignore no-explicit-any
+    const must = (res: { data: any; error: any }, where: string): any[] => {
+      if (res.error) throw new InboxReadError(where, res.error);
+      return (res.data ?? []) as unknown[];
+    };
+    // deno-lint-ignore no-explicit-any
+    const kinds = (t: InboxTable, q: any) => (t === "emailOut" ? q.in("kind", INBOX_EMAIL_KINDS) : q);
+    const src: InboxSource = {
+      async scan(t, cursor, limit) {
+        let q = kinds(t, admin.from(TABLE[t]).select(COLS[t]).eq("client_id", clientId).not("contact_id", "is", null))
+          .order(INBOX_AT_COLUMN[t], { ascending: false }).limit(limit);
+        if (cursor) q = q.lt(INBOX_AT_COLUMN[t], cursor);
+        return must(await q, "load your conversations");
+      },
+      async newer(t, ids, cursor) {
+        const q = kinds(t, admin.from(TABLE[t]).select(t === "calls" ? CALL_SCOPE_COLS : "contact_id").eq("client_id", clientId))
+          .in("contact_id", ids).gte(INBOX_AT_COLUMN[t], cursor).limit(1000);
+        return must(await q, "load your conversations");
+      },
+      async contacts(ids) {
+        const res = await admin.from("crm_contacts").select("id, name, owner_user_id, email, phone")
+          .eq("client_id", clientId).in("id", ids).is("merged_into", null);
+        return must(res, "load these customers") as InboxContact[];
+      },
+      visible: (ids) => visibleContactIds(ids),
+      async everByMe(ids) {
+        if (!me) return new Set<string>();
+        const [t, e, c] = await Promise.all([
+          admin.from("sms_messages").select("contact_id").eq("client_id", clientId).in("contact_id", ids).eq("sent_by", me).limit(1000),
+          admin.from("email_sends").select("contact_id").eq("client_id", clientId).in("contact_id", ids).in("kind", INBOX_EMAIL_KINDS).eq("sent_by", me).limit(1000),
+          // `me` is a checked uuid, so it cannot carry PostgREST grammar into the `or`.
+          seesCalls
+            ? admin.from("phone_calls").select("contact_id").eq("client_id", clientId).in("contact_id", ids).or(`placed_by.eq.${me},answered_by.eq.${me}`).limit(1000)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
+        const where = "check which customers you've been in touch with";
+        return new Set([...must(t, where), ...must(e, where), ...must(c, where)].map((r) => String(r.contact_id)));
+      },
+    };
+    // The first page also says which filters to offer: Texts once the account can text or has
+    // texts, Calls (for someone who may see them) once the phone is offered or there are calls.
+    const firstPage = !req0.cursor;
+    try {
+      const [page, smsCfg, anyText, anyCall] = await Promise.all([
+        buildInbox(src, req0, { me, seesCalls, callVisible }),
+        firstPage ? admin.from("client_settings").select("sms_number, sms_status").eq("client_id", clientId).maybeSingle() : null,
+        firstPage ? admin.from("sms_messages").select("id").eq("client_id", clientId).not("contact_id", "is", null).limit(1) : null,
+        firstPage && seesCalls ? admin.from("phone_calls").select("id").eq("client_id", clientId).not("contact_id", "is", null).limit(1) : null,
+      ]);
+      // deno-lint-ignore no-explicit-any
+      const cfg = (smsCfg as any)?.data;
+      return json({
+        ok: true,
+        threads: page.threads,
+        cursor: page.cursor,
+        ...(firstPage
+          ? {
+            smsReady: !!(cfg && cfg.sms_status === "active" && cfg.sms_number),
+            // A failed probe is "don't know", which only hides a filter button: the list itself
+            // is already answered, so it is not worth refusing the page over.
+            hasTexts: !!anyText && !anyText.error && (anyText.data ?? []).length > 0,
+            hasCalls: !!anyCall && !anyCall.error && (anyCall.data ?? []).length > 0,
+            seesCalls,
+          }
+          : {}),
+      });
+    } catch (e) {
+      if (e instanceof InboxReadError) return dbFail(req, clientId, e.where, e.dbError ?? { message: e.where });
+      throw e;
+    }
   }
 
   // ── EMAIL A CUSTOMER FROM THE RECORD PAGE ──────────────────────────────────────────
@@ -7811,6 +8649,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
       : null;
 
+    // Which of the business's numbers (migration 266): the one this customer last texted with,
+    // else the sender's own, else the main number (smsSend.ts replyFromNumber). sendTenantSms
+    // checks it again (this business's, live, registered, in its service) before anything is sent.
+    const fromNumber = await replyFromNumber(admin, clientId, { contactId, userId: userId ?? null });
+
     const out = await sendTenantSms(admin, clientId, {
       toPhone: String(c.phone),
       body,
@@ -7818,6 +8661,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       shortCode,
       sentBy: userId ?? null,
       statusCallback,
+      fromNumber,
       // A person typed this and pressed Send, so it goes now (Ahsan, 2026-09-29: "if i am
       // sending manual messages it should go right away"). Quiet hours are for automation;
       // the scope planned this override from the start and this path was simply missed, so
@@ -7892,6 +8736,68 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
+  // ── QUICK SENDS: saved messages for the record's Email and SMS boxes ───────────────────────
+  // Carolyn 2026-09-30: "quick sends on text and email, both of them … so that they can easily
+  // just click and choose the list of things." The list is My Synergy Phone's (migration 258),
+  // each person's own, and the rules are in ./quickSends.ts. NOTHING HERE SENDS: the portal's
+  // Insert fills the box, and the email or text still goes out through crm_send_email /
+  // crm_send_sms below, with every one of their checks.
+  //
+  // REFUSED IN VIEW-AS. The person signed in is CSM Synergy staff, so the list would be the
+  // operator's OWN, and the first open would seed the starter set for them under the builder's
+  // account. The same reasoning as the signature in crm_send_email; the shell hides the button
+  // there too (quickSendsOn). A refusal, marked so, exposed so the browser can read the mark.
+  if (action === "quick_sends_list" || action === "quick_send_used") {
+    if (operator) {
+      const r = json({ error: QUICK_SENDS_VIEW_AS }, 403);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    }
+    // Both keys from the verified session: the JWT's user and the tenant resolveTenant settled on.
+    const who = { userId, clientId };
+    if (action === "quick_sends_list") {
+      const out = await readQuickSends(admin, who, (why) => logEdgeError({
+        fn: "portal-settings", req, clientId, code: "quick_send_seed_failed", severity: "warn",
+        message: `phone_seed_quick_sends failed: ${why}`,
+      }));
+      if ("dbError" in out) return dbFail(req, clientId, "load your quick sends", out.dbError);
+      return json({ ok: true, quick_sends: out.quick_sends, my_name: out.my_name });
+    }
+    const used = await countQuickSendUse(admin, payload?.id, who);
+    if (used === "counted") return json({ ok: true });
+    if (used === "not_found") return json({ error: QUICK_SEND_NOT_FOUND }, 404);
+    return dbFail(req, clientId, "count that quick send", used.dbError);
+  }
+
+  // ── WHO A CUSTOMER'S REPLY IS COPIED TO (2026-10-05) ───────────────────────────────────
+  // Every email this function sends is set off by the person signed in: crm_send_email below,
+  // and the quote re-send and re-price, the change order and the invoice sends, re-issues and
+  // retries further down. So the reply copy names THEM (their My Profile address, else their
+  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. The
+  // rule and its reasons are _shared/repReplyTo.ts. The senders take a ReplySender rather than
+  // reading the session themselves (sendQuoteEmail and restampQuoteTax take it as a parameter),
+  // so a sender added later has to say whose email it is. `recipient` is the address the email
+  // goes to, and is required: the assigned rep is named only for their customer's own address.
+  // A failed lookup is logged and the email goes with the routing address only, as every
+  // document email did before.
+  type ReplySender = { userId: string | null; operator: boolean };
+  const signedIn: ReplySender = { userId: userId ? String(userId) : null, operator: Boolean(operator) };
+  const replyCopy = (sender: ReplySender, ref: { shortCode?: string | null; contactId?: string | null; recipient: string }) =>
+    repReplyTo(admin, clientId, {
+      senderUserId: sender.userId,
+      operator: sender.operator,
+      shortCode: ref.shortCode ?? null,
+      contactId: ref.contactId ?? null,
+      recipient: ref.recipient,
+      onError: (why) => {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "reply_to_lookup_failed", severity: "warn",
+          message: `reply copy lookup failed: ${why}`, context: { action },
+        }).catch(() => {});
+      },
+    });
+
   if (action === "crm_send_email") {
     const claimedTo = String(payload.to ?? "").trim().slice(0, 320);
     const subject = String(payload.subject ?? "").trim().slice(0, 200);
@@ -7902,6 +8808,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+    // The phone app's id for its pending bubble (My Synergy Phone, migration 261), written on the
+    // ledger row so the confirmed email replaces the bubble instead of showing twice. Ignored, not
+    // refused, when it is not the shape the app makes: it is a display detail, never a reason to
+    // hold back an email someone wrote.
+    const rawTempId = typeof payload.clientTempId === "string" ? payload.clientTempId : "";
+    const clientTempId = /^[A-Za-z0-9_-]{1,64}$/.test(rawTempId) ? rawTempId : null;
 
     // ── THE BROWSER SENDS IDS, NEVER AN ADDRESS ───────────────────────────────────────
     // Exactly the rule crm_send_sms and text_sign_link already state, applied to the channel
@@ -7918,12 +8830,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "An email has to be addressed to a contact or a deal." }, 400);
     }
     let to = "";
+    // Whether contactId named a real contact of THIS tenant. Only then does it go on the ledger
+    // row (below), because that row is what files the email in a person's conversation.
+    let contactFound = false;
     // Shape-checked before it reaches Postgres: crm_contacts.id is a uuid, and a malformed one
     // would answer 22P02 and turn a bad id into a 500 rather than the refusal below.
     if (contactId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contactId)) {
       const { data: c, error: cErr } = await admin.from("crm_contacts")
         .select("email").eq("client_id", clientId).eq("id", contactId).maybeSingle();
       if (cErr) return dbFail(req, clientId, "look up that contact", cErr);
+      contactFound = !!c;
       to = String(c?.email ?? "").trim();
     }
     if (!to && shortCode) {
@@ -7942,72 +8858,94 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "That address doesn't match this customer's — reopen the record and try again." }, 400);
     }
 
-    // REPLY-TO FALLBACK ONLY: the staff member who wrote it. There is no `business_email`
-    // column to default a reply address from (emailSend.ts says so in as many words), and the
-    // tenant's sending address is a no-reply-shaped local part, so a customer hitting Reply
-    // needs somewhere real to land. The signed-in sender is the right answer, and it is
-    // resolved SERVER-SIDE from the JWT rather than trusted from the body, so nobody can
-    // route a customer's replies at a third party.
+    // REPLY-TO: the person who wrote it, resolved SERVER-SIDE from the verified session and
+    // never from the body, so nobody can route a customer's replies at a third party. There is
+    // no `business_email` column to default one from (emailSend.ts says so in as many words),
+    // and the tenant's sending address is a no-reply-shaped local part, so without this a
+    // customer hitting Reply on a tenant with no reply domain had nowhere real to land.
     //
-    // The ROUTABLE address (`d.SS-…@reply.jrbarns.com`) used to be computed right here and is
-    // now derived inside sendTenantEmail, where it covers all ten send paths instead of this
-    // one. That move is the point: a customer replying to their QUOTE was never routed
-    // anywhere, because quotes go through submit-estimate and only this branch had the code.
-    // Do not reintroduce it here — sendTenantEmail prefers its own and falls back to this.
-    let replyTo: string | undefined;
-    try {
-      const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
-      const addr = u?.user?.email;
-      if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
-    } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
-    // The person's OWN choice beats their login address (Settings → My View). A login and the
-    // address someone wants customer replies at are often different — a shared `office@` login,
-    // a personal alias, a role address — which is the gap Carolyn was describing.
+    // The ROUTABLE address (`d.SS-…@reply.<their domain>`) is not computed here: sendTenantEmail
+    // derives it for every send path and puts BOTH in Reply-To, routing first. Do not reintroduce
+    // it here.
     //
-    // Their auth email stays the fallback: someone who has never opened that card must not lose
-    // the reply address they have had all along. Read from client_users keyed on the JWT's
-    // userId and NEVER on anything in the body, the same rule the auth lookup above follows —
-    // which is why this is a second query rather than a field the browser could send.
+    // WHOSE ADDRESS is _shared/repReplyTo.ts, the one rule every quote, invoice and change-order
+    // sender below follows too (2026-10-05): the writer's own choice in My Profile, else their
+    // sign-in email. Two things changed for this branch when it moved there. The preference is
+    // read on THIS tenant (it used to be limit(1) on the user alone). And in view-as the writer is
+    // CSM Synergy staff, whose address must never go on a builder's email: it used to be the
+    // operator's own sign-in address, and is now the customer's assigned rep, or nobody. The
+    // address is validated on the way out as well as at save_prefs, because it goes into a header.
+    const replyTo = await replyCopy(signedIn, { shortCode, contactId: contactFound ? contactId : null, recipient: to });
+    // VIEW-AS WITH NOWHERE FOR A REPLY TO GO IS REFUSED. Until 2026-10-05 the operator's own
+    // address was on this email, so a reply always reached somebody. Without it, an operator
+    // writing to a customer with no assigned rep to name, on an account whose replies aren't
+    // routed to the record (no active reply domain), would send with no Reply-To at all: the
+    // customer's answer goes to the From address and reaches no person and no record. Said
+    // before anything is sent. Only view-as: a member writing as themselves is not refused here.
+    if (operator && !replyTo) {
+      const { data: rs, error: rsErr } = await admin.from("client_settings")
+        .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
+      if (rsErr) return dbFail(req, clientId, "check where replies to this email would go", rsErr);
+      if (!buildReplyAddress(rs?.inbound_domain, rs?.inbound_status, { shortCode, contactId: contactFound ? contactId : null })) {
+        return json({ error: "A reply to this email would reach nobody. In view-as your own address can't go on it, this customer has no assigned rep to send replies to, and replies aren't routed to the record on this account yet. Assign the customer to someone on the team first." }, 400);
+      }
+    }
+    // The writer's EMAIL SIGNATURE (My Profile; Carolyn 2026-10-01). It is this person's own,
+    // keyed on the JWT and on this tenant, so a rep's emails carry their name and never a
+    // colleague's. A failed read costs the signature, never the email.
     //
-    // save_prefs validates this on the way IN, so it is not re-validated here. If that
-    // whitelist is ever relaxed, re-validate at this end too: it goes into a mail header.
+    // NO signature in view-as: the person writing is CSM Synergy staff, not the builder. Keyed on
+    // the user alone, this read used to find the operator's OWN prefs (every operator has a
+    // membership of their own), so a builder's customer would have got CSM Synergy's name under
+    // the builder's email. Keyed on this tenant it finds no row for them now; the operator check
+    // stays as the plain statement of the rule. The composer shows no signature in view-as either.
+    let signature: string | null = null;
     try {
       const { data: pu } = await admin.from("client_users")
-        .select("prefs").eq("user_id", userId ?? "").maybeSingle();
-      const own = (pu?.prefs as Record<string, unknown> | null)?.replyToEmail;
-      if (typeof own === "string" && own.includes("@")) replyTo = own.trim();
-    } catch (_) { /* fall through to the auth email */ }
+        .select("prefs").eq("user_id", userId ?? "").eq("client_id", clientId).limit(1).maybeSingle();
+      const prefs = pu?.prefs as Record<string, unknown> | null;
+      signature = operator ? null : cleanSignature(prefs?.emailSignature);
+    } catch (_) { /* no signature */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
-    // the branded template already exists for the documents that want one.
+    // the branded template already exists for the documents that want one. The signature goes
+    // under it: "-- " and the signature in the text, its own block in the HTML (escaped too).
     const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>`;
+    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(signature)}`;
+    const text = signText(body, signature);
 
     const out = await sendTenantEmail(admin, clientId, {
       kind: "conversation",
       to,
       subject,
       html,
-      text: body,
+      text,
+      // The words, the writer and the app's bubble id go on the ledger row (migration 261), so
+      // the conversation shows what was said and who said it. sentBy is the signed-in person
+      // from the JWT, never anything in the body. The words are the whole text that went out,
+      // signature included, so the record and the phone show the email as the customer got it.
+      bodyText: text,
+      ...(userId ? { sentBy: String(userId) } : {}),
+      ...(clientTempId ? { clientTempId } : {}),
       ...(replyTo ? { replyTo } : {}),
       ...(shortCode ? { shortCode } : {}),
-      // Carried so sendTenantEmail can build the threading Message-ID. Without it a
-      // conversation email about no particular design gets no threading id, and a reply
-      // could only be placed by the sender's address — which cannot tell two people at the
-      // same company apart.
-      ...(contactId ? { contactId } : {}),
+      // Only a contact the lookup above FOUND in this tenant. sendTenantEmail writes it to the
+      // ledger row at the claim — that is what files the email in the person's whole email
+      // history, including mail about no design at all — and builds the threading Message-ID
+      // from it, without which a conversation email about no particular design gets no
+      // threading id and a reply could only be placed by the sender's address (which cannot
+      // tell two people at the same company apart).
+      //
+      // The row used to get its contact AFTER the send, by stamping the newest conversation row
+      // to the same address. That missed every failed send, and every send the beta redirect
+      // re-addressed (to_email is then the test inbox), so those never reached the record.
+      ...(contactFound ? { contactId } : {}),
     } as any);
 
     if (out.sent) {
-      // sendTenantEmail owns the ledger row; stamp the contact scope onto it so the person's
-      // whole email history surfaces on their record, including mail about no design at all.
-      if (contactId) {
-        await admin.from("email_sends").update({ contact_id: contactId })
-          .eq("client_id", clientId).eq("kind", "conversation").eq("to_email", to)
-          .is("contact_id", null).order("created_at", { ascending: false }).limit(1);
-      }
-      return json({ ok: true, messageId: out.messageId });
+      // `id` is the ledger row, which the phone app matches its bubble to. The portal ignores it.
+      return json({ ok: true, messageId: out.messageId, id: out.id });
     }
     if (out.reason === "not_active") {
       // Not a fault: this tenant has not connected a sending domain yet. 503 is the closest
@@ -8065,9 +9003,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
     { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+    // Checked before toISOString(), which THROWS on an invalid date and turned a bad dueAt
+    // into an unhandled 500.
+    const dueMs = payload.dueAt ? Date.parse(String(payload.dueAt)) : null;
+    if (dueMs !== null && !Number.isFinite(dueMs)) return json({ error: "That due date isn't a date we can read." }, 400);
     const row: Record<string, unknown> = {
       client_id: clientId, kind, subject,
-      due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
+      due_at: dueMs !== null ? new Date(dueMs).toISOString() : null,
       assignee_user_id: userId ?? null, created_by: userId ?? null,
     };
     if (contactId) row.contact_id = contactId;
@@ -8253,12 +9195,1440 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // Invoice-send ledger state for these designs (migration 052). Lets the drawer show
     // "invoice created but not emailed — retry" instead of silently looking invoiced.
+    // Not `error`: send_invoice parks the CRM's own reply text and Postgres messages there for
+    // support, and nothing in the browser reads it — that column is not ours to put on the wire.
     const { data: sends } = await admin
       .from("invoice_sends")
-      .select("short_code, status, invoice_number, error, updated_at")
+      .select("short_code, status, invoice_number, updated_at")
       .eq("client_id", clientId).in("short_code", codes);
 
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
+  }
+
+  // ══ MY SYNERGY PHONE — calling settings and the Calls report (2026-09-29) ════════════════
+  //
+  // The build contract is structure-studio-phone/docs/SPEC.md; the why is the plan's sections
+  // 6, 7 and 12. The CALL PATH does not come through here — calls are placed and answered by the
+  // extension and the app against the phone-api Worker, which is the whole point of that
+  // Worker. These are the not-time-critical surfaces the plan puts in portal-settings: the
+  // owner's one-time setup, the on/off switch, "Sign out all devices", and the report.
+  //
+  // ⚠️ EVERY TABLE HERE ARRIVES WITH MIGRATION 254, and this function is deployed on its own
+  // schedule. A read that meets a missing table or column answers `available: false` — the
+  // Phone tab then says calling is not set up yet — instead of logging a fault per page load
+  // across every tenant. Writes refuse with the same sentence. Real database errors still go
+  // through dbFail.
+  const PHONE_NOT_READY = new Set(["42P01", "42703", "PGRST204", "PGRST205"]);
+  const phoneNotReady = (e: unknown) => PHONE_NOT_READY.has(String((e as { code?: string } | null)?.code ?? ""));
+  // A 503 that declares itself a REFUSAL (x-ss-refusal), exposed so the browser can read it —
+  // the same shape the email-sending not_active answer uses. Without the mark every press on a
+  // server that has not had 254 applied would file as a fault.
+  const phoneRefused = (sentence: string, status: number) => {
+    const r = json({ error: sentence }, status);
+    r.headers.set(SS_REFUSAL_HEADER, "1");
+    r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+    return r;
+  };
+  const phoneUnavailable = (sentence = "Calling isn't set up on this server yet.") => phoneRefused(sentence, 503);
+
+  // ── THE ROLLOUT, ON THE SERVER (plan D9, review SSB-1) ───────────────────────────────────
+  // The browser's ssPhoneOffered() only decides what is DRAWN, and it draws the Phone tab on
+  // every beta host — which shares this database, these functions and the Twilio account with
+  // production. So the server is where "builders stay out until launch" is enforced: turning
+  // calling on, connecting a number and searching for / buying one need a CSM Synergy operator
+  // until PHONE_SELF_SERVE=on (phone.ts). "An operator" is either an operator in view-as
+  // (`operator`, resolveTenant has already required can_write for a write) or an app_operators
+  // member with can_write acting on their OWN tenant — the pilot's owners — which resolveTenant
+  // does not report, so it is read here, once per request, only when asked. A failed read is
+  // "not an operator". The same row answers the caller-ID gate below, which also asks support_only.
+  let operatorRowMemo: Promise<{ can_write: boolean; support_only: boolean } | null> | null = null;
+  const ownOperatorRow = (): Promise<{ can_write: boolean; support_only: boolean } | null> => {
+    if (!isUuid(String(userId ?? ""))) return Promise.resolve(null);
+    if (!operatorRowMemo) {
+      operatorRowMemo = Promise.resolve(
+        admin.from("app_operators").select("user_id, can_write, support_only").eq("user_id", userId).maybeSingle(),
+      ).then(({ data, error }: { data: { can_write?: boolean; support_only?: boolean } | null; error: unknown }) =>
+        !error && data ? { can_write: data.can_write === true, support_only: data.support_only === true } : null,
+      () => null);
+    }
+    return operatorRowMemo;
+  };
+  const callerIsOperator = (): Promise<boolean> => {
+    if (operator) return Promise.resolve(true);
+    return ownOperatorRow().then((row) => !!row && row.can_write === true);
+  };
+  const phoneSelfServe = () => phoneSelfServeOn((k) => Deno.env.get(k));
+  /** null = the rollout lets this caller through; else the 403 refusal to return. */
+  const phoneRolloutGate = async (): Promise<Response | null> => {
+    const why = phoneRolloutRefusal({ selfServe: phoneSelfServe(), operator: phoneSelfServe() ? false : await callerIsOperator() });
+    return why ? phoneRefused(why, 403) : null;
+  };
+
+  // The tenant's numbers: EVERY live sms_numbers row, OLDEST first (migration 266, per-person
+  // numbers; plan D6's one number per builder is lifted to MAX_NUMBERS). The first is the number
+  // every screen before 266 called "your number", and a request that names no number (an older
+  // portal bundle) means it (phone.ts pickNumber). Bought on the Text Messaging tab (calls and
+  // texts), or on the Phone tab as calling-only numbers (no messaging_service_sid), which texting
+  // adopts or joins once its registration clears.
+  //
+  // The two 266 columns (label, assigned_user_id) ride in the same read; on a database before 266
+  // it is read again without them, so the Phone tab still works with no names and no owners
+  // (`perNumber` false), the posture every phone read here takes towards a missing column.
+  const NUMBER_COLUMNS = "id, phone_number, registration_status, voice_enabled, voice_configured_at, twilio_sid, messaging_service_sid, purchased_at";
+  // deno-lint-ignore no-explicit-any
+  const phoneNumberRows = async (): Promise<{ data: any[] | null; error: any; perNumber: boolean }> => {
+    const read = (cols: string) => admin.from("sms_numbers").select(cols)
+      .eq("client_id", clientId).is("released_at", null)
+      .order("purchased_at", { ascending: true }).order("id", { ascending: true }).limit(50);
+    const res = await read(`${NUMBER_COLUMNS}, label, assigned_user_id`);
+    if (res.error && String((res.error as { code?: string }).code ?? "") === "42703") {
+      const old = await read(NUMBER_COLUMNS);
+      return { data: old.data ?? null, error: old.error, perNumber: false };
+    }
+    return { data: res.data ?? null, error: res.error, perNumber: !res.error };
+  };
+
+  // Migration 266: the builder's Messaging Service while their texting is ON (sms_registrations
+  // 'active'), else null. A failed read is null too: the new number stays calling-only, exactly
+  // what happened before 266, and texting can be added to it later from the Phone tab.
+  const textingServiceSid = async (): Promise<string | null> => {
+    const { data, error } = await admin.from("sms_registrations")
+      .select("status, messaging_service_sid").eq("client_id", clientId).maybeSingle();
+    const r = (data ?? null) as { status?: string | null; messaging_service_sid?: string | null } | null;
+    return !error && r?.status === "active" && /^MG[0-9a-f]{32}$/i.test(String(r.messaging_service_sid ?? "")) ? String(r.messaging_service_sid) : null;
+  };
+  // attachToTexting's Twilio and database steps for one number: portal-sms's own helpers, and the
+  // row's messaging_service_sid written last (an update that matched nothing is not a success).
+  const textingDeps = (numberId: string) => ({
+    inService: (svc: string, sid: string) => numberInService(svc, sid),
+    attach: (svc: string, sid: string) => attachNumberToService(svc, sid),
+    clearSmsUrl: (sid: string) => clearNumberSmsUrl(sid),
+    record: async (patch: { messaging_service_sid: string; twilio_sid: string }) => {
+      const { data, error } = await admin.from("sms_numbers").update(patch)
+        .eq("id", numberId).eq("client_id", clientId).is("released_at", null).select("id");
+      return { error: error ?? ((data ?? []).length ? null : { message: "the number row was not updated (released meanwhile?)" }) };
+    },
+  });
+
+  // Plan phase 6, caller-ID trust (plan §14). OPERATOR-ONLY, always: unlike the rollout gate
+  // above, PHONE_SELF_SERVE never opens it (phoneTrust.ts's header says why). STRICTER than
+  // callerIsOperator (review BE-3): an operator in view-as needs can_write here, because
+  // resolveTenant only demands it for a write-level action, and a support-only operator is refused
+  // (phoneTrust.ts trustOperatorAllowed).
+  const callerMayManageCallerId = (): Promise<boolean> =>
+    trustOperatorAllowed({ operator: operator ?? null, ownOperatorRow });
+  const phoneOperatorGate = async (): Promise<Response | null> =>
+    (await callerMayManageCallerId()) ? null : phoneRefused(TRUST_OPERATOR_SENTENCE, 403);
+  // The number's caller-ID columns (migration 255), in their OWN select so a server without 255
+  // answers `callerId.available: false` rather than failing the number read everything else uses.
+  const trustRowOf = async (numberId: string) =>
+    await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("id", numberId).eq("client_id", clientId).maybeSingle();
+
+  // Phase 6: may this caller BUY a number? phone:'edit' got them through the gate; spending money
+  // every month is settings_billing:'edit' everywhere else (portal-sms buy_number), and an
+  // operator needs canBill. Asked by the purchase and reported by phone_settings_get so the
+  // screen offers the button only to people it will work for.
+  const mayBuyPhoneNumber = () => canEdit("phone") && canEdit("settings_billing") && (!operator || operator.canBill);
+
+  // A 5xx whose app_errors row the branch already wrote, so withErrorLog does not file it twice.
+  const filedHere = (res: Response) => { filedAtReturnSite.add(res); return res; };
+
+  type PhoneNum = { id: string; phone_number: string; twilio_sid: string | null; messaging_service_sid?: string | null };
+
+  // The number's PN… sid: the row's own, or found by its E.164 for a number recorded without one
+  // (a number bought by hand in the console, like the pilot's).
+  const numberSidOf = async (n: PhoneNum, creds: NonNullable<ReturnType<typeof twilioCreds>>):
+    Promise<{ ok: true; sid: string } | { ok: false; res: Response }> => {
+    if (n.twilio_sid) return { ok: true, sid: n.twilio_sid };
+    const found = await findNumberSid({ creds, e164: n.phone_number });
+    if (!found.ok) return { ok: false, res: json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502) };
+    if (!found.sid) return { ok: false, res: json({ error: "That number isn't on Structure Studio's phone account, so it can't be connected from here." }, 409) };
+    return { ok: true, sid: found.sid };
+  };
+
+  // Point a number's voice webhooks at the phone-api Worker (VoiceUrl, StatusCallback,
+  // VoiceFallbackUrl; phoneNumber.ts numberVoiceConfig), then record voice_enabled. Used by the
+  // purchase below when calling is on, by the switch turning calling back on for a number it moved
+  // to voicemail, and by the owner's "Connect this number for calls" for a number that texting
+  // bought, or one bought while calling was off.
+  //
+  // A CALLING-ONLY number (no messaging service) gets its SmsUrl in the same POST (review SSB-3):
+  // its texts reach sms-inbound only through the number's own webhook, so Connect also repairs a
+  // number whose purchase-time setting did not land.
+  const connectNumberForCalls = async (n: PhoneNum):
+    Promise<{ ok: true } | { ok: false; res: Response }> => {
+    const ve = voiceEnv((k) => Deno.env.get(k));
+    if (!ve.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_env_missing",
+        message: `Connecting a number for calls needs ${ve.missing.join(", ")}`, severity: "info" }).catch(() => {});
+      return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    }
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!creds) return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    const sidRes = await numberSidOf(n, creds);
+    if (!sidRes.ok) return sidRes;
+    const sid = sidRes.sid;
+    const smsUrl = !n.messaging_service_sid ? smsInboundUrl((k) => Deno.env.get(k)) : null;
+    const config = { ...numberVoiceConfig(ve.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
+    const applied = await applyNumberVoice({ creds, numberSid: sid, config });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_config_failed",
+        message: `Setting the number's voice URL failed (HTTP ${applied.status}, code ${applied.code})`, severity: "error",
+        context: { number_id: n.id } }).catch(() => {});
+      return { ok: false, res: filedHere(json({ error: "The phone company didn't accept the change. Try again in a minute." }, 502)) };
+    }
+    const { error: vErr } = await admin.from("sms_numbers")
+      .update({ voice_enabled: true, voice_configured_at: new Date().toISOString(), ...(n.twilio_sid ? {} : { twilio_sid: sid }) })
+      .eq("id", n.id).eq("client_id", clientId);
+    if (vErr) return { ok: false, res: phoneNotReady(vErr) ? phoneUnavailable() : dbFail(req, clientId, "record that the number takes calls", vErr) };
+    return { ok: true };
+  };
+
+  // THE REVERSE, for the switch going OFF (review SSB-2): point the number at the voicemail Bin
+  // (numberVoicemailConfig) and record voice_enabled = false. The Worker answers a tenant that is
+  // off with "this number can't take calls right now" and hangs up before writing anything, so
+  // a number left pointed at it dropped every customer's call without a trace; the Bin takes a
+  // message, and the Worker's recording sweep files it as a call and a voicemail on the tenant.
+  // voice_configured_at is kept: it is how turning calling back on knows to reconnect.
+  // Never throws; false (logged at `error`) means callers still hear "can't take calls".
+  const numberToVoicemail = async (n: PhoneNum): Promise<boolean> => {
+    const fail = (why: string, context: Record<string, unknown> = {}) => {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voicemail_config_failed", severity: "error",
+        message: `Calling is off but the number still points at My Synergy Phone: ${why}`, context: { number_id: n.id, ...context } }).catch(() => {});
+      return false;
+    };
+    try {
+      // Only the voicemail Bin is needed here, not the Worker's secret: a number connected by hand
+      // (the pilot's) must still be movable off the Worker.
+      const fallbackUrl = fallbackUrlOf((k) => Deno.env.get(k));
+      if (!fallbackUrl) return fail("PHONE_FALLBACK_URL is not set");
+      const creds = twilioCreds((k) => Deno.env.get(k));
+      if (!creds) return fail("Twilio credentials are not set");
+      const sidRes = await numberSidOf(n, creds);
+      if (!sidRes.ok) return fail("its sid could not be found");
+      const applied = await applyNumberVoice({ creds, numberSid: sidRes.sid, config: numberVoicemailConfig({ fallbackUrl }) });
+      if (!applied.ok) return fail(`Twilio answered HTTP ${applied.status}, code ${applied.code}`);
+      const { error } = await admin.from("sms_numbers").update({ voice_enabled: false })
+        .eq("id", n.id).eq("client_id", clientId);
+      if (error) return fail(`the row did not update (${(error as { code?: string }).code ?? "?"})`);
+      return true;
+    } catch (e) {
+      return fail((e as Error)?.message ?? "unknown");
+    }
+  };
+
+  // The team, each with their RESOLVED phone level (preset + overrides, owners absolute) —
+  // through access.ts, never a second copy of the presets.
+  const phoneTeam = async () => {
+    const { data, error } = await admin.from("client_users")
+      .select("user_id, full_name, role, title, access").eq("client_id", clientId)
+      .order("full_name", { ascending: true }).limit(200);
+    if (error) return { error, team: [] as { userId: string; name: string | null; title: string | null; role: string | null; phoneLevel: string }[] };
+    // deno-lint-ignore no-explicit-any
+    const team = (data ?? []).map((u: any) => ({
+      userId: String(u.user_id).toLowerCase(),
+      name: (u.full_name as string | null) ?? null,
+      title: (u.title as string | null) ?? null,
+      role: (u.role as string | null) ?? null,
+      phoneLevel: phoneLevelOf(u),
+    }));
+    return { error: null, team };
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const routeOut = (r: any) => r ? {
+    mode: r.mode, members: r.members ?? [], ringSeconds: r.ring_seconds, noAnswer: r.no_answer,
+    forwardTo: r.forward_to ?? null, businessHours: r.business_hours ?? null, timeZone: r.time_zone,
+    afterHours: r.after_hours, greetingUrl: r.greeting_url ?? null, updatedAt: r.updated_at ?? null,
+  } : null;
+
+  if (action === "phone_settings_get") {
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status, sms_number").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone settings", csErr);
+    const phoneStatus = (cs as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off";
+
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const rows: any[] = numRes.data ?? [];
+    // deno-lint-ignore no-explicit-any
+    const n: any = rows[0] ?? null;
+
+    // CALL RECORDING (migration 263), read on its own: a database without the columns still shows
+    // the rest of the Phone tab, with `recording` null ("not available yet"). A real fault is
+    // logged and shows the same. The phone-api Worker's CALL_RECORDING rail can't be seen from
+    // the database, so this function holds a copy as its own secret (recordingServerOn, set with
+    // the Worker var, SETUP 7c): `serverOn` false makes the card say recording hasn't started,
+    // rather than that calls are recorded while nothing records.
+    const recRes = await admin.from("client_settings")
+      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
+      .eq("client_id", clientId).maybeSingle();
+    if (recRes.error && !phoneNotReady(recRes.error)) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_recording_read_failed", severity: "error",
+        message: `client_settings recording read failed: ${recRes.error.message ?? "unknown"}` }).catch(() => {});
+    }
+    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)));
+
+    // AN 'own' CALLER GETS THEIR OWN SLICE. The gate let them in on `view` because RANK scores
+    // own == view; the setup — who answers, when, where calls forward — is the team's business
+    // and needs the LITERAL level (plan section 7). They still learn whether calling is on and
+    // which number customers see, which is what they need to use the apps at all — and whether
+    // their calls are recorded. "Which number" is the one THEIR calls show (migration 266: their
+    // own, else a team line; phone_caller_context's pick), with its name and whether it's theirs.
+    if (ownPhoneOnly(access)) {
+      const mine = callerNumberFor(rows, userId, (cs as { sms_number?: string | null } | null)?.sms_number ?? null);
+      return json({
+        ok: true, available: true, scope: "own", phoneStatus, level: "own", canEdit: false,
+        number: mine ? {
+          e164: mine.phone_number, label: mine.label ?? null,
+          mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(userId ?? "").toLowerCase(),
+        } : null,
+        recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null,
+      });
+    }
+
+    const [teamOut, routeRes, devRes, hoursRes] = await Promise.all([
+      phoneTeam(),
+      // Every number's route in one read (phone_routes has one row per number), matched by
+      // number_id below. Filed under this tenant only, as phone_route_for_number insists.
+      rows.length
+        ? admin.from("phone_routes")
+            .select("number_id, mode, members, ring_seconds, no_answer, forward_to, business_hours, time_zone, after_hours, greeting_url, updated_at")
+            .eq("client_id", clientId).in("number_id", rows.map((r) => r.id)).limit(50)
+        : Promise.resolve({ data: [], error: null }),
+      // Which devices each person has signed in on, for the "Sign out all devices" row. A
+      // courtesy: a failed read shows no devices rather than failing the screen.
+      admin.from("phone_devices")
+        .select("user_id, platform, app_version, last_seen_at").eq("client_id", clientId)
+        .order("last_seen_at", { ascending: false }).limit(500),
+      // Each person's own hours (migration 264: set by them in the phone-api Worker, shown here
+      // so the owner can see why someone wasn't rung). The same courtesy: a database before 264,
+      // or a failed read, shows no hours.
+      admin.from("phone_user_settings")
+        .select("user_id, ring_hours, ring_hours_tz").eq("client_id", clientId).limit(500),
+    ]);
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+    if (routeRes.error) return phoneNotReady(routeRes.error) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone settings", routeRes.error);
+    const devicesBy = new Map<string, { platform: string; appVersion: string | null; lastSeenAt: string | null }[]>();
+    // deno-lint-ignore no-explicit-any
+    for (const d of ((devRes as any).error ? [] : ((devRes as any).data ?? [])) as any[]) {
+      const k = String(d.user_id).toLowerCase();
+      const list = devicesBy.get(k) ?? [];
+      list.push({ platform: d.platform, appVersion: d.app_version ?? null, lastSeenAt: d.last_seen_at ?? null });
+      devicesBy.set(k, list);
+    }
+    const hoursBy = new Map<string, { ringHours: Record<string, unknown>; ringHoursTz: string | null }>();
+    // deno-lint-ignore no-explicit-any
+    for (const h of ((hoursRes as any).error ? [] : ((hoursRes as any).data ?? [])) as any[]) {
+      if (!h.ring_hours || typeof h.ring_hours !== "object" || Array.isArray(h.ring_hours)) continue;
+      hoursBy.set(String(h.user_id).toLowerCase(), { ringHours: h.ring_hours, ringHoursTz: h.ring_hours_tz ?? null });
+    }
+    const team = teamOut.team.map((t) => ({
+      ...t, devices: devicesBy.get(t.userId) ?? [],
+      ringHours: hoursBy.get(t.userId)?.ringHours ?? null, ringHoursTz: hoursBy.get(t.userId)?.ringHoursTz ?? null,
+    }));
+    // deno-lint-ignore no-explicit-any
+    const routesBy = new Map<string, any>(((routeRes.data ?? []) as any[]).map((r) => [String(r.number_id), r] as [string, any]));
+    const route = n ? routeOut(routesBy.get(String(n.id)) ?? null) : null;
+    // What the rollout lets this caller do (the same check the three writes make), so the screen
+    // offers "Turn calling on", Connect and Buy only where they will work. Turning calling OFF,
+    // the route, and "Sign out all devices" are never behind it.
+    const rolloutOpen = canEdit("phone") && (phoneSelfServe() || await callerIsOperator());
+    // Caller-ID trust (plan §14): where each number's registrations stand, for everyone on the
+    // team screen; the buttons that change it are an operator's only (canManageCallerId). ONE read
+    // for every number, in its OWN select (trustRowOf's columns), so a failed or not-yet-migrated
+    // read shows "not available" and never fails this screen.
+    // deno-lint-ignore no-explicit-any
+    const trustBy = new Map<string, any>();
+    let trustAvailable = false;
+    if (rows.length) {
+      const tr = await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("client_id", clientId).in("id", rows.map((r) => r.id)).limit(50);
+      trustAvailable = !tr.error;
+      // deno-lint-ignore no-explicit-any
+      for (const t of (tr.error ? [] : (tr.data ?? [])) as any[]) trustBy.set(String(t.id), t);
+    }
+    const callerIdOf = (id: string) => trustAvailable ? callerIdView((trustBy.get(id) ?? null) as TrustRow | null, true) : callerIdView(null, false);
+    const callerId = n ? callerIdOf(String(n.id)) : callerIdView(null, false);
+    // deno-lint-ignore no-explicit-any
+    const numberOut = (r: any) => ({
+      id: r.id, e164: r.phone_number,
+      // The TEXTING state, shown beside the number. Calling never waits on it (plan D6).
+      textingStatus: r.registration_status ?? null,
+      voiceReady: r.voice_enabled === true,
+      // Bought for calls on the Phone tab and not yet in a texting registration.
+      callingOnly: !r.messaging_service_sid,
+    });
+    return json({
+      ok: true, available: true, scope: "team", phoneStatus,
+      level: access.phone ?? null,
+      canEdit: canEdit("phone"),
+      canSwitchOn: rolloutOpen,
+      canConnect: rolloutOpen,
+      selfServe: phoneSelfServe(),
+      // The FIRST number, as before 266 (an older portal bundle reads only this and `route`).
+      number: n ? numberOut(n) : null,
+      // Migration 266: every number, oldest first, each with its own name, person, caller ID and
+      // route. `perNumber` false = a database before 266 (no names or owners can be saved yet).
+      numbers: rows.map((r) => {
+        const rt = routeOut(routesBy.get(String(r.id)) ?? null);
+        return {
+          ...numberOut(r),
+          label: r.label ?? null,
+          assignedUserId: r.assigned_user_id ? String(r.assigned_user_id).toLowerCase() : null,
+          main: !!(cs as { sms_number?: string | null } | null)?.sms_number && r.phone_number === (cs as { sms_number?: string | null }).sms_number,
+          callerId: callerIdOf(String(r.id)),
+          route: rt,
+          suggestedMembers: rt ? null : suggestedMembersFor(r.assigned_user_id ?? null, team),
+        };
+      }),
+      perNumber: numRes.perNumber,
+      // One number on a database before 266, as phone_buy_number allows there.
+      maxNumbers: numRes.perNumber ? MAX_NUMBERS : 1,
+      // The business's texting is on, so a new number can join it (phone_number_texting).
+      textingActive: await textingServiceSid() !== null,
+      // Phase 6, what the owner may do about the number from here. `canBuyNumber` is the
+      // purchase's own check (mayBuyPhoneNumber), so the button is offered exactly where it
+      // works; `numbersForSale` is Twilio being configured on this server at all; `voiceSetup`
+      // is whether "Connect this number for calls" has the Worker settings it needs (booleans
+      // only, never the values).
+      canBuyNumber: rolloutOpen && mayBuyPhoneNumber(),
+      // "Use this number for texting too" (phone_number_texting): the same check, since it changes
+      // the business's texting registration.
+      canJoinTexting: rolloutOpen && mayBuyPhoneNumber(),
+      // Buying also needs somewhere for the new number's texts to go (review SSB-3).
+      numbersForSale: trustHubConfigured() && !!smsInboundUrl((k) => Deno.env.get(k)) && voiceEnv((k) => Deno.env.get(k)).ok,
+      voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
+      callerId,
+      canManageCallerId: canEdit("phone") && await callerMayManageCallerId(),
+      // Call recording (migration 263): the settings, and whether THIS caller may change them
+      // (the business owner with phone edit: phone_recording_save's rule).
+      recording,
+      canChangeRecording: !!recording && canEdit("phone") && role === "owner",
+      route,
+      team,
+      // Plan section 7: "At setup the list starts with the owner." Offered, not saved — the
+      // route row does not exist until the owner presses Save. (A number that is someone's own
+      // starts with just them: each entry of `numbers` carries its own.)
+      suggestedMembers: route ? null : (n ? suggestedMembersFor(n.assigned_user_id ?? null, team) : team.filter((t) => t.role === "owner" && t.phoneLevel !== "none").map((t) => t.userId)),
+    });
+  }
+
+  // ONE number's settings (migration 266: "all of these settings ... for that individual number").
+  //   numberId        which number; must be a live number of this tenant. Absent = the FIRST, so
+  //                   an older portal bundle saves exactly what it always did.
+  //   label           its name (absent = unchanged, empty = none); phone.ts parseNumberLabel.
+  //   assignedUserId  whose number it is (absent = unchanged, empty = a team line): someone on THIS
+  //                   team with phone access (phone.ts parseAssignee). One live number per person:
+  //                   the database's unique index answers a race, in words.
+  //   the route       the answer list and the rest (parseRoute), when the save carries any of its
+  //                   keys. A save of only a name or a person changes no route, except that a
+  //                   number newly given to someone, with no route yet, rings just them.
+  // The number's own row is written first, so a refusal there (that person already has a number)
+  // changes nothing else.
+  if (action === "phone_settings_save") {
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    const picked = pickNumber(numRes.data ?? [], payload?.numberId);
+    if (!picked.ok) return json({ error: picked.error }, 409);
+    // deno-lint-ignore no-explicit-any
+    const n: any = picked.n;
+    if (!n) {
+      return json({ error: "Get a number on the Text Messaging tab first, then choose who answers it." }, 409);
+    }
+    const p = (payload ?? {}) as Record<string, unknown>;
+    const hasLabel = Object.prototype.hasOwnProperty.call(p, "label");
+    const hasAssignee = Object.prototype.hasOwnProperty.call(p, "assignedUserId");
+    if ((hasLabel || hasAssignee) && !numRes.perNumber) {
+      return phoneUnavailable("Naming numbers and giving them to people isn't available on this server yet.");
+    }
+    const teamOut = await phoneTeam();
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+    const eligible = new Set(teamOut.team.filter((t) => t.phoneLevel !== "none").map((t) => t.userId));
+    const names = new Map(teamOut.team.map((t) => [t.userId, t.name] as [string, string | null]));
+
+    const patch: Record<string, unknown> = {};
+    if (hasLabel) {
+      const l = parseNumberLabel(p.label);
+      if (!l.ok) return json({ error: l.error }, 400);
+      patch.label = l.value;
+    }
+    const wasLabel: string | null = n.label ?? null;
+    const wasAssigned: string | null = n.assigned_user_id ? String(n.assigned_user_id).toLowerCase() : null;
+    if (hasAssignee) {
+      // Leaving it as it is always passes, even for someone who has since lost phone access (the
+      // Phone tab shows them as gone), so the rest of the number's settings can still be saved.
+      const unchanged = typeof p.assignedUserId === "string" && !!wasAssigned && p.assignedUserId.toLowerCase() === wasAssigned;
+      const a = unchanged ? { ok: true as const, value: wasAssigned } : parseAssignee(p.assignedUserId, eligible, names);
+      if (!a.ok) return json({ error: a.error }, 400);
+      patch.assigned_user_id = a.value;
+    }
+    const withRoute = carriesRoute(p);
+    const parsed = withRoute ? parseRoute(p, eligible, names) : null;
+    if (parsed && !parsed.ok) return json({ error: parsed.error }, 400);
+
+    let label = wasLabel;
+    let assignedUserId = wasAssigned;
+    const newlyAssigned = hasAssignee && !!patch.assigned_user_id && patch.assigned_user_id !== wasAssigned;
+    if (Object.keys(patch).length) {
+      const { data: upd, error: uErr } = await admin.from("sms_numbers").update(patch)
+        .eq("id", n.id).eq("client_id", clientId).is("released_at", null)
+        .select("label, assigned_user_id");
+      if (uErr) {
+        if (String((uErr as { code?: string }).code ?? "") === "23505") return json({ error: ONE_NUMBER_PER_PERSON }, 409);
+        return phoneNotReady(uErr) ? phoneUnavailable() : dbFail(req, clientId, "save this number", uErr);
+      }
+      // deno-lint-ignore no-explicit-any
+      const row = ((upd ?? []) as any[])[0];
+      if (!row) return json({ error: "That number isn't on this account any more. Reload the page." }, 409);
+      label = row.label ?? null;
+      assignedUserId = row.assigned_user_id ? String(row.assigned_user_id).toLowerCase() : null;
+    }
+
+    const ROUTE_SELECT = "mode, members, ring_seconds, no_answer, forward_to, business_hours, time_zone, after_hours, greeting_url, updated_at";
+    // deno-lint-ignore no-explicit-any
+    let saved: any = null;
+    if (parsed && parsed.ok) {
+      const { data, error } = await admin.from("phone_routes")
+        .upsert({ client_id: clientId, number_id: n.id, ...parsed.row, updated_at: new Date().toISOString() }, { onConflict: "number_id" })
+        .select(ROUTE_SELECT).maybeSingle();
+      if (error) return phoneNotReady(error) ? phoneUnavailable() : dbFail(req, clientId, "save your phone settings", error);
+      saved = data;
+    } else {
+      const { data, error } = await admin.from("phone_routes").select(ROUTE_SELECT)
+        .eq("client_id", clientId).eq("number_id", n.id).maybeSingle();
+      if (error) return phoneNotReady(error) ? phoneUnavailable() : dbFail(req, clientId, "load this number's settings", error);
+      saved = data;
+      // Given to someone and nobody answers it yet: it rings them (the defaults otherwise).
+      if (!saved && newlyAssigned && assignedUserId) {
+        const first = parseRoute({ members: [assignedUserId] }, eligible, names);
+        if (first.ok) {
+          const ins = await admin.from("phone_routes")
+            .upsert({ client_id: clientId, number_id: n.id, ...first.row, updated_at: new Date().toISOString() }, { onConflict: "number_id" })
+            .select(ROUTE_SELECT).maybeSingle();
+          if (ins.error) return phoneNotReady(ins.error) ? phoneUnavailable() : dbFail(req, clientId, "save your phone settings", ins.error);
+          saved = ins.data;
+        }
+      }
+    }
+    if (label !== wasLabel || assignedUserId !== wasAssigned) {
+      audit("phone_number_saved", 1, `number=${n.id}${label !== wasLabel ? " label" : ""}${assignedUserId !== wasAssigned ? ` assigned=${assignedUserId ?? "team"}` : ""}`).catch(() => {});
+    }
+    return json({ ok: true, numberId: n.id, label, assignedUserId, route: routeOut(saved) });
+  }
+
+  // ── Call recording (migration 263) ─────────────────────────────────────────────────────
+  // The business OWNER only (role 'owner', on top of the gate's phone:'edit'): recording
+  // customers' calls is the business's own legal decision (decided 2026-10-04). An admin and an
+  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid,
+  // and refuses turning the announcement off. Who changed it and when are stamped on the row,
+  // for any later question about consent. Nothing records until the phone-api Worker's
+  // CALL_RECORDING rail is on too.
+  if (action === "phone_recording_save") {
+    if (role !== "owner") return json({ error: "Only the business owner can change call recording." }, 403);
+    const parsed = parseRecording((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { data, error } = await admin.from("client_settings")
+      .update({ ...parsed.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: userId })
+      .eq("client_id", clientId)
+      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
+    if (error) {
+      return phoneNotReady(error) ? phoneUnavailable("Call recording isn't set up on this server yet.") : dbFail(req, clientId, "save call recording", error);
+    }
+    if (!data || !data.length) {
+      return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
+    }
+    audit(parsed.row.phone_record_calls ? "phone_recording_on" : "phone_recording_off", 1,
+      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"}`).catch(() => {});
+    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k))) });
+  }
+
+  // THE SWITCH, and what it does to the number (phoneNumber.ts switchCalling). ON is behind the
+  // rollout until builder launch (review SSB-1); OFF never is. OFF also moves a connected number
+  // to voicemail (review SSB-2) — the Worker hangs up on a tenant that is off without writing
+  // anything — and ON puts back a number the switch moved. Calling it OFF while already off
+  // retries a move that failed, which is what the Phone tab's "Send calls to voicemail" does.
+  if (action === "phone_status_set") {
+    if (typeof payload?.on !== "boolean") return json({ error: "Say whether calling should be on or off." }, 400);
+    const on = payload.on === true;
+    if (on) {
+      const refused = await phoneRolloutGate();
+      if (refused) return refused;
+    }
+    const out = await switchCalling(on, {
+      writeStatus: async (v) => {
+        const { data, error } = await admin.from("client_settings")
+          .update({ phone_status: v ? "on" : "off" }).eq("client_id", clientId).select("phone_status");
+        if (error) return { ok: false, error };
+        // An update that matched nothing is not a success: the switch would read "on" in the
+        // browser and "off" everywhere that matters.
+        return data && data.length ? { ok: true } : { ok: false, noRow: true };
+      },
+      // Every live number follows the switch (migration 266), not only the first.
+      readNumbers: async () => {
+        const numRes = await phoneNumberRows();
+        return numRes.error ? { error: numRes.error } : { rows: (numRes.data ?? []) as SwitchNumber[] };
+      },
+      toVoicemail: (n) => numberToVoicemail(n),
+      connect: async (n) => (await connectNumberForCalls(n)).ok,
+    });
+    if (!out.ok) {
+      if ("noRow" in out) {
+        return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
+      }
+      return phoneNotReady(out.error) ? phoneUnavailable() : dbFail(req, clientId, on ? "switch calling on" : "switch calling off", out.error);
+    }
+    audit(on ? "phone_status_on" : "phone_status_off", 1, out.numbers.length ? `voiceReady=${out.numbers.map((x) => x.voiceReady).join(",")}` : null).catch(() => {});
+    return json({ ok: true, phoneStatus: out.phoneStatus, number: out.number, numbers: out.numbers, ...(out.warning ? { warning: out.warning } : {}) });
+  }
+
+  // ── "Sign out all devices" for one person ──────────────────────────────────────────────
+  // Plan section 14: a lost phone, or someone leaving. Bumping phone_user_settings'
+  // device_generation retires every Twilio identity they hold at once — the Worker refuses an
+  // identity whose g number is older than the current one on /token and /voice/outbound, and
+  // the route stops ringing it. A compare-and-swap on the old value, so two owners pressing it
+  // together bump it twice rather than both writing the same number.
+  //
+  // ⚠️ THE OTHER HALF IS ENDING THEIR SUPABASE SIGN-INS, so a lost phone cannot simply fetch a
+  // fresh token on the new generation. supabase-js has no admin "sign out user X" (its
+  // auth.admin.signOut needs THAT user's own JWT), so migration 254 PART 6B adds a service-role
+  // SQL function, phone_end_user_sessions, that deletes their auth.sessions rows (refresh tokens
+  // cascade). That signs them out of Structure Studio EVERYWHERE, which is the point for a lost
+  // phone and is what the confirm on the Phone tab says. Reported back as `sessionsEnded`; on a
+  // database without 254's function the answer is false and the screen says so plainly rather
+  // than claiming more. Their push tokens are forgotten too, as the Worker's own
+  // /devices/signout-all does, so text alerts stop reaching the lost phone.
+  if (action === "phone_signout_user") {
+    const target = String(payload?.userId ?? "").toLowerCase();
+    if (!isUuid(target)) return json({ error: "Which person?" }, 400);
+    const { data: member, error: mErr } = await admin.from("client_users")
+      .select("user_id, full_name, role").eq("client_id", clientId).eq("user_id", target).maybeSingle();
+    if (mErr) return dbFail(req, clientId, "find that team member", mErr);
+    if (!member) return json({ error: "That person isn't on your team." }, 404);
+    // Who may do this to whom, and whether it may end their Structure Studio sign-ins as well
+    // (phone.ts signoutPlan): an admin never signs out the owner; a CSM Synergy operator's team
+    // row gets its My Synergy Phone devices retired but its sessions kept unless the caller is an
+    // operator too (review SSB-9) — those sessions cover every tenant they support.
+    const [callerOp, targetOp] = await Promise.all([
+      callerIsOperator(),
+      admin.from("app_operators").select("user_id").eq("user_id", target).maybeSingle()
+        .then(({ data, error }: { data: unknown; error: unknown }) => ({ is: !!data, error }), (error: unknown) => ({ is: false, error })),
+    ]);
+    // Fail closed: if we cannot tell whether they are an operator, their sessions are not ended.
+    const plan = signoutPlan({
+      targetRole: (member as { role?: string }).role ?? null, callerRole: role,
+      callerIsOperator: callerOp, targetIsOperator: targetOp.is || !!targetOp.error,
+    });
+    if (!plan.ok) return json({ error: plan.error }, plan.status);
+
+    const now = new Date().toISOString();
+    const bumped = await bumpDeviceGeneration({
+      read: async () => {
+        const { data, error } = await admin.from("phone_user_settings")
+          .select("device_generation").eq("user_id", target).maybeSingle();
+        return { gen: data ? (Number((data as { device_generation?: number }).device_generation) || 1) : null, error };
+      },
+      insert: async (gen) => {
+        const { error } = await admin.from("phone_user_settings")
+          .insert({ user_id: target, client_id: clientId, device_generation: gen, updated_at: now });
+        return { error };
+      },
+      update: async (from, to) => {
+        const { data, error } = await admin.from("phone_user_settings")
+          .update({ device_generation: to, client_id: clientId, updated_at: now })
+          .eq("user_id", target).eq("device_generation", from).select("device_generation");
+        return { swapped: !!(data && data.length), error };
+      },
+    });
+    if ("error" in bumped) {
+      return phoneNotReady(bumped.error) ? phoneUnavailable() : dbFail(req, clientId, "sign them out of My Synergy Phone", bumped.error);
+    }
+    if ("conflict" in bumped) {
+      return json({ error: "Their phone settings changed at the same moment. Press it again." }, 409);
+    }
+    const generation = bumped.generation;
+
+    let sessionsEnded = false;
+    let sessionCount: number | null = null;
+    if (plan.endSessions) {
+      const { data: ended, error: endErr } = await admin.rpc("phone_end_user_sessions", { p_user_id: target });
+      if (!endErr) {
+        sessionsEnded = true;
+        sessionCount = Number(ended ?? 0) || 0;
+      } else if (!["PGRST202", "42883"].includes(String(endErr.code))) {
+        // The function exists and failed: worth seeing. Missing is the state of a database
+        // without 254, and is not logged, or every press would file a row.
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: String(endErr.code ?? "phone_end_sessions_failed"),
+          message: `phone_end_user_sessions failed: ${endErr.message ?? "unknown"}`, severity: "info",
+        }).catch(() => {});
+      }
+    }
+    // Forget their registered devices (push tokens). Best-effort: the generation bump above is
+    // what retires the lines, and a failure here only leaves a device listed until it is seen.
+    await admin.from("phone_devices").delete().eq("client_id", clientId).eq("user_id", target)
+      .then(() => {}, () => {});
+    audit("phone_signout_user", 1, `user=${target} generation=${generation} sessions=${sessionsEnded ? sessionCount : "n/a"}`).catch(() => {});
+    return json({
+      ok: true, generation, sessionsEnded, sessionCount, name: (member as { full_name?: string | null }).full_name ?? null,
+      // A CSM Synergy operator's sign-ins were deliberately left alone (review SSB-9).
+      ...(plan.endSessions ? {} : { sessionsKept: "operator" }),
+    });
+  }
+
+  // ── "Save as contact" (My Synergy Phone) ────────────────────────────────────────────────
+  // Plan section 6: calls and texts from a number that matches no contact show as their own
+  // thread, and "Save as contact" creates the CRM contact (source "phone") and links that
+  // number's earlier calls and texts to it. The extension and the app call exactly this, with
+  // {name, phone: "<E.164>", source: "phone"}, and read `id` (or `contactId`) back.
+  //
+  // Gated like crm_save_contact (contacts:'edit', and the CRM subscription through the crm_
+  // prefix). The work is ONE database call, crm_create_contact (migration 254 PART 9B), so the
+  // new row and the re-link land together or not at all.
+  //
+  // OWNER: a caller limited to their own customers (contacts:'own') becomes the owner, or the
+  // contact they just saved would be somebody else's to assign; CONTACT_ROW_SCOPE lets them in
+  // on exactly that promise (`creates`). Everyone else leaves it unassigned, as a design
+  // submission does (crm_ensure_contact assigns nobody).
+  //
+  // RE-LINK SCOPE (review SSB-6) lives in the SQL, keyed on p_actor: a narrowed saver moves only
+  // the calls they were on and the texts they sent, and no call moves away from a teammate who
+  // could not see the new contact. `creates: true` is therefore safe: it lets them create the
+  // row, not take other people's history with it.
+  //
+  // Here, below the phone block's helpers, rather than beside crm_save_contact: it answers a
+  // database without 254 with phoneUnavailable, a const declared above.
+  if (action === "crm_create_contact") {
+    const parsed = parseCreateContact((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const me = String(userId ?? "").toLowerCase();
+    if (ownContacts && !isUuid(me)) return json({ error: "Sign in again to save a contact." }, 401);
+    const { data: made, error } = await admin.rpc("crm_create_contact", {
+      p_client_id: clientId,
+      p_name: parsed.name,
+      p_phone: parsed.phone,
+      p_owner: ownContacts ? me : null,
+      p_actor: isUuid(me) ? me : null,
+      p_source: "phone",
+    });
+    if (error) {
+      // The known refusals (a duplicate number is crm_save_contact's own sentence, from the one
+      // copy both share), mapped in phone.ts createContactRefusal so a test runs them.
+      const refusal = createContactRefusal(error);
+      if (!refusal) return dbFail(req, clientId, "save that contact", error);
+      return refusal.refusal ? phoneRefused(refusal.error, refusal.status) : json({ error: refusal.error }, refusal.status);
+    }
+    const out = (made ?? {}) as { id?: string; relinked?: { calls?: number; sms?: number } };
+    if (!out.id) return dbFail(req, clientId, "save that contact", { message: "crm_create_contact returned no id" });
+    audit("crm_create_contact", 1, `contact=${out.id} calls=${out.relinked?.calls ?? 0} sms=${out.relinked?.sms ?? 0} owner=${ownContacts ? "caller" : "none"}`).catch(() => {});
+    return json({ ok: true, id: out.id, contactId: out.id, relinked: { calls: out.relinked?.calls ?? 0, sms: out.relinked?.sms ?? 0 } });
+  }
+
+  // ── GoHighLevel contacts into the CRM (migration 282) ───────────────────────────────────
+  // Carolyn, 2026-09-28: "continue building out the CRM part of it as well, because I also want to
+  // use it for all of our leads in here." CSM Synergy's own GoHighLevel location's contacts come into
+  // its own CRM through public.crm_import_ghl_contacts, one page of 100 per call, every contact
+  // through crm_ensure_contact (the dedupe every design and lead already goes through). Contacts
+  // only: no texts, emails, calls or pipeline stages until Carolyn says which of those move.
+  // _shared/ghlContactImport.ts reads GoHighLevel (POST /contacts/search, nothing else) and decides
+  // when to stop; this branch is the gate, the key and the database.
+  //
+  // ⚠️ THREE GATES, ALL BEFORE GOHIGHLEVEL IS CALLED.
+  //   1. contacts:'edit' and the CRM subscription (GATES, the crm_ prefix) are the floor, and
+  //      CONTACT_ROW_SCOPE marks it tenantWide: a caller limited to their own customers is refused.
+  //   2. OPERATOR-ONLY, the caller-ID setup's rule (trustOperatorAllowed): an operator in view-as
+  //      with can_write, or an app_operators member with can_write on their own tenant; never a
+  //      support-only one. It reads a whole CRM location and writes hundreds of customer rows, and no
+  //      screen calls it.
+  //   3. OUR OWN ACCOUNT ONLY (client_settings.internal_account, _shared/internalTenant.ts; today
+  //      that is structure-studio alone). A builder's GoHighLevel contacts are theirs to move, and
+  //      nobody has asked to move them.
+  //
+  // A DRY RUN unless the body says `dryRun: false` (parseImportRequest): the database runs each page
+  // and rolls it back, and the answer is what the real run would do. A real run is audited BEFORE
+  // its first write (auditStrict: no record of who started it, no import). Either way it answers
+  // `cursor` when it stops early (time, GoHighLevel slowing us down); the next call sends it back
+  // and carries on from there, in the same mode: a real run refuses a dry run's cursor (400), or
+  // it would skip every page before it. Re-running is safe: every contact it brought in now matches.
+  //
+  // ⛔ THE REAL RUN WAITS on Carolyn saying which leads move AND on the portal's Contacts list
+  // showing contacts with no design or captured lead (LeadsTable in 02-sales.jsx reads only
+  // designs and captured_leads today). Before that ships, it runs only once Carolyn has been told
+  // plainly that imported leads are found through My Synergy Phone's search and caller ID, not the
+  // Contacts list; that they come in unassigned, so someone limited to their own customers sees
+  // none of them until they are assigned; and that GoHighLevel's tags are kept but not shown yet,
+  // and she still says go ahead.
+  //
+  // COUNTS ONLY. Nothing answered or logged carries a contact. GoHighLevel's error bodies are thrown
+  // away unread, and a database failure is logged by its code, never its message or detail (a
+  // Postgres detail can quote the row it refused).
+  if (action === "crm_import_ghl_contacts") {
+    if (!(await trustOperatorAllowed({ operator: operator ?? null, ownOperatorRow }))) {
+      return json({ error: "Importing contacts from GoHighLevel is done by Structure Studio staff." }, 403);
+    }
+    let internal: boolean;
+    try { internal = await isInternalTenant(admin, clientId); }
+    catch (e) { return dbFail(req, clientId, "check whose account this is", e); }
+    if (!internal) return json({ error: "The GoHighLevel contact import is only for Structure Studio's own account." }, 403);
+
+    const parsed = parseImportRequest((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+
+    const { data: creds, error: credErr } = await admin.from("client_settings")
+      .select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+    if (credErr) return dbFail(req, clientId, "read the GoHighLevel connection", credErr);
+    if (!creds?.ghl_location_id || !creds?.ghl_api_key) {
+      return json({ error: "This account isn't connected to GoHighLevel, so there are no contacts to import. Connect it under Settings → CRM Connection first." }, 409);
+    }
+    if (!parsed.dryRun) {
+      try { await auditStrict("crm_import_ghl_contacts_start", null, `dry_run=false resume=${parsed.cursor ? "yes" : "no"}`); }
+      catch (e) { return dbFail(req, clientId, "record who started the import", e); }
+    }
+
+    // 282 not applied yet: PostgREST's "no such function" (or Postgres's own). The first page stops
+    // the walk, nothing was written, and the answer says so rather than reporting a fault.
+    let notInstalled = false;
+    const { softMs, hardMs } = importDeadlines({ requestStartMs, workerBornMs: WORKER_BORN_MS });
+    const result = await runGhlContactImport({
+      locationId: String(creds.ghl_location_id),
+      apiKey: String(creds.ghl_api_key),
+      dryRun: parsed.dryRun,
+      cursor: parsed.cursor,
+      softMs,
+      hardMs,
+      importPage: async (rows: ImportRow[], dryRun: boolean): Promise<PageCounts> => {
+        const { data, error } = await admin.rpc("crm_import_ghl_contacts", { p_client_id: clientId, p_rows: rows, p_dry_run: dryRun });
+        if (error) {
+          const code = String((error as { code?: string }).code ?? "");
+          if (code === "PGRST202" || code === "42883") notInstalled = true;
+          throw error;
+        }
+        const d = (data ?? {}) as Record<string, unknown>;
+        const n = (k: string) => Number.isFinite(Number(d[k])) ? Number(d[k]) : 0;
+        return {
+          created: n("created"), matched: n("matched"), noIdentity: n("no_identity"), conflicts: n("conflicts"), labelled: n("labelled"),
+          optedOut: n("opted_out"), split: n("split"),
+        };
+      },
+    });
+
+    if (notInstalled) {
+      const r = json({ error: "The contact import isn't installed on this server yet." }, 503);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    }
+
+    const c = result.counts;
+    audit("crm_import_ghl_contacts", c.created,
+      `dry_run=${parsed.dryRun} stopped=${result.stopped} pages=${result.pages} fetched=${c.fetched} created=${c.created} `
+      + `matched=${c.matched} no_identity=${c.noIdentity} conflicts=${c.conflicts} labelled=${c.labelled} opted_out=${c.optedOut} `
+      + `split=${c.split} repeats=${c.repeats} sms_dnd=${c.smsDnd}`,
+    ).catch(() => {});
+
+    // A stop that is not "the end" or "out of time for this call" is GoHighLevel refusing or the
+    // database failing: one row here, by code and counts, and the wrapper does not file a second.
+    const STATUS: Record<ImportStop, number> = {
+      end: 200, time: 200, page_ceiling: 200, ghl_busy: 503, ghl_auth: 502, ghl_refused: 502, paging_stuck: 502, database: 500,
+    };
+    const status = STATUS[result.stopped];
+    const answer = json({
+      ok: status === 200,
+      dryRun: parsed.dryRun,
+      done: result.done,
+      stopped: result.stopped,
+      ghlStatus: result.ghlStatus,
+      cursor: result.cursor,
+      pages: result.pages,
+      total: result.total,
+      paging: result.paging,
+      counts: c,
+      message: importSummary(result, parsed.dryRun),
+      ...(status === 200 ? {} : { error: importSummary(result, parsed.dryRun) }),
+    }, status);
+    if (status === 200) return answer;
+    logEdgeError({
+      fn: "portal-settings", req, clientId, code: `ghl_import_${result.stopped}`,
+      severity: result.stopped === "database" ? "error" : "warn",
+      message: `The GoHighLevel contact import stopped early (${result.stopped}).`,
+      context: {
+        dryRun: parsed.dryRun, ghlStatus: result.ghlStatus, pages: result.pages, counts: c,
+        pgCode: (result.dbError as { code?: string } | undefined)?.code ?? null,
+      },
+    }).catch(() => {});
+    return filedHere(answer);
+  }
+
+  // ── Plan phase 6: a number for calls, self-serve ────────────────────────────────────────
+  // D6: one number per builder for calls AND texts, and calling never waits on text
+  // registration. So a builder with no number can get one here for calls straight away; it is
+  // an ordinary sms_numbers row, registration_status 'pending_registration' (165's word for
+  // "not registered for texting" — Twilio's own externalstatus vocabulary has no other) and
+  // messaging_service_sid NULL, which is what marks it calling-only. It is never attached to a
+  // messaging service here: texting adopts THIS row once its carrier registration clears
+  // (portal-sms buy_number, adoptNumber.ts: into the builder's Messaging Service, its SmsUrl
+  // cleared, no second number and no second hold), so the texting flow never buys another.
+  //
+  // ⚠️ ROLLOUT (review SSB-1): search, buy and connect are behind phoneRolloutGate, i.e. a CSM
+  // Synergy operator, until PHONE_SELF_SERVE=on. What used to hold that switch off is gone:
+  // portal-sms's buy_number now ADOPTS a calling-only number (portal-sms/adoptNumber.ts), so
+  // buying here no longer blocks the builder's texting; turning it on is the launch decision.
+  //
+  // MONEY: the purchase takes portal-sms's own wallet hold — meter sms_number_monthly, key
+  // numberHoldKey (portal-sms's `sms_num:<client>:<number>`) — for the first month, captured once
+  // the number is recorded and released if it is not (phoneNumber.ts buyCallingNumber). The
+  // meter's `active` flag is the arming rail exactly as it is for texting. Months 2 and on are
+  // charged by the phone-api Worker's daily cron (workers/phone-api/src/cron/numberFee.ts) on
+  // the same meter and the same switch, under its own per-month key.
+  //
+  // TEXTS (review SSB-3): the new number's own SmsUrl points at sms-inbound in the same Twilio
+  // update that sets its voice settings, so a customer who texts back the number they were
+  // called from lands in sms_messages under this tenant.
+  //
+  // client_settings.sms_number is NOT set: that column is the main texting number sendTenantSms
+  // sends from, and a calling-only number must not look like one. phone_caller_context picks a
+  // caller ID from the live rows regardless (migration 266: the person's own number first, then a
+  // team line).
+
+  // portal-sms's takeHold, with 248's `hold_replayed` answered as "already paid for this exact
+  // number" (a retry of a purchase whose hold was captured) rather than as a refusal.
+  const takeNumberHold = async (idem: string): Promise<HoldResult> => {
+    const { data: hold, error } = await admin
+      .rpc("wallet_hold", { p_client_id: clientId, p_kind: "sms_number_monthly", p_idem: idem, p_user: userId ?? null })
+      .maybeSingle() as { data: { err?: string | null; hold_id?: number | null; price_cents?: number; balance_after?: number } | null; error: { message?: string } | null };
+    if (error) {
+      // The meter is unreachable. REFUSE rather than spend real money at Twilio with no record
+      // that we ever meant to charge for it (portal-sms's rule).
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed",
+        message: `Wallet hold failed, refusing the number purchase: ${error.message ?? "unknown"}` }).catch(() => {});
+      return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now. Try again shortly." } };
+    }
+    const err = hold?.err ?? null;
+    if (err === "insufficient_funds") {
+      return { ok: false, status: 402, body: {
+        error: `This number costs $${((hold?.price_cents ?? 0) / 100).toFixed(2)} a month and your wallet has $${((hold?.balance_after ?? 0) / 100).toFixed(2)}. Add funds in Settings → Billing, then try again.`,
+        code: "insufficient_funds", priceCents: hold?.price_cents ?? null, balanceCents: hold?.balance_after ?? null,
+      } };
+    }
+    if (err === "hold_in_flight") {
+      return { ok: false, status: 409, body: { error: "A charge for this account is already being processed. Give it a moment." } };
+    }
+    if (err === "meter_unknown") {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_meter_missing", message: "usage_prices has no sms_number_monthly row" }).catch(() => {});
+      return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now. Try again shortly." } };
+    }
+    // No error, `meter_inactive` (the arming rail) or `hold_replayed` (paid already): proceed.
+    return { ok: true, holdId: err ? null : (hold?.hold_id ?? null) };
+  };
+
+  if (action === "phone_search_numbers") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 })
+      .catch((e: unknown) => ({ failed: e }));
+    if (!Array.isArray(results)) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_search_failed",
+        message: `Twilio number search failed: ${(results.failed as Error)?.message ?? "unknown"}`, severity: "info" }).catch(() => {});
+      return filedHere(json({ error: "Couldn't look up numbers just now. Try again in a minute." }, 502));
+    }
+    return json({ ok: true, numbers: results.map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
+  }
+
+  if (action === "phone_enable_number") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // Which number (migration 266): payload.numberId, or the first.
+    const picked = pickNumber(numRes.data ?? [], payload?.numberId);
+    if (!picked.ok) return json({ error: picked.error }, 409);
+    // deno-lint-ignore no-explicit-any
+    const n: any = picked.n;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    // Same rule the purchase follows: a number points at the Worker only while calling is on
+    // for the tenant, because the Worker answers "not in service" for a tenant that is off.
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
+    if ((cs as { phone_status?: string } | null)?.phone_status !== "on") {
+      return json({ error: "Turn calling on first, then connect the number." }, 409);
+    }
+    const done = await connectNumberForCalls(n);
+    if (!done.ok) return done.res;
+    audit("phone_enable_number", 1, `number=${n.id}`).catch(() => {});
+    return json({ ok: true, number: { id: n.id, e164: n.phone_number, voiceReady: true } });
+  }
+
+  if (action === "phone_buy_number") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    if (!mayBuyPhoneNumber()) {
+      return json({ error: operator && !operator.canBill
+        ? "This operator account cannot change billing."
+        : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
+    }
+    if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // Everything the new number needs, BEFORE any money moves: somewhere for its texts to go
+    // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
+    // on, the voicemail Bin when it is off).
+    const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
+    const ve = voiceEnv((k) => Deno.env.get(k));
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!smsUrl || !ve.ok || !creds) {
+      const missing = [!smsUrl ? "SMS_INBOUND_SECRET" : null, ...(ve.ok ? [] : ve.missing), !creds ? "Twilio credentials" : null].filter(Boolean);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_env_missing", severity: "info",
+        message: `Buying a number for calls needs ${missing.join(", ")}` }).catch(() => {});
+      return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    }
+    const wanted = pickedNumber(payload?.phoneNumber);
+    if (!wanted) return json({ error: "Choose a number from the search results." }, 400);
+
+    // UP TO MAX_NUMBERS LIVE NUMBERS PER TENANT (migration 266: per-person numbers lift plan D6's
+    // one). A read-then-act count, the same caveat portal-sms's buy_number states: two presses at
+    // once can both pass it, and nothing in the schema enforces the cap. The same read hands the
+    // purchase the numbers the tenant already has, which its reconciliation must never adopt
+    // (phoneNumber.ts pickOrphan).
+    const live = await phoneNumberRows();
+    if (live.error) return dbFail(req, clientId, "check your numbers", live.error);
+    const liveRows = live.data ?? [];
+    // ⚠️ ONE NUMBER ON A DATABASE BEFORE 266 (`perNumber` false), the old refusal word for word.
+    // There, phone_caller_context still takes the NEWEST number as everyone's caller ID and sends
+    // the apps no `numbers`, so a second number would silently change every teammate's caller ID
+    // and make transfers from the first ring as customers.
+    if (!live.perNumber && liveRows.length >= 1) {
+      return json({ error: "This account already has a number. Connect it for calls instead of buying another." }, 409);
+    }
+    if (liveRows.length >= MAX_NUMBERS) {
+      return json({ error: `This account has ${MAX_NUMBERS} numbers, the most one account can have. Contact Structure Studio if you need more.` }, 409);
+    }
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
+    const phoneOn = (cs as { phone_status?: string } | null)?.phone_status === "on";
+
+    const out = await buyCallingNumber({ clientId, wanted, recorded: liveRows.map((r) => String(r.phone_number)) }, {
+      findPurchasedNumbers, purchaseNumber, releaseNumber,
+      hold: takeNumberHold,
+      capture: async (holdId, b) => {
+        const { error } = await admin.rpc("wallet_capture", {
+          p_hold_id: holdId, p_cost_cents: null, p_usage: { phone_number: b.phoneNumber, calling_only: true }, p_ref_id: b.sid,
+        });
+        if (error) {
+          logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_capture_failed",
+            message: `Hold ${holdId} not captured after a number purchase: ${error.message ?? "unknown"}` }).catch(() => {});
+        }
+      },
+      releaseHold: async (holdId, reason) => {
+        const { error } = await admin.rpc("wallet_release", { p_hold_id: holdId, p_reason: reason });
+        if (error) {
+          logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_release_failed",
+            message: `Could not release hold ${holdId}: ${error.message ?? "unknown"}` }).catch(() => {});
+        }
+      },
+      record: async (b) => {
+        const { data, error } = await admin.from("sms_numbers")
+          .insert(callingOnlyNumberRow(clientId, b))
+          .select("id, phone_number, twilio_sid").single();
+        return error || !data ? { ok: false, error: error ?? { message: "no row returned" } } : { ok: true, row: data };
+      },
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json(out.body, out.status);
+      if (out.kind === "lookup_failed") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_reconcile_failed", severity: "error",
+          message: `Listing this tenant's numbers before a purchase failed: ${(out.error as Error)?.message ?? "unknown"}` }).catch(() => {});
+        return filedHere(json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502));
+      }
+      if (out.kind === "purchase_failed") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_purchase_failed",
+          message: `Buying ${wanted} failed: ${(out.error as Error)?.message ?? "unknown"}`, severity: "error" }).catch(() => {});
+        return filedHere(json({ error: "That number couldn't be bought. It may have just been taken. Search again and pick another." }, 502));
+      }
+      // Bought (or adopted) and not recorded. A fresh purchase was released at Twilio and its hold
+      // let go; if the release failed too, the number is still ours under FriendlyName=client_id
+      // and the next press adopts it instead of buying another (buyCallingNumber).
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_record_failed", severity: "error",
+        message: `${out.bought.phoneNumber} was bought but its sms_numbers row failed; released at Twilio: ${out.releasedAtTwilio}`,
+        context: { sid: out.bought.sid, error: (out.error as { code?: string } | null)?.code ?? null } }).catch(() => {});
+      return filedHere(json({ error: "Your number couldn't be saved just now, so nothing was kept. Try again in a minute." }, 500));
+    }
+    const { row, bought } = out;
+    audit("phone_buy_number", 1, `number=${bought.phoneNumber} reconciled=${out.reconciled}${out.adoptedInstead ? " adopted_instead_of=" + wanted : ""}`).catch(() => {});
+    const bought1 = { id: String(row.id), e164: String(row.phone_number) };
+    // An earlier press had already bought a number that was never recorded; that one was kept
+    // and nothing new was rented. Said, so the builder is not surprised by a different number.
+    const note = out.adoptedInstead
+      ? { note: `An earlier try had already got ${bought.phoneNumber} for this account, so that number was kept instead of buying another.` }
+      : {};
+
+    // TEXTING (migration 266): a builder whose texting is already on gets the new number into
+    // that setup straight away, so it can text once its own carrier registration clears; until
+    // then nothing sends from it (smsSend checks registration_status). The main texting number
+    // (client_settings.sms_number) is not changed. A builder whose texting isn't on yet keeps the
+    // number calling-only, as before: texting adopts the oldest calling-only number when it
+    // clears (portal-sms buy_number), and phone_number_texting brings in the others. A join that
+    // doesn't finish leaves a calling-only number that takes calls; it is said, and retryable.
+    const serviceSid = await textingServiceSid();
+    let joined = false;
+    let textingWarning: string | null = null;
+    if (serviceSid) {
+      const att = await attachToTexting({ serviceSid, numberSid: bought.sid }, textingDeps(String(row.id)));
+      joined = att.ok;
+      if (!att.ok) {
+        textingWarning = TEXTING_JOIN_FAILED;
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
+          message: `A new number did not join the texting setup (stopped at ${att.step}): ${(att.error as { message?: string } | null)?.message ?? "unknown"}`,
+          context: { number_id: row.id, step: att.step, twilio_code: (att.error as { code?: number } | null)?.code ?? null } }).catch(() => {});
+      }
+    }
+    const textingOut = { callingOnly: !joined, ...(serviceSid ? { texting: joined ? "joined" : "failed" } : {}) };
+    const warn = (w: string) => ({ warning: [w, textingWarning].filter(Boolean).join(" ") });
+
+    // The number's settings, in ONE Twilio update: texts to sms-inbound (the number's own SmsUrl,
+    // only while it is calling-only: one in the Messaging Service takes the service's); calls to
+    // the Worker while calling is on (recorded as voice_enabled by connectNumberForCalls),
+    // otherwise to the voicemail Bin, so a customer who calls it before calling is on can still
+    // leave a message.
+    if (phoneOn) {
+      const done = await connectNumberForCalls({ ...row, messaging_service_sid: joined ? serviceSid : null });
+      if (!done.ok) {
+        // The number is bought and recorded either way; say what is left instead of failing a
+        // purchase that succeeded.
+        return json({ ok: true, number: { ...bought1, voiceReady: false, ...textingOut }, ...note,
+          ...warn("Your number is ready, but connecting it for calls didn't finish. Press \"Connect this number for calls\" to try again.") });
+      }
+      return json({ ok: true, number: { ...bought1, voiceReady: true, ...textingOut }, ...note, ...(textingWarning ? warn("Your number is ready.") : {}) });
+    }
+    const applied = await applyNumberVoice({
+      creds, numberSid: bought.sid, config: { ...numberVoicemailConfig(ve.env), ...(joined ? {} : numberSmsConfig(smsUrl)) },
+    });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_webhooks_failed", severity: "error",
+        message: `A new number's ${joined ? "voicemail settings" : "text and voicemail settings"} did not apply (HTTP ${applied.status}, code ${applied.code})${joined ? "" : "; its texts are not reaching sms-inbound"}`,
+        context: { number_id: row.id } }).catch(() => {});
+      return json({ ok: true, number: { ...bought1, voiceReady: false, ...textingOut }, ...note,
+        ...warn(joined
+          ? "Your number is ready, but its callers can't leave a voicemail yet. Turn calling on and press \"Connect this number for calls\" to finish, or contact Structure Studio."
+          : "Your number is ready, but it isn't set up to receive texts yet. Turn calling on and press \"Connect this number for calls\" to finish, or contact Structure Studio.") });
+    }
+    return json({ ok: true, number: { ...bought1, voiceReady: false, ...textingOut }, ...note, ...(textingWarning ? warn("Your number is ready.") : {}) });
+  }
+
+  // ── Migration 266: a calling-only number joins texting ────────────────────────────────────
+  // "Use this number for texting too" on the Phone tab, for a number that is calling-only while
+  // the builder's texting is on: a later number whose join at purchase did not finish, or one
+  // bought before texting cleared (texting adopts only one, buyPlan's). attachToTexting's steps, each
+  // safe to repeat. Spends nothing; the number texts once its own carrier registration clears.
+  //
+  // ⚠️ THE TEXTING-SETUP AUTHORITY TOO, not only phone:edit. This puts a number into the
+  // business's own carrier registration, which every change on the Text Messaging tab keeps to
+  // settings_billing:'edit' (portal-sms), and the purchase's own join is behind the same check
+  // (mayBuyPhoneNumber). phone_settings_get says who may (`canJoinTexting`).
+  if (action === "phone_number_texting") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    if (!mayBuyPhoneNumber()) {
+      return json({ error: operator && !operator.canBill
+        ? "This operator account cannot change billing."
+        : "Adding a number to your texting is for the account owner, or someone they've given Billing access." }, 403);
+    }
+    if (!trustHubConfigured()) return phoneUnavailable("Texting setup isn't available on this server yet.");
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    const picked = pickNumber(numRes.data ?? [], payload?.numberId);
+    if (!picked.ok) return json({ error: picked.error }, 409);
+    // deno-lint-ignore no-explicit-any
+    const n: any = picked.n;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    if (n.messaging_service_sid) return json({ ok: true, number: { id: n.id, callingOnly: false }, already: true });
+    const serviceSid = await textingServiceSid();
+    if (!serviceSid) {
+      return json({ error: "Texting isn't on for this account yet. Finish the Text Messaging tab first; your main number is used for texting when the carriers approve it." }, 409);
+    }
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!creds) return phoneUnavailable("Texting setup isn't available on this server yet.");
+    const sidRes = await numberSidOf(n, creds);
+    if (!sidRes.ok) return sidRes.res;
+    const att = await attachToTexting({ serviceSid, numberSid: sidRes.sid }, textingDeps(String(n.id)));
+    if (!att.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
+        message: `A number did not join the texting setup (stopped at ${att.step}): ${(att.error as { message?: string } | null)?.message ?? "unknown"}`,
+        context: { number_id: n.id, step: att.step, twilio_code: (att.error as { code?: number } | null)?.code ?? null } }).catch(() => {});
+      return filedHere(json({ error: "Couldn't add this number to your texting setup just now. Try again in a minute." }, 502));
+    }
+    audit("phone_number_texting", 1, `number=${n.id} attached=${att.attached}`).catch(() => {});
+    return json({ ok: true, number: { id: n.id, callingOnly: false } });
+  }
+
+  // ── Plan phase 6: caller-ID trust (plan §14, "Caller ID reputation") ───────────────────────
+  // SHAKEN/STIR: Twilio signs the builder's calls at level A only when the number is on BOTH an
+  // approved business profile and an approved SHAKEN/STIR Trust Product; the texting setup made
+  // the profile but never put the number on it. Voice Integrity: registers the number with the
+  // carriers' spam engines, which is what fights "Spam Likely". Both are built on the tenant's
+  // Secondary Customer Profile (sms_registrations.customer_profile_sid), or for an INTERNAL
+  // tenant with none, the platform's primary profile (phoneTrust.ts trustProfileFor).
+  //
+  // ⚠️ OPERATOR-ONLY, NEVER AUTOMATIC (phoneOperatorGate, before anything else). Each press
+  // submits the builder's legal identity for a Twilio review; Voice Integrity's price is to be
+  // checked before builder launch (plan §17). Nothing here spends the builder's wallet.
+  //
+  // Twilio flow: _shared/twilioTrustHub.ts setupVoiceTrust (idempotent: every assignment is
+  // listed before it is made, the Trust Product is found by FriendlyName before one is created,
+  // and one already under review is never resubmitted; a Voice Integrity resubmit carries the
+  // corrected answers onto its EndUser). Order and refusals: phoneTrust.ts runTrustSetup (one run
+  // per number at a time; the profile must be twilio-approved; the Trust Product SID is written
+  // the moment it exists). Recorded on sms_numbers (migration 255, the lock included).
+  const trustWrite = (numberId: string) => async (patch: Record<string, unknown>) => {
+    const { error } = await admin.from("sms_numbers").update(patch).eq("id", numberId).eq("client_id", clientId);
+    return error ? { ok: false as const, error } : { ok: true as const };
+  };
+
+  if (action === "phone_trust_setup") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    const kind = parseTrustProduct(payload?.product);
+    if (!kind) return json({ error: "Choose SHAKEN/STIR or Voice Integrity." }, 400);
+    let info: VoiceIntegrityInfo | null = null;
+    if (kind === "voice_integrity" && payload?.voiceIntegrity != null) {
+      const parsed = parseVoiceIntegrityInfo(payload.voiceIntegrity);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      info = parsed.info;
+    }
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!trustHubConfigured() || !creds) return phoneUnavailable("Caller ID registration isn't available on this server yet.");
+
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // Which number (migration 266): payload.numberId, or the first. Caller ID is per number.
+    const picked = pickNumber(numRes.data ?? [], payload?.numberId);
+    if (!picked.ok) return json({ error: picked.error }, 409);
+    // deno-lint-ignore no-explicit-any
+    const n: any = picked.n;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    const tr = await trustRowOf(n.id);
+    if (tr.error) {
+      return phoneNotReady(tr.error)
+        ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+        : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
+    }
+    const trustRow = (tr.data ?? {}) as TrustRow;
+    const sidRes = await numberSidOf(n, creds);
+    if (!sidRes.ok) return sidRes.res;
+
+    const { data: reg, error: regErr } = await admin.from("sms_registrations")
+      .select("customer_profile_sid").eq("client_id", clientId).maybeSingle();
+    if (regErr) return dbFail(req, clientId, "load your texting registration", regErr);
+    let internal = false;
+    try { internal = await isInternalTenant(admin, clientId); } catch (e) {
+      return dbFail(req, clientId, "check this account", { message: (e as Error)?.message ?? "unknown" });
+    }
+    const primaryProfileSid = Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? null;
+    // Internal tenants only: a number already on the platform's primary profile stays there (a
+    // number sits on ONE business profile). FAIL CLOSED (review BE-4): a failed read is a 502
+    // and nothing is sent, never a guess that it is not there (phoneTrust.ts chooseTrustProfile).
+    const prof = await chooseTrustProfile({
+      secondaryProfileSid: (reg as { customer_profile_sid?: string | null } | null)?.customer_profile_sid ?? null,
+      internal,
+      primaryProfileSid,
+      numberSid: sidRes.sid,
+    }, { numberOnProfile: (p, num) => numberOnProfile(p, num) });
+    if (!prof.ok) {
+      if (prof.kind === "refused") return json({ error: prof.error }, prof.status);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
+        message: `${kind}: ${prof.detail}`, context: { number_id: n.id, twilio_code: prof.code, profile: "primary_check" } }).catch(() => {});
+      return filedHere(json({ error: prof.error, code: prof.code || null }, prof.status));
+    }
+
+    // ONE RUN AT A TIME PER NUMBER (review BE-2): the claim is one conditional UPDATE (the lock is
+    // taken only where it is empty or expired, and a row coming back is the claim), the pattern
+    // portal-sms's `advance` uses on advance_lock_until. Released by runTrustSetup however the run
+    // ends, and only if it is still this run's.
+    const lockUntil = new Date(Date.now() + TRUST_LOCK_MS).toISOString();
+    const out = await runTrustSetup({
+      kind, clientId, numberSid: sidRes.sid, profileSid: prof.profileSid,
+      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info,
+    }, {
+      lock: {
+        claim: async () => {
+          const { data, error } = await admin.from("sms_numbers").update({ caller_id_lock_until: lockUntil })
+            .eq("id", n.id).eq("client_id", clientId)
+            .or(`caller_id_lock_until.is.null,caller_id_lock_until.lt.${new Date().toISOString()}`)
+            .select("id");
+          if (error) return { ok: false as const, busy: false as const, error };
+          return (data ?? []).length ? { ok: true as const } : { ok: false as const, busy: true as const };
+        },
+        release: async () => {
+          await admin.from("sms_numbers").update({ caller_id_lock_until: null })
+            .eq("id", n.id).eq("client_id", clientId).eq("caller_id_lock_until", lockUntil);
+        },
+      },
+      fetchProfile: (sid) => fetchCustomerProfile(sid),
+      setup: (s) => setupVoiceTrust(s),
+      write: trustWrite(n.id),
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error }, out.status);
+      if (out.kind === "db") {
+        return phoneNotReady(out.error)
+          ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+          : dbFail(req, clientId, "record the caller ID registration", out.error);
+      }
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
+        message: `${kind}: ${out.detail}`, context: { number_id: n.id, twilio_code: out.code, profile: prof.which } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    const r0 = out.result;
+    audit("phone_trust_setup", 1,
+      `product=${kind} status=${r0.status ?? "unknown"} created=${r0.created} submitted=${r0.submitted} answers_updated=${r0.endUserUpdated} profile=${prof.which}`).catch(() => {});
+    return json({
+      ok: true, product: kind, status: r0.status, submitted: r0.submitted, created: r0.created, answersUpdated: r0.endUserUpdated, profile: prof.which,
+      callerId: callerIdView({ ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString() }),
+    });
+  }
+
+  if (action === "phone_trust_status") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    if (!trustHubConfigured() || !twilioCreds((k) => Deno.env.get(k))) {
+      return phoneUnavailable("Caller ID registration isn't available on this server yet.");
+    }
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // Which number (migration 266): payload.numberId, or the first. Caller ID is per number.
+    const picked = pickNumber(numRes.data ?? [], payload?.numberId);
+    if (!picked.ok) return json({ error: picked.error }, 409);
+    // deno-lint-ignore no-explicit-any
+    const n: any = picked.n;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    const tr = await trustRowOf(n.id);
+    if (tr.error) {
+      return phoneNotReady(tr.error)
+        ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+        : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
+    }
+    const out = await runTrustStatus((tr.data ?? {}) as TrustRow, {
+      fetchTrustProduct: (sid) => fetchTrustProduct(sid),
+      write: trustWrite(n.id),
+    });
+    if (!out.ok) {
+      if (out.kind === "db") return dbFail(req, clientId, "record the caller ID status", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_status_failed", severity: "info",
+        message: out.detail, context: { number_id: n.id, twilio_code: out.code } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    return json({ ok: true, callerId: out.view, errorCodes: out.errorCodes });
+  }
+
+  // ── The Calls report ────────────────────────────────────────────────────────────────────
+  // Carolyn, 08-27: "the reporting is inside Structure Studio ... so it's in one place", and
+  // "My most annoying thing about GHL is you can't see just your calls" — so MY is the default
+  // and TEAM needs the literal view/edit level (ownPhoneOnly), exactly like the apps' Team tab.
+  //
+  // ROW SCOPE. A caller limited to their own customers (contacts:'own') is narrowed here by
+  // hand, because this function is service-role and BYPASSRLS: a call or text about a customer
+  // they cannot see is left out of every number, the way it is left out of every list (plan
+  // section 7). See keepForOwnScope for the unknown-number rule.
+  if (action === "phone_calls_report") {
+    const wantTeam = payload?.scope === "team";
+    if (wantTeam && ownPhoneOnly(access)) {
+      return json({ error: "Your phone access covers your own calls. Ask an owner or admin if you need to see the team's." }, 403);
+    }
+    const rawDays = Number(payload?.days ?? 30);
+    const days = Number.isFinite(rawDays) ? Math.min(366, Math.max(1, Math.round(rawDays))) : 30;
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const me = String(userId ?? "").toLowerCase();
+
+    // PostgREST answers at most 1000 rows a request, so read in pages. A cap keeps one huge
+    // tenant from turning a report into a timeout; hitting it is reported, never hidden.
+    const PAGE = 1000, CAP = 20000;
+    // deno-lint-ignore no-explicit-any
+    const pageAll = async (build: (from: number, to: number) => any): Promise<{ rows: any[]; truncated: boolean; error: any }> => {
+      // deno-lint-ignore no-explicit-any
+      const rows: any[] = [];
+      for (let from = 0; from < CAP; from += PAGE) {
+        const { data, error } = await build(from, from + PAGE - 1);
+        if (error) return { rows, truncated: false, error };
+        const got = data ?? [];
+        rows.push(...got);
+        if (got.length < PAGE) return { rows, truncated: false, error: null };
+      }
+      return { rows, truncated: true, error: null };
+    };
+
+    const mineFilter = isUuid(me) ? `placed_by.eq.${me},answered_by.eq.${me},rang_user_ids.cs.{${me}}` : null;
+    if (!wantTeam && !mineFilter) return json({ error: "Sign in again to see your calls." }, 401);
+    const [callsOut, textsOut, vmOut, teamOut] = await Promise.all([
+      pageAll((from, to) => {
+        let q = admin.from("phone_calls")
+          .select("id, direction, status, placed_by, answered_by, rang_user_ids, duration_s, answered_at, contact_id")
+          .eq("client_id", clientId).gte("started_at", since);
+        if (!wantTeam) q = q.or(mineFilter!);
+        return q.order("started_at", { ascending: false }).order("id", { ascending: true }).range(from, to);
+      }),
+      pageAll((from, to) => admin.from("sms_messages")
+        .select("id, direction, sent_by, contact_id")
+        .eq("client_id", clientId).gte("created_at", since)
+        .order("created_at", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+      pageAll((from, to) => admin.from("phone_voicemails")
+        .select("call_id").eq("client_id", clientId).gte("created_at", since)
+        .order("call_id", { ascending: true }).range(from, to)),
+      phoneTeam(),
+    ]);
+    for (const r of [callsOut, vmOut]) {
+      if (r.error) return phoneNotReady(r.error) ? json({ ok: true, available: false, lines: [], totals: null }) : dbFail(req, clientId, "load your calls", r.error);
+    }
+    if (textsOut.error) return dbFail(req, clientId, "load your texts", textsOut.error);
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+
+    let calls = callsOut.rows as ReportCall[];
+    // Texts on "mine" are the caller's own sends plus inbound texts on customers assigned to
+    // them; the aggregation decides which is which, so both directions are read here.
+    let texts = textsOut.rows as (ReportText & { id: string })[];
+    const idsOf = (rows: { contact_id: string | null }[]) => rows.map((r) => r.contact_id).filter((v): v is string => !!v);
+
+    if (ownContacts) {
+      const vis = await visibleContactIds([...idsOf(calls), ...idsOf(texts)]);
+      if (!vis) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+      calls = calls.filter((c) => keepForOwnScope(c.contact_id, vis,
+        c.placed_by === me || c.answered_by === me || (c.rang_user_ids ?? []).includes(me)));
+      texts = texts.filter((t) => keepForOwnScope(t.contact_id, vis, t.sent_by === me));
+    }
+
+    // Who is each inbound text's customer assigned to? One read per 150 ids, so the URL stays
+    // well inside PostgREST's limit however many customers texted in.
+    const contactOwner = new Map<string, string | null>();
+    const inboundIds = [...new Set(idsOf(texts.filter((t) => t.direction === "in")))];
+    for (let i = 0; i < inboundIds.length; i += 150) {
+      const { data: owners, error: oErr } = await admin.from("crm_contacts")
+        .select("id, owner_user_id").eq("client_id", clientId).in("id", inboundIds.slice(i, i + 150));
+      if (oErr) return dbFail(req, clientId, "load who your customers are assigned to", oErr);
+      // deno-lint-ignore no-explicit-any
+      for (const o of (owners ?? []) as any[]) contactOwner.set(String(o.id), o.owner_user_id ? String(o.owner_user_id).toLowerCase() : null);
+    }
+
+    const nameBy = new Map(teamOut.team.map((t) => [t.userId, t.name] as [string, string | null]));
+    const people = wantTeam
+      ? teamOut.team.filter((t) => t.phoneLevel !== "none").map((t) => ({ userId: t.userId, name: t.name || "Unnamed team member" }))
+      : [{ userId: me, name: nameBy.get(me) || "You" }];
+    const report = buildCallsReport({
+      calls,
+      texts,
+      voicemailCallIds: new Set(vmOut.rows.map((v: { call_id: string }) => String(v.call_id))),
+      contactOwner,
+      people,
+      includeOthers: wantTeam,
+      nameOf: (uid) => nameBy.get(uid) || (nameBy.has(uid) ? "Unnamed team member" : "Former team member"),
+    });
+    return json({
+      ok: true, available: true, scope: wantTeam ? "team" : "mine", days, since,
+      lines: report.lines,
+      // On "mine" the totals ARE your line: the texts read above cover the whole business, and
+      // a total built from them would describe everyone's texting under your name.
+      totals: wantTeam ? report.totals : report.lines[0],
+      truncated: callsOut.truncated || textsOut.truncated || vmOut.truncated,
+      narrowed: ownContacts,
+    });
   }
 
   // ── QuickBooks Online ─────────────────────────────────────────────────────────────
@@ -8303,10 +10673,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (error) return dbFail(req, clientId, "load your QuickBooks connection", error);
 
     const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
-    const { count } = await admin
-      .from("qbo_item_map")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", clientId);
+    // Only the mappings for the company on file count (migration 265; the same rule as
+    // mapRowsForRealm, as a filter: `eq` never matches a NULL, so an unstamped row is not counted
+    // either). No company on file, no mappings.
+    // Beside it, how many invoices already went into a DIFFERENT company, one this account was
+    // connected to before a switch. They stay there and are never pushed again (the default chosen
+    // for the reconnect card's "what should happen to invoices that were already sent to the OLD
+    // one?"), and the connection card is where the owner hears it: Retry never offers them, since
+    // qbo_pending lists only invoices with no QuickBooks id. `neq` never matches a NULL, so an
+    // invoice nobody could place (pushed before 265 with no company on file) is not counted.
+    const realm: string | null = data?.qbo_realm_id ?? null;
+    const [{ count }, { count: elsewhere }] = realm
+      ? await Promise.all([
+        admin
+          .from("qbo_item_map")
+          .select("id", { count: "exact", head: true })
+          .eq("client_id", clientId)
+          .eq("realm_id", realm),
+        admin
+          .from("invoice_sends")
+          .select("short_code", { count: "exact", head: true })
+          .eq("client_id", clientId)
+          .not("qbo_invoice_id", "is", null)
+          .neq("qbo_realm_id", realm),
+      ])
+      : [{ count: 0 }, { count: 0 }];
 
     // Never tokens, never the full realm id. The company NAME is the human handle.
     return json({
@@ -8325,13 +10716,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // explanation for why their invoices quietly stopped syncing.
       disconnectReason: data?.qbo_connected_at ? null : (data?.qbo_disconnect_reason ?? null),
       mappedCount: count ?? 0,
+      otherCompanyInvoices: elsewhere ?? 0,
     });
   }
 
   if (action === "list_item_map") {
-    const [maps, styles, items, types] = await Promise.all([
+    const [maps, styles, items, types, cs] = await Promise.all([
       admin.from("qbo_item_map")
-        .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name")
+        .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name, realm_id")
         .eq("client_id", clientId),
       admin.from("building_styles")
         .select("id, label, active").eq("client_id", clientId).eq("active", true),
@@ -8350,8 +10742,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // The designer's built-in names, so the grid reads "Rough Opening" rather than the raw
       // `roughOpening` key. Same three-step fallback the `catalog` action above already uses.
       admin.from("layout_item_types").select("item_key, label"),
+      // Which company the mappings must belong to (migration 265). The disconnect tombstone counts,
+      // as in save_item_map: it is still the company those rows were picked from.
+      admin.from("client_settings").select("qbo_realm_id").eq("client_id", clientId).maybeSingle(),
     ]);
     if (maps.error) return dbFail(req, clientId, "load your QuickBooks mappings", maps.error);
+    if (cs.error) return dbFail(req, clientId, "load your QuickBooks connection", cs.error);
     // Checked, not `?? []`-swallowed: an empty layoutItems list is indistinguishable from a
     // tenant with none, which is exactly how the bug above stayed invisible. Same for styles —
     // a silent empty there hides every per-style building override.
@@ -8363,7 +10759,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     return json({
       clientId,
-      mappings: maps.data ?? [],
+      // Only this company's rows (the push reads the same set, so the grid shows exactly what an
+      // invoice will use). A row left from another company reads as "— not mapped —", which is
+      // also how the push treats it. realm_id itself is dropped: qbo_status masks the realm id,
+      // and this must not hand the browser the whole one beside it.
+      mappings: mapRowsForRealm(maps.data as any[] | null, cs.data?.qbo_realm_id ?? null)
+        .map(({ realm_id: _realm, ...m }: any) => m),
+      // Which company this grid was loaded against, as an opaque tag (qboRealm.ts). The page sends
+      // it back with save_item_map, which refuses the save if the company changed since.
+      companyTag: await companyTagOf(cs.data?.qbo_realm_id ?? null),
       styles: styles.data ?? [],
       layoutItems: (items.data ?? []).map((li: any) => ({
         item_key: li.item_key,
@@ -8389,15 +10793,42 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.
-    const [itemsRes, stylesRes, exRes] = await Promise.all([
+    const [itemsRes, stylesRes, exRes, csRes] = await Promise.all([
       admin.from("client_layout_items").select("item_key").eq("client_id", clientId).eq("active", true),
       admin.from("building_styles").select("id").eq("client_id", clientId),
       admin.from("qbo_item_map").select("id, line_kind, item_key, style_id").eq("client_id", clientId),
+      // The QuickBooks company these item ids come from (migration 265). The disconnect tombstone
+      // counts: a tenant who disconnected is still mapping against that company's items, and
+      // reconnecting it keeps them.
+      admin.from("client_settings").select("qbo_realm_id").eq("client_id", clientId).maybeSingle(),
     ]);
     if (exRes.error) return dbFail(req, clientId, "read your current QuickBooks mappings", exRes.error);
+    if (csRes.error) return dbFail(req, clientId, "read your QuickBooks connection", csRes.error);
+    const realmId: string | null = csRes.data?.qbo_realm_id ?? null;
+    // The item ids in `rows` were picked from the list the page loaded, but the stamp below is the
+    // company on file NOW. A page left open across a company switch (another tab, a teammate)
+    // would write the old company's ids stamped as the new one's, and the push would bill them.
+    // So the page hands back the tag list_item_map gave it, and a mismatch is refused whole,
+    // before anything is written, blank-id deletes included. A page built before the tag existed
+    // sends no tag at all and is let through as before.
+    if (Object.prototype.hasOwnProperty.call(payload, "companyTag")
+        && (payload.companyTag ?? null) !== await companyTagOf(realmId)) {
+      return json({ error: "Your QuickBooks company changed since this page loaded. Reload the page, then pick your items." }, 409);
+    }
+    // A mapping names an item in ONE company's books, so with no company on file there is nothing
+    // to stamp it with, and an unstamped row is one the push ignores (qboRealm.ts). Refused whole,
+    // before anything is written, rather than saved into a grid that can never use it. Clearing a
+    // mapping (a blank id) still goes through: removing a row needs no company.
+    if (!realmId && payload.rows.some((row: any) => String(row?.qboItemId ?? "").trim() !== "")) {
+      return json({ error: "Connect QuickBooks first, then pick your items." }, 409);
+    }
     const validKeys = new Set((itemsRes.data ?? []).map((i: any) => i.item_key));
     const validStyles = new Set((stylesRes.data ?? []).map((s: any) => s.id));
     const keyOf = (k: string, ik: string, sid: string | null) => `${k}|${ik}|${sid ?? ""}`;
+    // EVERY row of the tenant's, whatever company it names, on purpose. The unique indexes are per
+    // (tenant, kind, key[, style]) with no realm in them, so a row left from another company (a
+    // wipe in qbo-oauth-callback that failed) still holds its slot: saving that slot has to UPDATE
+    // it, which re-stamps it with this company, rather than INSERT beside it and hit the index.
     const idByKey = new Map<string, string>();
     for (const r of exRes.data ?? []) idByKey.set(keyOf(r.line_kind, r.item_key, r.style_id), r.id);
 
@@ -8425,12 +10856,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
         continue;
       }
+      // realm_id on both writes: the row names an item in THIS company (see the refusal above).
       const res = existingId
         ? await admin.from("qbo_item_map")
-            .update({ qbo_item_id: qboItemId, qbo_item_name: qboItemName, updated_at: new Date().toISOString() })
+            .update({ qbo_item_id: qboItemId, qbo_item_name: qboItemName, realm_id: realmId, updated_at: new Date().toISOString() })
             .eq("id", existingId)
         : await admin.from("qbo_item_map")
-            .insert({ client_id: clientId, line_kind: lineKind, item_key: itemKey, style_id: styleId, qbo_item_id: qboItemId, qbo_item_name: qboItemName });
+            .insert({ client_id: clientId, line_kind: lineKind, item_key: itemKey, style_id: styleId, qbo_item_id: qboItemId, qbo_item_name: qboItemName, realm_id: realmId });
       if (res.error) { skipped.push(`${lineKind}: ${res.error.message}`); continue; }
       saved++;
     }
@@ -8589,10 +11021,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // KEEP qbo_realm_id (tombstone) and KEEP qbo_item_map: reconnecting the SAME company
-    // must not lose mapping work — the callback only wipes the map when the realm CHANGES.
-    // Side effect of the tombstone + unique index: this company cannot be attached to a
-    // DIFFERENT tenant while the tombstone stands; moving a company between tenants means
-    // clearing qbo_realm_id here first. That friction is intentional.
+    // must not lose mapping work. Every mapping row is stamped with the company it names
+    // (migration 265), so the callback keeps exactly that company's rows on a reconnect and
+    // clears everything else when a different company is connected.
+    // The tombstone still holds this company under the unique index, but that no longer needs
+    // clearing by hand to move a company between tenants: since 084, connecting it from another
+    // tenant takes it over (qbo_displace_realm), and 265 means a map left behind by a takeover
+    // can never bill against the next company this tenant connects.
     const { error } = await admin.from("client_settings").update({
       qbo_access_token: null,
       qbo_access_token_expires_at: null,
@@ -8629,13 +11064,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
-    const { data: sends, error: sendsErr } = await admin
+    // Does the sending domain already have a DMARC record? The screen's advisory row says
+    // "publish p=none at _dmarc.<domain>", and following it where a record exists either adds a
+    // second one (then receivers ignore both) or replaces the builder's own policy with none
+    // (_shared/dmarcLookup.ts). Asked of public DNS, from the domain in the DKIM host Resend
+    // returned, never our stored string. It runs alongside the recent-sends read below, is
+    // capped at DMARC_LOOKUP_TIMEOUT_MS, never throws, and answers null when it can't be sure,
+    // which the screen reads as "say nothing about DMARC". No records yet, no lookup.
+    const dmarcDomain = dmarcDomainOf(s?.email_dns_records);
+    const existingDmarcP = dmarcDomain ? lookupExistingDmarc(dmarcDomain) : Promise.resolve(null);
+    // opened_at and complained_at are migration 262's (B4). Read with them, and once more without
+    // them on "no such column", so a deploy ahead of 262 still shows this screen instead of failing
+    // it whole — crmFeed's rule for body_text.
+    const readSends = (cols: string) => admin
       .from("email_sends")
-      .select("id, kind, to_email, status, error, bounce_reason, created_at")
+      .select(cols)
       .eq("client_id", clientId)
       .order("created_at", { ascending: false })
       .limit(10);
+    let { data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at, opened_at, complained_at");
+    if (sendsErr && ["42703", "PGRST204"].includes(String(sendsErr.code))) {
+      ({ data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at"));
+    }
     if (sendsErr) return dbFail(req, clientId, "load your recent emails", sendsErr);
+    const existingDmarc = await existingDmarcP;
     const domain = s?.email_domain ?? null;
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
@@ -8652,6 +11104,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // { present, policy, count, host } or null (no records yet, or DNS couldn't say). The
+      // screen shows its DMARC advisory row only for present: false at _dmarc.<the DKIM host's
+      // domain>, says "leave it as it is" for one record, and warns about two or more.
+      existingDmarc,
       // ── Receiving replies ────────────────────────────────────────────────────────────
       // One nested block rather than five loose keys, so the screen can render the whole
       // receiving card from a single object and a future provider swap changes one shape.
@@ -8670,46 +11126,113 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       recentSends: (sends ?? []).map((r: any) => ({
         id: r.id, kind: r.kind, to: r.to_email, status: r.status,
         error: r.error ?? null, bounceReason: r.bounce_reason ?? null, createdAt: r.created_at,
+        // When the customer first opened it (migration 262), or null. Approximate: see the
+        // Email Settings opens card.
+        openedAt: r.opened_at ?? null,
+        // When they marked it as spam (262), or null. Not a bounce: the email arrived.
+        complainedAt: r.complained_at ?? null,
       })),
     });
   }
 
-  // Per-tenant SUBJECT / INTRO copy for the document emails (migration 138).
+  // Per-tenant WORDING for the document emails (migration 138; widened 2026-10-04): subject,
+  // opening line, closing message, button text and the building-photo switch, per kind.
   //
   // ⚠️ COPY ONLY. The stored value is plain text with {token} placeholders — never HTML.
   // A free-HTML template authored by a tenant would be an injection surface pointed at a
   // customer's inbox, and would also let a wording edit silently break the quote link and
-  // the totals table, which are the parts of the email that actually do something.
-  // tenantCopy() in _shared/emailTemplates.ts re-validates on the way OUT as well, so a row
-  // written before this check existed still cannot inject.
+  // the totals table, which are the parts of the email that actually do something. The rules
+  // (which fields, how long, markup refused out loud) are cleanTemplateCopy's, in
+  // _shared/emailTemplates.ts beside tenantCopy(), which re-validates on the way OUT as well,
+  // so a row written before a rule existed still cannot inject.
+  //
+  // The answer echoes what was KEPT. The editor compares it with what it sent, so a field this
+  // build doesn't know (an older server, a newer screen) is reported, never shown as "Saved.".
   if (action === "email_save_template") {
-    const KINDS = ["estimate", "quote", "invoice"];
-    const raw = payload?.copy;
-    if (!raw || typeof raw !== "object") return json({ error: "Nothing to save." }, 400);
-    const clean: Record<string, { subject?: string; subjectLen?: number; intro?: string }> = {};
-    for (const kind of KINDS) {
-      const v = (raw as any)[kind];
-      if (!v || typeof v !== "object") continue;
-      const take = (x: unknown) => {
-        const t = typeof x === "string" ? x.replace(/\s+/g, " ").trim() : "";
-        if (!t) return "";
-        // Refuse LOUDLY rather than stripping: a builder who pasted markup needs to be told,
-        // not to have it silently vanish and wonder which half saved.
-        if (/[<>]/.test(t)) throw new Error(`Remove the < > characters from the ${kind} ${x === v.subject ? "subject" : "message"} — this is plain text, not HTML.`);
-        return t.slice(0, 300);
-      };
-      try {
-        const subject = take(v.subject), intro = take(v.intro);
-        if (subject || intro) clean[kind] = { ...(subject ? { subject } : {}), ...(intro ? { intro } : {}) };
-      } catch (e) {
-        return json({ error: e instanceof Error ? e.message : "That template could not be saved." }, 400);
-      }
-    }
+    const cleaned = cleanTemplateCopy(payload?.copy);
+    if ("error" in cleaned) return json({ error: cleaned.error }, 400);
+    const clean = cleaned.copy;
     const { error } = await admin.from("client_settings")
       .update({ email_template_copy: Object.keys(clean).length ? clean : null })
       .eq("client_id", clientId);
     if (error) return dbFail(req, clientId, "save that email wording", error);
     return json({ ok: true, copy: clean });
+  }
+
+  // ── The building photo on a quote email (2026-10-04) ──────────────────────────────
+  // A style's own photo, behind that style's own "Image on estimate" switch, and only an
+  // upload in this builder's own storage folder (tenantStylePhotoUrl): submit-estimate's rule
+  // for the photo on the estimate's building line, so the email and the quote agree about which
+  // picture is theirs. Catalogs copied from another account point at THAT account's folder and
+  // get no photo, exactly as their estimate lines get none. A failed read costs the photo,
+  // never the email.
+  // deno-lint-ignore no-explicit-any
+  const emailStyles = async (): Promise<any[]> => {
+    try {
+      const { data, error } = await admin.from("building_styles")
+        .select("key, label, image_url, show_image_on_estimate, active, sort_order")
+        .eq("client_id", clientId).order("sort_order", { ascending: true }).limit(500);
+      return error ? [] : (data ?? []);
+    } catch (_) {
+      return [];
+    }
+  };
+  // deno-lint-ignore no-explicit-any
+  const styleEmailPhoto = (row: any): string | null =>
+    row && row.show_image_on_estimate !== false
+      ? tenantStylePhotoUrl(row.image_url, Deno.env.get("SUPABASE_URL") ?? "", clientId)
+      : null;
+
+  // The wording screen's Preview. `copy` is ONE kind's wording as the boxes hold it, saved or
+  // not, held to the save's own rules (so a preview refuses markup with the save's sentence).
+  // It is drawn around the builder's real name, logo, phone, website and terms, a sample
+  // customer and document, and their first building style whose photo is switched on for
+  // quotes. Sends nothing, writes nothing. `photo` tells the screen why there is or isn't a
+  // picture: "shown", "off" (they unticked it), "not_own" (styles have a photo with "Image on
+  // estimate" ticked, but none of those photos is in this account's own folder: a catalog
+  // copied from another account, whose estimate lines get no photo either) or "none" (no
+  // active style has a photo ticked at all). Two different fixes, so two different sentences.
+  if (action === "email_preview_template") {
+    const kind = String(payload?.kind ?? "");
+    if (!(TEMPLATE_KINDS as readonly string[]).includes(kind)) return json({ error: "Pick Estimate, Quote or Invoice to preview." }, 400);
+    const k = kind as typeof TEMPLATE_KINDS[number];
+    const cleaned = cleanTemplateCopy({ [k]: payload?.copy ?? {} });
+    if ("error" in cleaned) return json({ error: cleaned.error }, 400);
+    const copy = cleaned.copy[k] ?? {};
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("business_name, business_logo_url, business_phone, business_website, quote_terms, invoice_in_ghl")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your business details for the preview", csErr);
+    let pictureUrl: string | null = null;
+    let styleLabel: string | null = null;
+    let photo: "shown" | "off" | "not_own" | "none" | null = null;
+    if (k !== "invoice") {
+      if (copy.picture === false) {
+        photo = "off";
+      } else {
+        const ticked = (await emailStyles()).filter((r) =>
+          r.active !== false && r.show_image_on_estimate !== false && typeof r.image_url === "string" && r.image_url.trim());
+        const row = ticked.find((r) => styleEmailPhoto(r));
+        pictureUrl = row ? styleEmailPhoto(row) : null;
+        styleLabel = row?.label ? String(row.label) : null;
+        photo = pictureUrl ? "shown" : ticked.length ? "not_own" : "none";
+      }
+    }
+    const content = templatePreviewEmail({
+      kind: k,
+      copy,
+      businessName: String(cs?.business_name ?? "").trim() || clientId,
+      logoUrl: cs?.business_logo_url || null,
+      phone: cs?.business_phone || null,
+      website: cs?.business_website || null,
+      quoteTerms: cs?.quote_terms || null,
+      pictureUrl,
+      styleLabel,
+      // StructureStudio invoicing (invoice_in_ghl = false) sends the sign-on-the-quote-page
+      // invoice; the CRM path sends the hosted one. Preview the one this builder's customers get.
+      invoiceToSign: cs?.invoice_in_ghl === false,
+    });
+    return json({ ok: true, clientId, kind: k, subject: content.subject, html: content.html, photo });
   }
 
   if (action === "email_connect_domain") {
@@ -8836,7 +11359,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let d: RsDomain;
     try {
-      d = await rsVerifyDomain(String(cur.resend_domain_id));
+      // READ FIRST, and ask Resend to re-check only a domain that isn't verified yet. The verify
+      // POST restarts Resend's check and parks the domain at "pending" for minutes while it
+      // re-crawls, and rsVerifyDomain reads the status straight after it — so this button could
+      // never record a domain whose records were already in place: every press re-parked it and
+      // read "pending" back (seen live on structure-studio / csmsynergy.com, 2026-10-02: Resend
+      // said verified, one press flipped it to pending for ~3 minutes, and the card said
+      // "Not verified yet"). A domain still waiting on DNS gets the POST as before.
+      const id = String(cur.resend_domain_id);
+      const now = await rsGetDomain(id);
+      d = rsDomainVerified(now) ? now : await rsVerifyDomain(id);
     } catch (e) {
       // Park an authored note on the card (the UI's failed/pending panel renders
       // lastError) — never provider text. Best-effort: the response already says it.
@@ -8851,7 +11383,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // path into customer-visible headers). A check that simply finds the records absent
     // is NOT an error — the per-record flags refresh and the status stays pending.
     const verified = rsDomainVerified(d);
-    const dnsRecords = dnsRecordsOf(d);
+
+    // ── OPEN TRACKING (B4) — switched on the moment the domain is verified ──────────────
+    // Carolyn, 2026-10-01: a prospective client "asked to be able to see if an email is read or
+    // not". Resend counts opens only once the domain's tracking subdomain has its own CNAME in DNS
+    // (resend.ts rsEnableOpenTracking), so switching it on here hands the builder that one record
+    // with the others; the Email Settings opens card shows it, and email_tracking_check checks it.
+    //
+    // ⚠️ THE VERDICT ABOVE IS TAKEN FROM THE READ BEFORE THIS, and must stay that way. Whether a
+    // pending tracking CNAME moves Resend's domain-level status is not documented; taking the
+    // verdict afterwards could store "pending" for a domain that sends perfectly well, and that
+    // stored status is what sendTenantEmail gates every email on. The records shown come from the
+    // read after, so the new CNAME is on screen at once.
+    //
+    // BEST-EFFORT: a refusal here costs the opens, never the verification. It is logged (warn:
+    // the domain still verified) and the button in the opens card tries again.
+    let shown = d;
+    if (verified && !rsOpenTrackingConfigured(d)) {
+      try {
+        shown = await rsEnableOpenTracking(String(cur.resend_domain_id), d);
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "email_open_tracking_failed", severity: "warn",
+          message: `open tracking could not be switched on after verification: ${rsErrText(e)}`,
+        });
+      }
+    }
+    const dnsRecords = dnsRecordsOf(shown);
     // ⚠️ DO NOT COLLAPSE EVERY NON-VERIFIED STATE INTO "pending". Resend's domain enum is
     // not_started | pending | verified | failed | temporary_failure, and this used to map
     // all four failures to "pending" — so a domain Resend had GIVEN UP on displayed as
@@ -8876,7 +11434,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your domain's verification state", upErr);
-    return json({ ok: true, verified, domainStatus, providerStatus, dnsRecords });
+    return json({ ok: true, verified, domainStatus, providerStatus, dnsRecords, openTracking: openTrackingState(shown) });
+  }
+
+  // ── "See when emails are opened" (B4) ──────────────────────────────────────────────
+  // The opens card's one button. For a verified sending domain: switch Resend's open tracking on
+  // if it is not yet (every domain verified before B4, and any where the switch-on at verify
+  // failed); otherwise, while its tracking record is not in DNS yet, ask Resend to look for it.
+  //
+  // ⚠️ IT NEVER WRITES email_domain_status, OR ANYTHING BUT THE RECORD SNAPSHOT. The verify POST
+  // below re-parks the WHOLE domain at "pending" at Resend for a few minutes while it re-crawls
+  // (seen live 2026-10-02, the reason email_verify_domain reads first). Storing anything read
+  // after it as the sending verdict would switch the business's email off over an optional
+  // record. The snapshot is safe to refresh: on a verified domain it feeds only the webmaster
+  // email and this card.
+  //
+  // The POST runs only while the tracking record is unverified, so a domain whose opens already
+  // work is only read — and never while Resend is still checking from the last press (the domain
+  // reads "pending"), nor within a few minutes of the last ask (TRACKING_RECHECK_MS), or every
+  // press would restart that check and the card would never reach "On". rsCheckOpenTracking owns
+  // that rule; "checking" tells the card to say "come back in a few minutes" rather than "not seen
+  // yet", and "not_found" that the last look is over and did not find the record (it has asked
+  // again), so the builder checks what they added instead of waiting on it forever. The time of
+  // the last ask rides on the snapshot's tracking rows (trackingAskedAt), and is carried forward
+  // while the window lasts. The snapshot is the read from BEFORE any POST.
+  if (action === "email_tracking_check") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("resend_domain_id, email_domain_status, email_dns_records")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (!cur?.resend_domain_id) return json({ error: "Connect a domain first." }, 400);
+    if (cur.email_domain_status !== "verified") {
+      return json({ error: "Verify your domain first — then you can see when emails are opened." }, 409);
+    }
+    const askedAt = trackingAskedAt(cur.email_dns_records);
+    let d: RsDomain;
+    let checking: boolean;
+    let asked: boolean;
+    let notFound: boolean;
+    try {
+      ({ domain: d, checking, asked, notFound } = await rsCheckOpenTracking(String(cur.resend_domain_id), askedAt));
+    } catch (e) {
+      return rsFail(req, clientId, "check email open tracking", e);
+    }
+    const stamp = asked ? new Date().toISOString() : checking && askedAt != null ? new Date(askedAt).toISOString() : null;
+    const dnsRecords = dnsRecordsOf(d).map((r) => (r.tracking && stamp ? { ...r, askedAt: stamp } : r));
+    const { error: upErr } = await admin.from("client_settings").update({
+      email_dns_records: dnsRecords,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your email open tracking", upErr);
+    return json({ ok: true, openTracking: notFound ? "not_found" : checking ? "checking" : openTrackingState(d), dnsRecords });
   }
 
   if (action === "email_activate") {
@@ -8912,14 +11520,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const fromLocal = (typeof cur.email_from_local === "string" && cur.email_from_local.trim()) || "info";
     const businessName = String(cur.business_name ?? "").trim() || clientId;
+    // A test to someone who is already a contact goes out like a real conversation email:
+    // sendTenantEmail then gives it that contact's portal reply address (c.<id>@reply.<domain>,
+    // once replies are switched on) and files it on their record, so hitting Reply on the test
+    // shows up in the contact's conversation. Without this the test had no Reply-To at all and
+    // a reply went to the From address's own inbox (Ahsan, 2026-10-02: "if i send reply to the
+    // email it should show in contacts conversation tab"). No matching contact: as before.
+    // A lookup failure only costs the routing, never the send.
+    let contactId: string | null = null;
+    try {
+      const { data: c } = await admin.from("crm_contacts")
+        // ilike for case only: % and _ (common in addresses) are escaped so they match literally.
+        .select("id").eq("client_id", clientId).ilike("email", to.replace(/[\\%_]/g, (ch) => "\\" + ch))
+        .order("updated_at", { ascending: false }).limit(1).maybeSingle();
+      if (c?.id) contactId = String(c.id);
+    } catch (_) { /* no routing is fine for a test */ }
+    // The sender's own signature, so the test shows how their emails will end — the same one
+    // crm_send_email adds, read the same way (keyed on the JWT, limit(1)). A failed read just
+    // sends the test without it. None in view-as, as there: the person writing is CSM Synergy
+    // staff, not the builder, and the composer shows no signature, so none is added.
+    let signature: string | null = null;
+    try {
+      const { data: pu } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
+      signature = operator ? null : cleanSignature((pu?.prefs as Record<string, unknown> | null)?.emailSignature);
+    } catch (_) { /* no signature is fine for a test */ }
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
-    // never throws; the verdict below is the whole outcome.
+    // never throws; the verdict below is the whole outcome. It also writes the contact (and
+    // who sent the test) on the ledger row at the claim (migration 261), so the test sits in
+    // their conversation next to the reply it invites — sent or not, and under the beta
+    // redirect too, which the old after-the-send stamp by address could not see.
     const out = await sendTenantEmail(admin, clientId, {
       kind: "test",
       to,
-      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}` }),
+      ...(contactId ? { contactId } : {}),
+      ...(userId ? { sentBy: String(userId) } : {}),
+      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature }),
     });
-    if (out.sent) return json({ ok: true, messageId: out.messageId });
+    if (out.sent) {
+      return json({ ok: true, messageId: out.messageId });
+    }
     if (out.reason === "not_active") {
       // The tenant-side switches all say go, so the missing half is the platform's
       // (secrets unset) — the friendly not-ready sentence, never a 500.
@@ -9084,7 +11724,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let d: RsDomain;
     try {
-      d = await rsVerifyDomain(String(cur.resend_inbound_domain_id));
+      // Read first, for the same reason as email_verify_domain: the verify POST re-parks the
+      // domain at "pending" while Resend re-crawls, so a reply address that is already
+      // receiving must be recorded from a plain read, not from the read straight after a POST.
+      const id = String(cur.resend_inbound_domain_id);
+      const now = await rsGetDomain(id);
+      d = rsInboundReady(now) ? now : await rsVerifyDomain(id);
     } catch (e) {
       return rsFail(req, clientId, "check your reply address", e);
     }
@@ -9169,8 +11814,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // just re-priced it sends the new total. It checks no row scope — every caller does that
   // first. `refused` carries this action's own refusals, unchanged. `noEmail` is for the
   // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
+  // `sender` is whoever set the send off, for the reply copy (replyCopy above): a customer who
+  // answers the quote reaches the record and that person's inbox.
   const sendQuoteEmail = async (
     shortCode: string,
+    sender: ReplySender,
   ): Promise<{ refused: Response } | { sent: boolean; reason: string | null; noEmail?: true }> => {
     const { data: d, error: dErr } = await admin
       .from("designs")
@@ -9182,7 +11830,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
-      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
@@ -9194,14 +11842,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const total = totalFromSnapshot(d.estimate_lines);
     const sel = d.selections || {};
+    // The style row submit-estimate read for the first send (key OR label, the same norm), for
+    // its name and its photo: a re-send or a re-price must say and show what the first send
+    // did. No row (renamed, or the read failed): the stored key and no photo, as before.
+    const want = attrNorm(sel.style);
+    const styleRow = want ? (await emailStyles()).find((r) => attrNorm(r.key) === want || attrNorm(r.label) === want) : null;
     const content = estimateEmail({
+      // The builder's own wording (migration 138) and the {customer} it may name. Until
+      // 2026-10-04 a re-send passed neither, so it said different words from the first send.
+      templateCopy: cs.email_template_copy,
+      customerName: String(d?.contact?.name ?? "").trim(),
+      pictureUrl: styleEmailPhoto(styleRow),
       businessName: cs.business_name || clientId,
       logoUrl: cs.business_logo_url || null,
       phone: cs.business_phone || null,
       website: cs.business_website || null,
       estimateNumber: String(d.ss_quote_number),
       total: total == null ? "" : total,
-      styleLabel: sel.style || null,
+      styleLabel: styleRow?.label || sel.style || null,
       sizeLabel: sel.size || null,
       estimateUrl: myQuotesUrl(clientId, req),
       pdfUrl: d.image_url || null,
@@ -9209,6 +11867,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       quoteTerms: cs.quote_terms || null,
       docWord: "quote",
     });
+    const replyTo = await replyCopy(sender, { shortCode, recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "estimate",
       shortCode,
@@ -9216,6 +11875,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       subject: content.subject,
       html: content.html,
       text: content.text,
+      ...(replyTo ? { replyTo } : {}),
     });
     if (outcome.sent) {
       await admin.from("designs")
@@ -9234,7 +11894,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // even read, so a refusal costs nothing and cannot leak timing.
     { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
-    const out = await sendQuoteEmail(shortCode);
+    const out = await sendQuoteEmail(shortCode, signedIn);
     if ("refused" in out) return out.refused;
     return json({ ok: true, sent: out.sent, reason: out.reason });
   }
@@ -9331,7 +11991,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     d: any,
     tax: Record<string, unknown>,
-    opts: { confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string; afterWrite?: () => Promise<void> },
+    opts: {
+      confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string; afterWrite?: () => Promise<void>;
+      // Whose re-price this is, for the re-sent quote's reply copy (sendQuoteEmail).
+      sender: ReplySender;
+    },
   ): Promise<
     | { ok: false; response: Response }
     | {
@@ -9434,7 +12098,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const gate = restampResend({ resend: plan.resend, quoteNumber: fresh.ss_quote_number, quotePdfUrl, movedOn });
     let resendReason: string | null = gate.send ? null : gate.reason;
     if (gate.send) {
-      const sent = await sendQuoteEmail(shortCode);
+      const sent = await sendQuoteEmail(shortCode, opts.sender);
       ({ resent, resendReason } = restampSendOutcome("refused" in sent ? "refused" : sent));
     }
     return {
@@ -9526,6 +12190,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const out = await restampQuoteTax(d, tax, {
       confirmResend, alsoSet: { sales_location_id: locationId }, where: "set this quote's sales location",
+      sender: signedIn,
     });
     if (!out.ok) return out.response;
     await audit("portal_set_design_sales_location", 1,
@@ -9551,6 +12216,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //   5. an operator in view-as: confirmVerify, and a STRICT audit row (no row, no spend);
   //   6. a quote the customer already holds (emailed, texted or printed: quoteInCustomerHands):
   //      confirmResend, asked now because after the lookup the call is paid;
+  //   6b. the wallet, when the meter is armed: a press it cannot cover is refused (402), and an
+  //      unreadable wallet refuses too (503). Never on the invoice path (taxSpend.ts header).
+  //      Then the price: a press that will be charged must carry the figure its confirm stated
+  //      (quotedPriceCents), or it is refused 409 price_changed naming the price;
   //   7-9. paidLookup: the claim (the daily cap, the per-minute cap and the ledger row in one
   //      locked database step, failing closed), the request, the row closed;
   //   on failure: the quote is untouched. A verified rate the builder paid for earlier is never
@@ -9564,11 +12233,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "verify_tax") {
     const parsed = parseVerifyTax(payload);
     if (!parsed.ok) return json(parsed.refusal.body, parsed.refusal.status);
-    const { shortCode, confirmResend, confirmVerify } = parsed.value;
+    const { shortCode, confirmResend, confirmVerify, quotedPriceCents } = parsed.value;
     { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
+    // billing_exempt: one of the two exemptions the wallet check (6b) honours, read here with the
+    // switch rather than as a third read beside the wallet's.
     const { data: cs, error: csErr } = await admin.from("client_settings")
-      .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_label").eq("client_id", clientId).maybeSingle();
+      .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_label, billing_exempt").eq("client_id", clientId).maybeSingle();
     if (csErr) return dbFail(req, clientId, "read your tax settings", csErr);
     {
       const off = lookupSwitchRefusal({
@@ -9593,7 +12264,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       try {
         await auditStrict("operator_verify_tax_attempt", null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message, reason: "audit_unavailable" }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503, { reason: "audit_unavailable" });
       }
     }
     {
@@ -9602,6 +12274,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         totalCents: designTotalCents(d.estimate_lines),
       });
       if (r) return json(r.body, r.status);
+    }
+    // 6b. The wallet (2026-10-05): refuse the button, never the invoice. Read on the press that
+    // carries every confirmation, so it is the freshest balance, and before paidLookup, so a press
+    // the wallet cannot cover writes no ledger row and makes no call. Disarmed, unpriced or exempt
+    // asks nothing of the wallet; a read that fails on an armed meter refuses (503, fail closed).
+    {
+      let w: VerifyWallet;
+      try {
+        const [price, wallet] = await Promise.all([
+          admin.from("usage_prices").select("price_cents, active").eq("kind", VERIFY_TAX_METER).maybeSingle(),
+          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt").eq("client_id", clientId).maybeSingle(),
+        ]);
+        w = verifyWalletFrom({ price, wallet, billingExempt: cs?.billing_exempt === true });
+      } catch (_e) {
+        // billing_exempt was read with the switch above, so it still decides on its own.
+        w = { armed: null, priceCents: null, exempt: cs?.billing_exempt === true ? true : null, balanceCents: null, heldCents: null };
+      }
+      const r = verifyWalletRefusal(w);
+      if (r) {
+        if (r.status !== 503) return json(r.body, r.status);
+        // One row, under the code the tax triage reads, and not the wrapper's generic copy too.
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "tax_meter",
+          message: `verify_tax: the price or wallet read failed for ${shortCode}, so the press was refused`,
+        }).catch(() => {});
+        return filedHere(json(r.body, r.status));
+      }
+      // The figure the builder agreed to. tax_settings is read when the card opens, so a portal
+      // left open while the meter was armed (or a card whose price read failed) showed no price;
+      // that press is asked again with the price instead of being charged it unseen.
+      const changed = verifyPriceRefusal(w, quotedPriceCents);
+      if (changed) return json(changed.body, changed.status);
     }
 
     // deno-lint-ignore no-explicit-any
@@ -9631,9 +12335,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const out = await restampQuoteTax(d, tax, {
       confirmResend,
       where: "save the verified tax rate",
+      sender: signedIn,
       afterWrite: async () => {
         charge = await chargeLookup(admin, lookup, {
-          clientId, kind: "tax_lookup", refType: "design", refId: shortCode,
+          clientId, kind: VERIFY_TAX_METER, refType: "design", refId: shortCode,
           memo: `Verified sales tax rate${lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
           actorUserId: userId ?? null,
         });
@@ -9727,9 +12432,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       reviewUrl: myQuotesUrl(clientId, req),
       quoteTerms: cs?.quote_terms,
     });
+    // The rep who raised or re-sent it gets the customer's answer too (replyCopy above).
+    const replyTo = await replyCopy(signedIn, { shortCode: String(co.short_code), recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "change_order", shortCode: co.short_code, to,
       subject: content.subject, html: content.html, text: content.text,
+      ...(replyTo ? { replyTo } : {}),
     });
     // ⚠️ "failed" IS NOT A REASON, it is a status repeated back (found while testing the
     // whole flow on beta, 2026-09-08). The rep's screen said "not emailed (failed)", which
@@ -9744,7 +12452,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const detail = String((outcome as { error?: unknown }).error ?? "");
     const reason = outcome.reason === "not_active"
       ? "your sending domain isn't live yet — check Settings → Branding → Email"
-      : /4(0[0-9]|2[0-9])|validation|invalid|recipient/i.test(detail)
+      : /\b4(0[0-9]|2[0-9])\b|validation|invalid|recipient/i.test(detail)
         ? `that email address was rejected (${to})`
         : "the send didn't go through";
     return { sent: false, reason };
@@ -9754,6 +12462,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "amendment_status") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const gate = await amendmentGate(shortCode);
     const [liveRes, unlockRes, csRes] = await Promise.all([
@@ -9792,6 +12502,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = String(payload?.shortCode ?? "").trim();
     const reason = String(payload?.reason ?? "").trim().slice(0, 500);
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     // The reason is not paperwork: it is what the approver reads before deciding, and it
     // lands permanently on the order's amendment trail.
     if (!reason) return json({ error: "Say what needs changing -- whoever unlocks it will read this." }, 400);
@@ -9859,6 +12571,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const decision = payload?.decision === "declined" ? "declined" : "granted";
     const note = String(payload?.note ?? "").trim().slice(0, 500) || null;
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: cs } = await admin.from("client_settings")
       .select("co_unlock_hours").eq("client_id", clientId).maybeSingle();
@@ -9917,6 +12631,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "open_amendment") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d } = await admin.from("designs")
       .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
@@ -10003,6 +12719,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "pending_ack") {
       return json({ ok: true, already: true, changeOrder: co });
     }
@@ -10111,6 +12829,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status !== "pending_ack") {
       return json({
@@ -10278,6 +12998,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
+  // ── apply_change_order_money: the order's money once a change is acknowledged ──────────
+  //
+  // The Orders tab's Change orders card acknowledges a change in the browser (a manual change
+  // recorded as already confirmed, or "Record verbal" on a pending one) and then has to move
+  // the order's money. It did that by writing `orders.total_cents = co.total_after_cents`
+  // ALONE — the exact write customer-accept and attest_change_order stopped making on
+  // 2026-09-07 (see orderCentsAfterAck): pretax_subtotal_cents and tax_cents stayed at the
+  // accepted figures and every earlier change-order FEE (and this change's own) was dropped.
+  // send_invoice reconciles the printed lines against pretax_subtotal_cents, so the invoice
+  // and its email billed the PRE-change amount — "Change order CO-1 $250 / Order adjustment
+  // −$250" — while the balance, the pay screen and the sentence the customer signs all named
+  // the new one.
+  //
+  // This is that block of attest_change_order, on its own: no input money at all, only the
+  // agreed lines and the acknowledged change orders already in the database, so the browser
+  // can ask for it but cannot steer it. Same gate as the card's own change_orders writes.
+  if (action === "apply_change_order_money") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+    const [{ data: freshD, error: dErr }, { data: allAcked, error: cErr }] = await Promise.all([
+      admin.from("designs").select("estimate_lines, accepted_snapshot")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("change_orders")
+        .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+    ]);
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (cErr) return dbFail(req, clientId, "load its change orders", cErr);
+    if (!freshD) return json({ error: "Design not found." }, 404);
+    const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
+    // No usable snapshot: nothing to compute from, and writing a fabricated figure over a real
+    // order total is the worst outcome available (orderCentsAfterAck's own rule).
+    if (money == null) return json({ ok: true, applied: false });
+    const { error: totErr } = await admin.from("orders")
+      .update({
+        total_cents: money.totalCents,
+        pretax_subtotal_cents: money.pretaxCents,
+        tax_cents: money.taxCents,
+        // 'manual' also shields it from sync-design-status' GHL repricer.
+        total_source: "manual",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (totErr) return dbFail(req, clientId, "update the order total", totErr);
+    return json({ ok: true, applied: true, totalCents: money.totalCents });
+  }
+
   // ── reissue_invoice: rebuild the invoice document after an approved change ────────────
   //
   // ⚠️ THIS IS THE REMEDY THE STALE-INVOICE REFUSAL NAMES, and until 2026-09-08 it did not
@@ -10301,6 +13069,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "reissue_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin.from("designs")
       .select("short_code, status, ss_quote_number, image_url, estimate_lines, accepted_snapshot, contact")
@@ -10337,7 +13107,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("orders").select("total_cents, pretax_subtotal_cents")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("client_settings")
-        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label")
+        .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, co_fee_label, email_template_copy")
         .eq("client_id", clientId).maybeSingle(),
     ]);
     const feeLabel = String(csRes.data?.co_fee_label ?? "").trim() || "Change order fee";
@@ -10361,6 +13131,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         },
         estimateNumber: String(inv.invoice_number),
         dateIso: new Date().toISOString(),
+        // "Bill to" and the letterhead logo, the same as send_invoice prints (2026-10-05).
+        customer: pdfCustomerFrom(d.contact, shortCode),
+        logoSources: pdfLogoSources(csRes.data?.business_logo_url, supabaseUrl, clientId),
         // deno-lint-ignore no-explicit-any
         lines: amended.lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
         discount: amended.discount,
@@ -10470,6 +13243,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (payload?.sendEmail !== false && isEmail(to)) {
       const owed = amountOwed(agreedLines, acked, ordRes.data?.total_cents == null ? null : Number(ordRes.data.total_cents));
       const content = invoiceEmail({
+        // The builder's invoice wording (138) and the {customer} it may name. Until 2026-10-04 no
+        // invoice sender passed either, so saved invoice wording never reached a customer.
+        templateCopy: csRes.data?.email_template_copy,
+        customerName: String((d.contact as { name?: unknown } | null)?.name ?? "").trim(),
         businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
         logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
         invoiceNumber: String(inv.invoice_number),
@@ -10478,8 +13255,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: csRes.data?.quote_terms,
         signUrl: myQuotesUrl(clientId, req),
       });
+      const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
       const out = await sendTenantEmail(admin, clientId, {
         kind: "invoice", shortCode, to, subject: content.subject, html: content.html, text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
       sent = out.sent;
       if (out.sent) {
@@ -10511,6 +13290,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status !== "pending_ack") {
       return json({
         error: co.status === "draft"
@@ -10572,10 +13353,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // "Invoice to approve". ⚠️ Selecting it before the column exists 500s this whole read,
       // which empties the Orders tab — migration 229 must be applied BEFORE this deploys.
       : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at";
-    const { data, error } = await admin.from("designs")
-      .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
-    if (error) return dbFail(req, clientId, "read the designs for these orders", error);
-    const visible = await visibleDesignRows((data || []) as { contact_id?: string | null }[]);
+    // CHUNKED, because `in.(…)` rides in the URL even from here. The browser moved this read
+    // to POST precisely so 2000 codes would fit, but one PostgREST GET carrying them all is
+    // ~16 bytes a code (commas encode as %2C): 500 codes is already an 8 KB request line and
+    // 2000 is 33 KB, past what the gateway accepts — so a tenant with a few hundred orders
+    // lost the WHOLE Orders tab ("Couldn't load orders"). 200 codes is ~3 KB. Parallel, and
+    // each chunk is client-scoped exactly as the single read was.
+    const DESIGN_CHUNK = 200;
+    const chunks: string[][] = [];
+    for (let i = 0; i < codes.length; i += DESIGN_CHUNK) chunks.push(codes.slice(i, i + DESIGN_CHUNK));
+    const reads = await Promise.all(chunks.map((c) =>
+      admin.from("designs").select(cols).eq("client_id", clientId).in("short_code", c).limit(DESIGN_CHUNK)
+    ));
+    const failed = reads.find((r) => r.error);
+    if (failed) return dbFail(req, clientId, "read the designs for these orders", failed.error);
+    const data = reads.flatMap((r) => r.data || []);
+    const visible = await visibleDesignRows(data as { contact_id?: string | null }[]);
     if (!visible) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     return json({ ok: true, designs: visible });
   }
@@ -10584,6 +13377,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "order_paperwork") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const { data: cs, error: csErr } = await admin.from("client_settings")
       .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
@@ -10668,6 +13463,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "stage_order_attribute_change") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const attrs = (payload?.attrs && typeof payload.attrs === "object") ? payload.attrs : {};
     const dryRun = payload?.dryRun === true;
     const has = (k: string) => Object.prototype.hasOwnProperty.call(attrs, k);
@@ -11142,6 +13939,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     // A DRAFT IS DISCARDABLE -- that is what the rep's "Discard the change" does, and it is
     // also what releases the unlock they spent (the guard trigger's void branch).
     if (co.status !== "pending_ack" && co.status !== "draft") {
@@ -11306,7 +14105,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // operator declared a stranger's customer had agreed" must not read the same later.
         await auditStrict(`operator_${action}_attempt`, null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503);
       }
     }
 
@@ -11315,7 +14115,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
     {
       const { data: cur0 } = await admin.from("client_settings")
-        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
         .eq("client_id", clientId).maybeSingle();
       if (cur0?.invoice_in_ghl === false) {
         // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
@@ -11459,7 +14259,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               return json({ error: `Invoice ${prior.invoice_number} is complete, but this design has no email address — print the invoice PDF instead.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 400);
             }
             const { data: cs2 } = await admin.from("client_settings")
-              .select("business_name, business_phone, business_website, business_logo_url, quote_terms, beta_mode, beta_email")
+              .select("business_name, business_phone, business_website, business_logo_url, quote_terms, beta_mode, beta_email, email_template_copy")
               .eq("client_id", clientId).maybeSingle();
             // A PLACEHOLDER ADDRESS (example.com, .test, ...) can never receive this, and the
             // provider's rejection used to come back here as a 502 fault row reading only
@@ -11485,9 +14285,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               });
             }
             const amend2 = await loadAmendments();
+            const replyTo2 = await replyCopy(signedIn, { shortCode, recipient: to2 });
             const out2 = await sendTenantEmail(admin, clientId, {
               kind: "invoice", shortCode, to: to2,
+              ...(replyTo2 ? { replyTo: replyTo2 } : {}),
               ...invoiceEmail({
+                templateCopy: cs2?.email_template_copy,
+                customerName: String((c2?.contact as { name?: unknown } | null)?.name ?? "").trim(),
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
@@ -11854,7 +14658,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
           if (allocErr) {
             await setClaim({ status: "failed", error: `allocate: ${allocErr.message}`.slice(0, 500) });
-            return json({ error: `Could not allocate an invoice number: ${allocErr.message}` }, 502);
+            return dbFail(req, clientId, "allocate an invoice number", allocErr, 502);
           }
           invNumber = allocated ? String(allocated) : null;
           if (!invNumber) {
@@ -11896,6 +14700,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               },
               estimateNumber: invNumber,
               dateIso: nowIso(),
+              // "Bill to": the customer on the design, and the letterhead logo (2026-10-05).
+              customer: pdfCustomerFrom(d.contact, shortCode),
+              logoSources: pdfLogoSources(cur0?.business_logo_url, supabaseUrl, clientId),
               // deno-lint-ignore no-explicit-any
               lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
               discount: amended.discount,
@@ -11977,11 +14784,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         let sent = false;
         let sendReason: string | null = null;
         if (isEmail(to)) {
+          const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
           const out = await sendTenantEmail(admin, clientId, {
             kind: "invoice",
             shortCode,
             to,
+            ...(replyTo ? { replyTo } : {}),
             ...invoiceEmail({
+              templateCopy: cur0?.email_template_copy,
+              customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
               businessName: String(cur0?.business_name ?? "").trim() || clientId,
               logoUrl: cur0?.business_logo_url,
               phone: cur0?.business_phone,
@@ -12179,7 +14990,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .from("client_settings")
       // email_* + business_* ride along for the own-domain email branch below — the
       // Resend-active check and the branded invoice email's identity fields.
-      .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
@@ -12216,6 +15027,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       } catch (e) {
         return { ok: false, status: 0, body: null, netErr: (e as Error)?.message || "network error" };
       }
+    };
+    // A GoHighLevel call failed. Its body and the runtime's network text are not ours to show
+    // (dbFail's contract, applied to the CRM the way verify_save_ghl does): both go to app_errors
+    // under `step`, and the builder is shown the status alone. The caller marks its 502 filedHere,
+    // so the wrapper does not add a second row without the detail.
+    // deno-lint-ignore no-explicit-any
+    const ghlFailed = (step: string, r: { status: number; body: any; netErr?: string }): string => {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: r.status || "ghl_unreachable",
+        message: `send_invoice: GoHighLevel ${step} failed (${r.status ? `HTTP ${r.status}` : "no answer"})`,
+        context: {
+          step, shortCode,
+          body: r.body?.message != null ? String(r.body.message).slice(0, 300) : null,
+          netErr: r.netErr ? String(r.netErr).slice(0, 300) : null,
+        },
+      }).catch(() => {});
+      return r.status ? `HTTP ${r.status}` : "your CRM didn't answer";
     };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
 
@@ -12263,11 +15091,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         body: JSON.stringify({ altId: locationId, altType: "location", action: "send_manually", liveMode: true, userId: senderUserId }),
       });
       if (!manual.ok) return false;
+      // senderUserId above is the GoHighLevel user the send is made as; the reply copy is ours.
+      const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
       const out = await sendTenantEmail(admin, clientId, {
         kind: "invoice",
         shortCode,
         to,
+        ...(replyTo ? { replyTo } : {}),
         ...invoiceEmail({
+          templateCopy: cur.email_template_copy,
+          customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
           businessName: String(cur.business_name ?? "").trim() || clientId,
           logoUrl: cur.business_logo_url,
           phone: cur.business_phone,
@@ -12347,7 +15180,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const r = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
         if (!r.ok) {
           await setClaim({ status: "failed", error: `estimate list ${r.status}` });
-          return json({ error: `Could not read estimates from your CRM (${r.status || r.netErr}).` }, 502);
+          return filedHere(json({ error: `Could not read estimates from your CRM (${ghlFailed("estimate list", r)}).` }, 502));
         }
         const arr: any[] = Array.isArray(r.body?.estimates) ? r.body.estimates : [];
         est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
@@ -12402,7 +15235,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       if (!convRes.ok) {
         await setClaim({ status: "failed", error: `convert ${convRes.status}` });
-        return json({ error: `Creating the invoice failed: ${convRes.body?.message ?? convRes.status ?? convRes.netErr}` }, 502);
+        return filedHere(json({ error: `Creating the invoice failed (${ghlFailed("convert", convRes)}).` }, 502));
       }
       const invoice = convRes.body?.invoice ?? convRes.body ?? {};
       invoiceId = String(invoice?._id ?? invoice?.id ?? "");
@@ -12438,10 +15271,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
-          return json({
-            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
+          return filedHere(json({
+            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${ghlFailed("send", sendRes)}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
             invoiceId, invoiceNumber, created: true, sent: false,
-          }, 502);
+          }, 502));
         }
       }
     } else {
@@ -12468,7 +15301,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
-          return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+          return filedHere(json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${ghlFailed("resend", sendRes)}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502));
         }
       }
     }
@@ -12513,13 +15346,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Owner/admin by omission from READ_ACTIONS.
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: row } = await admin.from("invoice_sends")
-      .select("status, invoice_number, qbo_invoice_id")
+      .select("status, invoice_number, qbo_invoice_id, qbo_realm_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (!row) return json({ error: "No invoice has been sent for this design." }, 404);
     if (row.status !== "sent") return json({ error: "The invoice email hasn't gone out yet — retry that first." }, 400);
-    if (row.qbo_invoice_id) return json({ ok: true, alreadyPushed: true, qboInvoiceId: row.qbo_invoice_id, clientId });
+    if (row.qbo_invoice_id) {
+      // Already in a company's books — but since the tenant can switch companies, possibly NOT the
+      // one connected now (migration 265 records which). Either way it is not pushed again: copying
+      // an invoice into a second company's books is a bookkeeper's call (the default chosen for
+      // Carolyn's open question on the reconnect card), so the answer just says where it is.
+      // The portal only reaches this from a pending list gone stale in an open tab (qbo_pending
+      // lists invoices with no QuickBooks id); qbo_status's otherCompanyInvoices is the standing
+      // answer on the connection card.
+      const { data: cs } = await admin.from("client_settings")
+        .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
+      return json({
+        ok: true, alreadyPushed: true, qboInvoiceId: row.qbo_invoice_id,
+        otherCompany: pushedToOtherCompany(row.qbo_realm_id ?? null, cs?.qbo_realm_id ?? null),
+        clientId,
+      });
+    }
 
     await pushQboInvoice(admin, clientId, { shortCode, docNumber: row.invoice_number ?? null });
 
@@ -12537,4 +15387,4 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));
+}), { alreadyFiled: (res) => filedAtReturnSite.has(res) }));

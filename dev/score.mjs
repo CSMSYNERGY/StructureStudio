@@ -71,7 +71,7 @@ const CLAMPS = {
   pitch: [0, 2], ridgeOffset: [-0.35, 0.35], overhang: [0, 3],
   kneeU: [0, 1], kneeRise: [0, 1], ridgeRise: [0, 1.5], tailSpacingIn: [8, 96],
   leanToWidthFt: [0, 16], leanToDropFt: [0, 6],
-  dormerWidthFt: [0, 12], dormerRiseFt: [0, 6], dormerOffsetU: [-1, 1],
+  dormerWidthFt: [0, 100], dormerRiseFt: [0, 6], dormerOffsetU: [-1, 1],
   porchDepthFt: [0, 12], porchOutFt: [0, 12],
   rearStepFt: [0, 56], rearEaveRiseFt: [-1.5, 1.5],
 };
@@ -125,7 +125,7 @@ export function porchKind(roof) {
 // foundation the photo path never applies, and would drop the siding the photo path is the
 // only one that DOES apply. Same reply, two different buildings on screen.
 // The wing keys calDraftRoof clears as one set (the browser's CAL_WING_KEYS).
-const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"];
+const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList", "wingCornersMeet"];
 export function mergeDraft(prior, draft, source = "video") {
   const p = prior || {}, d = draft || {};
   const dr = d.roof || {};
@@ -147,7 +147,10 @@ export function mergeDraft(prior, draft, source = "video") {
 
   // calDraftRoof's clearing rules, 2026-09-24 keys included: whatever the draft is the authority
   // on, it is the only source of. A reported porch brings its own attach height and width (and,
-  // 2026-09-25, its posts, roof pitch and steps) or none; a recessed porch has none of them. A draft that reports a roof type decides the wings (no
+  // 2026-09-25, its posts, roof pitch and steps) or none; a recessed porch has none of them but its
+  // steps along its front (2026-10-03). A draft silent on porchSteps keeps a stored recessed porch's
+  // front steps, or a stored flight off an end of a deck, typed or not (2026-10-04): the model is
+  // never asked about either. A draft that reports a roof type decides the wings (no
   // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
   // cannot turn the scored building a quarter turn away from what the draft measured.
   // A draft that reports a roof TYPE replaces the roof (2026-09-25), keeping only the builder's own
@@ -156,13 +159,25 @@ export function mergeDraft(prior, draft, source = "video") {
   const base = {};
   if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
   const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };
-  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
+  const was = p.roof || null;
   if ((dr.porchOutFt || 0) > 0.5) {
     delete roof.porchDepthFt; delete roof.porchTruss;
     for (const k of own) if (!(k in dr)) delete roof[k];
+    // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04).
+    if (!("porchSteps" in dr) && was && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
+      roof.porchSteps = was.porchSteps;
+      if ("porchStepCount" in was) roof.porchStepCount = was.porchStepCount;
+    }
   } else if ((dr.porchDepthFt || 0) > 0.5) {
     delete roof.porchOutFt;
-    for (const k of own) delete roof[k];
+    // A recessed porch's steps along its front, and their count, stay (calDraftRoof, 2026-10-03), taken
+    // back by a typed draft from a stored recessed porch only (2026-10-04).
+    if (!("porchSteps" in dr) && was && !((Number(was.porchOutFt) || 0) > 0.5) && (Number(was.porchDepthFt) || 0) > 0.5) {
+      for (const k of ["porchSteps", "porchStepCount"]) if (k in was) roof[k] = was[k];
+    }
+    const keepSteps = ["left", "center", "right"].indexOf(roof.porchSteps) >= 0;
+    for (const k of own) if (!(keepSteps && (k === "porchSteps" || k === "porchStepCount"))) delete roof[k];
   }
   if (dr.type) {
     if (!((Number(dr.wingWidthFt) || 0) > 0)) {

@@ -112,6 +112,16 @@ export function cpAmount(cents: number): string {
  * Normalising HERE rather than in each page means one definition, both surfaces, and a
  * browser still running a cached build is fixed too.
  *
+ * ⚠️ AND IT IS ONLY YYYYMM FOR OCTOBER TO DECEMBER. Fiserv's own tokenizer script (itoke.js,
+ * where it builds the request) concatenates `expiryYear.toString() + expiryMonth.toString()`
+ * with the month as a NUMBER, and its comment says so: "YYYYM (if Jan-Sep) or YYYYMM (if
+ * Oct-Dec)". So 9/2032 arrives as the FIVE digits "20329". The first version of this
+ * function knew only 4 and 6 digits, so every card expiring January to September had its
+ * expiry silently dropped from /auth — and the 2026-09-02 live proof never saw it, because
+ * the only card it ever charged expired in December ("203212"). Five digits are read two
+ * ways, and the two shapes cannot collide: YYYYM starts with "20", while MYYYY (a hand-typed
+ * "9/2032") has its "20" at positions 1-2 and a 1-9 in front.
+ *
  * Returns undefined for anything unrecognised, so a bad value is simply omitted from the
  * request instead of being sent as garbage — a token carries its own expiry for its first
  * use, so omitting is recoverable where a wrong value is not.
@@ -122,6 +132,19 @@ export function cpExpiry(raw: unknown): string | undefined {
     // Already MMYY — unless it is YYMM, which we cannot distinguish and do not accept.
     const mm = Number(d.slice(0, 2));
     return mm >= 1 && mm <= 12 ? d : undefined;
+  }
+  if (d.length === 5) {
+    // YYYYM — what the tokenizer sends for January to September ("20329" is 9/2032).
+    const yyyy = Number(d.slice(0, 4));
+    if (yyyy >= 2000 && yyyy <= 2099 && d[4] >= "1" && d[4] <= "9") {
+      return "0" + d[4] + d.slice(2, 4);
+    }
+    // MYYYY — a one-digit month typed by hand ("9/2032").
+    const myyyy = Number(d.slice(1));
+    if (d[0] >= "1" && d[0] <= "9" && myyyy >= 2000 && myyyy <= 2099) {
+      return "0" + d[0] + d.slice(3, 5);
+    }
+    return undefined;
   }
   if (d.length === 6) {
     // YYYYMM (what the tokenizer sends) or MMYYYY (what a hand-typed field might).
@@ -304,7 +327,8 @@ export async function cpAuth(req: CpAuthRequest): Promise<CpAuthResult> {
     capture: "Y",
     ecomind: req.ecomind ?? "E",
   };
-  // Normalised, never passed through: the tokenizer says YYYYMM and /auth wants MMYY.
+  // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
+  // /auth wants MMYY.
   const exp = cpExpiry(req.expiry);
   if (exp) body.expiry = exp;
   if (req.postal) body.postal = req.postal;
@@ -508,6 +532,13 @@ export async function cpSurchargeProbe(
  *                      14px field inside the iframe would jump the layout on tap.
  * ACH swaps in fullmobilekeyboard (routing and account are typed as "routing/account", and
  * a numeric keypad has no slash) and drops the card grouping.
+ *
+ * ⚠️ THE ACH RAIL IS FOR CACHED PAGES ONLY since 2026-10. Carolyn asked for separate Routing
+ * and Checking boxes (2026-09-02), and this tokenizer cannot render two, so both pages now
+ * draw their own pair and tokenize "routing/account" straight from the browser to CardSecure
+ * on cpTokenizerOrigin() (CORS checked 2026-10-06: Access-Control-Allow-Origin: *). The URL
+ * is still served so a page cached from before keeps working; it can go once nothing that
+ * old can still be open.
  */
 export function cpTokenizerUrl(rail: "card" | "ach"): string {
   // ⚠️ THREE THINGS HERE ARE FIXES FOR DEFECTS SEEN ON A REAL PHONE (2026-09-02), not

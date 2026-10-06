@@ -94,7 +94,7 @@ Deno.test("the refusal names a time the builder can act on", () => {
 // per state, is what stops the next duplicate entry from reopening the hour in silence.
 const EARLY_EASTERN = [
   "239", "305", "321", "352", "386", "407", "561", "656", "689", "727", "754", "772", "786",
-  "813", "863", "904", "941", "954", // FL
+  "813", "863", "904", "941", "954", "324", "645", // FL
   "203", "475", "860", "959",        // CT
   "227", "240", "301", "410", "443", "667", // MD
 ];
@@ -150,4 +150,20 @@ Deno.test("a duplicated 8pm code is refused with the 8pm sentence, not the 9pm o
     assert(/8pm/.test(v.reason), "the refusal should name 8pm as the close");
     assert(!/9pm/.test(v.reason), "and must not offer 9pm to a state that closes at 8");
   }
+});
+
+Deno.test("Central and Mountain codes that were filed as Eastern follow their own clock", () => {
+  // 13:00 UTC in January = 08:00 EST but 07:00 CST and 06:00 MST: too early for all of these.
+  // Filed as Eastern (or not at all, which falls back to an 8am-Eastern open), they were
+  // textable an hour before the window opens where the customer is.
+  const CENTRAL_NOW = ["210", "325", "364", "464", "557", "615", "629", "726", "938"];
+  for (const c of CENTRAL_NOW) {
+    assert(!quietHoursVerdict(c, JAN(13)).allowed, `${c} is 7am Central at 13:00 UTC`);
+    assert(quietHoursVerdict(c, JAN(14)).allowed, `${c} is 8am Central at 14:00 UTC`);
+    // 02:30 UTC = 20:30 CST: still inside a Central customer's 9pm close.
+    assert(quietHoursVerdict(c, new Date(Date.UTC(2026, 0, 15, 2, 30))).allowed, `${c} is 8:30pm Central`);
+  }
+  // El Paso is Mountain: 14:00 UTC = 07:00 MST (shut), 15:00 UTC = 08:00 MST (open).
+  assert(!quietHoursVerdict("915", JAN(14)).allowed);
+  assert(quietHoursVerdict("915", JAN(15)).allowed);
 });

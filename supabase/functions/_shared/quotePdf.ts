@@ -28,6 +28,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
 import { buildFormalEstimatePdf, type EstimatePdfInput } from "./estimatePdf.ts";
+import { fetchPdfLogo, type PdfLogoSources } from "./pdfLogo.ts";
 
 /** Hard ceilings on the fetched plan PDF. A tenant's plan is tens to hundreds of KB; 20MB is
  *  far past anything legitimate and stops a wrong URL from parking an unbounded body in the
@@ -37,10 +38,21 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 export interface QuotePdfInput extends EstimatePdfInput {
   /**
-   * Public URL of the designer's plan PDF (`designs.image_url`): page 1 the floor plan, page 2
-   * the four-sided 3D sheet when one was captured. Null/absent → estimate sheet only.
+   * Public URL of the designer's plan PDF (`designs.image_url`): page 1 the floor plan; page 2, when
+   * the tenant has 3D on, a 3D page: the view the rep set up in the 3D viewer or a default
+   * three-quarter view, or, for a builder who switched on "all four corners" (migration 276,
+   * client_settings.quote_corner_views), one sheet with the building from each corner. Built in the
+   * designer's submitQuote; nothing here depends on which. Null/absent → estimate sheet only.
    */
   planPdfUrl?: string | null;
+  /**
+   * Where to fetch the builder's logo for sheet 1's letterhead: pdfLogo.ts's pdfLogoSources, which
+   * only ever names this tenant's folder in our own storage. Null/absent → the text letterhead.
+   * A logo that is slow, refused or unreadable costs the logo, never the document: it is fetched
+   * with its own 3 s budget, at the same time as the plan PDF, and its reason lands in
+   * onSheetSkipped as "logo …".
+   */
+  logoSources?: PdfLogoSources | null;
   /** Optional sink for why a sheet was dropped. Never used for control flow — telemetry only. */
   onSheetSkipped?: (reason: string) => void;
 }
@@ -74,14 +86,24 @@ async function fetchPlanPdf(url: string, note: (r: string) => void): Promise<Uin
 export async function buildQuotePdf(input: QuotePdfInput): Promise<Uint8Array> {
   const note = (r: string) => { try { input?.onSheetSkipped?.(r); } catch { /* telemetry only */ } };
 
+  // Both fetches start now and run side by side, so the logo's budget hides inside the plan's
+  // rather than adding to it. Neither promise can reject (each catches its own failures), so
+  // starting the plan fetch before sheet 1 is built leaves nothing dangling if sheet 1 throws.
+  const planUrl = String(input?.planPdfUrl ?? "").trim();
+  const planFetch = planUrl ? fetchPlanPdf(planUrl, note) : null;
+  const logoBytes = input?.logoSources ? await fetchPdfLogo(input.logoSources, note) : null;
+
   // Sheet 1 first and on its own: if THIS throws the caller has no document at all, which is a
   // real failure and must surface — unlike a missing plan page.
-  const estimateBytes = await buildFormalEstimatePdf(input);
+  const estimateBytes = await buildFormalEstimatePdf({
+    ...input,
+    business: { ...(input?.business ?? {}), logo: logoBytes ?? input?.business?.logo ?? null },
+    onLogoSkipped: note,
+  });
 
-  const planUrl = String(input?.planPdfUrl ?? "").trim();
-  if (!planUrl) { note("no plan url"); return estimateBytes; }
+  if (!planFetch) { note("no plan url"); return estimateBytes; }
 
-  const planBytes = await fetchPlanPdf(planUrl, note);
+  const planBytes = await planFetch;
   if (!planBytes) return estimateBytes;
 
   try {

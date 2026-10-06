@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 // The delivery address the customer already typed into the designer, plus the v1 territory
 // rule. Shared + unit-tested because a miss here is silent: it yields a stop with no
@@ -13,7 +13,8 @@ import {
   LIFECYCLE_RANK,
   type StageKind,
 } from "../_shared/inventoryLifecycle.ts";
-import type { GateTable } from "../_shared/access.ts";
+import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
+import { calendarDayIn, isTimeZone, numOrNull } from "../_shared/scheduleInput.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
 // Spec: SCHEDULING_SCOPE.md (mockup approved by Carolyn 2026-08-04).
@@ -57,7 +58,13 @@ const GATES: GateTable = {
   // "Is this building already scheduled?" — what the Designs and Inventory rows need to
   // decide between offering "Add to build schedule" and showing the stage it's already in.
   // Deliberately its own tiny action rather than making those tabs fetch the whole board.
-  schedule_links: { area: "build_schedule", level: "view" },
+  // EITHER board: Orders asks for this whenever the viewer can schedule a build OR a delivery
+  // (schedOn || deliverOn), and its lot-sale half — "this order sold building #N, take it to a
+  // load" — exists precisely for the delivery side. Gated on build_schedule alone, a Driver
+  // (delivery_schedule:edit, no build access) got a 403 that Orders swallows, so every lot sale
+  // lost its "Schedule delivery →" and every scheduled build read "Not scheduled". Nothing here
+  // is wider than `pool` / `loads` already show a delivery viewer (build stage names included).
+  schedule_links: { any: [{ area: "build_schedule", level: "view" }, { area: "delivery_schedule", level: "view" }] },
   move_job:     { area: "build_schedule", level: "edit" },
   // "We have re-read the plans" (migration 219). Gated at EDIT because it is a claim about
   // work, not a preference: the crew leader who says the flag can come down is asserting
@@ -118,6 +125,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
@@ -144,7 +153,9 @@ class Refusal extends Error {
   }
 }
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
-const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+// Blank → null, never 0 (see numOrNull): the portal sends null for an emptied box, and
+// Number(null) is 0 — which broke every driver saved without a deck length or max width.
+const num = numOrNull;
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
 const dateStr = (v: unknown): string | null => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 
@@ -381,6 +392,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   // done column), complete_job (the Mark built button) and the delivery override's
   // alsoCompleteBuilds. Wiring only one of them is how you get buildings that are built and
   // have no serial, which is worse than the feature not existing.
+  // The shop's own calendar day for the serial's MMDD block. The portal sends the viewer's IANA
+  // zone as `tz` on every call that can complete a build; without one this is the UTC day, which
+  // is TOMORROW for a US shop marking a build done after 5–8 pm local (see calendarDayIn).
+  const shopTz = isTimeZone(payload?.tz) ? payload.tz : null;
   const mintBuildingSerial = async (job: Record<string, any>, whenIso: string) => {
     try {
       const code = job?.design_short_code;
@@ -394,7 +409,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         p_client_id: clientId,
         p_short_code: code,
         p_order_no: order.order_no,
-        p_built_on: whenIso.slice(0, 10),
+        p_built_on: calendarDayIn(whenIso, shopTz),
       });
       if (!serial) return;
       // `.is(building_serial, null)` makes this idempotent: two people marking the same job
@@ -444,6 +459,78 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     if (error) throw error;
     return data ?? [];
   };
+
+  // ── THE CUSTOMER BEHIND A SCHEDULE ROW (Carolyn 2026-08-28) ────────────────────────────
+  // "If I click on this card ... it takes it now to a ... view of that contact ... I think
+  // we'll do the same kind of structure from both the build schedule and the delivery
+  // schedule." Neither build_jobs nor delivery_stops carries a contact. The link is the row's
+  // design code, and designs.contact_id is the customer. So a row gets
+  // `customer_link: { code, contactId }` only when its code names a design that still EXISTS
+  // on this tenant: live data has order jobs and stops whose designs were deleted (test
+  // leftovers), and a link to one of those would open "That design no longer exists."
+  // contactId may be null (crm_ensure_contact makes no customer for a design that carried
+  // neither a phone nor an email); the portal then opens the design's own record instead.
+  //
+  // WHICH ROWS is the caller's call, and it is narrow on purpose: an ORDER job or stop, and a
+  // SOLD unit's sale stop, which carries the buyer's design code (add_stop). Never an
+  // inventory spec build or its shop-to-lot haul. Those carry no code, or the builder's own
+  // master design, and there is no customer behind them to open.
+  //
+  // contacts:'own' sees only the customers they own or follow, the rule crm_record applies,
+  // so a link to anyone else's would open "That contact no longer exists." For them the links
+  // go through crm_visible_contact_ids, the predicate the record page and RLS share, and a
+  // design with no customer is dropped too (crm_record refuses those for 'own'). Nobody else
+  // pays that round trip.
+  //
+  // OPTIONAL, NEVER FATAL. A failed read costs the links (logged) and the board still opens:
+  // the schedule is the page's job, and this is only a way out of it. It never answers
+  // "show everything" either: when the 'own' check fails, nobody's link is shown.
+  type CustomerLink = { code: string; contactId: string | null };
+  const customerLinksFor = async (rawCodes: unknown[]): Promise<Map<string, CustomerLink>> => {
+    const links = new Map<string, CustomerLink>();
+    const codes = [...new Set(rawCodes.filter((c): c is string => typeof c === "string" && !!c))];
+    if (!codes.length) return links;
+    const fail = (what: string, err: { code?: string; message?: string } | null) => {
+      logEdgeError({
+        fn: "portal-schedule", req, clientId, code: err?.code ?? "customer_link_failed",
+        message: `customer links: ${what} failed: ${err?.message ?? "unknown"}`,
+        context: { action, codes: codes.length },
+      }).catch(() => {});
+      return new Map<string, CustomerLink>();
+    };
+    try {
+      // In slices: the codes ride in the URL, and one read answers at most PostgREST's 1000
+      // rows, which a busy board's order codes could pass (see fetchAll on silent caps).
+      const slices: string[][] = [];
+      for (let i = 0; i < codes.length; i += 200) slices.push(codes.slice(i, i + 200));
+      const reads = await Promise.all(slices.map((part) => admin.from("designs").select("short_code, contact_id")
+        .eq("client_id", clientId).in("short_code", part)));
+      const bad = reads.find((x) => x.error);
+      if (bad) return fail("designs read", bad.error);
+      for (const d of reads.flatMap((x) => x.data ?? [])) {
+        if (!d?.short_code) continue;
+        links.set(String(d.short_code), { code: String(d.short_code), contactId: d.contact_id ? String(d.contact_id) : null });
+      }
+      if (!ownContactsOnly(r.ctx.access) || !links.size) return links;
+      const ids = [...new Set([...links.values()].map((l) => l.contactId).filter((v): v is string => !!v))];
+      let seen = new Set<string>();
+      if (ids.length) {
+        const { data: vis, error: vErr } = await admin.rpc("crm_visible_contact_ids", {
+          p_client_id: clientId, p_user_id: userId, p_ids: ids,
+        });
+        if (vErr) return fail("crm_visible_contact_ids", vErr);
+        seen = new Set(((vis as string[] | null) ?? []).map(String));
+      }
+      for (const [code, l] of [...links]) if (!l.contactId || !seen.has(l.contactId)) links.delete(code);
+      return links;
+    } catch (e) {
+      return fail("lookup", { message: (e as Error)?.message });
+    }
+  };
+  // A sold unit's sale stop carries the BUYER's design code (add_stop), and nothing else on an
+  // inventory stop carries a code at all: the shop-to-lot haul has none.
+  // deno-lint-ignore no-explicit-any
+  const stopHasCustomer = (s: any) => !!s?.design_short_code && (s.source === "order" || s.source === "inventory");
 
   // Stops whose building is not built yet (the built-before-delivered check).
   //
@@ -673,7 +760,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .filter((j) => j.repair_id).map((j) => j.repair_id as string))];
 
       // ── Wave B: reads keyed by Wave A's ids ──
-      const [stopsRes, ordsRes, unitRowsRes, repairRowsRes, mastersRes] = await Promise.all([
+      // customerLinksFor is the customer behind each ORDER job (see its comment). Its second
+      // trip, for contacts:'own' only, runs inside this wave rather than after it.
+      const [stopsRes, ordsRes, unitRowsRes, repairRowsRes, mastersRes, customerLinks] = await Promise.all([
         jobIds.length
           ? admin.from("delivery_stops").select("build_job_id, load_id, delivered_at")
               .eq("client_id", clientId).in("build_job_id", jobIds)
@@ -694,6 +783,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           ? admin.from("designs").select("short_code, selections")
               .eq("client_id", clientId).in("short_code", masterCodes)
           : Promise.resolve({ data: [] }),
+        customerLinksFor(orderCodes),
       ]);
       const stops = stopsRes.data;
       const ords = ordsRes.data;
@@ -767,7 +857,12 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           description: rp.description, serial: rp.serial, status: rp.status,
         })),
       };
-      const jobsOut = (jobs ?? []).map((j) => ({ ...j, valueCents: valueByJob[String(j.id)] ?? null }));
+      // customer_link is ADDITIVE: absent (not null) on every row that has none, so a portal
+      // from before it reads the same payload it always did.
+      const jobsOut = (jobs ?? []).map((j) => {
+        const link = j.source === "order" ? customerLinks.get(String(j.design_short_code ?? "")) : undefined;
+        return { ...j, valueCents: valueByJob[String(j.id)] ?? null, ...(link ? { customer_link: link } : {}) };
+      });
       // team/crews were fetched in Wave A — do NOT await them here. Awaiting inside the
       // response literal is what made them two extra serial trips at the very end of the
       // request, after every other read had already finished.
@@ -779,9 +874,20 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // ~9 round trips in single file, and drivers/territories/team were three of them —
       // awaited inside the response literal, so they only started once everything else had
       // finished. They depend on nothing; they go first, alongside the loads read.
+      //
+      // Both whole-set reads are PAGED (see fetchAll). The loads read used to be
+      // `.limit(500)` on an ASCENDING date sort, which kept the OLDEST 500: past that, every
+      // new load — the upcoming week, and every undated planned load (sorted last) — silently
+      // vanished from the board, from the Repairs tab's "add to a load" picker, and from the
+      // calendar. The stops read had no limit at all, which on PostgREST means 1000 rows, so a
+      // board past ~1000 stops lost its higher-numbered stops (it sorted by stop_order alone),
+      // under-filling deck bars on the loads it truncated.
+      // Stops are read for the whole tenant rather than `.in(load_id, …)`: every stop belongs to
+      // a load (load_id NOT NULL, cascade), and every load is now in hand, so it is the same set
+      // without a URL that grows by ~40 characters per load.
       const [loadsRes, drivers, territories, team] = await Promise.all([
-        admin.from("delivery_loads").select("*").eq("client_id", clientId)
-          .order("load_date", { ascending: true, nullsFirst: false }).limit(500),
+        fetchAll((from, to) => admin.from("delivery_loads").select("*").eq("client_id", clientId)
+          .order("load_date", { ascending: true, nullsFirst: false }).order("id").range(from, to)),
         getDrivers(),
         getTerritories(),
         getTeam(),
@@ -790,8 +896,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const loads = loadsRes.data;
       const loadIds = (loads ?? []).map((l) => l.id);
       const { data: stops } = loadIds.length
-        ? await admin.from("delivery_stops").select("*").eq("client_id", clientId)
-          .in("load_id", loadIds).order("stop_order")
+        ? await fetchAll((from, to) => admin.from("delivery_stops").select("*").eq("client_id", clientId)
+          .order("load_id").order("stop_order").order("id").range(from, to))
         : { data: [] };
       // Build status per stop (for the cross-link chips), and where each unit sits on the
       // ladder — independent of each other, so one wave rather than two.
@@ -801,11 +907,14 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // building being collected from the lot and false for one that has not been built yet.
       // A stop whose unit is below `built` must not look ready to load.
       const unitIds = [...new Set((stops ?? []).map((s) => s.inventory_unit_id).filter(Boolean))];
-      const [jobsRes, unitLifecycle] = await Promise.all([
+      // ...and the customer behind each order stop and sold unit's sale stop (customerLinksFor),
+      // in the same wave: it needs only the stops.
+      const [jobsRes, unitLifecycle, customerLinks] = await Promise.all([
         jobIds.length
           ? admin.from("build_jobs").select("id, stage_id, due_date, completed_at").in("id", jobIds)
           : Promise.resolve({ data: [] }),
         unitIds.length ? lifecycleByUnit(unitIds as string[]) : Promise.resolve({}),
+        customerLinksFor((stops ?? []).filter(stopHasCustomer).map((s) => s.design_short_code)),
       ]);
       const jobs = jobsRes.data;
       const stageIds = [...new Set((jobs ?? []).map((j) => j.stage_id))];
@@ -821,7 +930,11 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       }]));
       return json({
         loads: loads ?? [],
-        stops: stops ?? [],
+        // Additive like build_board's: customer_link only on the rows that have one.
+        stops: (stops ?? []).map((s) => {
+          const link = stopHasCustomer(s) ? customerLinks.get(String(s.design_short_code)) : undefined;
+          return link ? { ...s, customer_link: link } : s;
+        }),
         buildByJob,
         unitLifecycle,
         drivers,
@@ -853,7 +966,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const [stopsRes, jobsAllRes, soldRes, locsRes, openRepairsRes, territories, drivers] =
         await Promise.all([
           fetchAll((from, to) => admin.from("delivery_stops")
-            .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
+            .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip, created_at")
             .eq("client_id", clientId).order("id").range(from, to)),
           fetchAll((from, to) => admin.from("build_jobs").select("*")
             .eq("client_id", clientId).neq("source", "repair").order("id").range(from, to)),
@@ -882,22 +995,47 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // build_job_id, so filtering on that alone left the building sitting in the pool with
       // an "Add to load…" control that 409'd every single time it was used.
       const stopDesign = new Set((stops ?? []).map((s) => s.design_short_code).filter(Boolean));
+      // ...and by INVENTORY UNIT, for the same reason one level over. A spec build sold before
+      // it was hauled sits here twice — its build job ("spec build → haul to the sales lot") and
+      // the sold unit ("deliver to the buyer"). Add the UNIT row and the sale stop carries the
+      // unit id but no build_job_id (and an inventory job's design code is always null), so the
+      // job row stayed: its "Add to load…" 409'd ("already on a load") while the stop was open,
+      // and once the building reached the buyer it sat here for good, still saying "haul to the
+      // sales lot". Same test the sold-unit list below applies: an OPEN stop for the unit, or
+      // its SALE stop (the one carrying the buyer's design code) in any state. A delivered haul
+      // stop on an unsold unit deliberately does not count — that is today's behaviour.
+      const soldCodeByUnit: Record<string, string> = {};
+      for (const u of sold ?? []) if (u.sold_design_short_code) soldCodeByUnit[u.id] = u.sold_design_short_code;
+      const stopUnit = new Set((stops ?? []).filter((s) => s.inventory_unit_id && (
+        !s.delivered_at
+        || (soldCodeByUnit[s.inventory_unit_id] && s.design_short_code === soldCodeByUnit[s.inventory_unit_id])
+      )).map((s) => s.inventory_unit_id));
 
       // Where this tenant has delivered before, so a pool row can be grouped by corridor
       // BEFORE it becomes a stop. Same rule add_stop applies on insert — kept in step by
       // being the same two lookups, so the group a building sits in is the territory it
       // will actually get.
+      //
+      // ...over the SAME rows in the SAME order, or "first match wins" picks a different
+      // winner: add_stop reads the 200 newest stops that carry a territory, newest first,
+      // while this loop used to walk every stop in id (random uuid) order. A town whose
+      // corridor had changed — Sedalia moved from West to Central on recent stops — was
+      // grouped under whichever old stop's uuid sorted first, then got the other territory
+      // the moment it was added to a load.
       const terrByZip: Record<string, string> = {};
       const terrByCity: Record<string, string> = {};
-      for (const s of stops ?? []) {
-        if (!s.territory_id) continue;
+      const terrStops = (stops ?? []).filter((s) => s.territory_id)
+        .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))
+        .slice(0, 200);
+      for (const s of terrStops) {
         if (s.dest_zip && !terrByZip[s.dest_zip]) terrByZip[s.dest_zip] = s.territory_id;
         const c = s.dest_city ? String(s.dest_city).trim().toLowerCase() : "";
         if (c && !terrByCity[c]) terrByCity[c] = s.territory_id;
       }
 
       const poolJobRows = (jobsAll ?? []).filter((j) =>
-        !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code)));
+        !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code))
+        && !(j.inventory_unit_id && stopUnit.has(j.inventory_unit_id)));
       // One query for every destination, not one per row.
       const poolCodes = [...new Set(poolJobRows.map((j) => j.design_short_code).filter(Boolean))];
       // The pool row used to label every sold unit "Sold lot building" — the same generic
@@ -1024,19 +1162,25 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // it can seed rows, and writes do not belong in a read wave.
       const stages = await getStages();
       const stageById = Object.fromEntries(stages.map((s) => [s.id, s]));
+      // All three are WHOLE-SET reads the Orders column is computed from, so they are PAGED
+      // (see fetchAll). They used to be `.limit(2000)` / unbounded on unordered queries, which
+      // PostgREST silently caps at 1000: past 1000 build jobs, a random slice of scheduled
+      // buildings came back as "Add to build schedule" (create_job then 409s), and past 1000
+      // sold units a random slice of lot sales was offered a BUILD instead of a delivery.
       const [jobsRes, stopsRes, soldUnitsRes] = await Promise.all([
-        admin.from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
-          .eq("client_id", clientId).limit(2000),
+        fetchAll((from, to) => admin.from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
+          .eq("client_id", clientId).order("id").range(from, to)),
         // Which units already ride a load, so a row offers "Schedule delivery" only when
         // there isn't one open already (add_stop would 409).
-        admin.from("delivery_stops").select("inventory_unit_id")
-          .eq("client_id", clientId).is("delivered_at", null),
+        fetchAll((from, to) => admin.from("delivery_stops").select("inventory_unit_id")
+          .eq("client_id", clientId).is("delivered_at", null).order("id").range(from, to)),
         // A LOT SALE looks like any other order on the Orders page — it has its own sale
         // design and its own orders row — but the building already exists, so it goes
         // straight to delivery and must never be offered a build. This map is how Orders
         // tells the two apart: sale design code -> the unit being sold.
-        admin.from("inventory_units").select("id, serial, sold_design_short_code")
-          .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000),
+        fetchAll((from, to) => admin.from("inventory_units").select("id, serial, sold_design_short_code")
+          .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null)
+          .order("id").range(from, to)),
       ]);
       if (jobsRes.error) throw jobsRes.error;
       const jobs = jobsRes.data;
@@ -1218,9 +1362,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const source = String(payload?.source ?? "");
       if (!["order", "inventory", "repair", "manual"].includes(source)) return json({ error: "Invalid source." }, 400);
       const stages = await getStages();
+      // No stage named → the first live "waiting" column. If the tenant has archived every
+      // queue-kind stage, fall back to the first LIVE column, never blindly stages[0]: that is
+      // the lowest sort_order, which is the archived Queue itself — every job added from the
+      // tray then landed in a column the Board does not draw.
       const stage = payload?.stageId
         ? await requireRow("schedule_stages", payload.stageId, "Stage")
-        : (stages.find((s) => s.kind === "queue" && !s.archived) ?? stages[0]);
+        : (stages.find((s) => s.kind === "queue" && !s.archived) ?? stages.find((s) => !s.archived) ?? stages[0]);
       // ENTERING A DONE STAGE IS COMPLETING — however the job got there. move_job and
       // complete_job both stamp completed_at, log the activity line and mint the building
       // serial; creating a job straight into a done stage (the board offers "add to this
@@ -2114,7 +2262,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           return json({ error: "Invalid repair status." }, 400);
         }
         patch.status = payload.status;
-        patch.completed_at = payload.status === "completed" ? new Date().toISOString() : null;
+        // The completion date is when it was FIRST completed. The repair card's Save always
+        // posts the status, so re-stamping here on every save moved a July completion to
+        // today the moment someone edited its notes or address — it re-entered "Completed ·
+        // 30 days" and lost the real date. Same rule complete_job applies to build jobs.
+        patch.completed_at = payload.status === "completed"
+          ? (repair.status === "completed" && repair.completed_at ? repair.completed_at : new Date().toISOString())
+          : null;
       }
       const { error } = await admin.from("repairs").update(patch).eq("id", repair.id).eq("client_id", clientId);
       if (error) throw error;

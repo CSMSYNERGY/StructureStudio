@@ -98,6 +98,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 /** Same severity split as customer-pay, and for the same reason: this function logs at
  *  minStatus 400 so the money trail is durable, which means a gate refusal and a declined
@@ -162,6 +164,13 @@ async function recentDeclines(
     .eq("actor_kind", "staff")
     .eq("actor_ref", actorRef)
     .eq("state", "closed_declined")
+    // closed_declined also holds the gateway's rate limiter and OUR configuration errors
+    // (invoicePayment.ts closes both that way — "rate limited: …" / "gateway configuration: …")
+    // because neither charged anything. Neither is the gateway answering about a CARD, so
+    // neither may count, or five tries through a broken credential or a busy minute read as
+    // "several declined attempts" and lock the login out for an hour.
+    .not("detail", "like", "rate limited:%")
+    .not("detail", "like", "gateway configuration:%")
     .gt("created_at", since);
   return Number(count ?? 0);
 }
@@ -291,8 +300,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       minCents: MIN_PAYMENT_CENTS,
       maxCents: MAX_PAYMENT_CENTS,
       tokenizer: {
+        // Also where the modal tokenizes a bank account itself (the Routing and Checking
+        // boxes, 2026-10): the numbers go from the browser to CardSecure, never through here.
         origin: cpTokenizerOrigin(),
         cardUrl: cpTokenizerUrl("card"),
+        // Unused by the current modal; kept for a portal tab still running the old build.
         achUrl: cpTokenizerUrl("ach"),
         // swipeonly is a SEPARATE url: the reader is a USB keyboard, and letting it share
         // the keyed-entry frame would mean a swipe could also be typed by hand.

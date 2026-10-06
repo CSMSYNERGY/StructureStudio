@@ -229,6 +229,30 @@ Deno.test("E2E: an all-non-taxable order taxes nothing and still balances", asyn
   assert(printed.includes("* Not subject to sales tax"), "every line wears the marker");
 });
 
+Deno.test("E2E: a rep's own prices (migration 277) are taxed, printed and billed; the list never appears", async () => {
+  // submit-estimate replaces a re-priced line's amount and keeps the catalog figure as listAmount,
+  // for audit only. Tax is worked out on what the customer is charged, and the document, the
+  // consent sentence and the ledger all read the new price; the replaced list figure is nowhere.
+  const lines = LINES.map((l) =>
+    l.kind === "building" ? { ...l, amount: 10500, listAmount: 11200 }
+    : l.kind === "door" ? { ...l, amount: 300, listAmount: 325 }
+    : l);
+  const snap = stampedSnapshot({ lines, rate: 0.0725 });
+  const { printed, consentFigure, ledger } = await threeWay(snap, "estimate");
+  // 10,500 + 2 x 300 + 600 taxable; 150 + 450 not.
+  assert(printed.includes("$11,700.00"), "the taxable subtotal is the re-priced one");
+  assert(printed.includes("$848.25"), "7.25% of 11,700 — the tax follows the new prices");
+  assert(printed.includes("$13,148.25"), "the total");
+  assertEquals(consentFigure, "$13,148.25", "the customer signs the re-priced total");
+  assertEquals(ledger.totalCents, 1314825);
+  assertEquals(ledger.taxCents, 84825);
+  for (const list of ["$11,200.00", "$325.00", "11200", "listAmount"]) {
+    assert(!printed.includes(list), `the document must never show the replaced list figure ${list}`);
+  }
+  // The invoice restates it too.
+  assertEquals((await threeWay(snap, "invoice")).consentFigure, consentFigure);
+});
+
 Deno.test("E2E: a pre-tax snapshot is untouched — the CRM path, and every legacy document", async () => {
   // No `tax` key: the totals block, the total and the ledger must all be exactly what they were
   // before any of this shipped. This is the regression that protects every tenant still on GHL.

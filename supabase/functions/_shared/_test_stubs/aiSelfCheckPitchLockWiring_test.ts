@@ -24,7 +24,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import {
-  applySelfCheck, measuredPitchLock, modelReplyText, parseKnownDims, parseSelfCheck, sanitizeD3Spec,
+  applySelfCheck, measuredOverhangLock, measuredPitchLock, modelReplyText, parseKnownDims, parseSelfCheck, sanitizeD3Spec,
   selfCheckChangedFields, selfCheckPrompt, selfCheckReverted, selfCheckRequest, selfCheckTotalChanges,
   legacySelfCheckPrompt, SELF_CHECK_CLAIM_WINDOW_MS, SELF_CHECK_MAX_ROUNDS,
 } from "../styleD3.ts";
@@ -63,7 +63,8 @@ for (const must of [
   '.select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens")',
   'const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);',
   "round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,",
-  "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);",
+  // The measured-overhang lock rides beside it (2026-09-29, aiSelfCheckOverhangLockWiring_test).
+  "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);",
 ]) {
   assert(BLOCK.includes(must), `the check lost ${must}`);
 }
@@ -162,6 +163,8 @@ const PARAMS = [
   "measuredPitchLock", "selfCheckRequest", "checkMode", "pairs", "selfCheckChangedFields", "AbortSignal", "fetch",
   "apiKey", "failedCheck", "t0", "modelReplyText", "parseSelfCheck", "applySelfCheck", "selfCheckTotalChanges",
   "selfCheckReverted", "SELF_CHECK_MAX_ROUNDS",
+  // 2026-09-29: the measured-overhang lock, which none of these rows has.
+  "measuredOverhangLock",
 ];
 const RUN = new AsyncFunction(...PARAMS, `${BLOCK}\n  return { fellThrough: true };`);
 
@@ -192,7 +195,7 @@ async function runCheck(opts: { row: Row; round?: number; mode?: "v2" | "legacy"
     // deno-lint-ignore require-await
     async (code: string) => ({ failed: code }),
     Date.now(), modelReplyText, parseSelfCheck, applySelfCheck, selfCheckTotalChanges, selfCheckReverted,
-    SELF_CHECK_MAX_ROUNDS,
+    SELF_CHECK_MAX_ROUNDS, measuredOverhangLock,
   );
   assert(out && out.body && out.status === 200, `the check answered: ${JSON.stringify(out)}`);
   assertEquals(sent.length, 1, "one model call");

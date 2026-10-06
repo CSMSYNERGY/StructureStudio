@@ -48,6 +48,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 /**
  * ⚠️ THE SEVERITY SPLIT, and it needs saying because this function logs at minStatus 400
@@ -261,8 +263,13 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
       minCents: MIN_PAYMENT_CENTS,
       maxCents: MAX_PAYMENT_CENTS,
       tokenizer: {
+        // The origin is also where the page tokenizes a bank account itself: since the
+        // Routing and Checking boxes (2026-10) the numbers go from the browser straight to
+        // CardSecure on this origin, never through here.
         origin: cpTokenizerOrigin(),
         cardUrl: cpTokenizerUrl("card"),
+        // No current page loads achUrl/achHeight. They stay so a page cached from before
+        // the two boxes still renders the old single-field iframe and can still pay.
         achUrl: cpTokenizerUrl("ach"),
         // Served, not hardcoded in the page: at 132px the CVV sat below the fold of a
         // non-scrolling frame and the form was quietly uncompletable.
@@ -347,12 +354,19 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     }, 400);
   }
 
-  // Decline throttle. Counted on the ORDER, over an hour.
+  // Decline throttle. Counted on the ORDER, over an hour. Card declines only: invoicePayment.ts
+  // also closes the gateway's rate limiter ("rate limited: …") and our own configuration errors
+  // ("gateway configuration: …") as closed_declined, since neither charged anything — but neither
+  // says anything about a card, and counting them told a customer who retried through a busy
+  // minute "That's several declined attempts in a row" and shut them out for an hour.
   const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { count: declines } = await admin.from("payment_attempts")
     .select("id", { count: "exact", head: true })
     .eq("client_id", ctx.clientId).eq("order_id", ctx.orderId)
-    .eq("state", "closed_declined").gt("created_at", since);
+    .eq("state", "closed_declined")
+    .not("detail", "like", "rate limited:%")
+    .not("detail", "like", "gateway configuration:%")
+    .gt("created_at", since);
   if ((declines ?? 0) >= MAX_DECLINES_PER_HOUR) {
     return json(
       { error: "That's several declined attempts in a row. Give it an hour, or call your builder." },

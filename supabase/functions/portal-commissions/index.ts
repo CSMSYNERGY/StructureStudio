@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
@@ -60,6 +61,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
@@ -254,23 +257,25 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const admin = createClient(supabaseUrl, serviceKey);
 
-  // 1. Real signed-in user (bare anon key passes the gateway but carries no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  // 1. Real signed-in user (bare anon key passes the gateway but carries no user) — the shared
+  //    check in _shared/verifyCaller.ts: token verified here + one session query, getUser()
+  //    only when that cannot decide.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return json(who.body, who.status);
+  const { user } = who.caller;
 
   // 2. Map the caller to their tenant + role (service role; client_id is never trusted from the body).
   //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
   //    exists, which would lock the user out entirely. portal.html already guards this
   //    the same way (its "audit #F6" comment), as does _shared/resolveTenant.ts.
-  const admin = createClient(supabaseUrl, serviceKey);
-  const { data: meRows, error: meErr } = await admin
-    .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
+  //    On verifyCaller's fast path this row came back with the session check.
+  const { data: meRows, error: meErr } = who.caller.mapping
+    ? { data: who.caller.mapping, error: null }
+    : await admin
+      .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
   if (meErr) return dbFail(req, null, "check your account", meErr);
   const me = meRows && meRows[0];
   if (!me?.client_id) return json({ error: "Your login isn't attached to an account." }, 403);
@@ -295,9 +300,18 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   // ⚠️ This function never accepts a targetClientId (it 403s on one, deliberately — Carolyn
   // 2026-08-07), so `clientId` is always the caller's OWN tenant and this question can only
   // ever be asked about them. That is what makes one lookup safe here.
-  let isInternal = false;
-  try { isInternal = await isInternalTenant(admin, clientId); }
-  catch (e) { return dbFail(req, clientId, "check your account settings", e); }
+  //
+  // ⏱ ONE WAVE with the caller's own commission grants (2026-10-02): neither read needs the other,
+  // and they used to be two round trips one after the other on EVERY action. The failure rules are
+  // unchanged: the internal check still fails CLOSED with its own 500 (and wins if both fail),
+  // and the grants read keeps its old tolerance — an error reads as "no grants", a thrown
+  // rejection still escapes to withErrorLog exactly as the bare await did.
+  const [internalRes, myCmRes] = await Promise.allSettled([
+    isInternalTenant(admin, clientId),
+    admin.from("commission_members").select("full_access, sees_all_payouts").eq("client_id", clientId).eq("user_id", user.id).maybeSingle(),
+  ]);
+  if (internalRes.status === "rejected") return dbFail(req, clientId, "check your account settings", internalRes.reason);
+  const isInternal = internalRes.value;
 
   // ⚠️ INTERNAL-ONLY AREAS NEVER LAND ON A BUILDER'S ROW. sanitizeAccess drops keys it does
   // not KNOW, and `projects` is a perfectly well-known area — it exists for every tenant so
@@ -320,9 +334,9 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
     return out;
   };
 
-  // The caller's own grants. Owner always sees rates + all payouts regardless.
-  const { data: myCm } = await admin
-    .from("commission_members").select("full_access, sees_all_payouts").eq("client_id", clientId).eq("user_id", user.id).maybeSingle();
+  // The caller's own grants (read in the wave above). Owner always sees rates + all payouts regardless.
+  if (myCmRes.status === "rejected") throw myCmRes.reason;
+  const myCm = myCmRes.value.data;
   const canSeeRates = isOwner || myCm?.full_access === true;
   const seesAll = isOwner || myCm?.sees_all_payouts === true;
   // The per-area Commissions switch (migration 100), which this function never consulted:
@@ -386,6 +400,102 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
     if (error) throw error;
     if (!data) throw new Refusal("That person isn't on your team.");
     return data as { user_id: string; role: string; title: string | null; access: Record<string, unknown> | null; full_name: string | null };
+  };
+
+  // ── The ledger as the caller may see it (rep = own; owner/sees_all = everyone) ─────────
+  // list_entries returns it, and so does compute when asked (withEntries) — the read after
+  // compute's writes then rides compute's own response instead of costing the tab a third call.
+  // A user row that has gone missing degrades to "" (and the name to a dash), exactly as the
+  // sequential version did — never taking the whole report down with it.
+  const emailOf = async (id: string) => {
+    try {
+      const { data: au } = await admin.auth.admin.getUserById(id);
+      return [id, au?.user?.email || ""] as const;
+    } catch { return [id, ""] as const; }
+  };
+  const listEntriesPayload = async () => {
+    // ⏱ THIS IS THE READ THE LEDGER PAINTS FROM, so it is kept to as few waves as its
+    // dependencies allow — the tab now shows entries before compute has run, and every
+    // trip saved here is one the user waits through.
+    //
+    // The two Auth-admin lookups below used to be sequential loops: one getUserById per
+    // earner missing a name, and one per team member UNCONDITIONALLY, every load. On a
+    // team of eight that was eight serial HTTP calls to GoTrue for nothing but an email
+    // column. They are batched with Promise.all now. Deliberately NOT auth.admin
+    // .listUsers(): that pages every user in the project, across all tenants, to answer
+    // a question about this tenant's handful of people.
+    const [settingsRes, entriesRes, teamRowsRes] = await Promise.all([
+      admin.from("commission_settings").select("enabled, payout_frequency, custom_days").eq("client_id", clientId).maybeSingle(),
+      (() => {
+        let q = admin.from("commission_entries").select("*").eq("client_id", clientId);
+        if (!seesAll) q = q.eq("earner_user_id", user.id);
+        return q;
+      })(),
+      canSeeRates
+        ? admin.from("client_users").select("user_id, full_name").eq("client_id", clientId).order("created_at")
+        : Promise.resolve({ data: [] }),
+    ]);
+    const settings = settingsRes.data;
+    const freq = settings?.payout_frequency || "biweekly";
+    const customDays = settings?.custom_days ?? null;
+    const entries = entriesRes.data || [];
+    // The team's emails depend only on wave A, so their GoTrue lookups start NOW and run beside
+    // wave B instead of waiting for it (2026-10-02). Same set of lookups, same degrade-to-"" rule.
+    const tRows = teamRowsRes.data || [];
+    const teamIds = [...new Set(tRows.map((t: any) => t.user_id))] as string[];
+    const teamEmailsP = Promise.all(teamIds.map(emailOf));
+
+    const orderIds = [...new Set(entries.map((e: any) => e.order_id))];
+    const earnerIds = [...new Set(entries.map((e: any) => e.earner_user_id).filter(Boolean))] as string[];
+    const [ordsRes, cuRes] = await Promise.all([
+      orderIds.length ? admin.from("orders").select("id, order_no, short_code").in("id", orderIds) : Promise.resolve({ data: [] }),
+      earnerIds.length ? admin.from("client_users").select("user_id, full_name").in("user_id", earnerIds) : Promise.resolve({ data: [] }),
+    ]);
+    const ords = ordsRes.data || [];
+    const ordById = new Map(ords.map((o: any) => [o.id, o]));
+    const codes = [...new Set(ords.map((o: any) => o.short_code).filter(Boolean))] as string[];
+    const nameById = new Map<string, string>();
+    for (const u of cuRes.data || []) nameById.set(u.user_id, u.full_name || "");
+
+    // Whose email we still have to ask GoTrue for: earners with no stored name (the team's
+    // lookups are already running — teamEmailsP — so an earner on the team is not asked twice).
+    const [dsnsRes, earnerEmails, teamEmails] = await Promise.all([
+      codes.length
+        ? admin.from("designs").select("short_code, contact, selections").eq("client_id", clientId).in("short_code", codes)
+        : Promise.resolve({ data: [] }),
+      Promise.all(earnerIds.filter((id) => !nameById.get(id) && !teamIds.includes(id)).map(emailOf)),
+      teamEmailsP,
+    ]);
+    const emailById = new Map<string, string>([...teamEmails, ...earnerEmails]);
+    const dsns = dsnsRes.data || [];
+    const dByCode = new Map(dsns.map((d: any) => [d.short_code, d]));
+    for (const id of earnerIds) if (!nameById.get(id)) nameById.set(id, emailById.get(id) || "—");
+    const enriched = entries.map((e: any) => {
+      const o: any = ordById.get(e.order_id) || {};
+      const d: any = o.short_code ? dByCode.get(o.short_code) : null;
+      const sel: any = d?.selections || {};
+      return {
+        id: e.id, orderId: e.order_id, orderNo: o.order_no ?? null,
+        customer: d?.contact?.name || "—",
+        building: [sel.style, sel.size].filter(Boolean).join(" ") || "—",
+        earnerUserId: e.earner_user_id,
+        earnerName: e.earner_user_id ? (nameById.get(e.earner_user_id) || "—") : null,
+        baseCents: e.base_cents, ratePercent: e.rate_percent == null ? null : Number(e.rate_percent),
+        amountCents: e.amount_cents, earnedOn: e.earned_on,
+        periodKey: e.period_key, periodLabel: e.period_key ? periodLabel(e.period_key, freq, customDays) : "Unscheduled",
+        status: e.status, kind: e.kind, isOverride: e.is_override,
+        splitShare: e.split_share == null ? null : Number(e.split_share),
+      };
+    });
+    // The assignable team (names) — only for someone who may edit commissions.
+    let team: any = undefined;
+    if (canSeeRates) {
+      team = tRows.map((t: any) => {
+        const email = emailById.get(t.user_id) || "";
+        return { userId: t.user_id, name: t.full_name || email || "—", email };
+      });
+    }
+    return { ok: true, isOwner, seesAll, canSeeRates, enabled: !!settings?.enabled, entries: enriched, team };
   };
 
   try {
@@ -843,45 +953,71 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // entry is still created with a null base/amount so the order shows on the report to be resolved.
       case "compute": {
         if (!canReadCommissions) return json({ error: "You don't have access to commissions." }, 403);
-        if (!canSeeRates) return json({ error: "Only the owner or a full-access admin can run commissions." }, 403);
-        const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
-        if (!settings || !settings.enabled) return json({ ok: true, enabled: false, computed: 0, updated: 0 });
+        // withEntries (2026-10-02, opt-in, so the production portal's plain compute → list_entries is
+        // untouched): the response also carries the ledger, read AFTER every write below has been
+        // awaited — the post-compute read the tab used to make as a third call. A caller who may not
+        // run compute gets the ledger without a 403, so the tab can ask everyone the same way and a
+        // rep's open files no refusal row.
+        if (!canSeeRates) {
+          if (p.withEntries === true) return json({ ok: true, skipped: "no_rate_access", ledger: await listEntriesPayload() });
+          return json({ error: "Only the owner or a full-access admin can run commissions." }, 403);
+        }
+        const withLedger = async (b: Record<string, unknown>) => (p.withEntries === true ? { ...b, ledger: await listEntriesPayload() } : b);
+        // ⏱ ONE WAVE for everything compute reads that depends on nothing but the tenant
+        // (2026-10-02): settings and orders used to be two round trips of their own in front of the
+        // wave. A disabled tenant, or one with no orders, now pays the other reads too (five reads,
+        // three of them whole-tenant), in parallel — more DB work, no added wait.
+        const [settingsRes, ordersRes, invsRes, memsRes, teamRowsRes, existingRes] = await Promise.all([
+          admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle(),
+          admin.from("orders")
+            .select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId),
+          admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator, issued_by").eq("client_id", clientId),
+          admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId),
+          admin.from("client_users").select("user_id").eq("client_id", clientId),
+          admin.from("commission_entries")
+            .select("id, order_id, status, is_override, earner_user_id, base_cents, rate_percent, amount_cents, earned_on, period_key")
+            .eq("client_id", clientId).eq("kind", "commission"),
+        ]);
+        const settings = settingsRes.data;
+        if (!settings || !settings.enabled) return json(await withLedger({ ok: true, enabled: false, computed: 0, updated: 0 }));
         const baseType: string = settings.base_type;
         const earnedOn: string = settings.earned_on;
         const freq: string = settings.payout_frequency;
         const anchor: string = settings.period_anchor;
         const customDays: number | null = settings.custom_days;
 
-        const { data: orders } = await admin.from("orders")
-          .select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId);
-        const ords = orders || [];
-        if (ords.length === 0) return json({ ok: true, orders: 0, computed: 0, updated: 0, removed: 0 });
+        const ords = ordersRes.data || [];
+        if (ords.length === 0) return json(await withLedger({ ok: true, orders: 0, computed: 0, updated: 0, removed: 0 }));
         const codes = ords.map((o: any) => o.short_code).filter(Boolean);
 
-        // designs → ghl_estimate_id (for the pre-tax fetch); invoice_sends → earner; members → rate; team → still-valid earners.
-        // ⏱ One wave, not six. These reads share no dependency — they were simply written
-        // one under the other, and the tab waited for the sum. The existing-entry read joins
-        // them (it is keyed by tenant, not by anything above it) and now also carries the
-        // fields the no-op check below compares against.
-        const [designsRes, invsRes, memsRes, teamRowsRes, paysRes, existingRes] = await Promise.all([
-          admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes),
-          admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator, issued_by").eq("client_id", clientId),
-          admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId),
-          admin.from("client_users").select("user_id").eq("client_id", clientId),
-          earnedOn === "collected"
-            ? admin.from("payments").select("order_id, amount_cents, received_at, voided_at").eq("client_id", clientId)
-            : Promise.resolve({ data: [] }),
-          admin.from("commission_entries")
-            .select("id, order_id, status, is_override, earner_user_id, base_cents, rate_percent, amount_cents, earned_on, period_key")
-            .eq("client_id", clientId).eq("kind", "commission"),
-        ]);
-        const estIdByCode = new Map<string, string>((designsRes.data || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
+        // invoice_sends → earner (read in the wave above); members → rate; team → still-valid earners.
         const senderByCode = new Map<string, string>();
         const portalCodes = new Set<string>();
         for (const iv of invsRes.data || []) {
           if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
           if (issuedByPortal(iv)) portalCodes.add(String(iv.short_code));
         }
+        // ── SCOPE: portal-issued sales only (see issuedByPortal above) ─────────────────
+        // Partitioned rather than filtered in the loop, because the orders that fall out are
+        // not simply skipped — any auto line already sitting on them has to go, or the report
+        // keeps showing sales this ledger has just decided it does not cover.
+        // (Partitioned HERE, before the GHL estimate fetch, so that fetch is skipped when only
+        // out-of-scope orders lack a base — their estimates were never used.)
+        const inScope = ords.filter((o: any) => portalCodes.has(String(o.short_code)));
+        const outOfScope = ords.filter((o: any) => !portalCodes.has(String(o.short_code)));
+        // designs → ghl_estimate_id, needed only for an in-scope order with no stored pre-tax base;
+        // payments only when commission is earned on collection. Both start together, and neither
+        // costs a round trip when it is not needed.
+        const needDesigns = baseType === "pretax_subtotal" && inScope.some((o: any) => o.pretax_subtotal_cents == null);
+        const [designsRes, paysRes] = await Promise.all([
+          needDesigns
+            ? admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes)
+            : Promise.resolve({ data: [] }),
+          earnedOn === "collected"
+            ? admin.from("payments").select("order_id, amount_cents, received_at, voided_at").eq("client_id", clientId)
+            : Promise.resolve({ data: [] }),
+        ]);
+        const estIdByCode = new Map<string, string>((designsRes.data || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
         const rateByUser = new Map<string, number | null>((memsRes.data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
         const teamSet = new Set<string>((teamRowsRes.data || []).map((t: any) => t.user_id));
 
@@ -890,7 +1026,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
 
         // One bounded estimate-list call, only when some order still lacks a stored base.
         const estById = new Map<string, any>();
-        if (baseType === "pretax_subtotal" && ords.some((o: any) => o.pretax_subtotal_cents == null && estIdByCode.get(o.short_code))) {
+        if (baseType === "pretax_subtotal" && inScope.some((o: any) => o.pretax_subtotal_cents == null && estIdByCode.get(o.short_code))) {
           const { data: cs } = await admin.from("client_settings").select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
           if (cs?.ghl_location_id && cs?.ghl_api_key) {
             for (const e of await listEstimates(cs.ghl_location_id, cs.ghl_api_key)) { const id = String(e?._id ?? e?.id ?? ""); if (id) estById.set(id, e); }
@@ -900,13 +1036,6 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const existing = existingRes.data || [];
         const existByOrder = new Map<string, any[]>();
         for (const e of existing) { const a = existByOrder.get(e.order_id) || []; a.push(e); existByOrder.set(e.order_id, a); }
-
-        // ── SCOPE: portal-issued sales only (see issuedByPortal above) ─────────────────
-        // Partitioned rather than filtered in the loop, because the orders that fall out are
-        // not simply skipped — any auto line already sitting on them has to go, or the report
-        // keeps showing sales this ledger has just decided it does not cover.
-        const inScope = ords.filter((o: any) => portalCodes.has(String(o.short_code)));
-        const outOfScope = ords.filter((o: any) => !portalCodes.has(String(o.short_code)));
 
         const diag: any[] = [];
         let computed = 0, updated = 0, removed = 0;
@@ -979,8 +1108,18 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
               && same(autoRow.earned_on, earnedDate)
               && same(autoRow.period_key, period?.key ?? null);
             if (!unchanged) {
-              await admin.from("commission_entries").update(rowData).eq("id", autoRow.id);
-              updated++;
+              // Only if the line is STILL what `existing` said it was (2026-10-02, review finding).
+              // `existing` is a snapshot taken before the GHL paging, so seconds can pass before
+              // this write — long enough for the owner, on a remounted tab whose own compute has
+              // already settled, to Adjust or reassign the line (is_override = true) or approve it.
+              // An unconditioned UPDATE then put the old auto figure back over their edit, and
+              // is_override kept any later compute from repairing it. Same idea as the retire
+              // DELETE below, which re-checks status and is_override; matching the snapshotted
+              // status (not just 'pending') keeps today's updates to excluded auto lines.
+              const { data: upd } = await admin.from("commission_entries").update(rowData)
+                .eq("id", autoRow.id).eq("status", autoRow.status).eq("is_override", false)
+                .select("id");
+              if ((upd || []).length) updated++;
             }
           } else {
             // 23505 here is NOT a failure — it is the database holding the one invariant this
@@ -1024,101 +1163,21 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         if (p.debug && diag.length) {
           try { await admin.from("app_errors").insert({ source: "edge:portal-commissions", severity: "info", code: "compute_diag", message: "pretax diag", client_id: clientId, context: { diag: diag.slice(0, 25) } }); } catch { /* best-effort */ }
         }
-        await audit(`compute (${computed} new, ${updated} updated, ${removed} removed)`);
-        return json({ ok: true, orders: inScope.length, computed, updated, removed, ...(p.debug ? { diag } : {}) });
+        // The audit and the ledger read run together — both after every write above. allSettled so
+        // the audit is ALWAYS awaited before the response, and a failed ledger read still reaches
+        // the catch below (a 500 the tab answers by reading list_entries itself).
+        const [, ledgerRes] = await Promise.allSettled([
+          audit(`compute (${computed} new, ${updated} updated, ${removed} removed)`),
+          withLedger({ ok: true, orders: inScope.length, computed, updated, removed, ...(p.debug ? { diag } : {}) }),
+        ]);
+        if (ledgerRes.status === "rejected") throw ledgerRes.reason;
+        return json(ledgerRes.value);
       }
 
       // ── the report: entries scoped to what the caller may see (rep = own; owner/sees_all = everyone) ──
       case "list_entries": {
         if (!canReadCommissions) return json({ error: "You don't have access to commissions." }, 403);
-        // ⏱ THIS IS THE READ THE LEDGER PAINTS FROM, so it is kept to as few waves as its
-        // dependencies allow — the tab now shows entries before compute has run, and every
-        // trip saved here is one the user waits through.
-        //
-        // The two Auth-admin lookups below used to be sequential loops: one getUserById per
-        // earner missing a name, and one per team member UNCONDITIONALLY, every load. On a
-        // team of eight that was eight serial HTTP calls to GoTrue for nothing but an email
-        // column. They are batched with Promise.all now. Deliberately NOT auth.admin
-        // .listUsers(): that pages every user in the project, across all tenants, to answer
-        // a question about this tenant's handful of people.
-        const [settingsRes, entriesRes, teamRowsRes] = await Promise.all([
-          admin.from("commission_settings").select("enabled, payout_frequency, custom_days").eq("client_id", clientId).maybeSingle(),
-          (() => {
-            let q = admin.from("commission_entries").select("*").eq("client_id", clientId);
-            if (!seesAll) q = q.eq("earner_user_id", user.id);
-            return q;
-          })(),
-          canSeeRates
-            ? admin.from("client_users").select("user_id, full_name").eq("client_id", clientId).order("created_at")
-            : Promise.resolve({ data: [] }),
-        ]);
-        const settings = settingsRes.data;
-        const freq = settings?.payout_frequency || "biweekly";
-        const customDays = settings?.custom_days ?? null;
-        const entries = entriesRes.data || [];
-
-        const orderIds = [...new Set(entries.map((e: any) => e.order_id))];
-        const earnerIds = [...new Set(entries.map((e: any) => e.earner_user_id).filter(Boolean))] as string[];
-        const [ordsRes, cuRes] = await Promise.all([
-          orderIds.length ? admin.from("orders").select("id, order_no, short_code").in("id", orderIds) : Promise.resolve({ data: [] }),
-          earnerIds.length ? admin.from("client_users").select("user_id, full_name").in("user_id", earnerIds) : Promise.resolve({ data: [] }),
-        ]);
-        const ords = ordsRes.data || [];
-        const ordById = new Map(ords.map((o: any) => [o.id, o]));
-        const codes = [...new Set(ords.map((o: any) => o.short_code).filter(Boolean))] as string[];
-        const nameById = new Map<string, string>();
-        for (const u of cuRes.data || []) nameById.set(u.user_id, u.full_name || "");
-
-        // Whose email we still have to ask GoTrue for: earners with no stored name, plus
-        // every team member (the picker shows the address under the name).
-        const tRows = teamRowsRes.data || [];
-        const needEmail = [...new Set([
-          ...earnerIds.filter((id) => !nameById.get(id)),
-          ...tRows.map((t: any) => t.user_id),
-        ])] as string[];
-        const [dsnsRes, emailPairs] = await Promise.all([
-          codes.length
-            ? admin.from("designs").select("short_code, contact, selections").eq("client_id", clientId).in("short_code", codes)
-            : Promise.resolve({ data: [] }),
-          Promise.all(needEmail.map(async (id) => {
-            // A user row that has gone missing must degrade to a dash, exactly as the
-            // sequential version did — never take the whole report down with it.
-            try {
-              const { data: au } = await admin.auth.admin.getUserById(id);
-              return [id, au?.user?.email || ""] as const;
-            } catch { return [id, ""] as const; }
-          })),
-        ]);
-        const emailById = new Map<string, string>(emailPairs);
-        const dsns = dsnsRes.data || [];
-        const dByCode = new Map(dsns.map((d: any) => [d.short_code, d]));
-        for (const id of earnerIds) if (!nameById.get(id)) nameById.set(id, emailById.get(id) || "—");
-        const enriched = entries.map((e: any) => {
-          const o: any = ordById.get(e.order_id) || {};
-          const d: any = o.short_code ? dByCode.get(o.short_code) : null;
-          const sel: any = d?.selections || {};
-          return {
-            id: e.id, orderId: e.order_id, orderNo: o.order_no ?? null,
-            customer: d?.contact?.name || "—",
-            building: [sel.style, sel.size].filter(Boolean).join(" ") || "—",
-            earnerUserId: e.earner_user_id,
-            earnerName: e.earner_user_id ? (nameById.get(e.earner_user_id) || "—") : null,
-            baseCents: e.base_cents, ratePercent: e.rate_percent == null ? null : Number(e.rate_percent),
-            amountCents: e.amount_cents, earnedOn: e.earned_on,
-            periodKey: e.period_key, periodLabel: e.period_key ? periodLabel(e.period_key, freq, customDays) : "Unscheduled",
-            status: e.status, kind: e.kind, isOverride: e.is_override,
-            splitShare: e.split_share == null ? null : Number(e.split_share),
-          };
-        });
-        // The assignable team (names) — only for someone who may edit commissions.
-        let team: any = undefined;
-        if (canSeeRates) {
-          team = tRows.map((t: any) => {
-            const email = emailById.get(t.user_id) || "";
-            return { userId: t.user_id, name: t.full_name || email || "—", email };
-          });
-        }
-        return json({ ok: true, isOwner, seesAll, canSeeRates, enabled: !!settings?.enabled, entries: enriched, team });
+        return json(await listEntriesPayload());
       }
 
       // ── assign/reassign an earner on one entry (owner or full_access); recomputes its amount ──

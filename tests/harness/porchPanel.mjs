@@ -15,10 +15,18 @@
 //   6. a style with no porch, opened and saved untouched, sends no porchOutFt, porchDepthFt,
 //      plateBand or wood key
 //   7. the projecting readout ("Posts ... clear") shows, and turns amber at 7 ft walls
-//   8. the truss box shows only for a recessed porch on a gable roof; the wood box only for a
-//      projecting porch
+//   8. the truss box shows only for a recessed porch on a gable roof, at a gable END (2026-10-05: not on
+//      the left wall of a gable front, an eave wall; yes on the left wall of a long-side front, a gable
+//      end); the wood box only for a projecting porch, or (2026-10-04) as "Wood colour (steps)" for a
+//      recessed porch's steps
 //   9. the BUILDER-ONLY cards stay off this surface: no step 1, no step 2, no Generate
 //  10. zero page errors
+//  11. the steps by porch kind (2026-10-03): a projecting porch offers left / centre / right and a
+//      flight down either side, those two greyed out (and the hint saying why) on a deck under
+//      2' 6"; a side flight saves its word, and made shallower than that it stays picked with the hint
+//      saying it is not drawn (2026-10-04); switching to recessed offers the front three only, drops
+//      the side flight and saves without steps; centre steps save beside porchDepthFt with the step
+//      count box showing the drawn count; switching back to projecting keeps them
 //
 // The public ?admin=1 operator page, with Supabase stubbed at the network layer (lib.mjs): no login,
 // and nothing leaves the machine, so no save ever reaches a database. It exercises the COMPILED
@@ -170,6 +178,13 @@ export async function main() {
     ok("save 1: nothing else in roof moved", keys(d3.roof) === "overhang,pitch,plateBand,porchEnd,porchOutFt,type"
       && d3.roof.type === "gable" && d3.roof.pitch === 0.4 && d3.roof.overhang === 0.6, keys(d3.roof));
     ok("save 1: no wood key until one is typed", !has(d3.colors, "wood"), keys(d3.colors));
+    // A SIDE WALL (2026-10-05) needs the front: with no front set the end is a gable end, front or back only, and the
+    // panel says what to do first.
+    const endSel = field(page, /^Porch end/).locator("select");
+    ok("with no front set the porch end offers the two gable ends only",
+      (await endSel.locator("option").allTextContents()).join("|") === "Front gable end|Back gable end", (await endSel.locator("option").allTextContents()).join("|"));
+    ok("...and says to set which wall is the front first for a side wall",
+      (await page.locator("[data-ss-porch-side-hint]").count()) === 1 && /set which wall is the front first/.test(await page.locator("[data-ss-porch-side-hint]").innerText()));
 
     // ── 2. Recessed ──
     await porchSelect(page).selectOption("recessed");
@@ -184,8 +199,24 @@ export async function main() {
     ok("...a recessed porch on a gambrel shows no truss box", (await trussBox(page).count()) === 0);
     await roofType.selectOption("gable");
     await settle(page);
+    // ...and it stands in a gable END (2026-10-05): on the left wall of a gable front the porch runs along an eave
+    // wall, where the box would tick and draw nothing; on the left wall of a long-side front, a gable end, it shows.
+    const frontSel = field(page, "Front wall (main door side)").locator("select");
+    await frontSel.selectOption("gable");
+    await settle(page);
+    await endSel.selectOption("left");
+    await settle(page);
+    ok("...a recessed porch on the left wall of a gable front shows no truss box", (await trussBox(page).count()) === 0);
+    await frontSel.selectOption("eave");
+    await settle(page);
+    ok("...on the left wall of a long-side front, a gable end, it shows", (await trussBox(page).count()) === 1);
+    // Back to the building as it was: the porch at the back, no front.
+    await endSel.selectOption("back");
+    await frontSel.selectOption("");
+    await settle(page);
     d3 = (await save(page, calls)).d3;
     ok("save 2: porchDepthFt 6.5", d3.roof.porchDepthFt === 6.5, JSON.stringify(d3.roof));
+    ok("save 2: the porch is back at the back, and no front is stored", d3.roof.porchEnd === "back" && !has(d3.roof, "front"), JSON.stringify(d3.roof));
     ok("save 2: no porchOutFt", !has(d3.roof, "porchOutFt"), keys(d3.roof));
     ok("save 2: the band stays on", d3.roof.plateBand === true);
 
@@ -227,6 +258,49 @@ export async function main() {
     ok("at 7 ft walls the readout warns and names the wall height a door needs",
       /^Walls this short leave \d+' \d+" under the porch beam\. About \d+' \d+" walls give a door's height at 2:12$/.test(r7text), r7text);
     ok("...in amber", r7color === AMBER, r7color);
+
+    // ── 11. The steps by porch kind (2026-10-03) ──
+    const stepsSel = () => field(page, /^Porch steps/).locator("select");
+    const optVals = () => stepsSel().locator("option").evaluateAll((os) => os.map((o) => `${o.value}${o.disabled ? "(off)" : ""}`).join("|"));
+    const countBox = () => page.locator('input[data-ss-step-count="ss-grid"]');
+    ok("a projecting porch offers steps along its front and down either side", (await optVals()) === "|left|center|right|leftSide|rightSide", await optVals());
+    await typeNumber(page, depthInput(page), 2);
+    const shallowHint = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("⚠️ on a 2 ft deck the side flights are greyed out, and the hint says why",
+      (await optVals()) === "|left|center|right|leftSide(off)|rightSide(off)" && /Steps down a side need a deck 2 ft 6 in deep/.test(shallowHint), `${await optVals()} | ${shallowHint}`);
+    await typeNumber(page, depthInput(page), 6);
+    ok("...and offered again at 6 ft", (await optVals()) === "|left|center|right|leftSide|rightSide", await optVals());
+    await stepsSel().selectOption("leftSide");
+    await settle(page);
+    ok("a side flight shows the step count box", (await countBox().count()) === 1 && /^blank = \d+$/.test((await countBox().getAttribute("placeholder")) || ""));
+    d3 = (await save(page, calls)).d3;
+    ok("save 11a: porchSteps leftSide beside porchOutFt 6", d3.roof.porchSteps === "leftSide" && d3.roof.porchOutFt === 6, JSON.stringify(d3.roof));
+    // ⚠️ Made shallower than 2 ft 6 in (2026-10-04), the pick stays (a depth typed a key at a time never
+    // loses it) but is not drawn, and the hint says so instead of the generic line.
+    await typeNumber(page, depthInput(page), 1.5);
+    const cutHint = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("⚠️ on a 1.5 ft deck the side flight stays picked, and the hint says it is not drawn",
+      (await stepsSel().inputValue()) === "leftSide" && /Steps down a side are not drawn until the deck is at least 2 ft 6 in deep/.test(cutHint), `${await stepsSel().inputValue()} | ${cutHint}`);
+    await typeNumber(page, depthInput(page), 6);
+    ok("...and at 6 ft the hint is the usual one again", (await stepsSel().inputValue()) === "leftSide"
+      && /down one of its sides/.test((await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ")));
+    await porchSelect(page).selectOption("recessed");
+    await settle(page);
+    ok("⚠️ a recessed porch offers the front three only, and drops the side flight", (await optVals()) === "|left|center|right" && (await stepsSel().inputValue()) === "", `${await optVals()} = ${await stepsSel().inputValue()}`);
+    d3 = (await save(page, calls)).d3;
+    ok("save 11b: recessed, no steps", d3.roof.porchDepthFt === 6 && !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount"), keys(d3.roof));
+    await stepsSel().selectOption("center");
+    await settle(page);
+    ok("recessed centre steps show the step count box, the one step a porch at grade draws", (await countBox().count()) === 1 && (await countBox().getAttribute("placeholder")) === "blank = 1");
+    // They are built of the porch wood (2026-10-04), so its box shows, named for them.
+    ok("...and the wood colour box, as \"Wood colour (steps)\"", (await field(page, "Wood colour (steps)").locator('input[type="text"]').count()) === 1 && (await woodInput(page).count()) === 0);
+    d3 = (await save(page, calls)).d3;
+    ok("save 11c: porchSteps center beside porchDepthFt 6", d3.roof.porchSteps === "center" && d3.roof.porchDepthFt === 6 && !has(d3.roof, "porchOutFt"), JSON.stringify(d3.roof));
+    await porchSelect(page).selectOption("projecting");
+    await settle(page);
+    ok("switching back to projecting keeps the centre steps", (await stepsSel().inputValue()) === "center");
+    d3 = (await save(page, calls)).d3;
+    ok("save 11d: porchSteps center beside porchOutFt 6", d3.roof.porchSteps === "center" && d3.roof.porchOutFt === 6 && !has(d3.roof, "porchDepthFt"), JSON.stringify(d3.roof));
 
     // ── 6. A style with no porch, saved untouched ──
     await openStyle(page, "Harness Plain Barn");

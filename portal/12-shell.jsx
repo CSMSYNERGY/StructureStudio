@@ -30,6 +30,9 @@ function DesignsLegacySub({ sub, navigate }) {
 const ICONS = {
   admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
   designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+  // Stacked layers — every control, one on top of another. Not the view-3d cube: the two pages
+  // can sit in one rail, and two cubes would read as one thing.
+  advanced: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>,
   quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
   accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
   // Kanban columns of descending height — the section is named Pipeline now, and the old
@@ -39,6 +42,8 @@ const ICONS = {
   // took that glyph in the same week, and two column icons in one rail read as one thing.
   projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
   contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  // Two speech bubbles: a back-and-forth. Not Settings → SMS's single bubble, which is one channel.
+  conversations: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>,
   orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
   pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
   "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
@@ -57,6 +62,8 @@ const ICONS = {
   "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
   "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
   "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
+  // A handset — My Synergy Phone's Calls page, and (by reference, below) Settings → Phone.
+  calls: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>,
 };
 
 // ── Settings rail glyphs ──────────────────────────────────────────────────────────────
@@ -83,6 +90,7 @@ const SETTINGS_ICONS = {
   email: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>,
   sms: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>,
   commissions: ICONS.commissions,
+  phone: ICONS.calls,                        // the handset — My Synergy Phone's calling setup
   billing: ICONS.billing,                    // the card — labelled "Subscription" in the rail
   myprofile: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>,
 };
@@ -482,8 +490,26 @@ const ssStyleSaveTail = new Map();
 
 // Read in the CALLER's tick, like 01-core's wrapper reads the view-as target, and for the same
 // reason: a queued save runs later, by which time an operator may be viewing somebody else.
-function ssStyleSaveKey(styleValue) {
-  return `${ssTargetClientId || ""}|${styleValue}`;
+// `target` is for a caller that read the view-as target even earlier and pins it (the Advanced
+// page's Save); left out, it is the target now, exactly as before.
+function ssStyleSaveKey(styleValue, target = ssTargetClientId) {
+  return `${target || ""}|${styleValue}`;
+}
+
+// THE GROUND'S FALL GOES ON EVERY STYLE SAVE, null included (review BC-1, 2026-09-29). The server
+// carries a stored gradeFallFt / gradeFallToward forward over any save that OMITS them
+// (carryForwardFoundation in _shared/styleD3.ts): a designer built between 09-25 and 09-28 sends
+// frame "front" but drops both keys, and must not erase a fall it has never heard of. So this panel's
+// "no fall" has to be said out loud, as null, or it would never land. The sanitiser drops the null,
+// so nothing ever stores it, and a style with no fall is written exactly as before.
+// The operator page's save (saveCalSpec in the designer twins) sends the same two keys the same way.
+// THE GROUND AT EACH CORNER (gradeCornersFt, 2026-09-29) rides the same way and for the same reason:
+// the server carries a stored value over any save that omits it (production's designer and every
+// panel before today), so this panel's "level ground" is an explicit null too.
+function ssD3WithFall(d3) {
+  if (!d3 || typeof d3 !== "object") return d3;
+  return { ...d3, gradeFallFt: d3.gradeFallFt != null ? d3.gradeFallFt : null, gradeFallToward: d3.gradeFallToward != null ? d3.gradeFallToward : null,
+    gradeCornersFt: d3.gradeCornersFt != null ? d3.gradeCornersFt : null };
 }
 
 function ssQueueStyleSave(key, run) {
@@ -596,6 +622,12 @@ function ssRunStyleSave(key, target, styleValue, label, build, confirm) {
   });
 }
 
+// How long a cold /portal/advanced waits on "Checking your account…" for the tenant's billing
+// answer before it gives up and shows the Designer (review 2026-09-29). Long enough for a cold
+// edge function, short enough that a failed call does not strand anyone. A "yes" that lands later
+// still opens the page. window.__ssAdvancedHoldMs overrides it for the harness.
+const SS_ADVANCED_HOLD_MS = 8000;
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -606,17 +638,36 @@ function Dashboard({ session }) {
   });
   // The Settings / Admin sub-page, lifted out of those shells so it can live in the URL.
   const [sub, setSub] = useState(() => ssParsePath().sub || null);
-  // Which DEAL a customer record should open on, when the reader arrived by clicking that
-  // deal in the Pipeline. Carolyn 2026-09-02: a contact record opens with nothing selected
-  // and "it's Greek, you have no idea" — but arriving from a pipeline row means the deal is
-  // already known, so there is nothing to guess.
+  // HOW THE READER ARRIVED AT A RECORD, when the page that opened it knows more than the URL
+  // says. Three things ride along, all optional:
+  //   deal  which DEAL a customer record opens on: the Pipeline row, or the schedule job or stop,
+  //         that was clicked. Carolyn 2026-09-02: a contact record opens with nothing selected
+  //         and "it's Greek, you have no idea" — but arriving from one of those the deal is
+  //         already known, so there is nothing to guess.
+  //   chip  which HISTORY CHIP it opens on, from a Conversations row: an email opens on Emails,
+  //         a text on Messages, a call on Calls.
+  //   from  where the record's own Back goes, when that isn't the list the record belongs to:
+  //         { page, pageSub }. Conversations opens a CONTACT record, whose Back would otherwise
+  //         land on Contacts (pageSub keeps the filter left, /portal/conversations/texts), and the
+  //         Build and Delivery Schedules open a contact or a design record.
   //
-  // SELF-INVALIDATING BY SHAPE, which is why it stores the contact id alongside the deal
-  // rather than the deal alone: it is honoured only while `sub` still names that same
-  // contact, so walking to another record, or back and in again by hand, silently stops
-  // matching instead of preselecting a deal that belongs to somebody else. No cleanup
-  // effect, and nothing to forget on a new route.
-  const [recordDeal, setRecordDeal] = useState(null);   // { contactId, deal } | null
+  // KEPT IN THE HISTORY ENTRY, not just here (review 2026-10-05). navigate() writes it into the
+  // entry it pushes, and onPop reads it back from the entry it lands on, so the record's own Back
+  // and the browser's Back always agree (Carolyn 2026-08-28: "they function the same way"). An
+  // earlier draft spent all three the moment `sub` moved, which broke exactly that: Open in
+  // designer, then the browser's Back, reopened the record with no deal and a Back to Contacts,
+  // and took the Pipeline's preselected deal with it.
+  //
+  // Every other navigate() passes none, so it clears: the same customer reopened from Contacts
+  // opens on nothing, with a Back to Contacts. And `sub` is stored with it, and every reader
+  // checks it, so a context can only ever apply to the record it was captured for.
+  // Seeded from the entry a reload lands on, which still carries it.
+  const [recordCtx, setRecordCtx] = useState(() => {
+    try {
+      const st = window.history.state, p = ssParsePath();
+      return st && st.rec && st.rec.sub === (p.sub || null) ? st.rec : null;
+    } catch (_e) { return null; }
+  });   // { sub, deal?, chip?, from?: { page, pageSub } } | null
   // What the URL ASKED for, held until the role/operator gates have resolved. Without this
   // the clamp below runs on the first render — when isOperator is still false because
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
@@ -648,14 +699,20 @@ function Dashboard({ session }) {
   // operator console are keep-mounted, and a real navigation would discard an in-progress
   // design or a half-filled admin form. The rail's anchors call THIS from their left-click
   // handler and leave every other click to the browser — see ssNavClick in 01-core.jsx.
-  const navigate = useCallback((page, nextSub = null, replace = false) => {
+  //
+  // `rec` is how the reader arrived, for a record (recordCtx above): { deal?, chip?, from? }.
+  // Left out, it clears, which is what every ordinary navigation wants.
+  const navigate = useCallback((page, nextSub = null, replace = false, rec = null) => {
     wanted.current = null;                 // an explicit click supersedes the boot intent
+    const ctx = rec ? { ...rec, sub: nextSub } : null;
+    setRecordCtx(ctx);
     setTab(page);
     setSub(nextSub);
     try {
       const url = ssPagePath(page, nextSub);
-      if (replace) window.history.replaceState({ page, sub: nextSub }, "", url);
-      else window.history.pushState({ page, sub: nextSub }, "", url);
+      const state = ctx ? { page, sub: nextSub, rec: ctx } : { page, sub: nextSub };
+      if (replace) window.history.replaceState(state, "", url);
+      else window.history.pushState(state, "", url);
     } catch (_e) { /* history unavailable — the app still works, the URL just won't track */ }
   }, []);
 
@@ -683,6 +740,21 @@ function Dashboard({ session }) {
   // still latches this and mounts the host hidden, which costs a fetch and shows nothing.
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
+  // The Advanced page gets the designer's treatment: mounted on first open, then kept, so a
+  // building half-built there survives a trip to another page. It is its OWN designer instance,
+  // so the quote in progress on the Designer page is never touched by it. The render also asks
+  // ssAdvancedOn, so latching on the raw tab here can never mount it for a tenant without it.
+  const [advancedOpened, setAdvancedOpened] = useState(false);
+  useEffect(() => { if (tab === "advanced") setAdvancedOpened(true); }, [tab]);
+  // Does the Advanced page hold a building that is not saved, or a save still going? The page
+  // reports it (AdvancedTab's onDirty), and openAccount / exitAccount ask before throwing it away
+  // (the page is remounted per account). A ref: nothing renders from it.
+  const advancedDirtyRef = useRef(false);
+  // A cold /portal/advanced is HELD on "Checking your account…" until the entitlement answers
+  // (the gate below), but not for ever: a billing call that failed, hung, or answered without an
+  // entitlement never answers, and the route would sit there for the whole session (review
+  // 2026-09-29). Set by the effect beside the clamp, after SS_ADVANCED_HOLD_MS.
+  const [advancedHoldOver, setAdvancedHoldOver] = useState(false);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
   // "Open in the portal designer" request ({clientId, code, version, n}) set by the
@@ -733,6 +805,22 @@ function Dashboard({ session }) {
   // owner-JWT-bound and must not run against the operator's own tenant).
   const [viewing, setViewing] = useState(null);
 
+  // ONE refetch counter for the entitlement (2026-10-05). Both reads of it below (your own, and
+  // the viewed tenant's in view-as) are keyed on the sign-in token, so a purchase or a
+  // cancellation on the Billing tab reached nothing until a reload: a builder who had just bought
+  // 3D was still looking at a locked 3D, and an owner who paid on the paywall was still looking at
+  // the paywall it promises lifts "as soon as payment goes through". Whatever changes the
+  // entitlement raises ssEntitlementChanged (01-core.jsx): Billing's subscribe and cancel, and the
+  // Advanced mode switch in Settings → Designer (whose answer is the entitlement's advancedMode).
+  // This bumps the counter, and the counter sits in both effects' deps. Declared ABOVE them for the reason `viewing`'s comment gives
+  // (Babel compiles const to var, so a dep read above its useState is silently undefined).
+  const [entitlementRev, setEntitlementRev] = useState(0);
+  useEffect(() => {
+    const bump = () => setEntitlementRev((n) => n + 1);
+    window.addEventListener(SS_ENTITLEMENT_CHANGED, bump);
+    return () => window.removeEventListener(SS_ENTITLEMENT_CHANGED, bump);
+  }, []);
+
   // Fetches the entitlement declared above — split from its useState and placed BELOW
   // `viewing` because Babel compiles const to var, so a `viewing` read above its useState
   // is silently `undefined`, never a throw (the canAdminForUrl comment tells that story).
@@ -743,7 +831,10 @@ function Dashboard({ session }) {
   // tenant's entitlement here and lock the operator's own portal after Exit (audit
   // 2026-08-20). Skipped while viewing; the `viewing` dep refetches on exit, so nothing
   // goes stale either. Keyed on the token, not the session object — onAuthStateChange
-  // mints a new session object on EVERY auth event, token change or not.
+  // mints a new session object on EVERY auth event, token change or not. And on
+  // entitlementRev, so a purchase on the Billing tab lands without a reload. A refetch keeps the
+  // last answer on screen until the new one arrives, and a failed one keeps it for good: the
+  // same never-lock-someone-out posture as the first read.
   useEffect(() => {
     if (viewing) return;
     let cancelled = false;
@@ -754,7 +845,7 @@ function Dashboard({ session }) {
       } catch (_e) { /* leave null — never lock someone out because a call failed */ }
     })();
     return () => { cancelled = true; };
-  }, [session.access_token, viewing]);
+  }, [session.access_token, viewing, entitlementRev]);
 
   // ── SUPPORT OPERATOR (migration 176) ─────────────────────────────────────────
   // A support operator stands in the builder's shoes: the server resolves the VIEWED
@@ -926,11 +1017,19 @@ function Dashboard({ session }) {
           "viewed_ctx_unreadable", { clientId: viewing && viewing.clientId });
         return;
       }
-      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null });
+      // `clientId` says WHOSE answer this is. The state is not cleared when an operator moves
+      // straight from one viewed builder to another, so until the new answer lands it still holds
+      // the last one; the Advanced gate (below) reads a mismatch as "not answered yet".
+      // phoneStatus: the VIEWED tenant's My Synergy Phone switch, so Call and the Calls page follow the
+      // builder on screen rather than the operator's own account.
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null });
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [mirrorView, viewing && viewing.clientId, session.access_token]);
+    // entitlementRev: an operator who subscribes or cancels FOR the viewed builder (Billing in
+    // view-as) sees the builder's portal change at once, exactly as the builder would. The state is
+    // not cleared first, so the old answer stays on screen until the new one lands.
+  }, [mirrorView, viewing && viewing.clientId, session.access_token, entitlementRev]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -959,6 +1058,32 @@ function Dashboard({ session }) {
   // what the tenant has PAID for is a separate question, answered by gateEnt below for every
   // operator alike since 2026-09-15.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // ── ADVANCED (2026-09-28): one rule, ssAdvancedOn (01-core), asked about the tenant ON SCREEN.
+  // Derived inline HERE, not from gateEnt: that is declared below the early returns, and read up
+  // here it would be a var-hoisted `undefined` (the placement note above). Same shape as gateEnt:
+  // the viewed tenant's entitlement in view-as, your own otherwise.
+  //
+  // ONLY THE VIEWED TENANT'S OWN ANSWER (review 2026-09-29). viewedCtx is not cleared when an
+  // operator moves straight from our account to another builder, so until that builder's answer
+  // lands it still holds OURS — and the item and a page instance appeared for a builder without
+  // Advanced. An answer tagged with another clientId is read as no answer yet.
+  const advancedCtx = (viewing && viewedCtx && viewedCtx.clientId === viewing.clientId) ? viewedCtx : null;
+  const advancedEnt = viewing ? (advancedCtx ? advancedCtx.entitlement : null) : entitlement;
+  // AND ONLY SOMEONE WHO MAY RUN THE ACCOUNT (review 2026-09-29). The page's whole output is a new
+  // style, saved through setup3d, which is built for canAdmin alone; a team member was offered a
+  // page that could only say no. In view-as that is a platform operator — a support operator wears
+  // the builder's map, not the owner's chair — and isSupportOp null (still asking) is not yet a yes.
+  const advancedMayRun = viewing ? (!!isOperator && isSupportOp === false) : !!canAdminForUrl;
+  const advancedOn = ssAdvancedOn(advancedEnt) && advancedMayRun;
+  // The entitlement arrives AFTER the tenant, so a cold /portal/advanced first renders with no
+  // answer. Refusing then would rewrite our own account's address bar to /portal/designer and
+  // mount the Designer, only to jump back when the answer lands. So while it is out the route is
+  // HELD: the page says "Checking…" and neither the nav item nor the page itself is drawn (both
+  // read advancedOn, never this). Only a real answer decides — or the hold's time limit
+  // (advancedHoldOver), after which a route still unanswered is refused like any other "no".
+  const advancedAnswered = viewing ? (advancedCtx !== null && isSupportOp !== null) : entitlement !== null;
+  const advancedAsked = advancedAnswered || advancedHoldOver;
+  const advancedClampOn = advancedOn || (tab === "advanced" && !advancedAsked);
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
   // operator-tabs-only failure the placement comment above this block was written about.
@@ -966,7 +1091,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -999,8 +1124,32 @@ function Dashboard({ session }) {
     // the address bar keeps a path that bounces again on every reload. isSupportOp is listed
     // for the same reason: gatesResolved reads it too.
   }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects, isSupportOp]);
-  const viewingFetch = useCallback(async () => {
-    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
+  // A REFUSED /portal/advanced shows the Designer, so the Designer host has to mount. The effect
+  // above rewrites the address bar but leaves `tab` on "advanced", and designerOpened latches on
+  // the raw tab — so without this line the page under /portal/designer is blank. Leaving `tab`
+  // alone is deliberate: an operator's cold /portal/advanced?view=<ours> is refused for a moment
+  // (their own entitlement answers before ?view= arms) and then resolves, and the URL follows.
+  useEffect(() => {
+    if (tab === "advanced" && resolvedTab === "designer") setDesignerOpened(true);
+  }, [tab, resolvedTab]);
+  // The hold's time limit (see advancedHoldOver). Started afresh each time the route is held, and
+  // lifted the moment a real answer lands or the builder goes elsewhere. A late "yes" still wins:
+  // `tab` stays "advanced" under a refusal, so the page opens when the answer finally arrives.
+  useEffect(() => {
+    setAdvancedHoldOver(false);
+    if (tab !== "advanced" || advancedAnswered) return;
+    const ms = (typeof window !== "undefined" && Number(window.__ssAdvancedHoldMs)) || SS_ADVANCED_HOLD_MS;
+    const t = setTimeout(() => setAdvancedHoldOver(true), ms);
+    return () => clearTimeout(t);
+  }, [tab, advancedAnswered]);
+  // The Contacts list's contacts, on the same audited route as the rest: `withContacts` adds the
+  // first page of the tenant's contacts (crmContacts + crmContactsTotal) to get_portal's answer, and
+  // `contactsFrom` is its "Show more", answered with that page alone. The Pipeline sends neither,
+  // so its get_portal carries no contacts at all.
+  const viewingFetch = useCallback(async (opts = null) => {
+    const contactsFrom = opts && opts.contactsFrom > 0 ? opts.contactsFrom : undefined;
+    const withContacts = opts && opts.withContacts ? true : undefined;
+    const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId, contactsFrom, withContacts } });
     if (error) {
       let msg = error.message;
       try { const ctx = await error.context.json(); if (ctx && ctx.error) msg = ctx.error; } catch (_e) {}
@@ -1008,7 +1157,8 @@ function Dashboard({ session }) {
     }
     // Backfill the real company name (a ?view= deep link seeds it with the slug).
     if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
-    return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [] };
+    return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [],
+      crmContacts: data.crmContacts || [], crmContactsTotal: data.crmContactsTotal || 0 };
   }, [viewing && viewing.clientId]);
   // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
   // admin console's "Open portal ↗") auto-opens that account once the operator
@@ -1024,8 +1174,12 @@ function Dashboard({ session }) {
     }
   }, [isOperator]);
   const openAccount = (c) => {
-    // Switching account remounts the Designer, discarding anything in progress.
-    if (designerOpened && !window.confirm("Opening another account will discard the design you have open in the Designer tab. Continue?")) return;
+    // Switching account remounts the Designer, discarding anything in progress — and the Advanced
+    // page, whose unsaved building (or save still going) is named too (review 2026-09-29).
+    const advDirty = advancedDirtyRef.current;
+    const lose = designerOpened && advDirty ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page"
+      : advDirty ? "the building you haven't saved on the Advanced page" : "the design you have open in the Designer tab";
+    if ((designerOpened || advDirty) && !window.confirm(`Opening another account will discard ${lose}. Continue?`)) return;
     // A consumed Open request must not survive the switch: the remounted DesignerTab
     // would replay it on mount and silently rehydrate that customer's design (with its
     // live GHL estimate refs) into what the operator expects to be a blank designer.
@@ -1037,6 +1191,9 @@ function Dashboard({ session }) {
     try { window.history.replaceState({ page: "designs", sub: null }, "", "/portal/designs?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
   };
   const exitAccount = () => {
+    // Leaving remounts the Advanced page too. Only its UNSAVED work asks: that page reports it, and
+    // the Designer (which never asked here) is left as it was.
+    if (advancedDirtyRef.current && !window.confirm("Leaving this account will discard the building you haven't saved on the Advanced page. Continue?")) return;
     setOpenDesign(null);                        // same replay guard as openAccount
     ssTargetClientId = null;
     setViewing(null); setTab("accounts"); setSub(null);
@@ -1088,15 +1245,39 @@ function Dashboard({ session }) {
   // tenant's URL, and ssPagePath then rode the stale ?view= onto every later navigation
   // (audit 2026-08-20). Restoring an entry with ?view= re-enters view-as exactly as a
   // reload of that URL would (the boot effect above); an entry without it exits.
+  //
+  // UNSAVED WORK ON THE ADVANCED PAGE (review ADV-3, 2026-09-29). Crossing a view-as boundary remounts
+  // that page (its key is the tenant), so Back or Forward over one asks first, with the words
+  // openAccount / exitAccount use. By the time popstate fires the address bar has already moved, so
+  // the address this page was on is kept after every render (lastAddrRef), and a No puts it back
+  // with pushState before anything here changes: the page, the tenant and the building all stay.
+  const lastAddrRef = useRef(null);
+  useEffect(() => { lastAddrRef.current = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state }; });
   useEffect(() => {
     const onPop = () => {
       const p = ssParsePath();
-      wanted.current = p.page && TAB_META[p.page] ? p.page : null;
-      setTab(p.page && TAB_META[p.page] ? p.page : "designs");
-      setSub(p.sub || null);
       const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
       const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;
-      if (urlView !== (viewing ? viewing.clientId : null)) {
+      const crosses = urlView !== (viewing ? viewing.clientId : null);
+      if (crosses && advancedDirtyRef.current) {
+        const lose = designerOpened ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page" : "the building you haven't saved on the Advanced page";
+        const ask = urlView ? `Opening another account will discard ${lose}. Continue?`
+          : "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?";
+        if (!window.confirm(ask)) {
+          const back = lastAddrRef.current;
+          if (back) { try { window.history.pushState(back.state, "", back.url); } catch (_e) { /* history unavailable */ } }
+          return;
+        }
+      }
+      wanted.current = p.page && TAB_META[p.page] ? p.page : null;
+      // How the reader first arrived at the record this entry holds (recordCtx): the entry kept
+      // it, so Back onto a record opened from a schedule, Conversations or the Pipeline reopens it
+      // on the same deal or chip, with the same Back. Anything else clears.
+      const st = window.history.state;
+      setRecordCtx(st && st.rec && st.rec.sub === (p.sub || null) ? st.rec : null);
+      setTab(p.page && TAB_META[p.page] ? p.page : "designs");
+      setSub(p.sub || null);
+      if (crosses) {
         setOpenDesign(null);                    // same replay guard as openAccount/exitAccount
         ssTargetClientId = urlView;             // same tick as the pop, before the re-render
         // Seeded with the slug; viewingFetch backfills the real company name, exactly as
@@ -1106,7 +1287,7 @@ function Dashboard({ session }) {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [isOperator, viewing]);
+  }, [isOperator, viewing, designerOpened]);
 
   // Keep the transport override in lockstep with `viewing`. Assigned during RENDER, not in
   // an effect: React runs CHILD effects before PARENT effects on mount, so an effect here
@@ -1269,6 +1450,8 @@ function Dashboard({ session }) {
       // server-side hole above has to be closed rather than compensated for here.
       let access = null;
       let prefs = null;
+      // My Synergy Phone's per-tenant switch ("on" | "off" | null), off the same bootstrap call.
+      let phoneStatus = null;
       try {
         // Issued at the top of the effect, not here — see the note there for why that is
         // safe against a view-as arming mid-flight. `bootStatus` is null exactly when
@@ -1282,6 +1465,7 @@ function Dashboard({ session }) {
           // a round trip late renders the wrong tab and then jumps, which reads worse than
           // having no setting at all.
           if (st && st.prefs) prefs = st.prefs;
+          if (st && st.phoneStatus) phoneStatus = st.phoneStatus;
           // …and so does the heading. `status` already reads client_configs server-side and
           // hands back branding.companyName, so the separate client_configs SELECT that used
           // to sit above was a third sequential round trip for a column this response was
@@ -1312,6 +1496,7 @@ function Dashboard({ session }) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
               if (again.data && again.data.prefs) prefs = again.data.prefs;
+              if (again.data && again.data.phoneStatus) phoneStatus = again.data.phoneStatus;
               if (again.data && again.data.branding && again.data.branding.companyName
                   && (!again.data.clientId || again.data.clientId === mapping.client_id)) {
                 businessName = again.data.branding.companyName;
@@ -1336,7 +1521,7 @@ function Dashboard({ session }) {
       // (performance.mark is wrapped because a hardened browser can make it throw, and a
       // measurement must never be the thing that blanks the portal).
       try { performance.mark("ss:tenant-ready"); } catch (_e) {}
-      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs });
+      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs, phoneStatus });
     })();
   }, [session.access_token, viewing]);
 
@@ -1362,19 +1547,41 @@ function Dashboard({ session }) {
     if (window.__ssWarmed) return undefined;
     window.__ssWarmed = true;
     const first = setTimeout(() => {
-      ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions");
-      ssWarmFn("portal-settings"); ssWarmFn("portal-billing");
+      ssWarmThrottled("portal-schedule"); ssWarmThrottled("portal-commissions");
+      ssWarmThrottled("portal-settings"); ssWarmThrottled("portal-billing");
     }, 1500);
     const second = setTimeout(() => {
-      ssWarmFn("portal-payments"); ssWarmFn("portal-setup");
-      ssWarmFn("portal-feedback"); ssWarmFn("sync-design-status");
+      ssWarmThrottled("portal-payments"); ssWarmThrottled("portal-setup");
+      ssWarmThrottled("portal-feedback"); ssWarmThrottled("sync-design-status");
     }, 3000);
     return () => { clearTimeout(first); clearTimeout(second); };
-    // Deps stay EMPTY on purpose. Adding one (isOperator, to warm the operator-only functions)
-    // would re-run the effect the moment that flag resolves; React runs the previous cleanup
-    // first, so the pending timers would be cleared and the re-run would bail on the
-    // __ssWarmed guard — warming nothing at all. Two operators are not worth that risk.
+    // Deps stay EMPTY on purpose. Adding a late flag (isOperator) would re-run this the moment it
+    // resolves; React runs the cleanup first, clearing the pending timers, and the re-run bails
+    // on __ssWarmed, so nothing gets warmed. The operator-only functions get their own effect below.
   }, []);
+
+  // ── Warm the operator-only isolates ─────────────────────────────────────────────
+  // operator-portal (Accounts, the switcher, every view-as read), admin-catalog (Admin) and
+  // portal-projects (Projects) back screens the boot waves never name, and a cold one costs the
+  // same ~2.5 s. Their flags come from three token-keyed rpcs that answer AFTER boot, so this is a
+  // separate effect keyed on the resolved answers. No page-level guard: ssWarmThrottled stamps a
+  // function only when its ping is SENT, so a re-run that clears this timer just schedules it again.
+  // Each ping is gated on the SAME condition that draws its console, never on isOperator alone. A
+  // support operator is refused by admin-catalog and portal-projects at the door, and
+  // tests/harness/supportConsoles.mjs counts every request a support account sends to either.
+  const warmOperatorPortal = !!isOperator;
+  const warmAdminCatalog = !!isOperator && isSupportOp === false;
+  const warmProjectsFn = !!projectsOpen;
+  useEffect(() => {
+    if (!warmOperatorPortal && !warmAdminCatalog && !warmProjectsFn) return undefined;
+    // Behind the boot waves (1.5 s / 3 s), for the same reason they are delayed.
+    const t = setTimeout(() => {
+      if (warmOperatorPortal) ssWarmThrottled("operator-portal");
+      if (warmAdminCatalog) ssWarmThrottled("admin-catalog");
+      if (warmProjectsFn) ssWarmThrottled("portal-projects");
+    }, 3500);
+    return () => clearTimeout(t);
+  }, [warmOperatorPortal, warmAdminCatalog, warmProjectsFn]);
 
   // ── Who the signed-in person is, and the operator's user editor ────────────────
   // `profile` is the caller's own client_users row. needsDetails drives a one-time nudge:
@@ -1433,43 +1640,41 @@ function Dashboard({ session }) {
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
   // not read a value declared below itself. See the setup3d memo for what that cost.
-  // 3D reads entitlement.GRANTED, not entitlement.features, and that is deliberate.
   //
-  // `features.view_3d` is computed by portal-billing, where view_3d falls under the
-  // exempt/free-period BLANKET unless that function has the three-branch map (which needs
-  // billing_plans.operator_grantable, migration 109). Every tenant predating the billing gate
-  // is exempt, so gating on features here would show 3D to essentially all of them the moment
-  // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
-  // when this landed on beta before the migration could be applied.
+  // 3D is on when the tenant on screen was GIVEN it or has PAID for it: ssView3dOn (01-core.jsx)
+  // reads entitlement.granted and entitlement.paid, two lists portal-billing names feature by
+  // feature. Until 2026-10-05 this read `granted` alone, and a purchase never lands there, so a
+  // builder who bought 3D (Carolyn's call with one on 2026-09-16, and another on 2026-08-27) saw
+  // Billing say Active while 3D stayed locked until she switched it on by hand. `paid` is every
+  // feature a subscription makes usable right now, with the same grace and paid-through rules
+  // as the rest of Billing; the public designer gets the same answer from get_config (migration
+  // 270). A purchase on the Billing tab reaches this without a reload: see entitlementRev.
   //
-  // `granted` is emitted ONLY by portal-billing, and only for features this tenant genuinely
-  // holds as a comp rather than a purchase, so reading it keeps the copy honest ("switched on
-  // for you by Structure Studio", never "included in your plan").
+  // Still NOT entitlement.features, and never fold 3D into featureOn: `features` hands every
+  // non-billable account every feature in one blanket, which is how 3D once showed on nearly
+  // every tenant at once (2026-08-19, a frontend that shipped ahead of migration 109). And the
+  // copy depends on knowing a comp from a purchase ("switched on for you by Structure Studio",
+  // never "included in your plan"), which only the two named lists can tell apart.
   //
-  // ⚠️ AMENDED 2026-09-21 (migration 228). `granted` is no longer grants alone: portal-billing
-  // now also puts a NON-BILLABLE or INTERNAL account's grantable features in that array, so
-  // ticking Non-billable switches 3D on without a second trip to the Early access card. That
-  // is a deliberate widening and it is still not a blanket — the server names each feature and
-  // filters it through `grantable`, so an ordinary tenant is unaffected and a paying one is
-  // never told their purchase was a comp. The reason for keeping the browser on `granted`
-  // rather than on `features` is unchanged, and is now about honesty of copy rather than
-  // reach: `features` cannot distinguish a comp from a purchase.
-  //
-  // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
-  // featureOn, which would widen it by a blanket rather than feature by feature.
-  // View-as reads the VIEWED tenant's grant, for every operator (Carolyn 2026-09-15) — the
-  // old `isOperator ||` blanket showed a 3D tab on a builder who was never granted it. A null
-  // viewedCtx is still loading and reads as on, the same rule featureOn uses. On the
-  // operator's own portal the operator's own grant decides, exactly like any tenant.
+  // View-as reads the VIEWED tenant's lists, for every operator (Carolyn 2026-09-15): the old
+  // `isOperator ||` blanket showed a 3D tab on a builder who never had it. A null viewedCtx is
+  // still loading and reads as on, the same rule featureOn uses. On the operator's own portal
+  // the operator's own entitlement decides, exactly like any tenant.
   const view3dUnlocked = viewing
-    ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
-        && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
-    : (!!entitlement && Array.isArray(entitlement.granted)
-        && entitlement.granted.indexOf("view_3d") !== -1);
+    ? (!viewedCtx || ssView3dOn(viewedCtx.entitlement))
+    : ssView3dOn(entitlement);
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
   const effClientId = viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null);
+  // My Synergy Phone: is calling switched on for the tenant ON SCREEN (the viewed one in view-as)?
+  // null = not known yet, which every reader treats as off. `phoneOffered` is ssPhoneOffered's
+  // answer — the ONE rule for whether the Phone tab, the Calls rail item and a live Call button
+  // exist at all (see 01-core.jsx for why a builder on production does not see them yet).
+  const effPhoneStatus = viewing
+    ? (viewedCtx && viewedCtx.clientId === viewing.clientId ? (viewedCtx.phoneStatus || null) : null)
+    : (tenant && tenant !== "none" ? (tenant.phoneStatus || null) : null);
+  const phoneOffered = ssPhoneOffered(effPhoneStatus, !!viewing);
   // 3D setup contract handed to the calibration editor, which lives in Settings ->
   // Designer -> 3D since 2026-08-21 (it used to be a bar across the top of the Designer
   // TAB, over every design anyone opened). The editor itself is still rendered by the
@@ -1502,10 +1707,12 @@ function Dashboard({ session }) {
     // the photos, not inside them, so reopening a style can still answer "has this got a video".
     // Through the style-save queue since 2026-09-14: deadline, side door, base — see
     // ssRunStyleSave above Dashboard.
-    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames) => {
+    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames, pinnedTarget) => {
       // Captured NOW, in the click's tick: the save may wait behind another in the queue.
-      const target = ssTargetClientId;
-      const key = ssStyleSaveKey(styleValue);
+      // `pinnedTarget` is a target the CALLER captured earlier still (the Advanced page's Save,
+      // below), null meaning the caller's own tenant; left out, it is read here, as before.
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue, target);
       return ssRunStyleSave(key, target, styleValue, "save 3D look", (base) => {
         // The key is OMITTED, not sent as null, when the caller does not know the frames: the
         // server distinguishes absence ("leave the column alone") from an empty array ("the
@@ -1513,7 +1720,11 @@ function Dashboard({ session }) {
         // `frame: "front"` (2026-09-25) says this designer knows the raised-floor keys: without it
         // the server carries a stored blocks/piers foundation and its floor height forward over the
         // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
-        const body = { action: "save_style_d3", styleValue, d3, d3Photos, frame: "front" };
+        // The ground's fall is not in that promise: it rides as two explicit keys (ssD3WithFall).
+        // `slabGround: true` (2026-10-03) says this panel draws a slab's corners too, so the null
+        // ssD3WithFall sends for level ground clears them on a slab; an older panel's null, which only
+        // knew raised floors, keeps them (carryForwardFoundation).
+        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front", slabGround: true };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
@@ -1527,6 +1738,57 @@ function Dashboard({ session }) {
         if (base && base.version !== undefined) body.baseVersion = base.version;
         return body;
       }, (data) => ssConfirmStyleVersion(key, data));
+    },
+    // THE ADVANCED PAGE'S "Save as a new style" (2026-09-28): create_style, then
+    // onSetStyleActive(false), then onSaveSpec above with the new key.
+    //
+    // ONE TENANT FOR ALL THREE (review 2026-09-29). onCreateStyle reads the view-as target in the
+    // click's tick and RETURNS it; the page hands it back to the other two as their pinned target.
+    // Each used to read ssTargetClientId when it was called, which is AFTER the create's await: an
+    // operator who pressed Back into another builder mid-save had the style made in one tenant
+    // and its hide and shape sent to the other — where set_style_active matches no row and still
+    // answers ok (so the new style stayed visible), and save_style_d3 could overwrite that
+    // builder's style of the same key.
+    //
+    // create_style gets NO deadline and NO side-door retry, on purpose: it is not idempotent. A
+    // request that stalled may still land, and a retry through the functions host would then make
+    // a SECOND style with the same name. A slow create is better than two.
+    // Returns { key, styleId, target } — target null for the caller's own tenant.
+    onCreateStyle: async (label) => {
+      const target = ssTargetClientId || null;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "create_style", label, targetClientId: target } });
+      if (error) throw new Error(error.message || "Could not create that style");
+      if (!data || !data.ok || !data.key) throw new Error((data && data.error) || "Could not create that style");
+      return { key: data.key, styleId: data.styleId, target };
+    },
+    // Show or hide one style. Idempotent, so it goes through the style-save call (deadline, side
+    // door) and, when the caller names the style's key, waits in that style's queue, so it lands
+    // in order with that style's saves. `pinnedTarget` as onSaveSpec's.
+    onSetStyleActive: (styleId, active, styleValue, pinnedTarget) => {
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
+      const body = { action: "set_style_active", styleId, active: active !== false, targetClientId: target || null };
+      const run = async () => {
+        const r = await ssStyleSaveCall(body, "show or hide a style");
+        if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+        return r.data;
+      };
+      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue, target), run) : run();
+    },
+    // Rename one style: portal-settings' own update_style (Settings → Structures' Edit uses it), with
+    // only `label` in the body, so the image, the code and the key are left as they are. The Advanced
+    // page uses it when a Save that stopped part-way is finished under a different name (review
+    // ADV-1, 2026-09-29): the name lands on the style already made instead of a second one. Setting a
+    // label is idempotent, so it goes through the style-save call (deadline, side door) and, given
+    // the key, waits in that style's queue. `pinnedTarget` as onSaveSpec's.
+    onRenameStyle: (styleId, label, styleValue, pinnedTarget) => {
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
+      const body = { action: "update_style", styleId, label, targetClientId: target || null };
+      const run = async () => {
+        const r = await ssStyleSaveCall(body, "rename a style");
+        if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+        return r.data;
+      };
+      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue, target), run) : run();
     },
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
@@ -1632,6 +1894,10 @@ function Dashboard({ session }) {
         videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
         modelStatus: (st && st.model_status) || "none",
         aiReady: data.aiReady !== false,
+        // The video meter as the server reads it (price, on or off, exempt), for the money line.
+        // Passed through untouched: the designer's calChargeOf is the one place it is read, and a
+        // catalog with no wallet (an older function, a failed read) is null, which says no price.
+        wallet: data.wallet ?? null,
       };
     },
     onDraftFromPhotos: async (photoUrls, styleValue) => {
@@ -1776,7 +2042,9 @@ function Dashboard({ session }) {
       if (brokeOff || closedAtDeadline) {
         const rec = opts && opts.recover;
         if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
-          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+          // No money claim (2026-10-05): this line cannot see the wallet, and with the meter off
+          // nobody is charged. The server's own pickup sentences are the ones that say money.
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, it counted as one generation.");
         }
         let asked = 0;
         let got = null;
@@ -2106,7 +2374,10 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub);
+  // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
+  // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
+  const advancedHeld = activeTab === "advanced" && !advancedOn;
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -2208,6 +2479,37 @@ function Dashboard({ session }) {
   // Inventory offer their schedule entry points.
   const schedCanEdit = canAdmin || !!(myAccess && myAccess.build_schedule === "edit");
   const deliverCanEdit = canAdmin || !!(myAccess && myAccess.delivery_schedule === "edit");
+  // A schedule row's CUSTOMER (Carolyn 2026-08-28: "when I click this card here, it does the
+  // same thing as when I'm here, and I click the [contact]"). The Build Schedule's job popup and
+  // the Delivery Schedule's stop rows carry portal-schedule's customer_link; this answers, per
+  // row, the click that opens it for THIS reader, or null to leave the name as plain text. Where
+  // it goes is schedCustomerDest's rule (05-schedule.jsx), the Pipeline's onOpenRecord fallback:
+  // the contact record ON that deal, else the design's record, else nothing. Each "may open" is
+  // asked through ssClampTab, so it cannot promise a page the router would refuse (the hazard
+  // CrmRecord's onNavigate documents). Null outright when this reader may open neither record,
+  // so a crew member gets no link at all rather than one per row that goes nowhere.
+  //
+  // BACK PARITY, her explicit condition ("What happens when I hit the back button up here? I
+  // want to make sure that ... they function the same way"): recordCtx's `from` sends the
+  // record's own Back to the schedule it came from, and the schedule reopens on the view and week
+  // it left (schedViewLoad). It rides in the history entry, so it survives a hop away and the
+  // browser's Back onto the record again.
+  const scheduleCustomerOpener = (fromPage) => {
+    const reach = {
+      crm: crmUnlocked,
+      contacts: ssClampTab("contacts", isOperator, canAdmin, myAccess, supportView) === "contacts",
+      designs: ssClampTab("designs", isOperator, canAdmin, myAccess, supportView) === "designs",
+    };
+    if (!(reach.crm && reach.contacts) && !reach.designs) return null;
+    return (link) => {
+      const dest = schedCustomerDest(link, reach);
+      if (!dest) return null;
+      return () => navigate(dest.page, dest.sub, false, {
+        deal: dest.contactId ? dest.code : null,
+        from: { page: fromPage, pageSub: null },
+      });
+    };
+  };
   // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation
   // only — the server re-checks {area:'orders', level:'edit'} whatever the browser believes.
   const ordersCanEdit = canAdmin || !!(myAccess && myAccess.orders === "edit");
@@ -2220,6 +2522,15 @@ function Dashboard({ session }) {
   // both or neither, and an approver who cannot raise a change is a normal, intended state.
   // `change_order_approve` has two levels only (none/edit), like `commissions`.
   const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
+  // Changing a line's price in the Designer (migration 277): owners and admins by
+  // default, anyone else only when an owner or admin ticks "Override prices" for them in Team.
+  // Presentation only — submit-estimate re-checks {area:'price_override', level:'edit'} and strips
+  // a price from anyone who does not hold it, whatever the browser believes.
+  // The RESOLVED map, not the role: owners resolve 'edit' on every area and admins hold it by
+  // preset, so `canAdmin ||` added nothing for them except an admin whose switch an owner turned
+  // off — who then typed prices the server dropped. canAdmin stays only for a platform operator
+  // in view-as, who has no map on the viewed tenant (a support operator reads the owner's).
+  const priceCanOverride = (!!viewing && canAdmin) || !!(myAccess && myAccess.price_override === "edit");
   // Grace / transition banners read gateEnt too: in view-as they are the VIEWED tenant's
   // countdowns, so an operator sees exactly the warning the builder sees.
   const gateGrace = !!gateEnt && gateEnt.state === "grace";
@@ -2269,10 +2580,15 @@ function Dashboard({ session }) {
   // product, and they are how an operator leaves a locked account (their content renders
   // outside `!gateLocked` below for the same reason).
   const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";
+  // Intent warming: a pointer entering a rail link, or keyboard focus reaching it, warms the
+  // function(s) that page opens on (SS_NAV_WARM, 01-core). Skipped for the page you are already on
+  // and behind a billing lock, where the page is BillingGate. The consoles are never padlocked.
+  const warmNav = (id) => { if (activeTab !== id && !gateLockedFor(id)) ssWarmNav(id, !!viewing); };
   const navItem = (id, label, badge) => navHidden(id) ? null : (
     <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
       aria-current={activeTab === id ? "page" : undefined}
       title={gateLockedFor(id) ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
+      onMouseEnter={() => warmNav(id)} onFocus={() => warmNav(id)}
       onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
@@ -2312,6 +2628,26 @@ function Dashboard({ session }) {
   // the numbers, so what they actually got was a hollow Billing page and buttons that could
   // only come back 403: the "disabled UI fails silently" shape, one level up.
   const settingsAccess = mirrorAccess;
+  // ── Settings → Designer's ADVANCED MODE switch (2026-10-05, migration 270) ──
+  // The builder's own way into the Advanced page (06-3d.jsx AdvancedModeCard). Built from the SAME
+  // three values the Advanced gate above uses, so the switch and the menu item cannot disagree:
+  //   advancedEnt     the entitlement of the tenant ON SCREEN, and in view-as only the viewed
+  //                   tenant's own answer (never the operator's, never the last builder's);
+  //   advancedMayRun  owner/admin, or a platform operator in view-as: the people the page is for;
+  //   ssAdvancedOn    whether it is on now.
+  // null hides the card: not answered yet, not someone who may run the account, or a server that
+  // predates `advancedMode` (a switch whose answer could never come back would look broken). Our own
+  // account shows it on and locked: internal_account keeps the page whatever the column says.
+  // Turning it off throws away an unsaved building on the Advanced page, so that asks first, in the
+  // words exitAccount uses.
+  const advancedSwitch = (advancedMayRun && advancedEnt
+    && (advancedEnt.reason === "internal" || typeof advancedEnt.advancedMode === "boolean")) ? {
+      on: ssAdvancedOn(advancedEnt),
+      locked: advancedEnt.reason === "internal",
+      confirmOff: () => !advancedDirtyRef.current
+        || window.confirm("Turning Advanced off will discard the building you haven't saved on the Advanced page. Continue?"),
+      onOpen: () => navigate("advanced"),
+    } : null;
   // Accounts and Admin moved INTO this rail, so it has to stay up on their pages too or
   // clicking one would throw you straight back to the nav you just left. The settings half is
   // the IDENTICAL predicate the body render uses — copy it if you change either.
@@ -2323,8 +2659,10 @@ function Dashboard({ session }) {
   //   settingsPage — are we RENDERING a settings page? (drives the topbar and the sub-tab clamp)
   //   settingsMode — is the settings RAIL up? (drives the chrome)
   // They agree everywhere except one page.
+  // My Profile needs no settings area — the clamp lets that one sub-page through for everyone
+  // (ssClampTab), so this predicate and the body render below must too, or it renders blank.
   const settingsPage = !gateLocked && activeTab === "settings"
-    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)));
+    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)) || (sub || "") === "myprofile");
   // ── MY PROFILE DOES NOT DECIDE THE RAIL ───────────────────────────────────────────────
   // Carolyn 2026-09-11, on clicking it from a workspace page: "it switches you to the
   // settings and I feel like people will be confused .... but then the same is true the other
@@ -2348,7 +2686,7 @@ function Dashboard({ session }) {
   // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
   // draws them) — which are no longer the same condition.
   const settingsTabs = (settingsPage || settingsMode)
-    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess })
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
@@ -2391,6 +2729,8 @@ function Dashboard({ session }) {
   const setItem = ([id, label]) => (
     <a key={id} href={ssPagePath("settings", setTarget(id))} className={settingsSub === id ? "active" : ""}
       aria-current={settingsSub === id ? "page" : undefined} title={label}
+      onMouseEnter={() => { if (settingsSub !== id) ssWarmSettings(id); }}
+      onFocus={() => { if (settingsSub !== id) ssWarmSettings(id); }}
       onClick={ssNavClick(() => navigate("settings", setTarget(id)))}>
       {SETTINGS_ICONS[id]}
       <span className="lbl">{label}</span>
@@ -2429,12 +2769,22 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
+          {/* Directly under Designer (Carolyn 2026-09-28), and only where ssAdvancedOn says so —
+              our own account, and a builder who turned Advanced mode on in Settings → Designer.
+              `advancedOn` is false until the entitlement answers, so the item arrives late on a
+              cold load and never flashes for anyone else. */}
+          {advancedOn && navItem("advanced", "Advanced")}
           {/* TWO items again. Carolyn, 2026-08-26 12:15, having used the merged one: "we have
               contacts as one, and then we have another one that says pipeline ... I would
               rather have more tabs and one specific name on it." Contacts first — a person,
               then what they are quoting. The List | Pipeline board toggle stays INSIDE
               Pipeline (02-sales); it is the section, not a third nav item. */}
           {navItem("contacts", "Contacts")}
+          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
+              Contacts: the same people, seen by their latest message. Only with the CRM: unlike
+              Contacts, which stays in the rail to sell it, one locked item there is enough. A
+              typed /portal/conversations without it still lands on the CRM card below. */}
+          {crmUnlocked && navItem("conversations", "Conversations")}
           {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -2444,6 +2794,10 @@ function Dashboard({ session }) {
           {navItem("delivery-schedule", "Delivery Schedule")}
           {navItem("repairs", "Repairs")}
           {navItem("commissions", "Commissions")}
+          {/* My Synergy Phone's report. Only where calling is offered (ssPhoneOffered) — a Calls page
+              on an account that cannot call is a list of zeros that reads as broken. The route
+              itself still resolves for anyone with phone access, for old links. */}
+          {phoneOffered && navItem("calls", "Calls")}
           {/* QuickBooks has no nav entry any more (Carolyn 2026-08-24): it is a config
               surface, not workspace work, and it is already mounted a second time at
               Settings → QuickBooks — which is where the links people actually hold point
@@ -2559,7 +2913,7 @@ function Dashboard({ session }) {
               a 52px-wide tenant list helps nobody; the Accounts page covers that mode. */}
           {isOperator && (
             <div className="ss-switch-wrap" ref={pickerRef}>
-              <button type="button" className="ss-switch" onClick={() => setPickerOpen((o) => !o)}
+              <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
                 aria-haspopup="listbox" aria-expanded={pickerOpen}
                 title={viewing ? `Viewing ${shownBusiness} — switch account` : "Switch account"}>
                 <div className="ss-clogo" aria-hidden="true">{tenantInitials}</div>
@@ -2604,7 +2958,7 @@ function Dashboard({ session }) {
           )}
           {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
               OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
-          <a className="ss-newlink" href={ssPagePath("support", null)} onClick={ssNavClick(() => navigate("support"))} title="Support">
+          <a className="ss-newlink" href={ssPagePath("support", null)} onMouseEnter={() => warmNav("support")} onFocus={() => warmNav("support")} onClick={ssNavClick(() => navigate("support"))} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
             <span>Support</span>
           </a>
@@ -2675,6 +3029,11 @@ function Dashboard({ session }) {
         /* Projects owns its scroll the way the designer does: the shell takes the viewport
            height and the board's table scrolls inside it under a pinned header. */
         + (activeTab === "projects" ? " ss-projects-active" : "")
+        /* The Advanced page is full-bleed like the Designer (no .ss-body padding), so at a 1440 px
+           window its frame reaches the Designer's xl width and shows the same step rail. The page
+           still scrolls the window: no fixed-height shell, which is what keeps its 3D sticky. Only
+           while the page itself shows -- "Checking your account…" keeps the padded body. */
+        + (activeTab === "advanced" && advancedOn && !gateLocked ? " ss-advanced-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there
@@ -2687,8 +3046,8 @@ function Dashboard({ session }) {
               same thing again over a caption line saying it a third time. Accounts and Admin
               are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
           <div className="ttl">
-            {settingsActive ? settingsActive[1] : (TAB_META[activeTab] || [activeTab])[0]}
-            <span>{settingsActive ? settingsActive[2] : (TAB_META[activeTab] || [])[1]}</span>
+            {settingsActive ? settingsActive[1] : advancedHeld ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
+            <span>{settingsActive ? settingsActive[2] : advancedHeld ? "" : (TAB_META[activeTab] || [])[1]}</span>
           </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
@@ -2716,12 +3075,23 @@ function Dashboard({ session }) {
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
                 openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null}
                 canPushInvoice={ordersCanEdit}
+                canOverridePrice={priceCanOverride}
                 /* navigate(), not location.assign: the designer host above is kept MOUNTED
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —
                    sending someone to a tab they cannot open is its own dead end. */
                 onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
+            </div>
+          )}
+          {/* Keep-mounted Advanced host, the same treatment as the Designer's above and for the
+              same reason: a building half-built here survives a trip to another page. A plain
+              scrolling page (no ss-designer-active), so the 3D column can be position:sticky.
+              Asks ssAdvancedOn again rather than trusting the clamp: that is only a router. */}
+          {advancedOpened && advancedOn && !gateLocked && (
+            <div style={{ display: activeTab === "advanced" ? "block" : "none" }}>
+              <AdvancedTab key={"a-" + effClientId} clientId={effClientId} setup3d={setup3d} canAdmin={canAdmin}
+                onDirty={(d) => { advancedDirtyRef.current = !!d; }} />
             </div>
           )}
           <div className="ss-inner">
@@ -2793,7 +3163,8 @@ function Dashboard({ session }) {
                 operator could be locked. A platform operator gets the embedded plan picker;
                 portal-billing still refuses card entry on a tenant's behalf and only lets an
                 operator subscribe against a card the owner already vaulted. */}
-            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor} />}
+            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor}
+              viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />}
             {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "the view of being in
                 an opportunity and the view of being in a person are different, but they're
                 the same."
@@ -2839,7 +3210,11 @@ function Dashboard({ session }) {
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
                 isAdmin={mirrorAdmin}
-                canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
+                /* ssCanWrite, not `contacts === "edit"`: since 2026-09-07 contacts:'own' WRITES
+                   (a Dealer edits their own customers — OWN_WRITE_AREAS in 01-core), and the
+                   literal compare left every write tab on a dealer's own record greyed with
+                   "You don't have permission" while the server would have taken the write. */
+                canEdit={canAdmin || ssCanWrite(myAccess, "contacts")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
                    Pipeline list opens and it has to keep working. Its READ is exempt from the
@@ -2847,14 +3222,21 @@ function Dashboard({ session }) {
                    record used to render with a live Notes box that 403'd on Save. Passing the
                    entitlement lets CrmRecord grey what it cannot save instead. */
                 crmUnlocked={crmUnlocked}
-                /* Only when `sub` still names the contact the deal was captured for — see
-                   recordDeal's declaration. `key={sub}` remounts the record on every route,
-                   so this is read fresh as initial state and never fights a later hand-pick. */
-                initialDeal={recordDeal && sub === "c-" + recordDeal.contactId ? recordDeal.deal : null}
+                /* Only when `sub` still names the record the deal was captured for — see
+                   recordCtx's declaration. `key={sub}` remounts the record on every route,
+                   so this is read fresh as initial state and never fights a later hand-pick.
+                   A contact record only: a design record IS its one deal. */
+                initialDeal={recordCtx && recordCtx.sub === sub && sub.charAt(0) === "c" ? (recordCtx.deal || null) : null}
+                /* The History chip a Conversations row asked for, under the same rule as the deal. */
+                initialChip={recordCtx && recordCtx.sub === sub ? (recordCtx.chip || null) : null}
                 onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
                 /* Back goes to the list this record belongs to, which after the split is a
-                   whole tab rather than a sub-view. */
-                onBack={() => navigate(sub.charAt(0) === "c" ? "contacts" : "designs")}
+                   whole tab rather than a sub-view; or to the page that opened it, when that
+                   page said so (recordCtx.from: Conversations, on the filter the reader left; a
+                   Build or Delivery Schedule, which reopens on the week it left). */
+                onBack={() => (recordCtx && recordCtx.sub === sub && recordCtx.from
+                  ? navigate(recordCtx.from.page, recordCtx.from.pageSub || null)
+                  : navigate(sub.charAt(0) === "c" ? "contacts" : "designs"))}
                 /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
                    record shell above serves EITHER kind under EITHER tab, so the tab here is
                    cosmetic — which nav item highlights — and switching to one the clamp
@@ -2889,6 +3271,30 @@ function Dashboard({ session }) {
                 canEditDesigns={mirrorAdmin || ssCanWrite(mirrorAccess, "designs")}
                 canReadTaxSettings={mirrorAdmin || ssCanRead(mirrorAccess, "settings_crm")}
                 canVerifyTax={mirrorAdmin || ssCanWrite(mirrorAccess, "settings_crm")}
+                /* MY SYNERGY PHONE. The SIGNED-IN person's id — the extension refuses a call for
+                   anybody else on a shared computer — and whether their own access includes
+                   calling (any phone level; owners always). Not mirrorAdmin: in view-as the
+                   record greys Call and Text before this is ever asked. */
+                userId={session.user ? session.user.id : null}
+                canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
+                phoneOn={phoneOffered && effPhoneStatus === "on"}
+                /* EMAIL SIGNATURE (My Profile). The SIGNED-IN person's, off the prefs `status`
+                   returned at boot and kept current by My Profile's save (onPrefsSaved), because
+                   crm_send_email adds the signature of whoever is signed in. In view-as there is
+                   no prefs read (status is skipped), so null: the composer shows nothing rather
+                   than a guess. */
+                emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
+                onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
+                /* QUICK SENDS (the signed-in person's saved messages, beside the Email and SMS
+                   boxes). Not in view-as: the person signed in is CSM Synergy staff, so the list
+                   would be the operator's OWN, read and seeded under the builder's account.
+                   portal-settings refuses quick_sends_list to an operator as well; this keeps the
+                   button from being offered at all. Same rule as the signature above. */
+                quickSendsOn={!viewing}
+                /* CARD ORDER (My Profile). The signed-in person's, off the same boot prefs and
+                   kept current the same way as the signature above. Null in view-as, where no
+                   prefs are read, so the operator sees the default order. */
+                cardOrder={viewing ? null : ((tenant.prefs && tenant.prefs.cardOrder) || null)}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -2920,10 +3326,8 @@ function Dashboard({ session }) {
                      tenant's Pipeline click at the upsell would take away the page they have
                      today, which is a regression dressed as a feature. */
                 onOpenRecord={(code, contactId) => {
-                  if (contactId && crmUnlocked) {
-                    setRecordDeal({ contactId, deal: code });
-                    navigate("contacts", "c-" + contactId);
-                  } else navigate("designs", "d-" + code);
+                  if (contactId && crmUnlocked) navigate("contacts", "c-" + contactId, false, { deal: code });
+                  else navigate("designs", "d-" + code);
                 }}
                 /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
                    deliberately carries no view of its own so the saved preference can fill
@@ -2941,7 +3345,15 @@ function Dashboard({ session }) {
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                   fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
                   onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
-                  onOpenDesign={openInDesigner} />
+                  onOpenDesign={openInDesigner}
+                  /* MY SYNERGY PHONE: Call on each row, fed EXACTLY what CrmRecord's Call tab is fed
+                     below, so the row and the record answer the same way. callOffered is the
+                     one ssPhoneOffered rule: no Call column where calling is not offered. */
+                  callOffered={phoneOffered}
+                  viewing={!!viewing}
+                  userId={session.user ? session.user.id : null}
+                  canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
+                  phoneOn={phoneOffered && effPhoneStatus === "on"} />
               ) : (
                 <ComingSoon
                   title="Contacts"
@@ -2952,6 +3364,37 @@ function Dashboard({ session }) {
                     "Text and email them from inside the record — the thread stays",
                     "Follow-up activities so nobody quietly goes cold",
                     "The pipeline board view, alongside your list",
+                  ]}
+                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                  available
+                />
+              )
+            )}
+            {/* CONVERSATIONS — /portal/conversations[/email|texts|calls]. The sub is the filter, so
+                the browser's Back from a record restores it. Behind the built-in CRM like Contacts;
+                the nav item only appears with it, and a typed URL without it gets the CRM card.
+                A row opens the CONTACT record on the History chip for its channel, and the
+                record's Back returns here (recordCtx.from). */}
+            {!gateLocked && activeTab === "conversations" && (
+              crmUnlocked ? (
+                <ConversationsInbox key={"t-" + effClientId} clientId={effClientId} viewing={!!viewing}
+                  phoneOffered={phoneOffered}
+                  phoneLevel={myAccess ? (myAccess.phone || null) : null}
+                  urlFilter={sub}
+                  onFilter={(slug) => navigate("conversations", slug, true)}
+                  onOpen={(contactId, channel) => navigate("contacts", "c-" + contactId, false, {
+                    chip: CRM_INBOX_CHIP[channel] || "all",
+                    from: { page: "conversations", pageSub: sub || null },
+                  })} />
+              ) : (
+                <ComingSoon
+                  title="Conversations"
+                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>}
+                  blurb="Every email, text and call with your customers in one list, newest first, with a bar on top to see just one kind. Part of the built-in CRM."
+                  bullets={[
+                    "One line per customer, showing their latest message",
+                    "See who's waiting on a reply at a glance",
+                    "Click through to the customer's record to answer",
                   ]}
                   cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
                   available
@@ -3068,7 +3511,7 @@ function Dashboard({ session }) {
                 left those people a Settings topbar over an empty body (audit 2026-08-20).
                 SettingsShell filters its own sub-tabs by area for non-admins, and
                 portal-settings re-checks every action per-area regardless. */}
-            {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))) && (
+            {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)) || (sub || "") === "myprofile") && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 /* The SAME three values the rail's tab list is built from — see
@@ -3096,6 +3539,16 @@ function Dashboard({ session }) {
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
                 setup3d={setup3d}
+                /* Settings → Designer says "add 3D on Billing" only when 3D is really off; on an
+                   account that has it, setup3d is null only because this person cannot run it. */
+                view3d={view3dUnlocked}
+                /* ...and points at Billing only for someone who can use it (the gate's own test);
+                   anyone else is told to ask the owner, never sent to a page they cannot open. */
+                canBill={billingActor}
+                /* The Advanced mode switch (advancedSwitch above), null where it must not show. */
+                advanced={advancedSwitch}
+                /* The same answer the rail's list was built from, or the two disagree. */
+                phoneOffered={phoneOffered}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
@@ -3123,7 +3576,8 @@ function Dashboard({ session }) {
               schedUnlocked ? (
                 <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
                   access={mirrorAccess}
-                  onOpenDesign={(code) => openInDesigner(code)} />
+                  onOpenDesign={(code) => openInDesigner(code)}
+                  customerOpener={scheduleCustomerOpener("build-schedule")} />
               ) : (
               <ComingSoon
                 title="Build Schedule"
@@ -3142,7 +3596,8 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
                 <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
-                  access={mirrorAccess} />
+                  access={mirrorAccess}
+                  customerOpener={scheduleCustomerOpener("delivery-schedule")} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
@@ -3191,6 +3646,15 @@ function Dashboard({ session }) {
               />
               )
             )}
+            {/* A cold /portal/advanced before the entitlement has answered (advancedClampOn holds
+                the route open). Nothing of the page is drawn until ssAdvancedOn says yes; a "no"
+                lands on the Designer. */}
+            {!gateLocked && advancedHeld && (
+              <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Checking your account…</div>
+            )}
+            {/* 3D is on sale, and buying it switches 3D on at once (2026-10-05), so a tenant
+                without it gets the available-now card with the way in, like Scheduling and the
+                CRM, rather than a "we're still building this" teaser. */}
             {!gateLocked && activeTab === "view-3d" && (
               view3dUnlocked
                 ? <Studio3DStatus clientId={effClientId} canAdmin={mirrorAdmin} navigate={navigate} />
@@ -3203,6 +3667,8 @@ function Dashboard({ session }) {
                       "Roof profile, cladding, doors and windows in their colors",
                       "The 3D view rides along on the emailed quote",
                     ]}
+                    cta={canAdmin ? { label: "Add 3D — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                    available
                   />
             )}
             {!gateLocked && activeTab === "rent-to-own-contracts" && (
@@ -3249,6 +3715,18 @@ function Dashboard({ session }) {
                 // but the cache key is explicit rather than implied.
                 <CommissionsReport clientId={effClientId} />
               )
+            )}
+            {/* MY SYNERGY PHONE — the Calls report (11-sms.jsx). Team needs the LITERAL view/edit
+                level (ssOwnPhoneOnly), the same question portal-settings asks before it hands
+                the team's numbers over. An operator in view-as rides the viewed tenant's rules:
+                a platform operator holds the owner's full map, a support operator the owner's
+                own. portal-settings is in SS_TENANT_SCOPED_FNS, so the report is the viewed
+                builder's, not the operator's (the Commissions trap above does not apply). */}
+            {!gateLocked && activeTab === "calls" && (
+              <CallsReport key={"calls-" + effClientId} clientId={effClientId}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                canTeam={viewing ? (!supportView || !ssOwnPhoneOnly(myAccess)) : (tenant.role === "owner" || !ssOwnPhoneOnly(myAccess))}
+                phoneOn={effPhoneStatus === "on"} />
             )}
             {!gateLocked && activeTab === "reports" && (
               <ComingSoon
@@ -3594,7 +4072,12 @@ function PortalApp() {
         const { data } = await sb.auth.getSession();
         if (data && data.session) {
           setExpired(true);
-          await sb.auth.signOut(); // clears the local session even if the server call fails
+          // scope "local" (2026-10-02): end only THIS browser's session (every tab here shares it).
+          // The default is "global", which ends every session the user has, on every device, so one
+          // tab's 401 (a multi-tab refresh race, a blip) signed the person out of their phone and
+          // other computers too. Seen on beta: one stale tab, zero sessions left for the account.
+          // The deliberate Sign Out button keeps the default.
+          await sb.auth.signOut({ scope: "local" }); // clears the local session even if the server call fails
         }
       } catch (_e) { /* never let the guard crash the app */ }
       handling = false;

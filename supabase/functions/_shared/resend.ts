@@ -26,7 +26,7 @@
  *     sending (`Authorization: Bearer`), unlike Postmark's account/server token split — so
  *     configured-ness is a single check and there is no per-API token to mix up.
  *   - Domain-level `status` values: "not_started" | "pending" | "verified" | "failed" |
- *     "temporary_failure". Only `rsDomainVerified` (status === "verified") means usable;
+ *     "temporary_failure". Only `rsDomainVerified` (status "verified", or "partially_verified" with every DKIM/SPF record verified) means usable;
  *     "temporary_failure" is a previously-passing domain that failed a periodic re-check.
  *   - Resend returns DNS record hosts as RELATIVE names ("send", "resend._domainkey").
  *     A UI rendering those verbatim hands the tenant a record that lands at the wrong node.
@@ -197,13 +197,32 @@ export type RsDomain = {
    *  Receiving is OFF unless asked for at create time, and a domain object carries both —
    *  which is why an inbound subdomain is a separate domain, not a flag on the sending one. */
   capabilities?: { sending?: string; receiving?: string };
+  /** Resend's tracking switches (`open_tracking`, `click_tracking`, `tracking_subdomain`).
+   *  Present only when the response carried at least one of them, so a read that says nothing
+   *  about tracking is never taken to mean "off". See rsEnableOpenTracking. */
+  tracking?: { open: boolean; click: boolean; subdomain: string | null };
 };
 
-/** The ONE meaning of "usable": Resend has checked the records and says verified. Every
+/** The ONE meaning of "usable": Resend has checked the records and says verified (or only an
+ *  optional tracking record is still pending; see below). Every
  *  other status — including "pending" and "temporary_failure" — is not-yet/no-longer. */
 export function rsDomainVerified(d: RsDomain): boolean {
-  return d.status === "verified";
+  if (d.status === "verified") return true;
+  // ⚠️ OPEN TRACKING MOVES THE DOMAIN-LEVEL STATUS. Switching open tracking on adds a "Tracking"
+  // CNAME (links.<domain>), and until that one record is in DNS Resend reports the WHOLE domain
+  // as `partially_verified` — seen live 2026-10-05 on a domain whose DKIM and both SPF records
+  // were all verified. email_verify_domain switches tracking on the moment a domain verifies,
+  // and the tracking record is optional, so without this the next Check would store "pending"
+  // for a domain that sends perfectly well and silently switch the builder's email off.
+  // So partially_verified counts only while every SENDING record (DKIM, SPF) is verified and
+  // sending is not switched off — a receiving-only subdomain (sending disabled) never passes.
+  if (d.status !== "partially_verified" || d.capabilities?.sending === "disabled") return false;
+  const sending = d.records.filter((r) => SENDING_PURPOSES.has(r.purpose.toUpperCase()));
+  return sending.length > 0 && sending.every((r) => r.verified);
 }
+
+/** Resend's `record` values for the records that decide whether a domain can SEND. */
+const SENDING_PURPOSES = new Set(["DKIM", "SPF"]);
 
 /**
  * Build the absolute record name from Resend's relative one.
@@ -274,6 +293,13 @@ function toRsDomain(raw: unknown): RsDomain {
   };
   if (caps && typeof caps === "object") {
     out.capabilities = { sending: str(caps.sending), receiving: str(caps.receiving) };
+  }
+  if ("open_tracking" in d || "click_tracking" in d || "tracking_subdomain" in d) {
+    out.tracking = {
+      open: d.open_tracking === true,
+      click: d.click_tracking === true,
+      subdomain: str(d.tracking_subdomain) || null,
+    };
   }
   return out;
 }
@@ -458,6 +484,119 @@ export async function rsGetReceivedEmail(id: string): Promise<RsReceivedEmail> {
 export async function rsDeleteDomain(id: string): Promise<void> {
   const key = requireKey();
   await rsFetch(key, `/domains/${id}`, { method: "DELETE" });
+}
+
+/**
+ * OPEN TRACKING — "has the customer read it?" (Carolyn, 2026-10-01: "One of the potential clients
+ * to sign up asked to be able to see if an email is read or not.")
+ *
+ * Resend counts an open when a 1x1 image in the email is downloaded, and reports it to the
+ * events webhook (postmark-events) as `email.opened`. Three facts from Resend's docs (read
+ * 2026-10-04, resend.com/docs/dashboard/domains/tracking and api-reference/domains/update-domain)
+ * shape everything below:
+ *
+ *   ⚠️ IT NEEDS ITS OWN DNS RECORD. `open_tracking` "is only applied if a tracking_subdomain is
+ *      configured and verified": a CNAME such as links.<domain> → Resend, which the builder has
+ *      to publish like the others (plus a CAA row when their domain has CAA records). Switching
+ *      the flag on alone tracks nothing, silently.
+ *   ⚠️ THE SUBDOMAIN CAN BE CHANGED BUT NEVER REMOVED once set (Resend keeps it so links in mail
+ *      already sent keep working). So it is set ONLY when the domain has none — a builder who
+ *      already chose one in Resend's dashboard keeps theirs — and click tracking is never touched:
+ *      it rewrites every link in the email, which nobody asked for.
+ *   ⚠️ A TRACKING RECORD IS NOT A SENDING RECORD. Whether a pending tracking CNAME moves the
+ *      domain-level `status` away from "verified" is not documented. Callers therefore never let
+ *      tracking decide the sending verdict: email_verify_domain takes its verdict from the read
+ *      BEFORE it switches tracking on, and email_tracking_check never writes the sending status.
+ */
+export const TRACKING_SUBDOMAIN = "links";
+
+/** The record(s) open tracking needs: Resend's `Tracking` CNAME, and the CAA row it adds when
+ *  the domain restricts certificate issuers (the tracking subdomain needs a TLS certificate). */
+export function rsTrackingRecords(d: RsDomain): RsDnsRecord[] {
+  return (d.records ?? []).filter((r) =>
+    String(r.purpose ?? "").toLowerCase() === "tracking" || String(r.type ?? "").toUpperCase() === "CAA"
+  );
+}
+
+/** Has open tracking been asked for on this domain: the switch on, with a subdomain (or its
+ *  record) to track through. Says nothing about whether the record is in DNS yet. */
+export function rsOpenTrackingConfigured(d: RsDomain): boolean {
+  return d.tracking?.open === true && (!!d.tracking.subdomain || rsTrackingRecords(d).length > 0);
+}
+
+/** Are opens actually being counted: configured, and every tracking record seen in DNS. */
+export function rsOpenTrackingActive(d: RsDomain): boolean {
+  if (!rsOpenTrackingConfigured(d)) return false;
+  const recs = rsTrackingRecords(d);
+  return recs.length > 0 && recs.every((r) => r.verified);
+}
+
+/**
+ * Switch open tracking on for a domain, then return one fresh full read (the PATCH answers with
+ * only `{object, id}`, like the verify POST). `current` is the caller's latest read of the same
+ * domain: the tracking subdomain is sent only when it has none (see above — it can never be taken
+ * back), and click tracking is left as it is.
+ */
+export async function rsEnableOpenTracking(id: string, current: RsDomain): Promise<RsDomain> {
+  const key = requireKey();
+  const hasSubdomain = !!current.tracking?.subdomain || rsTrackingRecords(current).length > 0;
+  await rsFetch(key, `/domains/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      open_tracking: true,
+      ...(hasSubdomain ? {} : { tracking_subdomain: TRACKING_SUBDOMAIN }),
+    }),
+  });
+  return toRsDomain(await rsFetch(key, `/domains/${id}`));
+}
+
+/** After rsCheckOpenTracking asks Resend to look for the tracking record, presses only READ for
+ *  this long. Matches the card's "press Check it again in about 5 minutes". */
+export const TRACKING_RECHECK_MS = 5 * 60_000;
+
+/**
+ * The opens card's one button (portal-settings email_tracking_check). Off: switch tracking on.
+ * On and counting: just the read. Waiting on its record: ask Resend to look, AT MOST ONCE PER
+ * TRACKING_RECHECK_MS. `checking` is true when a check is running or was asked for inside that
+ * window, so the card can say "come back in a few minutes" instead of "not seen yet", which only
+ * invites another press. `asked` is true when THIS call sent the verify POST: the caller keeps that
+ * time and hands it back as `askedAt` next press (portal-settings stamps it on the snapshot).
+ *
+ * ⚠️ NEVER A SECOND POST WHILE A CHECK IS RUNNING. The verify POST parks the WHOLE domain at
+ * "pending" for about 3 minutes while Resend re-checks (seen live 2026-10-02), and the read straight
+ * after it always shows the record unverified. Before this, every press POSTed again, restarting
+ * Resend's check each time, so a builder pressing every minute or two never reached "On" (the loop
+ * email_verify_domain was fixed for on 10-02). So a domain that reads "pending" is only read, and so
+ * is one we asked about less than TRACKING_RECHECK_MS ago: "pending" is what Resend did on 10-02,
+ * not a promise, and the window holds even if a re-check stops showing it.
+ *
+ * The gate is "not pending", not "verified", on purpose: whether a missing tracking CNAME moves the
+ * domain's own status is not documented (above). If it can, a "verified" gate would never ask.
+ *
+ * `notFound` is true when the LAST look is over and did not find the record: we asked before, the
+ * window has passed, the domain no longer reads "pending", and the record still reads unverified.
+ * It still asks again, but the card must say so. Without it every press after the first said
+ * "checking, come back in 5 minutes" for good, so a builder whose record is missing, mistyped or
+ * proxied on Cloudflare was never told to look at it again.
+ *
+ * `domain` is always the read from BEFORE any POST: the one after it is the half-way pending shape,
+ * not an answer, and it is what the caller stores as its record snapshot.
+ */
+export async function rsCheckOpenTracking(
+  id: string,
+  askedAt: number | null = null,
+  now: number = Date.now(),
+): Promise<{ domain: RsDomain; checking: boolean; asked: boolean; notFound: boolean }> {
+  const d = await rsGetDomain(id);
+  if (!rsOpenTrackingConfigured(d)) return { domain: await rsEnableOpenTracking(id, d), checking: false, asked: false, notFound: false };
+  if (rsOpenTrackingActive(d)) return { domain: d, checking: false, asked: false, notFound: false };
+  // A time ahead of now is not "recent": a bad stamp must never stop the button for good. Nor is it
+  // an earlier look, so it never reads as "not found" either.
+  const askedBefore = askedAt != null && Number.isFinite(askedAt) && askedAt <= now;
+  const askedRecently = askedBefore && now - Number(askedAt) < TRACKING_RECHECK_MS;
+  if (d.status === "pending" || askedRecently) return { domain: d, checking: true, asked: false, notFound: false };
+  await rsVerifyDomain(id); // records go "pending" while Resend re-checks
+  return { domain: d, checking: true, asked: true, notFound: askedBefore };
 }
 
 /**

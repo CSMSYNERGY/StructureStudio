@@ -28,21 +28,21 @@ if (i < 0 || j < 0) {
 }
 const BLOCK = SRC.slice(i, j);
 
-for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView"]) {
+for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView", "ssAdvancedOn"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
 type Access = Record<string, string>;
-type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean) => string;
+type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean, sub?: string | null) => string;
 
 // `window` is injected because ssIsBetaHost reads `window.location.hostname`. Pinned to a
 // NON-beta host so the coming-soon routes behave as they do in production — that branch runs
 // before every role check, and a beta-host default would quietly skip it. (Deno 2 has no
 // `window` global, so the parameter is also what keeps the slice runnable at all.)
-const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab };`);
-const { ssClampTab, ssFallbackTab } = factory(
+const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab, ssAdvancedOn };`);
+const { ssClampTab, ssFallbackTab, ssAdvancedOn } = factory(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string };
+) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string; ssAdvancedOn: (e: unknown) => boolean };
 
 // An owner's resolved map: edit everywhere. The support operator wears exactly this, which is
 // what makes "and yet admin/projects are still refused" a real assertion rather than a
@@ -110,5 +110,105 @@ Deno.test("coming-soon routes are refused on a production host before any role c
   // page rather than an unreleased teaser.
   for (const tab of ["reports", "rent-to-own-contracts"]) {
     assert(ssClampTab(tab, true, true, OWNER_MAP, false) !== tab);
+  }
+});
+
+// ── ADVANCED (2026-09-28): our own account only, for now ──────────────────────────────────────
+// The route is refused ABOVE the canAdmin short-circuit, so an owner or an operator of any other
+// tenant cannot type their way onto it, and the refusal lands where a refused Designer would.
+
+Deno.test("Advanced resolves only when the shell says the tenant has it — owners and operators included", () => {
+  // Off: owner, operator, and the old 4-argument call shape (the default must refuse).
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, false), "designer");
+  assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, false), "designer");
+  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("advanced", true, true, OWNER_MAP), "designer");
+  // On: the owner, and a team member who holds the designer area (the page's TAB_AREA).
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, true), "advanced");
+  assertEquals(ssClampTab("advanced", false, false, { designer: "edit", designs: "view" }, false, false, true), "advanced");
+});
+
+Deno.test("a refused Advanced lands where a refused Designer would", () => {
+  // No designer area at all: both routes fall back to the same page, on or off.
+  const noDesigner: Access = { designs: "edit" };
+  for (const on of [false, true]) {
+    assertEquals(ssClampTab("advanced", false, false, noDesigner, false, false, on), ssFallbackTab(noDesigner));
+  }
+  assertEquals(ssClampTab("advanced", false, false, noDesigner, false, false, false), ssClampTab("designer", false, false, noDesigner));
+});
+
+Deno.test("the Advanced argument changes no other tab", () => {
+  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "projects"]) {
+    for (const on of [false, true]) {
+      assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false, true, on), ssClampTab(tab, true, true, OWNER_MAP, false, true));
+    }
+  }
+});
+
+Deno.test("ssAdvancedOn reads the internal-account signal and the builder's own switch, nothing else", () => {
+  // null is "not answered yet" and must read OFF, or the nav item flashes for everyone. Neither 3D
+  // (granted or paid) nor exempt nor the features blanket opens it: only the two signals do.
+  for (const e of [
+    null, undefined, {}, { reason: "exempt" }, { reason: "never_paid" }, { reason: "active", granted: ["view_3d"] },
+    { reason: "active", paid: ["view_3d"], features: { view_3d: true } },
+    { reason: "exempt", exempt: true, granted: ["view_3d"], features: { view_3d: true } },
+  ]) {
+    assertEquals(ssAdvancedOn(e), false, JSON.stringify(e));
+  }
+  assertEquals(ssAdvancedOn({ reason: "internal" }), true);
+  assertEquals(ssAdvancedOn({ reason: "internal", exempt: true, state: "exempt" }), true);
+  // The builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
+  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), true);
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
+  // Our own account stays on whatever its column says.
+  assertEquals(ssAdvancedOn({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
+  // Strictly true: nothing that merely looks like yes.
+  for (const v of ["true", 1, "on", [true], { on: true }]) {
+    assertEquals(ssAdvancedOn({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
+  }
+});
+
+Deno.test("a builder with Advanced mode on: /portal/advanced resolves for them like any page they may see", () => {
+  // The shell passes ssAdvancedOn(...) && advancedMayRun as the 7th argument; with it true the route
+  // is theirs, with it false it lands on the Designer — owners and operators included.
+  const on = ssAdvancedOn({ reason: "active", advancedMode: true });
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, on), "advanced");
+  const off = ssAdvancedOn({ reason: "active", advancedMode: false });
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, off), "designer");
+  assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, off), "designer");
+});
+
+// MY PROFILE (2026-10-04). Every title without a settings_* area — sales rep, dealer, scheduler,
+// crew, driver — was bounced off /portal/settings/myprofile to their fallback page, so the
+// account menu's My Profile and the needsDetails nudge's "Add details" did nothing for them.
+const SALES_REP: Access = {
+  designer: "edit", designs: "edit", contacts: "edit", phone: "own", inventory: "view", orders: "edit", commissions: "own",
+  settings_structures: "none", settings_options: "none", settings_branding: "none", settings_crm: "none",
+  settings_quickbooks: "none", settings_email: "none", settings_team: "none", settings_billing: "none",
+};
+const DRIVER: Access = { delivery_schedule: "edit", inventory: "view", orders: "view" };
+
+Deno.test("My Profile resolves for every role, settings area or not", () => {
+  for (const access of [SALES_REP, DRIVER, null]) {
+    assertEquals(ssClampTab("settings", false, false, access, false, false, false, "myprofile"), "settings", JSON.stringify(access));
+  }
+  // …and for owners and operators exactly as before.
+  assertEquals(ssClampTab("settings", false, true, OWNER_MAP, false, false, false, "myprofile"), "settings");
+});
+
+// Asked of a DRIVER, who holds no settings area at all. Not of a sales rep: since `phone` joined
+// SETTINGS_AREAS (Phone is a Settings card gated on the phone area itself), a rep's phone 'own'
+// rightly opens Settings, where their rail is Phone and My Profile.
+Deno.test("only My Profile: the rest of Settings still needs an area", () => {
+  for (const sub of [null, "structures", "team", "billing", "phone", "not-a-real-slug"]) {
+    assertEquals(ssClampTab("settings", false, false, DRIVER, false, false, false, sub), ssFallbackTab(DRIVER), String(sub));
+  }
+});
+
+Deno.test("the sub argument changes no other tab", () => {
+  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "projects", "advanced"]) {
+    for (const access of [SALES_REP, OWNER_MAP]) {
+      assertEquals(ssClampTab(tab, false, false, access, false, false, false, "myprofile"), ssClampTab(tab, false, false, access, false, false, false));
+    }
   }
 });

@@ -84,19 +84,91 @@ export type TenantMail = {
   replyTo?: string | string[];
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
-  /** Who this is about, when there is no design — the CRM composer's case. Used only to
-   *  build the threading Message-ID, so a reply to a plain conversation email lands on the
-   *  right person. A send with neither this nor shortCode simply gets no threading id. */
+  /** Who this is about — the CRM composer's case, and a test sent to someone who is a contact.
+   *  It builds the threading Message-ID, so a reply to a plain conversation email lands on the
+   *  right person (a send with neither this nor shortCode simply gets no threading id), and
+   *  since migration 261 it is written to the ledger row's contact_id at the claim — which is
+   *  what puts the email in that person's conversation, in the portal and in the phone app.
+   *  Pass it only for a contact the caller has actually found in this tenant. A value that is
+   *  not a uuid is left off the row (and still threads as before), so it can never fail the
+   *  claim insert. */
   contactId?: string | null;
+  /** The words as the person typed them, plain text — a conversation email's body (migration
+   *  261: email_sends.body_text), so the conversation can show what was said and not only the
+   *  subject. Leave it off for document mail; its words are a template. Over 20,000 characters
+   *  is cut to 20,000 on the row (never in the email itself). */
+  bodyText?: string | null;
+  /** The signed-in person sending it (auth user id), from the caller's session — never from a
+   *  request body (migration 261: email_sends.sent_by). Left off the row unless it is a uuid. */
+  sentBy?: string | null;
+  /** The id the phone app gave its pending bubble, so the ledger row replaces it instead of
+   *  showing twice (migration 261: email_sends.client_temp_id). Left off the row unless it is
+   *  1–64 of A–Z a–z 0–9 _ -. */
+  clientTempId?: string | null;
   to: string;
   subject: string;
   html: string;
   text?: string;
 };
 
+/**
+ * `id` is the email_sends row (the ledger row) for this send: on a sent outcome always, on a
+ * failed one whenever the claim row was written — a send the provider refused is a row the
+ * conversation shows as not sent. It is absent only when there is no row: a dark guard, or a
+ * claim insert that failed.
+ */
 export type SendOutcome =
-  | { sent: true; messageId: string; to: string; redirected: boolean }
-  | { sent: false; reason: "not_active" | "failed"; error?: string };
+  | { sent: true; messageId: string; to: string; redirected: boolean; id: string }
+  | { sent: false; reason: "not_active" | "failed"; error?: string; id?: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The shape portal-settings accepts for a client temp id, and the most email_sends'
+ *  client_temp_id check allows (64). */
+const CLIENT_TEMP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** email_sends_body_text_chk's limit, counted the way Postgres counts it: code points. */
+const BODY_TEXT_MAX = 20000;
+/** The claim-row keys that exist only once migration 261 is applied (contact_id is older). */
+const LEDGER_261_KEYS = ["body_text", "sent_by", "client_temp_id"];
+/** The PostgREST / Postgres codes for "that column does not exist (yet)" (sms-inbound's set). */
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+
+/**
+ * The contact and the migration-261 columns for the claim row. NOTHING HERE MAY FAIL THE
+ * INSERT: the claim is written before the provider call, and a claim that cannot be written
+ * means the email is not sent (see the header). So each value goes on the row only when it is
+ * sure to be accepted — a uuid where the column is a uuid, a client temp id of the right
+ * shape, a body cut to the check's limit — and otherwise stays off it (the column is NULL),
+ * which costs that one detail and not the email.
+ *
+ * A key is left OUT rather than written as null, so a send that carries none of these — every
+ * quote, invoice, change order and receipt — writes exactly the row it wrote before 261. That
+ * keeps document mail working even if these functions ever reach the database ahead of the
+ * migration. A send that does carry them is claimed again without them when the columns are
+ * not there yet (see the claim in sendTenantEmail), so it is sent too.
+ */
+function ledgerExtras(mail: TenantMail): Record<string, unknown> {
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const contactId = str(mail.contactId);
+  const sentBy = str(mail.sentBy);
+  const tempId = str(mail.clientTempId);
+  let body = typeof mail.bodyText === "string" ? mail.bodyText : "";
+  // Postgres text cannot hold U+0000, and PostgREST refuses a lone surrogate (crm_send_email's
+  // 20,000-unit slice can leave half an emoji at the end). Either would fail the claim insert,
+  // and a failed claim means the email is not sent, so the STORED copy drops NULs and swaps a
+  // lone surrogate for U+FFFD. The email itself goes out exactly as it was given. The swap is
+  // one unit for one unit and the drop only shortens, so the cut below still holds.
+  body = body.replaceAll("\u0000", "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+  // .length counts UTF-16 units, which is never fewer than code points, so only a body that
+  // could be over the limit pays for the split.
+  if (body.length > BODY_TEXT_MAX) body = Array.from(body).slice(0, BODY_TEXT_MAX).join("");
+  return {
+    ...(UUID_RE.test(contactId) ? { contact_id: contactId } : {}),
+    ...(body.trim() ? { body_text: body } : {}),
+    ...(UUID_RE.test(sentBy) ? { sent_by: sentBy } : {}),
+    ...(CLIENT_TEMP_ID_RE.test(tempId) ? { client_temp_id: tempId } : {}),
+  };
+}
 
 /**
  * RFC 5322 display-name formatting: `"Name" <addr>`. Control characters are stripped (a
@@ -194,6 +266,8 @@ export async function sendTenantEmail(
   clientId: string,
   mail: TenantMail,
 ): Promise<SendOutcome> {
+  // Out here so the last-resort catch below can still name the row it claimed.
+  let rowId: string | undefined;
   try {
     // ── Dark guards (zero network, zero ledger) ─────────────────────────────────────
     // Secrets first: an unconfigured deployment skips even the settings read.
@@ -257,7 +331,14 @@ export async function sendTenantEmail(
     const to = betaTo ?? mail.to;
 
     // ── Ledger first: claim the send before touching the provider ───────────────────
-    const { data: row, error: insErr } = await admin.from("email_sends").insert({
+    // The contact, the words, the writer and the app's bubble id ride on the CLAIM (migration
+    // 261), not on a later update: the row is right from its first moment, whether the send
+    // then succeeds or fails, and whichever address it went to. They used to be stamped on
+    // afterwards by matching the newest row to the same address, which missed every failed
+    // send and every send the beta redirect re-addressed. ledgerExtras keeps any of them from
+    // failing the insert.
+    const extras = ledgerExtras(mail);
+    const claim = (more: Record<string, unknown>) => admin.from("email_sends").insert({
       client_id: clientId,
       short_code: mail.shortCode ?? null,
       kind: mail.kind,
@@ -266,7 +347,32 @@ export async function sendTenantEmail(
       from_email: fromEmail,
       subject: mail.subject,
       status: "claimed",
+      ...more,
     }).select("id").single();
+    let { data: row, error: insErr } = await claim(extras);
+
+    // ⚠️ A DEPLOY AHEAD OF MIGRATION 261 MUST NOT STOP THE EMAIL. PostgREST refuses the WHOLE
+    // insert when one key names a column it cannot find (PGRST204), so without this every
+    // conversation and test email would be refused at the claim, and not sent, until a human
+    // applied the migration. On that error the claim is tried once more without the 261 keys
+    // (contact_id is older and stays, so the email still lands on the contact), and one info row
+    // names the migration. That costs only the stored words, the writer and the bubble id. A
+    // second failure is the ledger really being down, and refuses exactly as before.
+    const later = Object.keys(extras).filter((k) => LEDGER_261_KEYS.includes(k));
+    if (insErr && MISSING_COLUMN.has(String(insErr.code ?? "")) && later.length) {
+      await logEdgeError({
+        fn: "email-send",
+        clientId,
+        code: "email_ledger_261_columns_missing",
+        severity: "info",
+        message: `email_sends claim row refused ${later.join(", ")} - retrying without them; `
+          + `migration 261 may not be applied: ${insErr.message ?? insErr.code}`,
+        context: { kind: mail.kind, shortCode: mail.shortCode ?? null, redirected },
+      });
+      ({ data: row, error: insErr } = await claim(
+        Object.fromEntries(Object.entries(extras).filter(([k]) => !LEDGER_261_KEYS.includes(k))),
+      ));
+    }
 
     if (insErr || !row?.id) {
       // No claim row → no send. The raw Postgres message can echo row values (which
@@ -283,7 +389,7 @@ export async function sendTenantEmail(
       });
       return { sent: false, reason: "failed", error: "email ledger write failed" };
     }
-    const rowId = row.id;
+    rowId = String(row.id);
 
     // ── Threading id ────────────────────────────────────────────────────────────────
     // An RFC 5322 Message-ID we generate ourselves, encoding the tenant and what the mail
@@ -391,7 +497,7 @@ export async function sendTenantEmail(
           context: { kind: mail.kind, shortCode: mail.shortCode ?? null, rowId },
         });
       }
-      return { sent: false, reason: "failed", error: err };
+      return { sent: false, reason: "failed", error: err, id: rowId };
     }
 
     const { error: updErr } = await admin.from("email_sends").update({
@@ -414,7 +520,7 @@ export async function sendTenantEmail(
         context: { kind: mail.kind, shortCode: mail.shortCode ?? null, rowId, messageId },
       });
     }
-    return { sent: true, messageId, to, redirected };
+    return { sent: true, messageId, to, redirected, id: rowId };
   } catch (e) {
     // Includes anything the supabase client throws. Best-effort log, then the same
     // verdict shape as every other failure — the promise never rejects.
@@ -424,8 +530,8 @@ export async function sendTenantEmail(
       clientId,
       code: "email_send_unhandled",
       message: `sendTenantEmail failed unexpectedly: ${err}`,
-      context: { kind: mail?.kind, shortCode: mail?.shortCode ?? null },
+      context: { kind: mail?.kind, shortCode: mail?.shortCode ?? null, ...(rowId ? { rowId } : {}) },
     });
-    return { sent: false, reason: "failed", error: err };
+    return { sent: false, reason: "failed", error: err, ...(rowId ? { id: rowId } : {}) };
   }
 }

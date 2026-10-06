@@ -98,14 +98,23 @@ export async function hasPaidFeature(
   // Fails CLOSED like the rest of this module: a read error throws to the caller's 5xx rather
   // than being swallowed into "not internal, carry on", because silently downgrading our own
   // account to a customer is how this bug happened the first time.
-  const csRes = await admin.from("client_settings").select("internal_account, billing_exempt").eq("client_id", clientId).maybeSingle();
+  //
+  // The plans read starts WITH it (2026-10-02) rather than after: neither needs the other, and this
+  // check sits in front of every RTP / CRM / QuickBooks action. The checks below keep their ORDER —
+  // internal/exempt still answers before a plans failure is even looked at — and the plans read is
+  // wrapped so that even a rejected promise (rather than one resolving with .error) becomes a value,
+  // never a throw that could reach an internal or exempt tenant.
+  const confer = conferringFeatures(feature);
+  const [csRes, plansRes] = await Promise.all([
+    admin.from("client_settings").select("internal_account, billing_exempt").eq("client_id", clientId).maybeSingle(),
+    admin.from("billing_plans")
+      .select("id, feature, billing_interval")
+      .in("feature", confer)
+      .then((r: any) => r, (e: unknown) => ({ data: null, error: e as { message: string } })),
+  ]);
   if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
   if (csRes.data?.internal_account || csRes.data?.billing_exempt) return true;
 
-  const confer = conferringFeatures(feature);
-  const plansRes = await admin.from("billing_plans")
-    .select("id, feature, billing_interval")
-    .in("feature", confer);
   if (plansRes.error) throw new Error(`billing_plans read failed: ${plansRes.error.message}`);
   const plans = plansRes.data ?? [];
   if (!plans.length) return false;

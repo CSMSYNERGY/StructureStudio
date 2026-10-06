@@ -4,10 +4,23 @@ import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { linkOwnerRow, type LinkRole } from "../_shared/linkOwnerRow.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
+// "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
+// imports the same module, so a change to it deploys both functions.
+import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
+// delete_client cancels the builder's subscriptions and removes their saved card at the gateway
+// before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
+import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
+import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscriptions } from "../_shared/tenantGatewayCleanup.ts";
+import {
+  chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
+  parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
+  summarizePhoneUsage, type PhoneBillingSettings, type TwilioDailyRow, type UsageChargeRow,
+} from "../_shared/phoneBillingAdmin.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -25,6 +38,8 @@ const cors = {
   // step-up fix shipped broken: the header was added client-side only.
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-ss-stepup",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
@@ -110,8 +125,25 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   if (st.error) throw st.error;
   const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
+  // A cell resolves against every style's label OR key, hidden styles included — and nothing
+  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
+  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
+  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
+  // reported them imported. A name more than one style answers to now resolves to nobody and
+  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
+  // sending; both operator consoles reach this function with no such guard.)
   const styleByName = new Map<string, any>();
-  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
+  for (const s of st.data ?? []) {
+    for (const tok of [s.label, s.key]) {
+      const t = String(tok ?? "").trim().toLowerCase();
+      if (!t) continue;
+      styleByName.set(t, s);
+      const ids = claimedBy.get(t) ?? new Set<string>();
+      ids.add(String(s.id));
+      claimedBy.set(t, ids);
+    }
+  }
   const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
   const maxSort = new Map<string, number>();   // style_id -> highest sort_order
   for (const z of sz.data ?? []) {
@@ -146,6 +178,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const styleName = String(row?.style ?? "").trim();
     const wv = num(row?.width), lv = num(row?.length);
     if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
+    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
+      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
+      continue;
+    }
     const style = styleByName.get(styleName.toLowerCase());
     if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
     if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
@@ -154,7 +190,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const w = wv.n, l = lv.n;
     const pr = num(row?.price);
-    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    // Negative is refused with the unparseable: nothing in the product means a building priced
+    // below zero: submit-estimate would email it as a negative building line, while the
+    // designer's preview clamps the line to $0, so the customer saw one number and got another.
+    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
     const price = pr.blank ? null : pr.n;
     const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
     const label = `${fmt(w)}x${fmt(l)}`;
@@ -187,9 +226,109 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
+// ── Phone & text billing: the database half (usage billing Part 1 step 6, 2026-10-02) ──────
+// The rules — what may be saved, what "charging is on" means, how a month adds up — live in
+// _shared/phoneBillingAdmin.ts so they are unit-tested; these helpers only read and write.
+// phone_billing_settings, usage_charges and twilio_usage_daily are server-only tables
+// (migration 259 revokes them from anon/authenticated), so the service-role client here is
+// their only reader outside the phone-api worker.
+const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
+
+async function readPhoneBilling(sb: any): Promise<{ settings: PhoneBillingSettings; meters: any[] }> {
+  const [st, mt] = await Promise.all([
+    sb.from("phone_billing_settings").select(PHONE_SETTINGS_COLUMNS).eq("id", true).maybeSingle(),
+    sb.from("usage_prices").select("kind, label, unit_label, active, pricing, price_cents, updated_at").in("kind", [...PHONE_METERS]),
+  ]);
+  if (st.error) throw phoneBillingDbError(st.error);
+  if (mt.error) throw phoneBillingDbError(mt.error);
+  // 259 seeds the one row; its absence means 259 is not (fully) applied, not "all defaults".
+  if (!st.data) throw phoneBillingDbError({ code: "42P01" });
+  // Always the contract's order, so the console lists out/in calls then out/in texts.
+  const meters = PHONE_METERS.map((k) => (mt.data ?? []).find((m: any) => m.kind === k)).filter(Boolean);
+  return { settings: normalizeSettings(st.data), meters };
+}
+
+/** Switch the four phone meters on or off together, and prove it reached every one of them. */
+async function setPhoneMeters(sb: any, active: boolean, nowIso: string) {
+  const { data, error } = await sb.from("usage_prices").update({ active, updated_at: nowIso })
+    .in("kind", [...PHONE_METERS]).select("kind, active");
+  if (error) throw phoneBillingDbError(error);
+  const n = (data ?? []).filter((m: any) => m.active === active).length;
+  // Switching OFF with a meter row missing is fine — a missing row charges nobody. Switching ON
+  // with one missing would leave that kind of usage free while the console says "every builder".
+  if (active && n !== PHONE_METERS.length) {
+    throw new Error(`Only ${n} of the ${PHONE_METERS.length} phone meters exist in the price list, so charging could not be switched on for everything. Check migration 259.`);
+  }
+}
+
+/**
+ * Every usage_charges row for one month. KEYSET pages on id, continuing until an EMPTY page —
+ * not "until a short page": PostgREST's max-rows can sit below the page size asked for, and a
+ * short-page stop would then end after the first page and report a fraction of the month as
+ * the whole of it. Capped so a runaway month cannot hold the isolate; the report says when it
+ * stopped short.
+ */
+async function readUsageChargesForMonth(sb: any, from: string, to: string): Promise<{ rows: UsageChargeRow[]; truncated: boolean }> {
+  const PAGE = 1000, MAX_ROWS = 100_000;
+  const rows: UsageChargeRow[] = [];
+  let lastId = 0;
+  for (;;) {
+    const { data, error } = await sb.from("usage_charges")
+      .select("id, client_id, source, direction, state, occurred_at, cost_micros, cost_source, units, unit, charge_micros")
+      .gte("occurred_at", from).lt("occurred_at", to)
+      .gt("id", lastId).order("id", { ascending: true }).limit(PAGE);
+    if (error) throw phoneBillingDbError(error);
+    const batch = (data ?? []) as any[];
+    if (batch.length === 0) return { rows, truncated: false };
+    rows.push(...batch);
+    lastId = Number(batch[batch.length - 1].id);
+    if (rows.length >= MAX_ROWS) return { rows, truncated: true };
+  }
+}
+
+/** Twilio's daily account totals for one month (a few hundred rows at most), same paging rule. */
+async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string): Promise<TwilioDailyRow[]> {
+  const PAGE = 1000;
+  const out: TwilioDailyRow[] = [];
+  // The offset advances by what CAME BACK, not by PAGE, for the max-rows reason above: a
+  // server cap of 500 with `offset += PAGE` would silently skip rows 500–999 of every page.
+  let offset = 0;
+  while (offset < 20_000) {
+    const { data, error } = await sb.from("twilio_usage_daily")
+      .select("day, category, count, usage, price_micros")
+      .gte("day", firstDay).lt("day", nextFirstDay)
+      .order("day", { ascending: true }).order("category", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) throw phoneBillingDbError(error);
+    const batch = (data ?? []) as TwilioDailyRow[];
+    if (batch.length === 0) break;
+    out.push(...batch);
+    offset += batch.length;
+  }
+  return out;
+}
+
 Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // The portal pings this when an operator's flags resolve and when the pointer reaches the
+  // Admin link, so the console's first list_clients/get_master does not also pay a cold isolate
+  // (~2.5 s). It answers ABOVE EVERYTHING THE GATE DOES, and that placement is the safety case:
+  //   • before checkAdminAuth: no getUser round trip, no app_operators read, and above all no
+  //     checkAdminPassword. The ping carries the anon key and no password, and below this line
+  //     that is a FAILED ADMIN PASSWORD: an admin_auth_attempts failure on the caller's IP
+  //     bucket (5 = a lock), an admin_auth_failed audit row, a count toward the global brake and
+  //     a 400 ms sleep. A ping per boot would walk an operator's own IP up the lock tiers;
+  //   • before createClient and the operator success audit further down;
+  //   • before req.json(): it never reads the BODY (the single parse below owns that stream);
+  //   • 200, so withErrorLog (minStatus 500) files nothing in app_errors;
+  //   • a QUERY PARAM, not an action: READ_ONLY_ACTIONS, PASSWORD_REQUIRED and the switch are
+  //     untouched. It can only skip work, never authorize any.
+  // ⚠️ DEPLOY THIS BEFORE ANY PORTAL BUNDLE THAT WARMS admin-catalog (2026-10-02: shipped alone,
+  // ahead of the portal change that pings it). _test_stubs/adminCatalogWarm_test.ts pins the order.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   let p: any;
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -253,6 +392,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     if (String(action ?? "") === "set_payments" && !identity.canBill) {
       return json({ error: "This operator account cannot change payment routing." }, 403);
     }
+    // Phone & text billing (usage billing Part 1 step 6): all four on the money grant, the two
+    // READS included. phone_billing_get and phone_usage_report serve OUR COST of every call and
+    // text — the margin on every builder, the same class of number as wallet_status's
+    // cost_cents — and an operator without can_bill has no reason to see it. Being absent from
+    // READ_ONLY_ACTIONS they need can_write as well. Own sentence, because "cannot change
+    // billing" would be wrong for a read.
+    if (PHONE_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
+      return json({ error: "This operator account cannot see or change phone and text billing." }, 403);
+    }
   }
 
   // Successful operator-authenticated calls are recorded. Until now only FAILURES were
@@ -278,14 +426,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Billing posture per tenant, so the console can show at a glance who is comped
         // and who is discounted. client_settings is service-role only — this function is
         // the only place it can be read from.
-        const { data: cs } = await sb.from("client_settings")
+        // ⚠️ All three reads below THROW on error rather than defaulting to empty. The console
+        // seeds editable state from this answer and writes it back whole: an unread
+        // client_settings showed every tenant as billable at 0%, so one Save on the Billing
+        // card (set_billing sends billingExempt every time) cleared a real exemption and locked
+        // that tenant out; an unread grant list showed nobody holding a comp, so the 3D toggle
+        // (set_feature_grants REPLACES the set) revoked every other grant the tenant had. A
+        // console that fails to load is recoverable; a confidently wrong one that saves is not.
+        const { data: cs, error: csErr } = await sb.from("client_settings")
           .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
+        if (csErr) throw csErr;
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
         // The billable feature list, so the console can offer a per-feature discount
         // picker without hardcoding a copy of the catalogue that would drift from
         // billing_plans. One entry per feature (monthly/annual share a feature).
-        const { data: planRows } = await sb.from("billing_plans")
+        const { data: planRows, error: planErr } = await sb.from("billing_plans")
           .select("feature, name, availability, required, operator_grantable").eq("active", true).order("sort_order", { ascending: false });
+        if (planErr) throw planErr;
         const seenFeature = new Set<string>();
         const features = (planRows ?? []).filter((p: any) => {
           if (!p.feature || seenFeature.has(p.feature)) return false;
@@ -294,8 +451,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required, operatorGrantable: Boolean(p.operator_grantable) }));
         // Operator grants per tenant (migration 109) — the console's "Early access" card.
         // client_feature_grants is service-role only, so this function is the only reader.
-        const { data: grantRows } = await sb.from("client_feature_grants")
+        const { data: grantRows, error: grantErr } = await sb.from("client_feature_grants")
           .select("client_id, feature, expires_at");
+        if (grantErr) throw grantErr;
         const grantsById = new Map<string, any[]>();
         for (const g of (grantRows ?? []) as any[]) {
           const arr = grantsById.get(g.client_id) ?? [];
@@ -566,7 +724,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "create_client": {
         const clientId = reqStr(p.clientId, "clientId").toLowerCase();
         if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Builder id must be lowercase letters, numbers and hyphens (DNS-safe).");
-        const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal"];
+        // "first" (2026-10-05): portal-billing's first-charge order ids are ss_first_<clientId>_<plan>,
+        // so a tenant slugged "first" mints ss_first_<plan>_… and billing-webhook's ssClientIdOf
+        // reads the plan's first word as the tenant. Its events would be homed on, or acked as the
+        // deleted tenant, "simple" / "crm" / "full". No tenant had it on 2026-10-05.
+        const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal", "first"];
         if (reserved.includes(clientId)) throw new Error(`"${clientId}" is a reserved id.`);
         const companyName = reqStr(p.companyName, "companyName");
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
@@ -639,11 +801,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const counts: Record<string, number> = {};
 
           // 1. building_styles → old id → new id (matched by stable per-client key)
-          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active").eq("client_id", T);
+          // taxable (158) and show_image_on_estimate (037) ride along: both default TRUE, so leaving
+          // them out silently reversed a template's "not taxable" / "no photo on the estimate"
+          // on every cloned style — tax charged on a building line the template exempted.
+          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active, taxable, show_image_on_estimate").eq("client_id", T);
           if (stSrc.error) throw new Error(`clone styles read: ${stSrc.error.message}`);
           if ((stSrc.data ?? []).length) {
             const r = await sb.from("building_styles").insert((stSrc.data ?? []).map((s: any) => ({
               client_id: Cc, key: s.key, label: s.label, image_url: s.image_url, sort_order: s.sort_order, active: s.active,
+              taxable: s.taxable !== false, show_image_on_estimate: s.show_image_on_estimate !== false,
             })));
             if (r.error) throw new Error(`clone styles: ${r.error.message}`);
           }
@@ -687,17 +853,29 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const fxSrc = await sb.from("fixture_items").select("*").eq("client_id", T).eq("archived", false);
           if (fxSrc.error) throw new Error(`clone fixtures read: ${fxSrc.error.message}`);
           const fixtureIdMap = new Map<string, string>();  // old fixture id → new fixture id
+          let fxStylesDropped = 0;
           if ((fxSrc.data ?? []).length) {
             const fxRows = (fxSrc.data ?? []).map((f0: any) => {
               const { id, client_id, created_at, updated_at, ...rest } = f0;
               const newId = crypto.randomUUID();
               fixtureIdMap.set(String(id), newId);
+              // "Offered on" (272): style_ids names the TEMPLATE's styles, so it is remapped through
+              // styleIdMap like the sizes (cloneStyleIds says why). Only a list is touched: NULL
+              // (every style) stays NULL, and a read from before 272 has no such key, so nothing is
+              // sent for a column that is not there yet.
+              if (Array.isArray(rest.style_ids)) {
+                const s = cloneStyleIds(rest.style_ids, styleIdMap);
+                rest.style_ids = s.value;
+                if (s.dropped) fxStylesDropped++;
+              }
               return { id: newId, client_id: Cc, ...rest };
             });
             const r = await sb.from("fixture_items").insert(fxRows);
             if (r.error) throw new Error(`clone fixtures: ${r.error.message}`);
           }
           counts.fixture_items = fixtureIdMap.size;
+          // Lists none of whose styles came across, sent as every style instead (cloneStyleIds).
+          if (fxStylesDropped) counts.fixture_style_ids_dropped = fxStylesDropped;
 
           // 4. building_size_inclusions → remap size_id (qty travels with the row —
           // previously dropped here, resetting every clone's quantities to the default 1)
@@ -724,8 +902,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           counts.building_size_inclusions = incRows.length;
           if (incDropped) counts.building_size_inclusions_dropped = incDropped;
 
-          // 5. client_layout_items (no style FK)
-          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
+          // 5. client_layout_items (no style FK). The per-row flags are copied too — each column
+          // defaults to the permissive value, so dropping it changed what the clone SELLS:
+          // archived (075) brought a retired option back onto the palette, internal_only (082)
+          // put a rep-only option in front of the new builder's public shoppers, taxable (158)
+          // taxed an option the template exempted, and the shelf dimensions (171) fell back to
+          // the master defaults.
+          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override, archived, internal_only, taxable, depth_in, height_off_floor_in").eq("client_id", T);
           if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
           if ((liSrc.data ?? []).length) {
             const r = await sb.from("client_layout_items").insert((liSrc.data ?? []).map((i: any) => ({ client_id: Cc, ...i })));
@@ -879,6 +1062,206 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
       }
 
+      // ── PHONE & TEXT BILLING, OPERATOR SIDE (usage billing Part 1 step 6, 2026-10-02) ─────
+      // The "Phone & text billing" card under Admin → Billing. Every call minute and text a
+      // builder uses is charged to their wallet at Twilio's real cost × ONE markup set here
+      // (Ahsan 2026-10-02). Until it is armed, the phone-api worker still records each item's
+      // real cost and what it WOULD have charged (usage_charges state 'shadow'), and
+      // phone_usage_report adds that up, so Carolyn sets the markup against what GoHighLevel
+      // charges with real numbers instead of guesses. All four are on can_bill (see the gate).
+      case "phone_billing_get": {
+        const { settings, meters } = await readPhoneBilling(sb);
+        let pilots: { clientId: string; companyName: string }[] = [];
+        if (settings.pilot_client_ids.length) {
+          const { data: cfg } = await sb.from("client_configs").select("client_id, company_name").in("client_id", settings.pilot_client_ids);
+          const byId = new Map((cfg ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+          pilots = settings.pilot_client_ids.map((id) => ({ clientId: id, companyName: byId.get(id) ?? id }));
+        }
+        return json({
+          ok: true,
+          settings,
+          meters: meters.map((m: any) => ({
+            kind: m.kind, label: m.label, plainLabel: PHONE_METER_LABELS[m.kind as keyof typeof PHONE_METER_LABELS] ?? m.label,
+            active: m.active === true, pricing: m.pricing ?? null, updatedAt: m.updated_at ?? null,
+          })),
+          charging: chargingMode(settings, meters),
+          pilots,
+          // The env rail as the EDGE functions see it (it gates texts sent from the portal). The
+          // phone-api worker reads its own copy from wrangler; both are off until go-live, and
+          // with the rail off nothing is charged and nobody is blocked whatever this card says.
+          serverSwitchOn: Deno.env.get("PHONE_USAGE_METERS") === "on",
+        });
+      }
+
+      case "phone_billing_set": {
+        // Validated before any read: a refused body costs nothing and writes nothing.
+        const patch = parseSettingsPatch(p, new Set(["action", "adminPassword"]));
+        const { settings: before, meters } = await readPhoneBilling(sb);
+        const wasMode = chargingMode(before, meters).mode;
+        // No markup = nothing can be priced, and 259's gate reads it as "not armed". Clearing it
+        // while charging is on would stop charging through the Save prices button — no confirm,
+        // no arm audit row, and the card would still show the pilot list as live. Stopping has
+        // its own button; this refuses the side door.
+        if ("markup" in patch && patch.markup === null && wasMode !== "off") {
+          throw new Error("Charging is on. Press Stop charging before clearing the markup.");
+        }
+        const { data: row, error } = await sb.from("phone_billing_settings")
+          .update({ ...patch, updated_at: new Date().toISOString(), updated_by: identity.via === "operator" ? identity.userId : null })
+          .eq("id", true).select(PHONE_SETTINGS_COLUMNS).maybeSingle();
+        if (error) throw phoneBillingDbError(error);
+        if (!row) throw phoneBillingDbError({ code: "42P01" });
+        // The column list is a joined constant, so supabase-js cannot type the row; it is the
+        // PHONE_SETTINGS_COLUMNS shape, and normalizeSettings reads it defensively either way.
+        const after = normalizeSettings(row as unknown as Record<string, unknown>);
+        const changes = describeSettingsChange(before, after);
+        // A DEDICATED audit row, the set_payments way: the generic operator row at the top of
+        // this function records only that the action ran, and the password path writes no success
+        // row at all. When a builder asks why a minute cost what it did, the question is which
+        // markup or cap was in force from when, and who set it.
+        try {
+          await sb.from("admin_audit").insert({
+            action: "phone_billing_set",
+            target_client_id: null,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} charging=${wasMode} ${changes.join("; ") || "no change"}`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
+        return json({
+          ok: true,
+          settings: after,
+          changed: changes,
+          charging: chargingMode(after, meters),
+          note: changes.length === 0
+            ? "Nothing changed."
+            : wasMode === "off"
+            ? "Saved. Charging is off, so nobody is charged. The report uses these prices for “would have charged”."
+            // The worker prices an item when it runs, not when the call happened, so a call still
+            // waiting for Twilio's price is charged at the NEW numbers. Said, because it is true.
+            : "Saved. Charging is on: these prices apply from the next charge run (within about 5 minutes), including calls and texts still waiting for Twilio's price.",
+        });
+      }
+
+      case "phone_billing_arm": {
+        // Start or stop charging. TWO shapes of "on", one of "off" (259's gate: markup set AND
+        // armed_at set AND (meter active OR tenant in pilot_client_ids)):
+        //   {armed:true, pilot_client_ids:[…]} → PILOT: meters stay inactive, only the listed
+        //                                         builders are charged.
+        //   {armed:true, scope:"all"}          → EVERYONE: all four meters active, pilot list
+        //                                         cleared (it no longer means anything).
+        //   {armed:false}                      → OFF: meters inactive AND the pilot list
+        //                                         CLEARED. armed_at is kept (the contract keeps
+        //                                         it as when charging last started), so a pilot
+        //                                         list left behind would keep charging every
+        //                                         pilot — membership alone satisfies the gate.
+        // armed_at is set to now() on EVERY arm, including a change to the pilot list while on:
+        // the worker shadows anything that happened before armed_at, so a builder added today is
+        // never charged for yesterday. The cost is the other side of the same rule — a call
+        // already pilot-billed but still waiting for Twilio's price when the list changes is
+        // recorded, not charged. Undercharging is the safe direction.
+        if (typeof p.armed !== "boolean") throw new Error("armed must be true or false.");
+        const pilots = p.pilot_client_ids == null ? [] : normalizePilotIds(p.pilot_client_ids);
+        if (!p.armed && pilots.length) throw new Error("Stop charging takes no pilot list: it stops charging for everyone.");
+        // "Everyone" must be asked for by name. An empty or blank pilot list normalises to [],
+        // and reading that as "everyone" would let the field meant to NARROW charging widen it
+        // to every builder on the platform.
+        if (p.armed && !pilots.length && p.scope !== "all") {
+          throw new Error("Add at least one pilot builder, or choose every builder.");
+        }
+        const { settings: before, meters } = await readPhoneBilling(sb);
+        const was = chargingMode(before, meters);
+        const target: "off" | "pilot" | "all" = !p.armed ? "off" : pilots.length ? "pilot" : "all";
+        if (p.armed) {
+          if (before.markup == null) {
+            throw new Error("Set a markup and save it before charging starts. Without one nothing can be priced.");
+          }
+          if (target === "all" && meters.length !== PHONE_METERS.length) {
+            throw new Error(`Only ${meters.length} of the ${PHONE_METERS.length} phone meters exist in the price list, so charging can't be switched on for everything. Check migration 259.`);
+          }
+          if (pilots.length) {
+            const { data: known, error: kErr } = await sb.from("client_configs").select("client_id").in("client_id", pilots);
+            if (kErr) throw kErr;
+            const have = new Set((known ?? []).map((r: any) => String(r.client_id)));
+            const missing = pilots.filter((id) => !have.has(id));
+            if (missing.length) throw new Error(`Unknown builder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Nothing was changed.`);
+          }
+        }
+        // WRITE ORDER, with no transaction across PostgREST calls: everything that NARROWS who is
+        // charged goes first and the one write that WIDENS it goes last. A failure part-way then
+        // leaves fewer builders charged than either the old or the new state — never more.
+        const nowIso = new Date().toISOString();
+        const by = identity.via === "operator" ? identity.userId : null;
+        if (target !== "all") await setPhoneMeters(sb, false, nowIso);
+        const settingsPatch: Record<string, unknown> = target === "off"
+          ? { pilot_client_ids: [], updated_at: nowIso, updated_by: by }
+          : { pilot_client_ids: target === "pilot" ? pilots : [], armed_at: nowIso, updated_at: nowIso, updated_by: by };
+        const { data: row, error } = await sb.from("phone_billing_settings")
+          .update(settingsPatch).eq("id", true).select("armed_at").maybeSingle();
+        if (error) throw phoneBillingDbError(error);
+        if (!row) throw phoneBillingDbError({ code: "42P01" });
+        if (target === "all") await setPhoneMeters(sb, true, nowIso);
+
+        // Read back what is REALLY on, rather than echo what was asked for.
+        const { settings: after, meters: metersAfter } = await readPhoneBilling(sb);
+        const now = chargingMode(after, metersAfter);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "phone_billing_arm",
+            target_client_id: null,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: (`via=${identity.via} mode ${was.mode} -> ${now.mode}`
+              + ` pilots [${before.pilot_client_ids.join(",")}] -> [${after.pilot_client_ids.join(",")}]`
+              + ` armed_at ${before.armed_at ?? "(none)"} -> ${after.armed_at ?? "(none)"}`
+              + ` markup ${after.markup ?? "(none)"}`).slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
+
+        const serverSwitchOn = Deno.env.get("PHONE_USAGE_METERS") === "on";
+        const railNote = serverSwitchOn || now.mode === "off"
+          ? ""
+          : " The server switch is still off, so nothing is actually charged until it is turned on.";
+        const note = now.mode === "all"
+          ? `Charging is on for every builder. From now on each call minute and text comes out of their wallet at Twilio's cost × ${after.markup}. Non-billable builders are never charged.${railNote}`
+          : now.mode === "pilot"
+          ? `Charging is on for ${after.pilot_client_ids.length} pilot builder${after.pilot_client_ids.length === 1 ? "" : "s"} only (${after.pilot_client_ids.join(", ")}), at Twilio's cost × ${after.markup}. Everyone else's costs are only recorded.${railNote}`
+          : now.mode === "off"
+          ? "Charging is off. Nothing new is charged and nobody is blocked for a low balance. Costs are still recorded, and charges already made stay on the wallets."
+          : `Saved, but the result isn't clean: ${now.problem ?? "check the meters."}`;
+        return json({
+          ok: true,
+          settings: after,
+          meters: metersAfter.map((m: any) => ({
+            kind: m.kind, label: m.label, plainLabel: PHONE_METER_LABELS[m.kind as keyof typeof PHONE_METER_LABELS] ?? m.label,
+            active: m.active === true, pricing: m.pricing ?? null, updatedAt: m.updated_at ?? null,
+          })),
+          charging: now,
+          serverSwitchOn,
+          note,
+        });
+      }
+
+      case "phone_usage_report": {
+        // One month, UTC (Twilio's daily totals are UTC days). Everything is computed from the
+        // RAW rows in _shared/phoneBillingAdmin.ts, so every figure on the card and in the CSV
+        // comes from one pass and they cannot disagree. "Would have charged" is priced at TODAY's
+        // markup and caps — that is the question being asked before arming ("what would this
+        // month have made at 2×?"), not the markup that happened to be set on the day.
+        const range = monthRange(p.month, new Date());
+        const [{ settings }, charges, twilio, cfg] = await Promise.all([
+          readPhoneBilling(sb),
+          readUsageChargesForMonth(sb, range.from, range.to),
+          readTwilioDaily(sb, range.firstDay, range.nextFirstDay),
+          sb.from("client_configs").select("client_id, company_name"),
+        ]);
+        if (cfg.error) throw cfg.error;
+        const names = new Map<string, string>((cfg.data ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+        return json({
+          ok: true,
+          ...summarizePhoneUsage({ range, rows: charges.rows, twilio, settings, names, truncated: charges.truncated }),
+        });
+      }
+
       // ── Avalara credential check (2026-09-17) ─────────────────────────────────────
       // Do the platform's Avalara credentials work? GET /api/v2/utilities/ping, run on purpose by
       // an operator. Deliberately NOT in READ_ONLY_ACTIONS: whether Avalara bills a ping is not
@@ -962,7 +1345,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // is confusing, while a comp this writer refuses is self-explanatory.
         // on_demand_pricing joined 2026-08-28 with the Real-Time Pricing build — pay-only
         // from the start, so no comp can hand out a feature whose whole point is the upcharge.
-        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing"]);
+        // crm joined portal-billing's and featureCheck's sets 2026-08-29 but never this one, so a
+        // CRM comp saved here read as granted while the reader refused to honour it.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm"]);
 
         const wanted = Array.isArray(p.grants) ? p.grants : [];
         if (wanted.length > 50) throw new Error("Too many grants in one request.");
@@ -1300,13 +1685,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // 3. map the user to this client with the chosen role. Refuse to SILENTLY re-home a
         //    login already linked to a different client (operator typo / isolation footgun);
         //    require an explicit reassign:true to move them.
-        const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
+        const existingLink = await sb.from("client_users").select("client_id, role").eq("user_id", user.id).maybeSingle();
         if (existingLink.error) throw existingLink.error;
         if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
           throw new Error(`"${email}" is already linked to builder "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
         }
+        // Not just `role`: access resolves from title + overrides, which a role-only upsert left
+        // behind from the old builder or the old role — see _shared/linkOwnerRow.ts.
         const up = await sb.from("client_users").upsert(
-          { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
+          linkOwnerRow(existingLink.data, user.id, clientId, role as LinkRole), { onConflict: "user_id" });
         if (up.error) throw up.error;
 
         // 4. always hand back a one-time set-password link (works without SMTP)
@@ -1399,10 +1786,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // then the client_configs row itself. Requires the typed client id to match
       // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
       // Irreversible. GHL-side contacts/estimates are external and untouched.
+      // BEFORE any of that, at the payment gateway: the tenant's open subscriptions are
+      // cancelled and its saved card is removed from the vault (2026-10-05), or the delete
+      // is refused with nothing wiped. The response and audit row carry COUNTS, never ids.
       // ⚠️ NOT removed: the financial ledgers (orders/payments/invoice_sends/
-      // billing_charge_attempts). Those are records of money that moved, so the
-      // response reports their counts as `retained` instead of silently keeping
-      // them — deciding to destroy them is a retention call, not a code change.
+      // billing_charge_attempts/wallet_transactions/usage_charges). Those are records of
+      // money that moved, so the response reports their counts as `retained` instead of
+      // silently keeping them — deciding to destroy them is a retention call, not a code change.
+      // ⚠️ NOT removed EITHER, and not decided yet: the tenant's CRM, phone, text, email and
+      // customer-login rows (end customers' names, numbers, message bodies, voicemails). They
+      // are counted as `leftBehind` so the operator sees them; see the note at that list.
       // Keep this list in step with the wipes below; drift here is what left a
       // deleted tenant's PII in the database twice already.
       case "delete_client": {
@@ -1411,11 +1804,116 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           throw new Error("Confirmation text does not match the client id.");
         }
         const deleted: Record<string, number> = {};
+        // Adds to the count rather than setting it: billing_customers is wiped twice, once by the
+        // gateway step the moment the card is gone, and again in the list below as the backstop.
         const wipe = async (table: string) => {
           const { error, count } = await sb.from(table).delete({ count: "exact" }).eq("client_id", clientId);
           if (error) throw new Error(`${table}: ${error.message}`);
-          deleted[table] = count ?? 0;
+          deleted[table] = (deleted[table] ?? 0) + (count ?? 0);
         };
+
+        // ── The payment gateway FIRST, before a single row is wiped (2026-10-05). ──────────────
+        // billing_subscriptions and billing_customers (wiped below) are only MIRRORS. Until this,
+        // deleting a paying builder left their subscriptions charging their card at Deposyt/NMI and
+        // the card in the gateway's vault, with no row left on our side to show either. Carolyn,
+        // 07-31: card information is not kept for a builder who is gone.
+        //
+        // ⚠️ The gateway account is SHARED with other CSM Synergy products, and both calls are
+        // irreversible. Only ids read from THIS tenant's own rows are touched, and it fails CLOSED:
+        // no gateway configured, or any answer short of "done" / "that id is already gone", refuses
+        // the delete with nothing wiped. A wiped tenant with a live subscription is a builder still
+        // being charged with nothing here to show why. The rules live in _shared/tenantGatewayCleanup.ts.
+        //
+        // ⛔ The vault id is a bearer capability for charging that card (see get_billing_overview).
+        // It is read here, handed to the gateway, and never reaches a response, an audit note or a
+        // log: counts only.
+        const [subsRes, custRes] = await Promise.all([
+          sb.from("billing_subscriptions").select("id, status").eq("client_id", clientId),
+          sb.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
+        ]);
+        if (subsRes.error) throw new Error(`billing_subscriptions: ${subsRes.error.message}`);
+        if (custRes.error) throw new Error(`billing_customers: ${custRes.error.message}`);
+        const tenantSubs = (subsRes.data ?? []) as { id: string; status: string | null }[];
+        let tenantVault: string | null = custRes.data?.vault_id ? String(custRes.data.vault_id) : null;
+        // A vault another builder's row ALSO points at is still in use, and deleting it would break
+        // THEIR billing. It is kept and reported. Never true on 2026-10-05 (4 rows, 4 distinct
+        // vaults); one count to rule it out on an irreversible call is cheap.
+        let vaultShared = false;
+        if (tenantVault) {
+          const { count: others, error: sharedErr } = await sb.from("billing_customers")
+            .select("client_id", { count: "exact", head: true })
+            .eq("vault_id", tenantVault).neq("client_id", clientId);
+          if (sharedErr) throw new Error(`billing_customers: ${sharedErr.message}`);
+          if (others) { vaultShared = true; tenantVault = null; }
+        }
+        const openSubs = openSubscriptions(tenantSubs).length;
+        let gateway = { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 };
+        // One dedicated audit row, written as soon as the gateway step has run, whichever way it went:
+        // the generic operator row at the top only records that the action was asked for, and the
+        // ADMIN_PASSWORD path writes no success row at all, yet what happened at the gateway cannot be
+        // undone and must be findable. Counts only.
+        const auditGateway = async (outcome: string) => {
+          try {
+            await sb.from("admin_audit").insert({
+              action: "delete_client",
+              target_client_id: clientId,
+              actor_email: identity.via === "operator" ? identity.email : null,
+              actor_user_id: identity.via === "operator" ? identity.userId : null,
+              note: (`via=${identity.via} gateway ${outcome}`
+                + ` subscriptions_cancelled=${gateway.subscriptionsCancelled} of ${openSubs}`
+                + ` vault_deleted=${gateway.vaultDeleted} already_gone=${gateway.alreadyGone}`
+                + (vaultShared ? " vault_kept=shared" : "")).slice(0, 2000),
+            });
+          } catch (_e) { /* best-effort: the gateway outcome is also in the response */ }
+        };
+        const atGateway = needsGateway(tenantSubs, tenantVault);
+        if (atGateway) {
+          if (!nmiConfigured) {
+            return json({ error: "Can't reach the payment gateway; nothing was deleted." }, 503);
+          }
+          try {
+            gateway = await cleanupTenantGateway({
+              subs: tenantSubs,
+              vaultId: tenantVault,
+              nmiPost,
+              // Mark each mirror row cancelled the moment the gateway confirms, the way
+              // portal-billing's cancel does, so a delete that stops part-way and is retried
+              // skips what already went.
+              onCancelled: async (subscriptionId: string) => {
+                const now = new Date().toISOString();
+                await sb.from("billing_subscriptions")
+                  .update({ status: "cancelled", canceled_at: now, updated_at: now })
+                  .eq("id", subscriptionId).eq("client_id", clientId);
+              },
+              // And the row that points at the saved card goes the moment the gateway confirms the
+              // card is gone, not fifteen wipes later. If a later wipe throws, the tenant survives
+              // the failed delete, and a vault id left behind would show a card on file that the
+              // gateway no longer holds: Billing says "card on file", subscribe and top-up reuse it
+              // and are declined, and a retry asks the gateway to delete it again. With the row gone
+              // the retry has nothing to send. The wipe in the list below stays as the backstop.
+              onVaultDeleted: () => wipe("billing_customers"),
+            });
+          } catch (e) {
+            // Anything that is not the module's own refusal is treated as "no answer": we cannot
+            // say what happened at the gateway, so the operator is sent to look.
+            const stopped = e instanceof GatewayCleanupError ? e : null;
+            const noAnswer = stopped ? stopped.unknown : true;
+            if (stopped) gateway = stopped.progress;
+            await auditGateway(`refused(${noAnswer ? "no_answer" : "declined"})`);
+            const cancelledSoFar = gateway.subscriptionsCancelled;
+            const partial = cancelledSoFar
+              ? ` ${cancelledSoFar} of their ${openSubs} paid plan${openSubs === 1 ? "" : "s"} ${cancelledSoFar === 1 ? "was" : "were"} cancelled at the gateway before it stopped.`
+              : "";
+            return json({
+              error: noAnswer
+                ? `The payment gateway didn't answer, so nothing was deleted. A cancellation may still have gone through: check this builder's plans in the Deposyt portal before you try again.${partial}`
+                : `The payment gateway wouldn't cancel this builder's plan or remove their saved card, so nothing was deleted. It said: "${stopped!.said}".${partial}`,
+              gateway,
+            }, 502);
+          }
+        }
+        await auditGateway(atGateway ? "done" : "none");
+
         // tax_code_assignments (migration 246) goes FIRST, ahead of the order below. Its rows have
         // no foreign key to anything wiped here (target_key is text, shared by style ids and
         // heading keys), so none cascade; and the HEADING rows — delivery, doors, services — pass
@@ -1424,8 +1922,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // codes as its own saved choices, and a save that kept them would stamp them as theirs.
         // First, because it is the one table here that can be missing: admin-catalog deployed
         // before 246 is applied refuses the delete on this line, before anything is gone, instead
-        // of half-deleting the tenant and throwing further down.
+        // of half-deleting the tenant and throwing further down. (Only the gateway step above runs
+        // ahead of it: its refusals wipe nothing, and once the gateway has removed the saved card it
+        // wipes the billing_customers row that pointed at it, which is the one row that must not
+        // outlive the card.)
         await wipe("tax_code_assignments");
+        // wallet_accounts (migration 164) is the BALANCE, keyed by client_id with no FK to anything,
+        // so a recreated slug inherited it: a deleted test tenant left $100.00 behind (seen 10-05),
+        // which the next tenant on that slug would have spent as its own. The movements stay:
+        // wallet_transactions is a ledger, reported under `retained` below.
+        await wipe("wallet_accounts");
+        // client_feature_grants is the same kind of entitlement as wallet_accounts and
+        // billing_subscriptions: keyed by client_id, no FK, so a recreated slug inherited the dead
+        // tenant's comped features (seen 10-05: an unexpired view_3d grant outliving its tenant).
+        // get_config's view3d is an EXISTS over this table, so the new tenant would have had paid
+        // 3D on day one. A grant is a comp, not a record of money that moved, so it is wiped, not
+        // retained.
+        await wipe("client_feature_grants");
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");
@@ -1454,7 +1967,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   one's 'active' subscription — full product, no payment — and made a subscribe call
         //   charge the FORMER customer's stored card, on an invoice nobody could attribute.
         //   Neither table is an accounting record; both are mirrors of gateway state, and the
-        //   gateway remains the source of truth.
+        //   gateway remains the source of truth. By this line the gateway step at the top has
+        //   already cancelled the subscriptions and removed the card these rows describe (and
+        //   wiped billing_customers once the card was gone; this second wipe is the backstop).
         await wipe("billing_subscriptions");
         await wipe("billing_customers");
         //   feedback_submissions holds submitter_name + submitter_email — the named people who
@@ -1479,11 +1994,31 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
         // unmentioned is how this class of miss happened in the first place. The counts go back in
         // the response so the operator can see exactly what outlived the tenant and escalate if a
-        // deletion request requires them gone too.
+        // deletion request requires them gone too. wallet_transactions (every top-up, debit and
+        // refund) and usage_charges (each metered call, text and 3D generation) joined the list on
+        // 2026-10-05: they are the same kind of record, and were neither wiped nor reported.
         const retained: Record<string, number> = {};
-        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts"]) {
+        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges"]) {
           const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
           if (count) retained[t] = count;
+        }
+        // LEFT BEHIND, and NOT a decision: the tenant's CRM, phone, text, email and customer-login
+        // rows, which name THEIR customers (names, phone numbers, message bodies, voicemails). All
+        // keyed by client_id with no FK to anything wiped here, so none cascade, and on 2026-10-05
+        // a deleted tenant's crm_contacts and customer_sessions were still in the database. Whether
+        // they are wiped, kept or exported first is a retention call for Ahsan and Carolyn, not
+        // part of the 10-05 change, so they are counted here exactly like `retained`: the dialog
+        // says "all of its data", and what outlives it has to be visible rather than assumed.
+        const leftBehind: Record<string, number> = {};
+        for (
+          const t of [
+            "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls",
+            "phone_voicemails", "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions",
+            "customer_email_otps", "design_acceptances",
+          ]
+        ) {
+          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+          if (count) leftBehind[t] = count;
         }
 
         // Capture the logins mapped to this client, unmap them, then delete any
@@ -1538,7 +2073,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // `retained` is empty for a normal tenant and only appears when financial rows outlived
         // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
         // its data", so anything that survives has to be visible rather than assumed.
-        return json({ ok: true, clientId, deleted, ...(Object.keys(retained).length ? { retained } : {}) });
+        // `gateway` is counts only (see the gateway step): what was cancelled and removed at the
+        // payment gateway, so the operator's confirmation can say so. `leftBehind` works like
+        // `retained`: present only when the tenant had rows there.
+        return json({
+          ok: true, clientId, deleted,
+          gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
+          ...(Object.keys(retained).length ? { retained } : {}),
+          ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
+        });
       }
 
       default:

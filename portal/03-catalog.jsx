@@ -19,12 +19,23 @@ function ssTaxReadUnavailable(err) {
   return err.ssStatus === 400 && /^Unknown action\b/i.test(String(err.message || ""));
 }
 
-function SettingsView({ section }) {
+// The Settings → Company "Quotes are good for" box: a whole number of days, 1 to 365 — the same
+// rule as portal-settings' save and client_settings' CHECK (migration 269).
+function ssQuoteDaysOk(v) {
+  const s = String(v ?? "").trim();
+  if (!/^\d+$/.test(s)) return false;
+  const n = Number(s);
+  return n >= 1 && n <= 365;
+}
+
+function SettingsView({ section, view3d = false }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
   // display + testing). No section = all (legacy). Form state always covers
   // every field (prefilled from status), so the global save stays safe no
   // matter which section is on screen.
+  // `view3d` is the shell's view3dUnlocked: the four-corner switch (migration 276) shows only where
+  // the tenant has 3D, because without it the quote carries no 3D page at all.
   const show = (k) => !section || section === k;
   const [status, setStatus] = useState(null);   // response of action:"status"
   const [error, setError] = useState(null);
@@ -50,6 +61,11 @@ function SettingsView({ section }) {
     businessName: "", businessPhone: "", businessWebsite: "", businessLogoUrl: "",
     addr1: "", addrCity: "", addrState: "", addrZip: "",
     quoteTerms: "", betaMode: false, betaEmail: "", showPricing: false,
+    // How many days a quote stays good for (migration 269). A STRING like every other field; "30"
+    // is the column's default and what every quote printed before the setting existed.
+    quoteValidDays: "30",
+    // Page 2 of the quote from all four corners (migration 276). Off is the column's default.
+    quoteCornerViews: false,
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
@@ -163,6 +179,8 @@ function SettingsView({ section }) {
         businessLogoUrl: data.businessLogoUrl || "",
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
+        quoteValidDays: typeof data.quoteValidDays === "number" ? String(data.quoteValidDays) : "30",
+        quoteCornerViews: data.quoteCornerViews === true,
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         invoiceInGhl: data.invoiceInGhl !== false,
         ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
@@ -200,6 +218,14 @@ function SettingsView({ section }) {
       setError("Beta mode needs a working test inbox — that's the address estimates go to instead of your customers. Add one, or turn beta mode off.");
       return;
     }
+    // Same bounds as the server and the column (1..365), stopped here so the owner sees it beside
+    // the box they just typed in. The server check is the one that counts. A cleared box is not a
+    // mistake: it means the 30 its placeholder shows, as the server's parseQuoteValidDays reads it.
+    const quoteDaysBlank = String(form.quoteValidDays ?? "").trim() === "";
+    if (quoteDaysReady && !quoteDaysBlank && !ssQuoteDaysOk(form.quoteValidDays)) {
+      setError("Quotes have to stay good for a whole number of days, from 1 to 365.");
+      return;
+    }
     setBusy(true);
     const hasAddr = form.addr1 || form.addrCity || form.addrState || form.addrZip;
     const body = {
@@ -213,11 +239,23 @@ function SettingsView({ section }) {
       betaMode: form.betaMode,
       betaEmail: form.betaEmail,
       showPricing: form.showPricing,
+      // Only when `status` could read the column: a portal-settings or database without migration
+      // 269 never sees the key, so this page can ship ahead of either without breaking the save.
+      ...(quoteDaysReady ? { quoteValidDays: quoteDaysBlank ? 30 : Number(form.quoteValidDays) } : {}),
+      // Only when `status` could read the column (migration 276), and only when the owner changed
+      // it: a save from Branding or CRM Connection, or one from a tab opened before someone else
+      // flipped the switch, then never writes back a value nobody on this screen chose.
+      ...(cornerReady && form.quoteCornerViews !== status.quoteCornerViews ? { quoteCornerViews: form.quoteCornerViews === true } : {}),
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
     if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
     setSaved(true);
+    // The four-corner switch is sent only when it differs from `status`, so `status` has to learn
+    // what was just stored even when the re-read below fails. Otherwise ticking it, saving through
+    // a failed re-read and unticking it again compares false with a stale false, sends nothing,
+    // says "Settings saved." and leaves the page on every quote.
+    if ("quoteCornerViews" in body) setStatus((s) => (s ? { ...s, quoteCornerViews: body.quoteCornerViews } : s));
     // refresh masked status
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
@@ -236,6 +274,13 @@ function SettingsView({ section }) {
   // true, and this must not follow it. The render below is unreachable until status has
   // loaded (the `!status && !error` branch), so there is no flash of the wrong card.
   const mayGhlInvoice = Boolean(status && status.ghlInvoicingAllowed === true);
+  // Can this tenant set how long quotes stay good for? `status` answers a number once migration
+  // 269 is applied and portal-settings knows the field; before that (or on a read that failed) it
+  // answers null or nothing, and the box stays hidden rather than offer a value it cannot save.
+  const quoteDaysReady = Boolean(status && typeof status.quoteValidDays === "number");
+  // The same for the four-corner switch (migration 276): status answers true or false once the
+  // column exists and portal-settings knows it, and null or nothing before, which hides the switch.
+  const cornerReady = Boolean(status && typeof status.quoteCornerViews === "boolean");
   // The SS-paperwork fields used to key on `!form.invoiceInGhl` alone. For a tenant that
   // cannot choose, SS mode is the only mode — including while their row still says otherwise,
   // which is exactly when they need the numbering fields in front of them.
@@ -553,7 +598,7 @@ function SettingsView({ section }) {
           {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
             : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
-                estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
+                estimate, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
                 their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
                 opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
@@ -955,6 +1000,9 @@ function SettingsView({ section }) {
               <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste a URL above</span>
               {form.businessLogoUrl && <img src={form.businessLogoUrl} alt="" style={{ height: 24, maxWidth: 90, objectFit: "contain", borderRadius: 4, border: "1px solid #E2E8F0" }} />}
             </div>
+            {/* The quote PDF fetches the logo server-side, and only from where Upload puts it
+                (_shared/pdfLogo.ts). A pasted link from another site still shows in emails. */}
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your quote PDFs.</div>
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -965,6 +1013,35 @@ function SettingsView({ section }) {
         </div>
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+        {/* Carolyn 2026-08-06: "estimate good for X amount of days". Prints as the "Valid until"
+            date on every quote PDF, and is the expiry date on estimates your CRM sends. */}
+        {quoteDaysReady && (
+          <div style={{ marginTop: 12 }}>
+            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Quotes are good for</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input id="ss-quote-valid-days" style={{ ...S.input, width: 90 }} value={form.quoteValidDays}
+                onChange={set("quoteValidDays")} inputMode="numeric" placeholder="30" />
+              <span style={{ fontSize: 13, color: "#475569" }}>days</span>
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+              Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days.
+            </div>
+          </div>
+        )}
+        {/* Carolyn 2026-08-20: a 3D page on the estimate, "optional for them", that "gets 4 sides. So
+            4 quadrants"; 2026-09-08: "we want to see 4 images... one from each corner". Only where
+            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. */}
+        {view3d && cornerReady && (
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+              <input type="checkbox" checked={form.quoteCornerViews} onChange={set("quoteCornerViews")} style={{ marginTop: 2 }} data-ss-quote-corners />
+              Show the building from all four corners on page 2 of my quotes
+            </label>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+              Page 2 of your quotes shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
+            </div>
+          </div>
+        )}
       </div>
       </>)}
 
@@ -1099,7 +1176,14 @@ function xlsxCellText(v) {
   if (v == null) return "";
   if (typeof v === "object") {
     if (v.text != null) return String(v.text);
-    if (v.result != null) return String(v.result);
+    // An Excel ERROR (#REF!, #N/A, #DIV/0!) — ExcelJS gives { error } for the value itself and
+    // { formula, result: { error } } for a formula that failed. It must come through as its code,
+    // never as "": every importer reads a blank as meaningful — the pricing sheet as "not priced"
+    // (the NULL-base-price contract hides the size from the designer), a fixture's price the same
+    // way, a Real-Time Pricing cost as $0 — while "#REF!" is refused by name and the row is left
+    // as it was. ("[object Object]" from the old String(result) was refused too, but unreadably.)
+    if (v.error != null) return String(v.error);
+    if (v.result != null) return (typeof v.result === "object" && !(v.result instanceof Date)) ? xlsxCellText(v.result) : String(v.result);
     if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("");
     if (v.hyperlink != null) return String(v.hyperlink);
     return "";
@@ -1162,14 +1246,317 @@ const TOPUP_PRESETS = [10000, 25000, 50000];
 // showing but when they click on it, it doesn't do anything." Founding members are backing the
 // platform, so they prepay the year.
 //
-// This is the ONE switch. Set it to false and the Monthly buttons work again, the tile copy goes
-// back to "Pick monthly or yearly", and the transition banner (12-shell) quotes /mo again.
-// Nothing else was taken apart to do this: the _monthly billing_plans rows, the interval maths
-// and portal-billing's subscribe all still handle monthly. ⚠️ So this is enforced in the BROWSER
-// only — the server still sells a monthly plan to anyone who asks for one directly. That was
-// deliberate while it lived on beta alone: the live site's older frontend still offered Monthly,
-// and a server refusal would have broken its checkout. Add the server refusal when this goes live.
+// This is the browser's switch. Set it to false and the Monthly buttons work again, the tile copy
+// goes back to "Pick monthly or yearly", and the transition banner (12-shell) quotes /mo again.
+// Nothing else was taken apart to do this: the _monthly billing_plans rows and the interval maths
+// all still handle monthly.
+//
+// ⚠️ THE SERVER HAS THE OTHER HALF (2026-09-29, when this went live on production): portal-billing's
+// subscribe refuses any monthly plan while FOUNDING_ANNUAL_ONLY in
+// supabase/functions/_shared/foundingPricing.ts is on (409 "founding_annual_only"), so a stale tab
+// or a hand-made request cannot buy monthly either. Reopening monthly means flipping BOTH
+// constants; _shared/foundingPricing.test.ts reads this line and fails the push when they differ.
+// Keep it a literal true/false so that test can read it.
 const FOUNDING_ANNUAL_ONLY = true;
+
+// ─── Wallet → Transactions (usage billing, migration 259) ───
+// Carolyn 2026-10-02: every call minute and every text comes out of the wallet, and "each charge
+// is its own line under Transactions, like GoHighLevel". So this is GHL's table: Date,
+// Description, Amount, Balance, newest first, with All / Calls / Texts / Funds / Other chips, a
+// date range, Load more and Export CSV. It replaces the card's ten-line "Recent activity" list,
+// which printed a $0.028 call as "−$0.00".
+//
+// Everything a line says is decided by portal-billing's `wallet_transactions` action
+// (_shared/walletLedger.ts): the description, the chip it counts under, whether it is pending,
+// and `precise` — a call or text, or any amount that is not whole cents, shows four decimal
+// places ($0.0280); everything else shows two. A balance shows four places on those lines and
+// whenever it is not whole cents itself (see balanceOf). This file maps no `kind` to English.
+//
+// INLINE STYLES ONLY, like every component here (there is no component stylesheet), so the phone
+// layout is chosen by measuring the card rather than by a media query: under WALLET_TX_NARROW_PX
+// each line becomes two rows, description over date on the left, amount over balance on the right.
+const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["funds", "Funds"], ["other", "Other"]];
+const WALLET_TX_NARROW_PX = 560;
+// Narrower still (a 320 px phone with the settings rail beside it leaves a ~230 px card), two date
+// fields side by side clip their own dates, so they stack.
+const WALLET_TX_TIGHT_PX = 280;
+
+// "$0.0280" / "$1,234.50", unsigned, from integer micros or cents. Never float division into a
+// display string: four places is exactly where 0.1 + 0.2 shows up.
+function walletTxMoney(micros, cents, precise) {
+  if (precise && micros != null) {
+    const units = Math.round(Math.abs(micros) / 100);   // ten-thousandths of a dollar
+    return { neg: micros < 0 && units !== 0, text: "$" + Math.floor(units / 10000).toLocaleString("en-US") + "." + String(units % 10000).padStart(4, "0") };
+  }
+  if (cents == null) return null;
+  const c = Math.abs(cents);
+  return { neg: cents < 0, text: "$" + Math.floor(c / 100).toLocaleString("en-US") + "." + String(c % 100).padStart(2, "0") };
+}
+
+async function walletTxCall(body) {
+  const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "wallet_transactions", ...body } });
+  if (e) {
+    // The sentence is in the BODY; e.message alone is the generic non-2xx.
+    let m = e.message;
+    try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+    throw new Error(m);
+  }
+  if (d && d.error) throw new Error(d.error);
+  return d || {};
+}
+
+// `recent` is status's ten-line list. It is shown ONLY when the full list cannot load, so a
+// portal that ships ahead of portal-billing (an older function answers "Unrecognised action")
+// still shows the latest activity instead of losing it.
+function WalletTransactions({ reloadKey, recent = [] }) {
+  const [filter, setFilter] = useState("all");
+  const [fromDay, setFromDay] = useState("");   // yyyy-mm-dd, local
+  const [toDay, setToDay] = useState("");
+  const [rows, setRows] = useState(null);       // null = first page loading
+  const [next, setNext] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);       // "more" | "export"
+  const [note, setNote] = useState(null);       // { ok } | { err } after an export
+  const [boxW, setBoxW] = useState(1000);       // the card's measured width
+  const narrow = boxW < WALLET_TX_NARROW_PX;
+  const tight = boxW < WALLET_TX_TIGHT_PX;
+  const boxRef = useRef(null);
+  const seq = useRef(0);                        // the newest request wins; older answers are dropped
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const measure = () => setBoxW(Math.round(el.getBoundingClientRect().width));
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The range in the builder's OWN days: from local midnight of the first day to local midnight
+  // after the last, sent as instants (portal-billing compares from-inclusive, to-exclusive). A
+  // date-only string through bare new Date() is UTC midnight, a day early in every US zone.
+  const range = useMemo(() => {
+    const startOf = (day, plusDays) => {
+      const d = ssLocalDate(day);
+      if (!d || !Number.isFinite(d.getTime())) return null;
+      d.setDate(d.getDate() + plusDays);
+      return d.toISOString();
+    };
+    const from = fromDay ? startOf(fromDay, 0) : null;
+    const to = toDay ? startOf(toDay, 1) : null;
+    return { from, to, bad: !!(fromDay && toDay && fromDay > toDay), key: `${from}|${to}` };
+  }, [fromDay, toDay]);
+  const params = () => ({ filter, ...(range.from ? { from: range.from } : {}), ...(range.to ? { to: range.to } : {}) });
+
+  useEffect(() => {
+    if (range.bad) return;
+    const my = ++seq.current;
+    setRows(null); setNext(null); setErr(null);
+    (async () => {
+      try {
+        const d = await walletTxCall(params());
+        if (seq.current !== my) return;
+        setRows(d.rows || []); setNext(d.next_cursor || null);
+      } catch (e) {
+        if (seq.current !== my) return;
+        setErr(e.message); setRows([]);
+      }
+    })();
+  }, [filter, range.key, range.bad, reloadKey]);
+
+  const loadMore = async () => {
+    if (!next || busy) return;
+    const my = seq.current;
+    setBusy("more");
+    try {
+      const d = await walletTxCall({ ...params(), cursor: next });
+      if (seq.current === my) { setRows((p) => (p || []).concat(d.rows || [])); setNext(d.next_cursor || null); }
+    } catch (e) {
+      if (seq.current === my) setNote({ err: e.message });
+    }
+    setBusy(null);
+  };
+
+  const exportCsv = async () => {
+    if (busy || range.bad) return;
+    setBusy("export"); setNote(null);
+    try {
+      let tz = "UTC";
+      try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_x) {}
+      const d = await walletTxCall({ ...params(), format: "csv", tz });
+      if (typeof d.csv !== "string") throw new Error("The export came back empty. Try again.");
+      const span = fromDay || toDay ? `-${fromDay || "start"}-to-${toDay || "today"}` : `-${ssLocalIso(new Date())}`;
+      // A byte-order mark so Excel opens it as UTF-8: descriptions carry "·" and "—".
+      downloadFile(`wallet-transactions${filter === "all" ? "" : "-" + filter}${span}.csv`, "﻿" + d.csv);
+      setNote(d.truncated
+        ? { ok: "Downloaded the newest 10,000 lines. Narrow the dates to export older ones." }
+        : { ok: `Downloaded ${Number(d.rows || 0).toLocaleString("en-US")} line${d.rows === 1 ? "" : "s"}.` });
+    } catch (e) { setNote({ err: e.message }); }
+    setBusy(null);
+  };
+
+  // Fallback rows from status, in this table's shape (whole cents, no balance).
+  const fallback = err && recent.length > 0;
+  // A range that ends before it starts shows the warning and no lines, rather than the last
+  // range's lines under dates that no longer describe them.
+  const shown = range.bad ? []
+    : fallback
+      ? recent.map((t) => ({ id: t.id, created_at: t.at, description: t.label, amount_cents: t.amountCents, pending: !!t.pending, precise: false, balance_after_cents: null }))
+      : (rows || []);
+  const filtered = filter !== "all" || !!fromDay || !!toDay;
+
+  const when = (iso) => {
+    const d = new Date(iso);
+    if (!Number.isFinite(d.getTime())) return { day: "", time: "" };
+    return {
+      day: d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+      time: d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+    };
+  };
+  const amountOf = (r) => {
+    const m = walletTxMoney(r.amount_exact_micros, r.amount_cents, r.precise);
+    if (!m) return null;
+    return <span style={{ color: m.neg ? "#991B1B" : "#065F46", fontWeight: 700 }}>{m.neg ? "−" : "+"}{m.text}</span>;
+  };
+  // The balance's places are its OWN, not the amount's. `precise` is decided by the amount, and a
+  // top-up after three texts has a whole-cent amount on a balance that still owes a fraction of a
+  // cent: printed to two places it read $34.99 under a text line's $9.9876, and the CSV said
+  // 34.9876. So four places whenever the exact balance is not whole cents, and on every call or
+  // text line as before. (portal-billing nulls an exact balance that does not match the cents,
+  // which is what a captured 3D hold leaves behind, so that one falls back to its cents.)
+  const balanceOf = (r) => {
+    if (r.pending) return <span style={{ color: "#92400E", fontWeight: 700 }}>Pending</span>;
+    const exact = r.balance_after_exact_micros;
+    const m = walletTxMoney(exact, r.balance_after_cents, r.precise || (exact != null && exact % 10000 !== 0));
+    return m ? <span style={{ color: m.neg ? "#991B1B" : "#334155" }}>{m.neg ? "−" : ""}{m.text}</span> : <span style={{ color: "#CBD5E1" }}>—</span>;
+  };
+  const NUM = { fontVariantNumeric: "tabular-nums", textAlign: "right", whiteSpace: "nowrap" };
+  const GRID = { display: "grid", gridTemplateColumns: "150px minmax(0, 1fr) 112px 112px", gap: 12, alignItems: "baseline" };
+  const CAP = { fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+
+  return (
+    <div ref={boxRef} style={S.card} data-wallet-tx="card">
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Transactions</div>
+        <button type="button" onClick={exportCsv} disabled={!!busy || range.bad} data-wallet-tx-export=""
+          style={{ ...S.btn("#F1F5F9", "#334155"), marginLeft: "auto", border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy || range.bad ? 0.6 : 1, cursor: busy || range.bad ? "default" : "pointer" }}>
+          {busy === "export" ? "Exporting…" : "Export CSV"}
+        </button>
+      </div>
+
+      {/* Chips, then the dates. Side by side on a wide card; stacked on a phone, where the two
+          date fields share the row and shrink (the portal's DateRange keeps the browser's own
+          width for a date field, which pushed a 390 px phone's card 10 px past its edge). */}
+      <div style={{ display: "flex", flexDirection: narrow ? "column" : "row", gap: narrow ? 10 : 14, flexWrap: narrow ? "nowrap" : "wrap", alignItems: narrow ? "stretch" : "flex-end", marginBottom: 12 }}>
+        <div role="group" aria-label="Show" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {WALLET_TX_FILTERS.map(([k, label]) => {
+            const on = filter === k;
+            return (
+              <button key={k} type="button" aria-pressed={on} onClick={() => setFilter(k)} data-wallet-tx-filter={k}
+                style={{
+                  cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 12px", borderRadius: 999,
+                  border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+                }}>{label}</button>
+            );
+          })}
+        </div>
+        <div style={FCTRL}>
+          {/* Clear sits on the heading line, not beside the fields, so on a phone the two date
+              fields keep the whole row. */}
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+            <span style={FLBL}>Dates</span>
+            {(fromDay || toDay) && (
+              <button type="button" onClick={() => { setFromDay(""); setToDay(""); }}
+                style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                Clear dates
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: tight ? "column" : "row", gap: 6, alignItems: tight ? "stretch" : "center", minWidth: 0 }}>
+            {[[fromDay, setFromDay, "From"], [toDay, setToDay, "To"]].map(([v, set, name], i) => (<React.Fragment key={name}>
+              {i === 1 && !tight && <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>}
+              <input type="date" aria-label={name} value={v} onChange={(e) => set(e.target.value)}
+                style={{ ...S.input, padding: "6px 8px", minWidth: 0, ...(tight ? { width: "100%" } : narrow ? { flex: "1 1 0", width: "auto" } : { flex: "0 0 auto", width: 150 }) }} />
+            </React.Fragment>))}
+          </div>
+        </div>
+      </div>
+
+      {range.bad && (
+        <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>The start date is after the end date.</div>
+      )}
+      {note && note.err && <div style={S.err}>{note.err}</div>}
+      {note && note.ok && <div style={S.okMsg}>{note.ok}</div>}
+      {err && (
+        <div style={{ ...S.err, ...(fallback ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E" } : {}) }}>
+          {fallback ? `Showing your latest activity only. The full list couldn't load: ${err}` : err}
+        </div>
+      )}
+
+      {!narrow && (shown.length > 0 || (rows === null && !range.bad)) && (
+        <div style={{ ...GRID, padding: "0 0 7px", borderBottom: "2px solid #E2E8F0" }}>
+          <span style={CAP}>Date</span><span style={CAP}>Description</span>
+          <span style={{ ...CAP, textAlign: "right" }}>Amount</span><span style={{ ...CAP, textAlign: "right" }}>Balance</span>
+        </div>
+      )}
+
+      {rows === null && !range.bad ? (
+        [0, 1, 2].map((i) => (
+          <div key={i} style={{ padding: "11px 0", borderBottom: "1px solid #F1F5F9", display: "flex", gap: 12 }}>
+            <SkelBar w={narrow ? "55%" : 130} h={11} /><SkelBar w="35%" h={11} />
+          </div>
+        ))
+      ) : shown.length === 0 && !range.bad ? (
+        !err && (
+          <p style={{ fontSize: 13, color: "#64748B", margin: "6px 0 0" }}>
+            {filtered ? "Nothing matches these filters." : "No transactions yet. Funds you add and everything charged to the wallet will show here."}
+          </p>
+        )
+      ) : shown.map((r) => {
+        const w = when(r.created_at);
+        const desc = (
+          <span style={{ color: "#334155", fontWeight: 600, overflowWrap: "anywhere" }}>
+            {r.description}
+            {r.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
+          </span>
+        );
+        return narrow ? (
+          <div key={r.id} data-wallet-tx-row={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "9px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+            <div style={{ minWidth: 0 }}>
+              <div>{desc}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 2 }}>{w.day} · {w.time}</div>
+            </div>
+            <div style={{ ...NUM, flexShrink: 0 }}>
+              <div>{amountOf(r)}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 2 }}>{r.pending || r.balance_after_cents != null ? <>Balance {balanceOf(r)}</> : null}</div>
+            </div>
+          </div>
+        ) : (
+          <div key={r.id} data-wallet-tx-row={r.id} style={{ ...GRID, padding: "9px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+            <span style={{ color: "#475569", whiteSpace: "nowrap" }}>{w.day}<span style={{ color: "#94A3B8" }}> · {w.time}</span></span>
+            {desc}
+            <span style={NUM}>{amountOf(r)}</span>
+            <span style={NUM}>{balanceOf(r)}</span>
+          </div>
+        );
+      })}
+
+      {!fallback && !range.bad && next && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" onClick={loadMore} disabled={!!busy} data-wallet-tx-more=""
+            style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0", padding: "7px 18px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+            {busy === "more" ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
@@ -1190,13 +1577,16 @@ const FOUNDING_ANNUAL_ONLY = true;
 //
 // The founding-price banner and the "checkout isn't switched on yet" notices ride with
 // SUBSCRIPTION: both are about the plan grid directly beneath them.
-function BillingView({ viewingLabel = null, section = "all" }) {
+function BillingView({ viewingLabel = null, section = "all", paywall = false }) {
   const showWallet = section === "all" || section === "wallet";
   const showSub = section === "all" || section === "subscription";
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
   const [msg, setMsg] = useState(null);      // { ok } | { err }
+  // On the paywall (BillingGate passes `paywall`), a checkout that went through only in part holds
+  // back the shell's entitlement re-read until the customer presses Continue: see subscribe().
+  const [holdSignal, setHoldSignal] = useState(false);
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
   const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
   const [demoNote, setDemoNote] = useState(false); // our own account pressed checkout — see demoView
@@ -1210,6 +1600,8 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   const [autoThreshold, setAutoThreshold] = useState("");
   const [autoAmount, setAutoAmount] = useState("");
 
+  // The shell's own entitlement is refreshed through ssEntitlementChanged (subscribe and cancel
+  // below), which respects the paywall's hold; this only re-reads what this view shows.
   const load = useCallback(async () => {
     setError(null);
     const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
@@ -1486,7 +1878,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
     if (demoView) { setDemoNote(true); return; }
     const planIds = cartPlans.map((p) => p.id);
     if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
-    setMsg(null); setBusy(true);
+    setMsg(null); setHoldSignal(false); setBusy(true);
     try {
       // EVERY caller echoes the exact amount shown, and the server refuses a mismatch —
       // so the card can only ever be charged the number that was on screen. dueTodayCents
@@ -1510,6 +1902,14 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         body.paymentToken = await getPaymentToken(dueTodayCents || null);
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      // Whatever the answer, the server may have started something (a partial success comes back
+      // as `failed` beside the ones that went through), so the shell re-reads the entitlement now
+      // rather than at the next reload: 3D bought here is on in the designer without one.
+      // EXCEPT on the paywall: there, a re-read that unlocks the portal unmounts this view and the
+      // message with it, and a partial failure's message can say "do NOT try again" or carry a
+      // charge reference. So anything short of a clean success waits for the Continue button.
+      const clean = !e && r && !r.error && !(r.failed && r.failed.length);
+      if (paywall && !clean) setHoldSignal(true); else ssEntitlementChanged();
       if (e) {
         // A non-2xx from the function carries the real story in its BODY — a declined-card
         // message, a "charge may not have been reversed (ref …)" with the transaction id,
@@ -1543,6 +1943,9 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
     try {
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
+      // Usually nothing visible moves (a cancelled feature runs to the end of the paid period),
+      // but the shell's copy of the entitlement must not be the one place that is out of date.
+      ssEntitlementChanged();
       setMsg({ ok: `${p.name || "Feature"} cancelled.` });
       await load();
     } catch (e) { setMsg({ err: e.message }); }
@@ -1591,7 +1994,19 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
   return (
     <div>
       {error && <div style={S.err}>{error}</div>}
-      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {/* While held, the server's sentence keeps a box of its own with Continue under it, so the
+          button is never read as part of it; otherwise the box is the bare sentence, as always. */}
+      {msg && msg.err && (
+        <div style={S.err}>
+          {holdSignal ? (<>
+            <div>{msg.err}</div>
+            <button type="button" onClick={() => { setHoldSignal(false); ssEntitlementChanged(); }}
+              style={{ ...S.btn("#1D4ED8", "#FFF"), marginTop: 8, padding: "4px 10px", fontSize: 12 }}>
+              Continue
+            </button>
+          </>) : msg.err}
+        </div>
+      )}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
       {showSub && (<>
@@ -1708,7 +2123,12 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   return (
                     <div key={m.kind} style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
                       <span style={{ color: "#334155", fontWeight: 600 }}>{m.label || m.kind}</span>
-                      {hasPrice && (
+                      {/* Calls and texts (259) cost Twilio's real price times the markup, so
+                          there is no fixed figure to print: the server sends the sentence
+                          instead ("Billed per call minute") and a null price. */}
+                      {m.billedAs ? (
+                        <span style={{ color: "#475569", whiteSpace: "nowrap" }}>{m.billedAs}</span>
+                      ) : hasPrice && (
                         <span style={{ color: "#475569", whiteSpace: "nowrap" }}>
                           {m.priceCents === 0 ? "No charge" : <><strong>{fmt$(m.priceCents)}</strong>{m.unitLabel ? ` / ${m.unitLabel}` : ""}</>}
                           {covers !== null && <span style={{ color: "#94A3B8" }}> · balance covers {covers}</span>}
@@ -1812,25 +2232,16 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 </div>
               </div>
             )}
-            {(w.transactions || []).length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>
-                {w.transactions.map((t) => (
-                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
-                    <span style={{ color: "#475569" }}>
-                      {t.label}
-                      {t.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
-                    </span>
-                    <span style={{ fontWeight: 700, color: t.amountCents < 0 ? "#991B1B" : "#065F46", whiteSpace: "nowrap" }}>
-                      {t.amountCents < 0 ? "−" : "+"}{fmt$(Math.abs(t.amountCents))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* The ten-line "Recent activity" list that sat here moved into Transactions below
+                (2026-10-02): it printed whole cents, so a $0.028 call read "−$0.00". status
+                still sends it, and Transactions falls back to it if its own list can't load. */}
           </div>
         );
       })()}
+      {/* TRANSACTIONS — the whole ledger, GHL-style. Mounted only where the wallet card is, so
+          it inherits the same audience (status's `mine` filter: owners, granted admins,
+          operators with can_bill). Reloads whenever `status` does, so a top-up shows at once. */}
+      {data && data.wallet && <WalletTransactions reloadKey={data} recent={data.wallet.transactions || []} />}
 
       </>)}
       {showSub && (<>
@@ -1839,7 +2250,10 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {data && liveSubs.length > 0 && (() => {
         const moSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval !== "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
         const yrSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval === "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
-        const nextRenew = liveSubs.map((s) => s.current_period_end).filter(Boolean).sort()[0] || null;
+        // paid_through (portal-billing, rolled forward past each renewal) before the stored
+        // current_period_end, which stays on the FIRST renewal date for good; the fallback is
+        // only for an older portal-billing that does not send it.
+        const nextRenew = liveSubs.map((s) => s.paid_through || s.current_period_end).filter(Boolean).sort()[0] || null;
         const headStatus = liveSubs.some((s) => s.status === "past_due") ? "past_due" : liveSubs.some((s) => s.status === "paused") ? "paused" : "active";
         const hb = SUB_BADGE[headStatus] || SUB_BADGE.active;
         const spend = [moSum ? `${fmt$(moSum)}/mo` : null, yrSum ? `${fmt$(yrSum)}/yr` : null].filter(Boolean).join(" + ") || "—";
@@ -1882,7 +2296,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{b.label}</span>
                   <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                     {s.price_cents != null && <>{fmt$(s.price_cents)}{p.billing_interval === "annual" ? "/yr" : "/mo"} · </>}
-                    started {fmtDate(s.current_period_start)}{s.current_period_end ? ` · renews ${fmtDate(s.current_period_end)}` : ""}
+                    started {fmtDate(s.current_period_start)}{(s.paid_through || s.current_period_end) ? ` · renews ${fmtDate(s.paid_through || s.current_period_end)}` : ""}
                   </div>
                 </div>
                 <button type="button" onClick={() => cancel(s)} disabled={busy}
@@ -2126,7 +2540,12 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    // Shares the same-tick catalog flight with RealTimePricing, which Settings → Structures mounts
+    // beside this card (window.__ssCatalogFlight below). Key = the tenant the call will hit.
+    const body = { action: "catalog" };
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
   };
@@ -2148,7 +2567,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
     // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
     // Mirrors LayoutPricing, which also hides the ramp row.
-    const layout = items().filter((it) => !it.archived && it.key !== "ramp").map((it) => ({ key: it.key, label: it.label }));
+    // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
+    // part of a size's price, so it has no column (submit-estimate ignores such a row too).
+    const layout = items().filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
     const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
     // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
     // since the column is matched by its exact label on re-import, a garbled header would silently
@@ -2667,8 +3088,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
 // LayoutPricing, DoorsView, RampsView, WindowsView) and FIVE of the things inside them —
 // LayoutPricing, the door catalog, RampsView, WindowColorsEditor, the window catalog —
 // each fire their OWN identical portal-settings {action:"catalog"} in the same mount tick.
-// That action is one edge invocation doing ten parallel table reads
-// (supabase/functions/portal-settings/index.ts:1027-1082) and returning the whole payload
+// That action is one edge invocation doing sixteen table reads plus the wallet pair, all in one
+// Promise.all (portal-settings, `if (action === "catalog")`), and returning the whole payload
 // every time; four of the five callers keep a slice of it (one fixture category + colors,
 // windowColors alone, rampSettings alone). Five identical copies contend on the same edge
 // instance and the tab is only whole when the SLOWEST lands — so the wait was the tail of
@@ -2676,6 +3097,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
 //
 // This coalesces those flights and does nothing else: same action, same arguments, same
 // payload, same tenant scoping. Only how many copies go on the wire changes.
+// Settings → Structures shares it too (2026-10-02): PricingCsv and RealTimePricing mount side by
+// side and each read the catalog. The accepted trade, the same one the Options cards make: if that
+// one invocation fails, both cards show the error instead of usually only one.
 //
 // ⚠️ IN-FLIGHT ONLY, AND ONLY WITHIN THE TICK THAT STARTED IT — a settled result is NEVER
 // reused. Every mutation on this tab ends in `await load()` (LayoutPricing.toggleArchive,
@@ -2754,11 +3178,14 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
   const [confirmToggle, setConfirmToggle] = useState(null);  // { to: boolean } | null
 
   const load = async () => {
+    // The catalog flight is keyed like every sibling's (the tenant the call will hit), so it is
+    // the SAME flight PricingCsv starts in this tick. It used "catalog|<id>", which never matched.
+    const catBody = scoped({ action: "catalog" });
     const [rtpRes, catRes] = await Promise.all([
       sb.functions.invoke("portal-settings", { body: scoped({ action: "rtp_data" }) }),
       window.__ssCatalogFlight(
-        () => sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) }),
-        "catalog|" + (clientId || "own"),
+        () => sb.functions.invoke("portal-settings", { body: catBody }),
+        String(catBody.targetClientId == null ? (ssTargetClientId || "") : catBody.targetClientId),
       ),
     ]);
     const rtpErr = rtpRes.error || (rtpRes.data && rtpRes.data.error);
@@ -3324,6 +3751,14 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// A partition wall (migration 278) is priced by the foot of wall, by the square foot of wall (its length
+// times its height) or each: the three methods its pricing understands. portal-settings refuses the
+// others for it, and submit-estimate would charge them each.
+const LP_METHODS_PARTITION = [
+  { value: "each", label: "each" },
+  { value: "lineal_ft", label: "lineal ft — per foot of wall" },
+  { value: "sqft_option", label: "sqft option — per sq ft of wall" },
+];
 // The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
 // methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
 // flat rate." Values must match the style_wall_heights check constraint (228).
@@ -3336,6 +3771,39 @@ const WH_BOS_BASES = [
   ["pct_building_price", "pct building price"],
   ["pct_estimate_total", "pct estimate total"],
 ];
+// One hauled and one built-on-site row per increase, and the two share no width (migration 272;
+// bug report 2026-10-02: +12 hauled on the 8-12 wide, the same +12 built on site on the 14 wide).
+// The portal's copy of wallHeightClash in supabase/functions/_shared/wallHeightRows.ts, so a
+// builder reads the sentence BEFORE the save instead of as a refused one; wallHeightRows.test.ts
+// pins the wording, so keep the two alike. A null widths list is every width the style sells, and
+// on a style with no sizes yet, every width at all.
+function whClash(rows, styleWidths) {
+  const key = (r) => Number(String(r.deltaIn).trim()) + ":" + (r.buildOnSite ? "site" : "haul");
+  const seen = {};
+  for (const r of rows) {
+    const d = Number(String(r.deltaIn).trim());
+    if (seen[key(r)]) return "+" + d + " in is listed twice" + (r.buildOnSite ? " as built on site" : "") + ". An increase can be listed once for hauled buildings and once ticked Built on site.";
+    seen[key(r)] = r;
+  }
+  const all = styleWidths || [];
+  for (const r of rows) {
+    if (r.buildOnSite) continue;
+    const d = Number(String(r.deltaIn).trim());
+    const site = seen[d + ":site"];
+    if (!site) continue;
+    let shared;
+    if (!Array.isArray(r.widthsFt) && !Array.isArray(site.widthsFt) && !all.length) shared = [];
+    else {
+      const wa = Array.isArray(r.widthsFt) ? r.widthsFt.map(Number) : (all.length ? all : null);
+      const wb = Array.isArray(site.widthsFt) ? site.widthsFt.map(Number) : (all.length ? all : null);
+      const both = wa === null ? (wb || []) : wb === null ? wa : wa.filter((w) => wb.indexOf(w) !== -1);
+      shared = [...new Set(both)].sort((x, y) => x - y);
+      if (!shared.length) continue;
+    }
+    return "+" + d + " in is offered both hauled and built on site at " + (shared.length ? shared.join(", ") + " ft wide" : "every width") + ". Untick " + (shared.length === 1 ? "that width" : "those widths") + " on one of the two rows.";
+  }
+  return null;
+}
 // -- Wall Height Upgrades (172) ----------------------------------------------------------
 // One card, one section per building style -- the ColorsView pattern, and for the reason
 // Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
@@ -3345,9 +3813,9 @@ const WH_BOS_BASES = [
 // renderSection is a plain function and NOT a component, deliberately: as a component React
 // remounts it on every keystroke and the input loses focus. Same note as ColorsView.
 // -- Insulation (177) -------------------------------------------------------------------
-// A fixed 2x3 matrix: batt / spray foam across floor / walls / roof. Blank a cell and that
-// combination stops being offered -- the row is deleted, get_config stops emitting it, and the
-// customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
+// A fixed 3x3 matrix: batt / spray foam / rigid foam (272) across floor / walls / roof. Blank a
+// cell and that combination stops being offered -- the row is deleted, get_config stops emitting
+// it, and the customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
 // fourth row here: a stored fourth rate would be a second place for the price to live.
 function Electrical({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -3590,7 +4058,7 @@ function Electrical({ viewingLabel = null, clientId = null }) {
 
 function Insulation({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
-  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"]];
+  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"], ["rigid_foam", "Rigid Foam"]];
   const AREAS = [["floor", "Floor"], ["walls", "Walls"], ["roof", "Roof"]];
   const [cat, setCat] = useState(null);
   const [cells, setCells] = useState({});
@@ -3656,7 +4124,8 @@ function Insulation({ viewingLabel = null, clientId = null }) {
         roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
         upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
         offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
-        each one lands as its own line on the quote.
+        each one lands as its own line on the quote. Only insulate under the floor? Fill in just the
+        Floor rate for that type and leave Walls and Roof blank.
       </p>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}
@@ -4141,6 +4610,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
       });
       if (badBos.length) throw new Error("Nothing was saved \u2014 fix these build-on-site fee(s) first: " + badBos.map((r) => "+" + r.deltaIn + " in (\"" + r.bosFeeRate + "\")").join(", ") + ".");
+      // The same increase twice is fine once hauled and once Built on site, on different widths.
+      const clash = whClash(rows, widthsOf(styleId));
+      if (clash) throw new Error("Nothing was saved \u2014 " + clash);
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_wall_heights",
@@ -4310,6 +4782,8 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         say so. Tick <b>Built on site</b> on an increase too tall to haul under a bridge: the
         customer sees “on site” beside that choice, the building is marked as a site build
         rather than a delivery, and you can add the upcharge for sending a crew out.
+        To sell the same increase hauled on narrower buildings and built on site on wider ones, add it
+        <b> twice</b>: once with the hauled widths ticked, and once ticked <b>Built on site</b> with the wider widths.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
@@ -4364,6 +4838,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   const [byStyle, setByStyle] = useState({});
   const [busyId, setBusyId] = useState(null);
   const [msg, setMsg] = useState(null);
+  // Can this database hold a lap course size (style_cladding.exposure_in, 275)? portal-settings
+  // answers false only before 275, and then the box is hidden rather than offered and lost.
+  const [courses, setCourses] = useState(false);
 
   const load = async () => {
     const body = scoped({ action: "catalog" });
@@ -4372,6 +4849,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
+    setCourses(data.claddingCourses === true);
     const saved = {};
     (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
     const m = {};
@@ -4391,6 +4869,8 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           taxable: !r || r.taxable !== false,
           active: !r || r.active !== false,
           internalOnly: !!(r && r.internal_only),
+          // Lap only: how much of each board shows, in inches. Blank = the 3D's standard 6 in.
+          exposureIn: c.id === "lap" && r && r.exposure_in != null ? String(r.exposure_in) : "",
         };
       });
     });
@@ -4414,6 +4894,12 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       if (badRate.length) {
         throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
       }
+      // The course size the same way: a typo must not become a silent 6 in.
+      const lapRow = rows.find((r) => r.claddingId === "lap");
+      const course = lapRow ? String(lapRow.exposureIn == null ? "" : lapRow.exposureIn).trim() : "";
+      if (courses && course !== "" && !(Number.isFinite(Number(course)) && Number(course) >= 3 && Number(course) <= 12)) {
+        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 6).");
+      }
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_cladding",
@@ -4426,6 +4912,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             taxable: r.taxable,
             active: r.active,
             internalOnly: r.internalOnly,
+            // Sent on the lap row only, and only where the database can hold it: a row that does
+            // not name it leaves the stored size alone.
+            ...(courses && r.claddingId === "lap" ? { exposureIn: String(r.exposureIn == null ? "" : r.exposureIn).trim() } : {}),
           })),
         }),
       });
@@ -4451,6 +4940,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
               <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+              {courses && <th style={S.th} title="Lap siding only: how much of each board shows, in inches. When a customer picks Lap Siding, the 3D draws the boards at this size. Blank = 6 in.">Course (in)</th>}
             </tr></thead>
             <tbody>
               {rows.map((r, i) => (
@@ -4485,6 +4975,16 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
                       onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
                       style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
                   </td>
+                  {courses && (
+                    <td style={S.td}>
+                      {r.claddingId === "lap" && (
+                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="6"
+                          aria-label={`${st.label} lap siding course, inches`}
+                          onChange={(e) => setRow(st.id, i, "exposureIn", e.target.value)}
+                          style={{ ...S.input, width: 80 }} />
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -4509,6 +5009,13 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
         else is an upcharge. Rename any of them under <b>Shown
         as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
         unaffected, because the siding itself is still the same one of our four.
+        {courses && (
+          <>
+            {" "}On <b>Lap Siding</b> you can also set the <b>course</b>: how much of each board
+            shows, in inches (4.5 for a 4&frac12;&Prime; vinyl, say). When a customer picks Lap
+            Siding, the 3D draws the boards at that size; it does not change the price. Blank is 6 in.
+          </>
+        )}
       </p>
       {/* The SAME wording as the Options header, because it is the same vocabulary. Two
           sentences are appended for cladding specifically: a whole-building option has no area
@@ -4552,7 +5059,12 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
+      // An item that stays out of the customer's palette until it is PRICED (171's shelves, 278's partition
+      // wall) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
+      // item would appear free on every customer's designer the first time this card was saved for
+      // something else. Any other item keeps showing 0, which is what it costs today.
+      const unpriced = !!it.hiddenUntilPriced && p.rate == null;
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : unpriced ? "" : "0", unpriced, image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
         wallSnap: !!it.wallSnap, depthIn: it.depthIn != null ? String(it.depthIn) : "", heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "" };
     });
   };
@@ -4659,9 +5171,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
         const t = String(v ?? "").trim(); return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
       }));
       if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
-      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
+      const payloadRows = src.filter((r) => !(r.unpriced && String(r.rate ?? "").trim() === "")).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
         ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
+      // partitionAware: this card knows the partition wall (278), so portal-settings lets it price one.
+      // The card from before it, which cannot, never sends the flag.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows, partitionAware: true } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -4694,7 +5208,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
         const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
         if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
         const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
-        if (method) byKey[itemKey].pricing_method = method;
+        if (method && (itemKey !== "partitionWall" || LP_METHODS_PARTITION.some((m) => m.value === method))) byKey[itemKey].pricing_method = method;
         const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
         if (rate !== "") byKey[itemKey].rate = rate;
       });
@@ -4753,14 +5267,16 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
                   <tr key={r.item_key} style={r.archived ? { opacity: 0.55 } : undefined}>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}{r.archived && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#B45309", background: "#FEF3C7", borderRadius: 4, padding: "1px 6px" }}>Archived</span>}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }} data-ss-lp-item={r.item_key}>{r.label}{r.archived && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#B45309", background: "#FEF3C7", borderRadius: 4, padding: "1px 6px" }}>Archived</span>}
+                      {r.unpriced && <div style={{ fontSize: 11.5, fontWeight: 500, color: "#64748B", marginTop: 2, maxWidth: 240 }}>Not offered yet. Customers see it once you set a rate and save.</div>}
+                    </td>
                     <td style={S.td}>
                       <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
-                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        {(r.item_key === "partitionWall" ? LP_METHODS_PARTITION : LP_METHODS).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                       </select>
                     </td>
                     <td style={S.td}>
-                      <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                      <input type="number" min="0" step="0.01" value={r.rate} placeholder={r.unpriced ? "not offered" : undefined} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
                     </td>
                     {/* Dimensions apply to wall-mounted items only; a dash reads as "not applicable
                         here", which an empty box would not. Blank = fall back to our default. */}
@@ -4914,6 +5430,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // checkboxes. Windows only.
   const [winColors, setWinColors] = useState([]);
   const isWindowCat = category === "window";
+  // The builder's building styles, for the "Offered on" ticks (272). Every category. Hidden
+  // styles are left out of the ticks, as every other per-style card here leaves them out.
+  const [offerStyles, setOfferStyles] = useState([]);
+  // EVERY style id, hidden ones included. "Every style" is judged against these, never against the
+  // ticks shown: a line restricted to the Greenhouse while the only other style is hidden must not
+  // save as "every style" on a price edit, or the restriction is gone when that style comes back.
+  const [allStyleIds, setAllStyleIds] = useState([]);
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -4924,6 +5447,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // null = offered on EVERY building style (the living default); an array = only those (272).
+    style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
     // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
     // the floor), so an empty string has to survive the round trip rather than becoming 0.
     // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
@@ -4951,6 +5476,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
     if (isWindowCat) setWinColors((data.windowColors || []).filter((c) => c.active !== false));
+    setOfferStyles((data.styles || []).filter((s) => s.active !== false));
+    setAllStyleIds((data.styles || []).map((s) => String(s.id)));
     setLoaded(true);
   };
   // refreshKey lets a sibling editor force a reload in place — WindowsView bumps it after
@@ -4958,6 +5485,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // checkboxes without a page refresh.
   useEffect(() => { load(); }, [refreshKey]);
 
+  // What a line's "Offered on" ticks send (272): null when every style the builder has, hidden
+  // ones included, is ticked, else the ticked ids. It rides on every save of the line (a price
+  // edit, Archive), so judging "every" by the visible ticks alone would widen a restriction.
+  const styleIdsOut = (ids) => (ids == null || (allStyleIds.length > 0 && allStyleIds.every((id) => ids.includes(id)))) ? null : ids;
+  // Every "Offered on" box unticked. portal-settings refuses that save, so the Save button waits.
+  // Judged on the boxes shown: a line left on hidden styles only reaches no customer today either.
+  const offeredNowhere = (d) => !!d && Array.isArray(d.style_ids) && offerStyles.length > 1 && !offerStyles.some((s) => d.style_ids.includes(String(s.id)));
   // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
   // Color keys ride ONLY for doors so the server's presence contract leaves other
   // categories' (forced) values alone.
@@ -4972,6 +5506,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    // Offered on (272), every category, the same collapse: every style ticked, hidden ones
+    // included, goes over as null ("every style"), so a style added later offers this item
+    // without a visit here.
+    styleIds: styleIdsOut(r.style_ids),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     // Height off the floor rides for DOORS as well since 2026-09-04 — a loft door is an
     // ordinary door row whose sill is not zero (Carolyn @27:16: "that loft door goes with the
@@ -5264,7 +5802,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -5336,6 +5874,14 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // one they got wrong should not have to open each row to find it. Only when set, so an
     // ordinary door's summary line is unchanged.
     if (isDoorCat && String(r.sill_in || "").trim()) parts.push(`${String(r.sill_in).trim()} off the floor`);
+    // Offered on some styles only (272): said on the row, so a builder looking for why an item
+    // is missing from a style's designer finds the answer without opening each line.
+    if (styleIdsOut(r.style_ids) !== null) {
+      const names = offerStyles.filter((s) => r.style_ids.includes(String(s.id))).map((s) => s.label);
+      // None shown: hidden styles, or (no foreign key on the list) styles deleted since.
+      parts.push(names.length ? `only on ${names.join(", ")}`
+        : r.style_ids.some((id) => allStyleIds.includes(id)) ? "only on hidden styles" : "on no style: its styles were deleted");
+    }
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -5451,6 +5997,43 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           )}
         </div>
       )}
+      {/* Offered on (272), for every category: the styles a customer can add this item to. A
+          builder asked for louvered vents on greenhouses only (2026-10-02); the same ticks keep a
+          garage door off a style sold without one. Only with two or more styles, since one style
+          leaves nothing to choose. Same collapse as the window colours: every style ticked, hidden
+          ones included, is "every style", including ones added later. A hidden style has no box, so
+          a tick change carries its place in the list through untouched. None ticked cannot be saved
+          (an item offered nowhere is Active unticked), and the Save button says so. */}
+      {offerStyles.length > 1 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>Offered on <span style={{ fontWeight: 400 }}>these building styles</span></div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            {offerStyles.map((s) => {
+              const ids = edit.draft.style_ids;
+              const checked = ids == null || ids.includes(String(s.id));
+              const toggle = (on) => {
+                const all = allStyleIds;
+                const cur = ids == null ? all : ids.filter((x) => all.includes(x));
+                const next = on ? [...new Set([...cur, String(s.id)])] : cur.filter((x) => x !== String(s.id));
+                setDraft({ style_ids: all.every((x) => next.includes(x)) ? null : next });
+              };
+              return (
+                <label key={s.id} data-ss-offered-on={s.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  {s.label}
+                </label>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 12, color: offeredNowhere(edit.draft) ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
+            {offeredNowhere(edit.draft)
+              ? `Tick at least one style. To stop offering this ${noun} everywhere, untick Active instead.`
+              : styleIdsOut(edit.draft.style_ids) == null
+                ? `Offered on every style, and on any style you add later.`
+                : `Customers designing any other style won't see this ${noun}.`}
+          </div>
+        </div>
+      )}
       {/* Height off the floor (139). Carolyn, 2026-08-25: "how far off the floor, not off
           the ground, off the floor, which is off the inside of the building, not the
           exterior." Every window used to render at the same 3'6" in 3D no matter what the
@@ -5535,7 +6118,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-        <button onClick={saveLine} disabled={busy || !edit.draft.name.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim()) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
+        <button onClick={saveLine} disabled={busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)} title={offeredNowhere(edit.draft) ? "Tick at least one building style under Offered on" : undefined} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
       </div>
     </div>
   );
@@ -5735,7 +6318,8 @@ function VentsView({ viewingLabel = null, clientId = null }) {
         one, set it to <b>0</b> if every building includes it at no charge, or enter an amount to charge for it —
         the same three states the doors and windows lists use. Each vent is <b>one line</b>; click <b>Edit</b> to
         change it and every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are
-        feet/inches — 12", 1'6" (no spaces).
+        feet/inches — 12", 1'6" (no spaces). To sell a vent on some building styles only, click <b>Edit</b> and
+        untick the others under <b>Offered on</b>.
       </p>
       <FixtureCatalog category="vent" noun="vent" addLabel="Add vent" namePh="e.g. Gable vent" labelPh="VNT" wPh={'12"'} hPh={'12"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
     </div>

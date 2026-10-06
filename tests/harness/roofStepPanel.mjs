@@ -155,7 +155,7 @@ export async function main() {
     // ── 7. only on a gable whose front is not a long side ──
     await typeNumber(page, stepBox(page), 10);
     await typeNumber(page, riseBox(page), 6);
-    const front = field(page, "Front wall (porch or door side)").locator("select");
+    const front = field(page, "Front wall (main door side)").locator("select");
     await front.selectOption("eave");
     await settle(page);
     ok("an 'eave' front hides both boxes", (await stepBox(page).count()) === 0 && (await riseBox(page).count()) === 0);

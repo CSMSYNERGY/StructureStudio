@@ -96,9 +96,14 @@ Deno.test("⚠️ both keys draw no step where the renderer cannot: shed, gambre
     ["an eave front", { ...CABIN, front: "eave", ...STEP }, 14, 40],
     ["an old-frame landscape size (the ridge runs side to side)", { type: "gable", pitch: 0.4, ...STEP }, 40, 14],
     ["wings", { ...CABIN, wingSide: "both", wingWidthFt: 4, ...STEP }, 14, 40],
+    // A wing list (roof.wingList, 2026-10-01) is its own switch: no wingWidthFt is needed to refuse the step.
+    ["a wing list", { ...CABIN, wingList: [{ wall: "left", widthFt: 6 }], ...STEP }, 14, 40],
     ["a lean-to", { ...CABIN, leanToWidthFt: 8, ...STEP }, 14, 40],
     ["a recessed porch at the back", { ...CABIN, porchEnd: "back", ...STEP }, 14, 40],
     ["a projecting porch at the back", { type: "gable", front: "gable", pitch: 0.4, porchOutFt: 6, porchEnd: "back", ...STEP }, 14, 40],
+    // A porch on a SIDE wall (2026-10-05): an eave wall the step's wedge and the rear eave run along.
+    ["a recessed porch on the left wall", { ...CABIN, porchEnd: "left", ...STEP }, 14, 40],
+    ["a projecting porch on the right wall", { type: "gable", front: "gable", pitch: 0.4, porchOutFt: 6, porchEnd: "right", ...STEP }, 14, 40],
     ["no room for 4 ft each side of the joint", { ...CABIN, ...STEP }, 14, 13],
     ["no type at all", { pitch: 0.4, ...STEP }, 14, 40],
   ];
@@ -234,7 +239,11 @@ Deno.test("⚠️ the server's roofStepAtSize draws exactly d3RoofStep's step, o
   const roofs: Record<string, unknown>[] = [
     CABIN, { type: "gable", pitch: 0.4 }, { type: "gable", front: "gable", pitch: 0.1 }, { type: "gable", front: "gable", pitch: 0.01 },
     { type: "gable", front: "gable", pitch: 0.41, porchOutFt: 6 }, { ...CABIN, porchEnd: "back" }, { type: "gable", front: "eave", pitch: 0.4 },
+    // A side porch (2026-10-05): refused in the frame; with no front a side is the front, and the step stands.
+    { ...CABIN, porchEnd: "left" }, { type: "gable", front: "gable", pitch: 0.41, porchOutFt: 6, porchEnd: "right" },
+    { type: "gable", pitch: 0.41, porchOutFt: 6, porchEnd: "left" }, { type: "gable", pitch: 0.41, porchDepthFt: 6, porchEnd: "right" },
     { ...CABIN, wingSide: "both", wingWidthFt: 4 }, { ...CABIN, leanToWidthFt: 8 }, { type: "gambrel", front: "gable" },
+    { ...CABIN, wingList: [{ wall: "left", widthFt: 6 }] },
     { type: "shed", highSide: "front", pitch: 0.25 }, { type: "gable", front: "gable", pitch: 0.5, ridgeOffset: 0.2 }, { type: "gable", front: "gable" },
   ];
   const steps = [[14, 0.6], [56, 1.5], [12, -0.75], [2, 0.5], [30, -1.5], [10, 1], [0, 0.5], [14, 0], [6, 0.005]];

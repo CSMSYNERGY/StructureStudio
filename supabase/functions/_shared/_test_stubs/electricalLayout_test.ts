@@ -172,3 +172,16 @@ Deno.test("no outletAboveBenchIn set: the outlet climbs off the bench it is behi
   assertEquals(outlets(out).length, 12);
   assertEquals(northOutletAt(out, 3).heightOffFloorIn, 42, "24 is behind the bench; 36 + 6 clears it");
 });
+
+Deno.test("the switch lands at the package's switchHeightIn, not its catalog item's height", () => {
+  // Settings -> Electrical package -> "Switch height" is the builder's standard for the one switch
+  // by the door, exactly as "Outlet height" is for the outlets. It was handed to tryWall as a bare
+  // number when the outlets' heights became a LIST, so `heights.length` was undefined and every
+  // switch fell back to the catalog item's own heightOffFloorIn: a builder's 44in went unread.
+  const out = layout([], { ...CFG, switchHeightIn: 44 });
+  assertEquals(out.filter((i) => i.type === "SW").map((i) => i.heightOffFloorIn), [44]);
+  // Unset still means the item's own height, which is what it always meant.
+  const { switchHeightIn: _drop, ...noSwitch } = CFG;
+  const out2 = layout([], noSwitch as typeof CFG);
+  assertEquals(out2.filter((i) => i.type === "SW").map((i) => i.heightOffFloorIn), [48]);
+});

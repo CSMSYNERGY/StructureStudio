@@ -4,14 +4,15 @@
 // sending the 3D view." He has 3D off.
 //
 // The cause was one missing condition in submitQuote. An armed snapshot was used when there was one,
-// and when there was NOT one a default four-sided 3D sheet was rendered instead, so "a quote is never
+// and when there was NOT one a default 3D view was rendered instead, so "a quote is never
 // sent without a picture of the building". For a tenant with 3D off the viewer can never be opened, so
 // there is never an armed snapshot — every quote they sent took the default-render branch and carried
 // a 3D sheet.
 //
 // It reaches BOTH documents from that one place: the estimate and the invoice are built server-side by
 // supabase/functions/_shared/quotePdf.ts, which appends `designs.image_url` — the PDF this harness
-// inspects — as "page 1 the floor plan, page 2 the four-sided 3D sheet when one was captured".
+// inspects — page 1 the floor plan, page 2 the 3D page when there is one. (The four-corner version of
+// that page, migration 276, has its own harness: quoteCornerViews.mjs.)
 //
 // This drives a real submit twice against the same fixture, changing ONLY config.view3d, and asserts
 // on what actually left the browser: the pages inside the uploaded PDF, the images uploaded beside it,

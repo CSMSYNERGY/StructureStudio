@@ -223,8 +223,17 @@ Deno.serve(async (req) => {
   // entire hand-built item map was already gone and not restored. The owner saw the working old
   // connection in the UI, then every later Send invoice aborted with "unmapped: …" on every line,
   // with nothing indicating that a FAILED connect attempt had destroyed the mapping.
+  //
+  // WHAT "DIFFERENT" MEANS changed with migration 265, and this is the fix for the known bug. It
+  // used to be "the realm on client_settings changed", and that compare was blind whenever the
+  // tenant had NO realm on file while its map survived: another account took the company over
+  // (084's qbo_displace_realm nulls the realm and keeps the map) or someone cleared it by hand.
+  // Connecting a different company after either read as a first connect, nothing was wiped, and
+  // the old company's ids billed lines in the new books. Now every mapping row carries the realm
+  // it was picked from, so the question is asked of the ROWS: whatever is not stamped with the
+  // company just connected goes. A same-company reconnect keeps every row, as before (an
+  // unstamped one is stamped rather than dropped; see the tidy-up below).
   const previousRealm = row?.qbo_realm_id ?? null;
-  const realmChanged = Boolean(previousRealm && previousRealm !== realmId);
 
   const now = Date.now();
   const saveConnection = () => admin.from("client_settings").update({
@@ -294,7 +303,11 @@ Deno.serve(async (req) => {
       clientId: cid,
       code: saveErr.code ?? reason,
       message: `Saving the QuickBooks connection failed (${reason}): ${saveErr.message}`,
-      context: { step: "save", reason, realmId, realmChanged, displaced: Boolean(displacedFrom) },
+      context: {
+        step: "save", reason, realmId,
+        realmChanged: Boolean(previousRealm && previousRealm !== realmId),
+        displaced: Boolean(displacedFrom),
+      },
     });
     // Name the COMPANY on realm_in_use. Without it the banner is a dead end — it says a
     // company is taken but not WHICH, and picking the wrong one in Intuit's company selector
@@ -309,41 +322,82 @@ Deno.serve(async (req) => {
       : { connected: "0", reason });
   }
 
-  // The connection is now definitively pointing at the new company, so the old company's item ids
-  // are definitively wrong. Item ids are per-company: silently keeping them would bill lines
-  // against whatever happens to share that id in the new books — a wrong-but-plausible invoice,
-  // which is worse than an obviously missing mapping. Only reached once the save above committed.
-  if (realmChanged) {
-    const { error: mapErr } = await admin.from("qbo_item_map").delete().eq("client_id", cid);
-    // A failure here leaves stale ids against a live new connection, which is the dangerous
-    // direction — surface it rather than letting the first invoice discover it.
-    if (mapErr) {
-      await logEdgeError({
-        fn: "qbo-oauth-callback",
-        req,
-        clientId: cid,
-        code: mapErr.code ?? "qbo_item_map_wipe_failed",
-        message: `Item-map wipe after a company change failed: ${mapErr.message}`,
-        context: { step: "item_map_wipe", realmId, previousRealm, pgCode: mapErr.code ?? null },
-      });
-      return land(host, { connected: "1", reason: "item_map_stale" });
-    }
+  // The connection is now definitively pointing at `realmId`, so every mapping row stamped with
+  // another company is definitively wrong, and an unstamped one is wrong unless that company was
+  // already on file (below). Only reached once the save above committed.
+  //
+  // "Does not name it" is SQL's IS DISTINCT FROM, done as two statements. PostgREST's `neq` is
+  // `<>`, which never matches a NULL, so on its own it would leave behind a row nobody stamped (one
+  // saved by a portal-settings older than 265). Plain filters rather than one `or=(…)` string,
+  // because the realm arrives on this request's query string and must never be spliced into
+  // filter syntax. Each is idempotent, so a failure is repaired by simply connecting again.
+  //
+  // An UNSTAMPED row on a reconnect of the company already on file is kept, and stamped. Only a
+  // portal-settings without 265 writes one (a rollback, or a deploy from a branch cut before
+  // 265), and it wrote it while this same company was on file, so its item id is this company's:
+  // the same reasoning as 265's backfill, which stamps a row with its tenant's realm on file.
+  // Deleting it would lose a working mapping on a routine reconnect under a plain "connected"
+  // banner. With any other company, or none on file (taken over, cleared by hand), nobody can say
+  // which company it named, so it goes. A same-company reconnect therefore deletes nothing.
+  const sameCompany = previousRealm === realmId;
+  const wipeOther = await admin.from("qbo_item_map").delete({ count: "exact" })
+    .eq("client_id", cid).neq("realm_id", realmId);
+  const unstamped = sameCompany
+    ? await admin.from("qbo_item_map").update({ realm_id: realmId }, { count: "exact" })
+      .eq("client_id", cid).is("realm_id", null)
+    : await admin.from("qbo_item_map").delete({ count: "exact" })
+      .eq("client_id", cid).is("realm_id", null);
+  const mapErr = wipeOther.error ?? unstamped.error ?? null;
+  const clearedOther = wipeOther.error ? 0 : (wipeOther.count ?? 0);
+  const unstampedCount = unstamped.error ? 0 : (unstamped.count ?? 0);
+  const cleared = clearedOther + (sameCompany ? 0 : unstampedCount);
+  const stamped = sameCompany ? unstampedCount : 0;
+  if (mapErr) {
+    // Since 265 a row left behind is IGNORED by the push and hidden from the grid (both keep only
+    // this company's rows), so this is no longer a wrong-invoice risk. It is still worth a row:
+    // it means the tidy-up itself is broken, and the tenant is told to re-check the grid.
+    await logEdgeError({
+      fn: "qbo-oauth-callback",
+      req,
+      clientId: cid,
+      code: mapErr.code ?? "qbo_item_map_wipe_failed",
+      message: `Tidying up item mappings not stamped with this company failed: ${mapErr.message}`,
+      context: { step: "item_map_wipe", realmId, previousRealm, sameCompany, cleared, stamped, pgCode: mapErr.code ?? null },
+    });
   }
 
+  // Written whatever the wipe did: the connection above DID commit, and an audit trail that skips
+  // a real connect because a cleanup after it failed is missing the event it exists to record.
   await admin.from("admin_audit").insert({
     action: "qbo_connected",
     target_client_id: cid,
     row_count: 1,
     note: [companyName ? `Connected to ${companyName}` : null,
-           displacedFrom ? `took over from ${displacedFrom}` : null].filter(Boolean).join(" — ") || null,
+           displacedFrom ? `took over from ${displacedFrom}` : null,
+           mapErr ? "leftover item mappings NOT tidied up"
+             : cleared ? `cleared ${cleared} item mapping${cleared === 1 ? "" : "s"} not for this company` : null,
+           !mapErr && stamped ? `stamped ${stamped} unstamped item mapping${stamped === 1 ? "" : "s"} with this company` : null,
+    ].filter(Boolean).join(" — ") || null,
   });
+
+  if (mapErr) return land(host, { connected: "1", reason: "item_map_stale" });
 
   // Tell the person who just connected that they moved the company off another account. It is
   // a success, not an error — but it is the one outcome here with a consequence somewhere they
   // cannot see, and the usual cause is picking the wrong company at Intuit, which they can
   // still undo. The displaced tenant is NEVER named: the person taking a company over need not
   // learn which other business had it, and this index exists for tenants who are strangers.
+  // When the taker's own mappings for another company also went, both are said at once: the
+  // takeover alone would leave the emptied grid below it unexplained.
+  // (One literal reason per return: the wiring test reads them off this file to check the portal
+  // has words for each.)
+  if (displacedFrom && clearedOther > 0) return land(host, { connected: "1", reason: "displaced_company_changed" });
   if (displacedFrom) return land(host, { connected: "1", reason: "displaced_other" });
+
+  // Mappings that named ANOTHER company just went, so the grid below the banner is emptier than
+  // the owner left it. Say why, or a company switch reads as lost work. Only for rows that named
+  // a different company: an unstamped row says nothing about a switch.
+  if (clearedOther > 0) return land(host, { connected: "1", reason: "company_changed" });
 
   return land(host, { connected: "1" });
 });

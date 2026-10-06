@@ -991,7 +991,9 @@ test("a refused Get Quote (400) shows the reason, logs as info, and the design s
   await flushDraft(page);
   await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
   const code = await ls(page, "ss_draft_" + CLIENT);
-  expect(saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
+  // Polled, not read once: the unload save writes the pointer BEFORE it sends the keepalive POST
+  // (saveDraftSilently), so the pointer can be visible here while the route has not yet recorded it.
+  await expect.poll(() => saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Get Quote", exact: true }).click();
   await expect(page.getByText(NO_USER)).toBeVisible({ timeout: 45_000 });
@@ -1314,7 +1316,9 @@ test("portal email wording: {total} is marked not recommended on the Quote wordi
   await expect(hint).toHaveCount(0);                                               // Estimate is the first tab
   await kind("Quote").click();
   await expect(hint).toHaveText("{total} is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.");
-  await expect(page.getByPlaceholder("Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready.")).toBeVisible();
+  // The box has its own "Opening line" label now (2026-10-04), so the placeholder is just the example.
+  await expect(page.getByLabel("Opening line", { exact: true }))
+    .toHaveAttribute("placeholder", "e.g. Thanks for designing with {business}! Your quote {number} is ready.");
   await hint.scrollIntoViewIfNeeded();
   await shot(page, "21-wording-total-hint");
   await kind("Invoice").click();

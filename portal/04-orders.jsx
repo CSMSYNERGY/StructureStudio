@@ -764,13 +764,16 @@ function MySubmissions({ refreshKey }) {
 // and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
 // not bought: shown, padlocked, and left out of the count — Carolyn 2026-09-04, it doubles
 // as the upsell. A step we have not finished building never arrives here at all.
-function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin }) {
+function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate, canAdmin }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
   const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
+  // Ticking is portal-setup's owner/admin action (or an operator who can write). Everyone
+  // else reads the list; their checkbox is disabled rather than ticking and bouncing back.
+  const mayTick = canEdit !== false;
   const toggle = async (it) => {
-    if (it.locked) return;
+    if (it.locked || !mayTick) return;
     const done = !it.completed_at;
     setBusy(it.id); setError(null);
     // Optimistic: ticking a box that then sits there doing nothing feels broken.
@@ -843,9 +846,10 @@ function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin
                   <SsLock title={`Needs ${ssFeatureLabel(feat)}`} />
                 </span>
               ) : (
-                <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                <input type="checkbox" checked={isDone} disabled={busy === it.id || !mayTick}
                   onChange={() => toggle(it)} aria-label={it.title}
-                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+                  title={mayTick ? undefined : "An owner or admin ticks these off"}
+                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: mayTick ? "pointer" : "default" }} />
               )}
               <div style={{ minWidth: 0, flex: 1 }}>
                 {/* No line-through on a locked row — that reads as "done". */}
@@ -952,7 +956,9 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         const c = items.filter((i) => !i.locked);
         return { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length };
       })();
-      const next = { items, counts };
+      // `canEdit` is whether this caller's tick will be accepted (owner/admin, or an operator
+      // who can write). Absent from an older edge function → assume yes, as before.
+      const next = { items, counts, canEdit: data.canEdit !== false };
       setSetupData(next);
       return next;
     } catch (_e) {
@@ -980,7 +986,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
         : x);
       const c = items.filter((i) => !i.locked);
-      return { items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
+      return { ...cur, items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
     });
   }, []);
 
@@ -1113,6 +1119,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       </div>
 
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
+        canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
@@ -1328,6 +1335,75 @@ const centsFrom = (txt) => {
 const todayLocal = () => new Date().toLocaleDateString("en-CA");
 const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["ach", "Bank / ACH"], ["other", "Other"]];
 
+// ── Bank details: a Routing box and a Checking box (Carolyn, 2026-09-02) ───────────────────
+// "You need two boxes there … one says routing and one says checking." CardPointe's hosted
+// tokenizer takes a bank account only as ONE "routing/account" string in ONE field, so the two
+// boxes are ours, and the string they compose goes from this browser straight to CardSecure's
+// tokenize endpoint on the tokenizer's own origin (served by portal-payments pay_options, never
+// written here — the repo is public). The token that comes back is charged exactly as the
+// iframe's was. The numbers never reach our servers.
+//
+// Checked 2026-10-06 from headless Chrome on the beta and production origins, with an empty
+// body: CardSecure answers both the preflight and the request with
+// Access-Control-Allow-Origin: *, so the browser can read the token.
+//
+// ⚠️ TWINS. my-quotes.html carries the customer's copy of these three, in that page's ES5.
+// scripts/preflight.mjs (checkAchBankInputs) lifts achRoutingOk/achAccountOk out of BOTH files
+// and runs them against the same vectors, and refuses a push where an ach* name meets
+// localStorage, a URL, the console or the error log. The numbers live in two pieces of
+// OrderDetail state and in the body of one POST, and nowhere else.
+
+// 9 digits, and the 9th is the ABA check digit: 3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9) is a
+// multiple of 10. That catches a mistyped digit at the counter instead of at the bank. A wrong
+// ACCOUNT number cannot be caught: it tokenizes fine and fails only at the gateway.
+function achRoutingOk(v) {
+  const d = String(v == null ? "" : v);
+  if (!/^\d{9}$/.test(d)) return false;
+  const n = [];
+  for (let i = 0; i < 9; i++) n.push(d.charCodeAt(i) - 48);
+  return (3 * (n[0] + n[3] + n[6]) + 7 * (n[1] + n[4] + n[7]) + (n[2] + n[5] + n[8])) % 10 === 0;
+}
+// 4 to 17 digits (17 is the width of the bank-file field).
+function achAccountOk(v) {
+  return /^\d{4,17}$/.test(String(v == null ? "" : v));
+}
+// routing + "/" + account -> { token } or { error }. The sentences name neither number, and
+// CardSecure's own message is never shown, so nothing it echoes can reach the screen.
+async function achTokenize(origin, achRouting, achAccount) {
+  const bad = { error: "Those bank details couldn't be checked. Check both numbers and try again." };
+  if (!/^https:\/\//.test(String(origin || "")) || !achRoutingOk(achRouting) || !achAccountOk(achAccount)) return bad;
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 15000) : null;
+  try {
+    const res = await fetch(`${origin}/cardsecure/api/v1/ccn/tokenize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: `${achRouting}/${achAccount}`, unique: true }),
+      credentials: "omit",
+      cache: "no-store",
+      signal: ctl ? ctl.signal : undefined,
+    });
+    // The body read stays OUTSIDE the JSON try: a connection that drops mid-body is a
+    // connection problem (the catch below), not numbers to re-check. my-quotes.html agrees.
+    const text = await res.text();
+    let j = null;
+    try { j = JSON.parse(text); } catch (_e) { /* not JSON */ }
+    let tok = j && typeof j.token === "string" ? j.token.trim() : "";
+    // An older reply shape carries the token in `message` beside errorcode 0.
+    if (!tok && j && Number(j.errorcode) === 0 && /^\d{8,}$/.test(String(j.message || ""))) tok = String(j.message);
+    // "NNNN::reason" is how CardSecure spells a failure inside a 200, and it may come
+    // URL-encoded ("0008%3A%3A…"): Fiserv's own itoke.js decodes before it tests, so do we.
+    let plain = tok;
+    try { plain = decodeURIComponent(tok); } catch (_e) { /* not encoded */ }
+    if (!res.ok || !tok || tok.length > 256 || /^\d{4}::/.test(plain)) return bad;
+    return { token: tok };
+  } catch (_e) {
+    return { error: "Couldn't reach the bank-details check. Check the connection and try again." };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ORDERS IS ALL SALES (Carolyn 2026-08-08): "even an inventory building will need delivery
 // so it is an ORDER." So this is the ONE page a sold building leaves for the shop or the
 // truck — Designs and Inventory report, Orders dispatches. Two routes out, decided by what
@@ -1397,6 +1473,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // is not a faster page, it is a page that lies about money and then corrects itself,
   // which is exactly the silent understatement the payment pagination exists to prevent.
   const [moneyReady, setMoneyReady] = useState(false);
+  // The tenant whose pending bank payments this mount has already asked the gateway about —
+  // see "BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS" at the end of load().
+  const reconcileFiredRef = useRef(null);
   const load = useCallback(async () => {
     setError(null);
     setMoneyReady(false);
@@ -1540,6 +1619,29 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // never be what a revisit paints from, even behind the pending flag.
     ssCachePut("rest", "orders", clientId, settled);
     setMoneyReady(true);
+
+    // ── BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS ──────────────────────────────────────
+    // portal-payments' `reconcile` is the ONLY code that turns a pending bank payment into
+    // settled (or returned) money — there is no pg_cron — and its header names this tab as
+    // the caller: fire-and-forget on load, never awaited in the paint path, then re-read the
+    // money. Nothing called it, so every ACH payment, from either the customer's pay screen
+    // or the Record-a-payment modal, read "Bank payment clearing" forever, the balance never
+    // closed, and paymentAmountDecision refused every further payment on that order
+    // ("A bank payment on this order is still clearing").
+    // Only when a gateway payment IS pending (the sweep has nothing to do otherwise, and a
+    // tenant without card payments must not file a refusal on every load), and at most once
+    // per mount, so a sweep that reports movement can never become a reload loop.
+    const hasPendingBank = (paysRes.data || []).some((p) =>
+      p.gateway === "cardpointe" && !p.voided_at && p.funding_state === "pending");
+    if (hasPendingBank && reconcileFiredRef.current !== clientId) {
+      reconcileFiredRef.current = clientId;
+      sb.functions.invoke("portal-payments", { body: { action: "reconcile" } }).then(({ data }) => {
+        const moved = data && !data.error && (
+          (Array.isArray(data.updated) && data.updated.length > 0) ||
+          (Array.isArray(data.resolved) && data.resolved.some((x) => x && x.resolved)));
+        if (moved) load();
+      }, () => {});
+    }
   }, [clientId]);
 
   // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
@@ -1623,6 +1725,11 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     if (sale) {
       // Already built and sitting on a lot — it never touches the build board, it just
       // needs a truck. Serial shown because that is how the yard refers to it.
+      // DELIVERED first: `onLoad` only counts an OPEN stop, so once the sale stop was marked
+      // delivered this row fell through to "Schedule delivery →" again — for a building
+      // standing in the buyer's yard. Marking that stop delivered writes 'delivered' onto
+      // this very design (portal-schedule writeBackDelivered), so the row already knows.
+      if (normStatus(r.d.status) === "delivered") return <span style={schedChipStyle("#F0FDF4", "#15803D")}>Delivered ✓</span>;
       if (sale.onLoad) return <span style={schedChipStyle("#EEF2FF", "#3D3672")}>On a load</span>;
       if (!deliverOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>#{sale.serial} · needs a load</span>;
       return schedLinkBtn("Schedule delivery →", `Building #${sale.serial} is on the lot — take it to the Delivery Schedule`,
@@ -1983,14 +2090,31 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
   // verbally" banner painted straight over this error and the operator walked away from
   // an acknowledged, frozen CO with the order still at its old total and nothing saying so.
   const applyAckedTotal = async (co) => {
-    // The acknowledged total becomes the order's total; 'manual' also shields it from the
-    // GHL repricer (sync-design-status skips manual rows).
-    if (co.total_after_cents == null) return true;
-    const { error } = await sb.from("orders")
-      .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
-      .eq("client_id", clientId).eq("short_code", shortCode);
-    if (error) { setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` }); return false; }
-    return true;
+    // THE SERVER WORKS OUT THE MONEY (portal-settings apply_change_order_money), with the one
+    // arithmetic customer-accept and attest_change_order use. This used to write
+    // `total_cents = co.total_after_cents` alone, which left pretax_subtotal_cents and
+    // tax_cents at the accepted figures and dropped every change-order fee — so the invoice
+    // (reconciled against the pre-tax column) billed the OLD amount with a "Change order /
+    // Order adjustment" pair that cancelled out, while the balance and the pay screen asked
+    // for the new one. Called even for a change with no new total: a fee is still owed.
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "apply_change_order_money", shortCode },
+    });
+    let m = (data && data.error) || null;
+    if (error && !m) m = await fnError(error);
+    if (!m) return true;
+    // A portal-settings that predates the action answers "Unrecognised action" — keep the old
+    // single-column write for that window rather than leave the order on its pre-change total.
+    if (/Unrecognised action/i.test(String(m))) {
+      if (co.total_after_cents == null) return true;
+      const { error: legacyErr } = await sb.from("orders")
+        .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+      if (!legacyErr) return true;
+      m = legacyErr.message;
+    }
+    setMsg({ err: `Change recorded, but the order total didn't update: ${m}` });
+    return false;
   };
 
   const createCo = async () => {
@@ -3519,6 +3643,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [tokenErr, setTokenErr] = useState("");
   const [surcharge, setSurcharge] = useState(null);
   const [armed, setArmed] = useState(false);
+  // The bank rail's two boxes (see achTokenize). These two strings are the ONLY place the
+  // numbers live: every way out of the modal empties them, and nothing copies them anywhere.
+  const [achRouting, setAchRouting] = useState("");
+  const [achAccount, setAchAccount] = useState("");
+  const [achLeft, setAchLeft] = useState({});        // boxes the operator has moved on from, so a half-typed number isn't scolded mid-keystroke
+  const [achChecking, setAchChecking] = useState(false);
+  const [achRetry, setAchRetry] = useState(0);       // bumped to re-check unchanged numbers after a failed charge
+  const clearAch = () => { setAchRouting(""); setAchAccount(""); setAchLeft({}); setAchChecking(false); };
   const frameRef = useRef(null);
   const modalRef = useRef(null);
   const chargeable = method === "card" || method === "ach";
@@ -3533,10 +3665,24 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       const { data } = await sb.functions.invoke("portal-payments", {
         body: { action: "pay_options", orderId: o.id },
       });
-      if (alive && data) setPayOpts(data);
+      // A refusal (online payments not switched on for this account, which is a 503 with no
+      // body to render) is an ANSWER, not a load still pending: say so, so the effect below
+      // can tell "can't charge here" from "not asked yet".
+      if (alive) setPayOpts(data || { canCharge: false });
     })();
     return () => { alive = false; };
   }, [payOpen, o.id]);
+
+  // Choosing Card or Bank lands on "Take it now", but only an account that CAN charge draws
+  // the Already collected / Take it now toggle. Without it, landing on "charge" was a dead end:
+  // a disabled Charge $0.00, no Record payment, and no way back — and on the bank rail, two
+  // boxes asking for numbers nothing would use. So once the answer is "can't charge here", the
+  // modal is a recording one, whichever chip was picked and whenever the answer arrived.
+  useEffect(() => {
+    if (payOpts && !payOpts.canCharge && collect === "charge") {
+      setCollect("recorded"); setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
+    }
+  }, [payOpts, collect]);
 
   // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
   // security of this listener — without it any page that opens this one could post a forged
@@ -3566,6 +3712,54 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     window.addEventListener("message", onMsg, false);
     return () => window.removeEventListener("message", onMsg, false);
   }, [payOpen, collect, payOpts]);
+
+  // The bank rail has no iframe to post a token back: once BOTH boxes are valid, the numbers
+  // are tokenized from here, two seconds after the last keystroke — the quiet the tokenizer's
+  // own iframe waited (inactivityto=2000), since any 4+ digits looks like an account number and
+  // a shorter pause would arm Charge on half of one. Any edit re-runs this effect, and its
+  // cleanup drops an answer that arrives for numbers no longer on screen.
+  useEffect(() => {
+    if (!payOpen || collect !== "charge" || method !== "ach") return;
+    const origin = payOpts && payOpts.tokenizer ? payOpts.tokenizer.origin : "";
+    if (!origin || !achRoutingOk(achRouting) || !achAccountOk(achAccount)) return;
+    let alive = true;
+    setAchChecking(true);
+    const t = setTimeout(async () => {
+      const r = await achTokenize(origin, achRouting, achAccount);
+      if (!alive) return;
+      setAchChecking(false);
+      if (r.token) { setTokenErr(""); setPayExpiry(null); setPayToken(r.token); }
+      else { setPayToken(null); setTokenErr(r.error); }
+    }, 2000);
+    return () => { alive = false; clearTimeout(t); setAchChecking(false); };
+  }, [payOpen, collect, method, payOpts, achRouting, achAccount, achRetry]);
+
+  // An edit to either box: digits only, and the token goes FIRST — Charge must never stay
+  // armed on numbers that are no longer the ones on screen. A keystroke that changes no DIGIT
+  // (a space, a dash, the same number pasted again) is not an edit: the numbers are the ones
+  // that were tokenized, and since they did not change the effect above would not re-run, so
+  // clearing the token there left Charge dead with nothing on screen to say why.
+  const editAch = (which, cur, set) => (e) => {
+    const next = String(e.target.value || "").replace(/\D/g, "");
+    if (next === cur) return;
+    setPayToken(null); setTokenErr(""); setAchLeft((l) => ({ ...l, [which]: false }));
+    set(next);
+  };
+  // Leaving a box names what is wrong with it; leaving one with both numbers valid and no token
+  // (a dropped connection, or a charge the bank refused) simply checks them again.
+  const leaveAch = (which) => {
+    setAchLeft((l) => ({ ...l, [which]: true }));
+    if (!payToken && !achChecking && achRoutingOk(achRouting) && achAccountOk(achAccount)) setAchRetry((n) => n + 1);
+  };
+  // What is wrong, in words — never the number itself.
+  const achProblem = (() => {
+    const r = achRouting, a = achAccount;
+    if (r.length > 9 || (achLeft.routing && r.length > 0 && r.length < 9)) return "A routing number is 9 digits.";
+    if (r.length === 9 && !achRoutingOk(r)) return "That routing number doesn't look right. Check it against the bottom of a check.";
+    if (a.length > 17) return "A checking account number is 17 digits at most.";
+    if (achLeft.account && a.length > 0 && a.length < 4) return "A checking account number is at least 4 digits.";
+    return "";
+  })();
 
   // Whether a surcharge applies cannot be known until the CARD is known — the card brands
   // forbid it on debit, so the same order is one price on one card and another on the next.
@@ -3613,7 +3807,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
   const closePay = () => {
     setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
-    setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed");
+    setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed"); clearAch();
   };
 
   const chargeCard = async () => {
@@ -3639,11 +3833,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // the decline reason, or "do NOT try again" — is in the body.
       let m = "That payment didn't go through.";
       try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+      // Said INSIDE the modal too (tokenErr): `msg` renders on the order behind the overlay,
+      // so on its own the operator was left looking at a Charge button gone grey, no reason.
       setMsg({ err: m });
-      setPayToken(null);
+      setPayToken(null); setTokenErr(m);
       return;
     }
-    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); return; }
+    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); setTokenErr(data.error); return; }
     closePay();
     setMsg({
       ok: data && data.pending
@@ -4235,8 +4431,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       // two-click job and delayed the tokenizer load to the worst moment.
                       // This moves the TOGGLE only — nothing is charged until details are
                       // entered and Charge is pressed, and Already collected is one click away.
-                      setCollect(id === "card" || id === "ach" ? "charge" : "recorded");
-                      setPayToken(null); setTokenErr(""); setArmed(false);
+                      // Not where the server has already said this account can't charge: there
+                      // is no toggle back from "charge" (see the effect beside pay_options).
+                      setCollect((id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge) ? "charge" : "recorded");
+                      setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
                     }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
@@ -4252,7 +4450,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
-                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); }}
+                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); clearAch(); }}
                         style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                     ))}
                   </div>
@@ -4278,25 +4476,45 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       ))}
                     </div>
                   )}
-                  <span style={S.lbl}>{method === "ach" ? "Routing / account number" : entry === "swipe" ? "Card reader" : "Card details"}</span>
+                  {method !== "ach" && <span style={S.lbl}>{entry === "swipe" ? "Card reader" : "Card details"}</span>}
                   {/* The tokenizer URL is composed SERVER-SIDE and never appears in this
                       file: the repo is public, and it puts the test/production switch in a
-                      secret rather than in code a customer can download. */}
-                  {payOpts && payOpts.tokenizer && (
+                      secret rather than in code a customer can download. Card only: the
+                      bank rail is the two boxes below, and with no iframe mounted the
+                      message listener's frameRef test refuses anything posted meanwhile. */}
+                  {method !== "ach" && payOpts && payOpts.tokenizer && (
                     <iframe
                       ref={frameRef}
                       title="Payment details"
-                      src={method === "ach" ? payOpts.tokenizer.achUrl : entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
+                      src={entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
                       // Height is SERVED (cpTokenizerHeight) so this modal and my-quotes.html
                       // cannot drift. Too short is a dead form, not a cosmetic issue: at the
                       // original 128px the CVV sat below the fold of a non-scrolling frame.
-                      style={{ width: "100%", display: "block", height: (method === "ach" ? (payOpts.tokenizer.achHeight || 130) : (payOpts.tokenizer.cardHeight || 265)), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
+                      style={{ width: "100%", display: "block", height: (payOpts.tokenizer.cardHeight || 265), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
                       frameBorder="0" scrolling="no"
                     />
                   )}
-                  {method === "ach" && (
-                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
-                      Routing number, then a slash, then the account number. Bank payments take 2-3 business days to clear.
+                  {method === "ach" && payOpts && payOpts.canCharge && payOpts.tokenizer && (
+                    // Routing and Checking as two boxes (Carolyn, 2026-09-02). Digits only, no
+                    // autofill, nothing remembered — see achTokenize at the top of this file.
+                    // Gated like the card iframe: an account that cannot charge is never asked
+                    // for bank numbers it has no way to use.
+                    <div>
+                      <label style={{ display: "block" }}>
+                        <span style={S.lbl}>Routing number</span>
+                        <input style={S.input} value={achRouting} onChange={editAch("routing", achRouting, setAchRouting)} onBlur={() => leaveAch("routing")}
+                          inputMode="numeric" pattern="[0-9]*" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
+                      </label>
+                      <label style={{ display: "block", marginTop: 10 }}>
+                        <span style={S.lbl}>Checking account number</span>
+                        <input style={S.input} value={achAccount} onChange={editAch("account", achAccount, setAchAccount)} onBlur={() => leaveAch("account")}
+                          inputMode="numeric" pattern="[0-9]*" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} />
+                      </label>
+                      <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
+                        Find both at the bottom of a check. Bank payments take 2-3 business days to clear.
+                      </div>
+                      {achProblem && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{achProblem}</div>}
+                      {achChecking && !payToken && <div style={{ fontSize: 11.5, color: "#475569", marginTop: 7 }}>Checking the bank details…</div>}
                     </div>
                   )}
                   {method === "card" && entry === "swipe" && (

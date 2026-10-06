@@ -32,6 +32,16 @@
 //   O. lookups on but no platform credentials (configured:false): no warning, no button
 //   P. the per-minute Verify limit (429 rate_limited): the server's sentence, one call, no retry, the
 //      tax line and total unchanged, and the button offered again
+//   Q. a priced meter (tax_settings lookupPriceCents, 2026-10-05): the first confirm states the
+//      server's price as one wallet charge ("Each verification is a paid lookup: this one costs
+//      $0.10 from your wallet.", and no "Avalara bills" beside it) and the card itself still names
+//      no figure; unpriced (B) the confirm names none. The press carries the price it stated
+//      (quotedPriceCents). A wallet that can't cover the press (402 insufficient_funds) shows the
+//      server's sentence, one call, no retry, the tax line unchanged and the button offered again
+//   R. a card opened before the meter was priced (lookupPriceCents null) against a server that
+//      would charge: the press carries no price, verify_tax answers 409 price_changed with the
+//      price, a second confirm names it, and the repeat carries it; dismissing that confirm calls
+//      nothing more; the next press's first confirm already states the price
 //
 // The replies below use the avalara-api branch's own sentences and fields (f3f3c55): a stub that
 // said something the server never says would pass a check the real page fails.
@@ -76,6 +86,8 @@ const SAY = {
   confirmOperator: "You're viewing this account as an operator, and verifying tax is a paid lookup on the builder's account. Confirm to go ahead (confirmVerify).",
   network: "Couldn't reach the tax service. Try again. The quote keeps its current tax rate.",
   rateLimited: "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
+  // taxSpend.ts verifyWalletRefusal (2026-10-05).
+  funds: "A verified tax lookup costs $0.10 and your wallet has $0.04. Add funds in Settings → Billing. The quote keeps its current tax rate.",
   resendPdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
   resendNoEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
   accepted: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
@@ -98,7 +110,8 @@ const design = (code, over = {}) => ({
 });
 
 // Mutable per scenario.
-const S = { lookupEnabled: true, configured: true, designs: {}, verifyReplies: [], locationReplies: [], sendInvoiceReply: null, acceptReplies: [] };
+// lookupPriceCents: tax_settings' price for one press — null is the meter as it is live (disarmed).
+const S = { lookupEnabled: true, configured: true, lookupPriceCents: null, designs: {}, verifyReplies: [], locationReplies: [], sendInvoiceReply: null, acceptReplies: [] };
 const calls = [];     // { fn, body } for every portal-settings / customer-* call
 const restReads = []; // every REST GET url
 const dialogs = [];   // { message, accepted }
@@ -183,7 +196,7 @@ const handler = async (route) => {
     }
     case "list_locations": return json(route, { ok: true, nextSerial: 100, locations: LOCS });
     case "tax_settings":
-      return json(route, { ok: true, ssMode: true, lookupEnabled: S.lookupEnabled, configured: S.configured, companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: 3, locations: LOCS });
+      return json(route, { ok: true, ssMode: true, lookupEnabled: S.lookupEnabled, configured: S.configured, companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: 3, lookupPriceCents: S.lookupPriceCents, locations: LOCS });
     case "verify_tax": return nextOf(S.verifyReplies, { status: 500, body: { error: "unexpected verify_tax call" } });
     case "set_design_sales_location": return nextOf(S.locationReplies, { status: 500, body: { error: "unexpected set_design_sales_location call" } });
     case "orders_designs": {
@@ -249,6 +262,7 @@ try {
   await page.waitForTimeout(700);
   ok("B: first confirm names the cost and the address", dialogs[0] && /Avalara bills each verification/.test(dialogs[0].message) && dialogs[0].message.includes("1 Main St"), dialogs[0] && dialogs[0].message);
   ok("B: dismissing it calls nothing", actionCalls("verify_tax").length === 0);
+  ok("B: unpriced (the live meter): the confirm names no figure", dialogs[0] && !/This costs|\$0\.\d\d|from your wallet/.test(dialogs[0].message), dialogs[0] && dialogs[0].message);
 
   // C
   resetCalls();
@@ -393,6 +407,83 @@ try {
   ok("O: card still renders, picker still offered", t.includes("Quote total") && (await card().locator("select").count()) === 1);
   ok("O: no credentials: no warning, no button", !t.includes("Avalara bills") && !t.includes("Verify tax"), t);
   S.configured = true;
+
+  // Q
+  S.lookupPriceCents = 10;
+  await go("/portal/designs");
+  await page.waitForTimeout(500);
+  await openRecord(SS);
+  await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  t = await cardText();
+  ok("Q: priced: the card itself still names no figure", t.includes("Avalara bills each verification") && !t.includes("$0.10") && !/\d+\s*(¢|cents)/i.test(t), t);
+  resetCalls();
+  dialogAnswers = [false];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  await page.waitForTimeout(700);
+  ok("Q: priced: the first confirm states the server's price", dialogs[0]
+    && dialogs[0].message.includes("Each verification is a paid lookup: this one costs $0.10 from your wallet. If the verified rate is different"), dialogs[0] && dialogs[0].message);
+  ok("Q: priced: one charge named, not an Avalara bill as well", dialogs[0] && !/Avalara bills/.test(dialogs[0].message), dialogs[0] && dialogs[0].message);
+  ok("Q: priced: dismissing it calls nothing", actionCalls("verify_tax").length === 0);
+  resetCalls();
+  S.verifyReplies = [{ status: 402, body: { error: SAY.funds, reason: "insufficient_funds", code: "insufficient_funds", priceCents: 10, balanceCents: 4 } }];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  ok("Q: a wallet that can't cover it: the server's sentence is shown", await waitText(SAY.funds));
+  await page.waitForTimeout(700);
+  t = await cardText();
+  ok("Q: one call, no retry", actionCalls("verify_tax").length === 1, JSON.stringify(actionCalls("verify_tax")));
+  ok("Q: the press carries the price its confirm stated", actionCalls("verify_tax")[0]?.quotedPriceCents === 10, JSON.stringify(actionCalls("verify_tax")));
+  ok("Q: not treated as a stale row (no re-read)", !restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`)), restReads.join(" | "));
+  ok("Q: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Quote total\s*\$9,652\.50/.test(t), t);
+  ok("Q: no ask-an-admin suffix", !/ask an owner or admin/.test(t));
+  ok("Q: the button is offered again", await card().getByRole("button", { name: "Verify tax for the delivery address" }).isEnabled());
+  S.lookupPriceCents = null;
+
+  // R
+  await go("/portal/designs");
+  await page.waitForTimeout(500);
+  await openRecord(SS);
+  await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  const SAY_PRICE = "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.";
+  resetCalls();
+  S.verifyReplies = [{ status: 409, body: { error: SAY_PRICE, reason: "price_changed", priceCents: 10 } }];
+  dialogAnswers = [true, false];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  await until(() => dialogs.length >= 2);
+  await page.waitForTimeout(500);
+  let rc = actionCalls("verify_tax");
+  ok("R: an unpriced card's press carries no price", rc.length >= 1 && rc[0].quotedPriceCents === null, JSON.stringify(rc));
+  ok("R: price_changed asks again, naming the server's price", dialogs.length === 2
+    && dialogs[1].message.includes("costs $0.10 from your wallet") && dialogs[1].message.includes("Verify anyway?"), dialogs[1] && dialogs[1].message);
+  ok("R: dismissing that confirm calls nothing more", rc.length === 1, JSON.stringify(rc));
+  ok("R: and charges nothing it didn't name: no success line", !(await cardText()).includes("Verified:"));
+
+  // Again on a freshly opened card (still unpriced, as a stale one is), this time saying yes.
+  await go("/portal/designs");
+  await page.waitForTimeout(500);
+  await openRecord(SS);
+  await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  resetCalls();
+  S.verifyReplies = [
+    { status: 409, body: { error: SAY_PRICE, reason: "price_changed", priceCents: 10 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 972900, resent: false, resendReason: null, quotePdfUrl: null, charged: true } },
+  ];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  ok("R: confirmed at the named price: success", await waitText("The quote total didn't change."));
+  rc = actionCalls("verify_tax");
+  ok("R: two calls, the repeat carrying the named price", rc.length === 2 && rc[0].quotedPriceCents === null && rc[1].quotedPriceCents === 10, JSON.stringify(rc));
+  ok("R: the price was asked about, once", dialogs.length === 2 && dialogs.filter((d) => /costs \$0\.10 from your wallet/.test(d.message)).length === 1,
+    JSON.stringify(dialogs.map((d) => d.message)));
+
+  resetCalls();
+  dialogAnswers = [false];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  await page.waitForTimeout(700);
+  ok("R: the next press's first confirm already states the price", dialogs[0]
+    && dialogs[0].message.includes("this one costs $0.10 from your wallet"), dialogs[0] && dialogs[0].message);
+  ok("R: dismissed: nothing called", actionCalls("verify_tax").length === 0);
 
   // H
   resetCalls();

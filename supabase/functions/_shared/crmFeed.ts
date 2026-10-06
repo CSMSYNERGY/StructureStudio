@@ -64,6 +64,16 @@ export const CRM_FEED_TYPES = {
   //
   // WhatsApp remains not a feature, and nothing here reserves a slot for it.
   message: ["sms", "sms_in"],
+  // CALLS (My Synergy Phone, 2026-09-29). Carolyn, 2026-08-26 27:02: "and we have calls." Three types
+  // under one chip, for the reason email and message are one chip each — a conversation split
+  // across filters is not a conversation:
+  //   call        — a call that connected (either direction), or an outbound one that did not
+  //                 (no answer / busy): the builder placed it, so it is theirs to see as a call;
+  //   call_missed — an inbound call nobody answered and no message was left;
+  //   voicemail   — an inbound call nobody answered where the customer left a message.
+  // Read from phone_calls (migration 254) with the voicemail embedded; see the slot-14 read.
+  // Mirrors CRM_CHIPS' "calls" in portal/02-sales.jsx; keep the two identical.
+  call: ["call", "call_missed", "voicemail"],
   // DOCUMENTS ARE HISTORY, NOT AN ACTION. Carolyn, 2026-08-26 24:01, having found the same
   // documents listed in two places: "the top part is about things to do. The bottom part is
   // about history … instead of in two places." So the record page's Documents TAB is gone
@@ -125,8 +135,23 @@ const humanSize = (n: number): string =>
 export async function buildCrmFeed(
   admin: any,
   clientId: string,
-  opts: { codes: string[]; contactId?: string | null; limit?: number; isAdmin?: boolean },
+  opts: {
+    codes: string[]; contactId?: string | null; limit?: number; isAdmin?: boolean;
+    /**
+     * WHO IS LOOKING, for the calls (review SSB-5). The record page's gate is contacts:view or
+     * designs:view and says nothing about the PHONE area, so without this every call on the
+     * contact — who placed it, who answered, missed calls, the full voicemail transcript — went
+     * to anyone who could open the record. The same rule the phone-api Worker applies to the
+     * same rows (routes/calls.ts mayViewCall):
+     *   "none" (or absent: fails closed) → no call events at all, and phone_calls is not read;
+     *   "own"                            → only calls that are theirs (callVisibleToOwn);
+     *   "team"                           → every call on the contact (literal view or edit).
+     * `contactOwner` is the contact's owner_user_id, which decides whose a missed call is.
+     */
+    phone?: { level: "none" | "own" | "team"; userId: string | null; contactOwner?: string | null };
+  },
 ): Promise<FeedEvent[]> {
+  const phoneScope = opts.phone?.level ?? "none";
   // A code is hand-joined into a PostgREST `or=` string in three of the reads below, where a
   // comma or a paren is GRAMMAR, not data: one crafted entry closes the `in.(...)` list and
   // appends a clause of the caller's choosing, and `contact_id.not.is.null` widens the read to
@@ -154,23 +179,41 @@ export async function buildCrmFeed(
   //   1 designs        2 design_versions  3 email_sends   4 design_acceptances
   //   5 change_orders  6 invoice_sends    7 captured_leads 8 crm_notes
   //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
-  //  13 crm_field_changes
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges] = await Promise.all([
-    codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
+  //  13 crm_field_changes                14 phone_calls (+ its voicemail)
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls] = await Promise.all([
+    // image_url is the floor-plan PDF the `floor_plan` event below carries. It was missing from
+    // this list, so `d.image_url` was always undefined and no floor plan ever reached History.
+    codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact, image_url").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
     // mail keyed on a design, and conversation mail keyed on the person — which often is
     // about no design at all ("are you still thinking about the 12x24?"). An `or` rather
     // than two queries so the 80-row cap applies to the merged history, not twice over.
+    //
+    // ⚠️ NOT q(), because q() turns ANY read error into []: a crmFeed deployed ahead of
+    // migration 261 would be refused body_text (no such column), and every sent email would
+    // vanish from every record page with nothing logged. On that one error the read is tried
+    // again with fewer columns, newest migration first: without 262's opened_at / open_count /
+    // complained_at (the email shows no "Opened" or "Marked as spam"), then without 261's body_text too (no words, so the
+    // "Emailed to …" line below). delivered_at and bounced_at are 107's and always there.
     (codes.length || opts.contactId)
-      ? q(admin.from("email_sends")
-          .select("id, short_code, contact_id, kind, to_email, subject, status, created_at")
-          .eq("client_id", clientId)
-          .or([
-            codes.length ? `short_code.in.(${codes.join(",")})` : null,
-            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
-          ].filter(Boolean).join(","))
-          .order("created_at", { ascending: false }).limit(80))
+      ? (async () => {
+          const read = (cols: string) => admin.from("email_sends")
+            .select(cols)
+            .eq("client_id", clientId)
+            .or([
+              codes.length ? `short_code.in.(${codes.join(",")})` : null,
+              opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+            ].filter(Boolean).join(","))
+            .order("created_at", { ascending: false }).limit(80);
+          const BASE = "id, short_code, contact_id, kind, to_email, subject, status, created_at, delivered_at, bounced_at";
+          let r: any = null;
+          for (const cols of [`${BASE}, body_text, opened_at, open_count, complained_at`, `${BASE}, body_text`, BASE]) {
+            r = await read(cols);
+            if (!(r?.error && ["42703", "PGRST204"].includes(String(r.error.code)))) break;
+          }
+          return r?.data ?? [];
+        })().catch(() => [])
       : Promise.resolve([]),
     codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("change_orders").select("id, short_code, co_no, status, total_before_cents, total_after_cents, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
@@ -228,6 +271,35 @@ export async function buildCrmFeed(
           .select("id, field, old_value, new_value, changed_by, created_at")
           .eq("client_id", clientId).eq("contact_id", opts.contactId)
           .order("created_at", { ascending: false }).limit(80))
+      : Promise.resolve([]),
+    // SLOT 14 — CALLS (My Synergy Phone). Contact-scoped only, like texts' person half: phone_calls is
+    // keyed on the contact matched from the caller's number, never on a design, so a design
+    // record with no contact linked has no calls to show. The voicemail rides along as an
+    // embed (phone_voicemails.call_id is a unique FK), which keeps this one round trip.
+    //
+    // ⚠️ `q` swallows the error, and that is the right answer here: until migration 254 is
+    // applied the table does not exist, and "no calls" is the truth of a tenant that cannot
+    // have any. It must never be merged into the sms_messages read above — a missing column
+    // there would empty the whole texting history instead.
+    // Not read at all for someone with no phone access (opts.phone, review SSB-5).
+    //
+    // CALL RECORDINGS (migration 263) ride along the same way: phone_call_recordings.call_id is a
+    // unique FK too. Only what the line needs: the transcript itself is NOT read here (up to
+    // 100,000 characters a call, 80 calls), the portal fetches it from the phone-api Worker on
+    // "Show transcript", with the Worker's own visibility rule.
+    // ⚠️ NOT q() alone, for the reason the email_sends read above gives: before 263 is applied
+    // PostgREST refuses the embed (no such relationship), and q() would turn that into "no calls
+    // at all". On that one refusal the read is tried again without it.
+    opts.contactId && phoneScope !== "none"
+      ? (async () => {
+          const read = (embed: string) => admin.from("phone_calls")
+            .select(`id, direction, status, from_e164, to_e164, started_at, answered_at, duration_s, placed_by, answered_by, transferred_from, rang_user_ids, phone_voicemails(id, duration_s, transcript, listened_at, deleted_at)${embed}`)
+            .eq("client_id", clientId).eq("contact_id", opts.contactId)
+            .order("started_at", { ascending: false }).limit(80);
+          let r = await read(", phone_call_recordings(id, status, duration_s, summary, transcript_status, deleted_at)");
+          if (r?.error && ["PGRST200", "42P01", "42703"].includes(String(r.error.code))) r = await read("");
+          return r?.data ?? [];
+        })().catch(() => [])
       : Promise.resolve([]),
   ]);
 
@@ -309,13 +381,26 @@ export async function buildCrmFeed(
   // email_sends is the table that makes the Emails chip REAL. Nothing in the portal reads
   // it today, so every quote and invoice email we have ever sent is invisible in the UI.
   for (const e of emails as any[]) {
-    const st = e.status && e.status !== "sent" ? ` (${e.status})` : "";
+    // What happened after it left (migration 262) is a label of its own — Opened, Delivered,
+    // Bounced or Marked as spam, in `meta.delivery`, which the record page draws beside the title.
+    // So those states no longer ride in the text; a send that is still going out or never went ("claimed",
+    // "failed") still says so there, as it always has.
+    const delivery = emailDelivery(e);
+    const st = e.status && !["sent", "delivered", "bounced"].includes(e.status) ? ` (${e.status})` : "";
+    const meta = delivery ? { delivery: delivery.label, openedAt: delivery.openedAt, openCount: delivery.openCount } : null;
     // A conversation reads as the SUBJECT, because that is what someone actually wrote and
     // what they will scan for. A document reads as its kind, because "Quote emailed to
     // jane@…" is the useful line and its subject is boilerplate.
+    //
+    // ITS BODY IS THE WORDS, once there are any (migration 261 keeps them in body_text), so our
+    // side of the conversation reads the way the customer's replies already do. An email from
+    // before 261 has none and keeps the old "Emailed to …" line. With the words shown, the
+    // status moves up to the title, so a send that failed still says so: a failed email that
+    // reads like a sent one is the builder finding out from the customer.
+    const words = typeof e.body_text === "string" && e.body_text.trim() ? e.body_text : null;
     push(e.kind === "conversation"
-      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: e.subject || "(no subject)", body: `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email" }
-      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email" });
+      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email", meta }
+      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
   }
   for (const a of accepts as any[]) {
     push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
@@ -363,22 +448,7 @@ export async function buildCrmFeed(
       meta: {
         from: r.from_email,
         inbound: true,
-        // TOKENISED, not one regex with a word boundary. The first version wrote `\b` into
-        // this file through a script and got a literal 0x08 BACKSPACE byte instead, so the
-        // lookahead could never match, the test always passed, and senderVerified was always
-        // false - every reply would have worn the NOT VERIFIED chip, which is precisely the
-        // badge-fatigue this design set out to avoid. Nothing threw; the unit test passed
-        // because it exercised a retyped copy of the regex rather than this file.
-        //
-        // No parseable token means UNKNOWN, not verified: a verdict string we cannot read is
-        // not a verdict we may vouch for.
-        senderVerified: (() => {
-          if (r.spam_verdict == null) return null;
-          const toks = String(r.spam_verdict).toLowerCase()
-            .match(/(?:spam|virus|spf|dkim|dmarc)=[a-z0-9_-]+/g);
-          if (!toks || !toks.length) return null;
-          return toks.every((t) => t.endsWith("=pass"));
-        })(),
+        senderVerified: senderVerifiedFrom(r.spam_verdict),
         senderVerdict: r.spam_verdict ?? null,
       },
     });
@@ -429,19 +499,25 @@ export async function buildCrmFeed(
   // has since left the tenant; a row with no full_name is one of the users who predate
   // migration 060. Those are different facts and the line says which.
   const ownerRows = (fieldChanges as any[]).filter((f) => f.field === "owner");
+  // Scoped to what this viewer may see of the phone (opts.phone) BEFORE anything is read or
+  // rendered from them, so a hidden call's people are not even looked up.
+  const callRows = scopeCallRows(calls as any[], opts.phone);
   const knownUsers = new Set<string>();
   const nameByUser = new Map<string, string>();
-  if (ownerRows.length) {
-    const ids = Array.from(new Set(
-      ownerRows.flatMap((f) => [f.old_value, f.new_value])
-        .filter((v: unknown): v is string => typeof v === "string" && !!v),
-    ));
-    if (ids.length) {
-      const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", ids));
-      for (const u of users as any[]) {
-        knownUsers.add(u.user_id);
-        if (u.full_name) nameByUser.set(u.user_id, u.full_name);
-      }
+  // ONE read of client_users for every person this feed names: owners on either side of an
+  // owner change, and whoever placed or answered a call. Made only when there is someone to
+  // resolve, so a record with neither costs nothing extra.
+  const peopleIds = Array.from(new Set(
+    [
+      ...ownerRows.flatMap((f) => [f.old_value, f.new_value]),
+      ...callRows.flatMap((c) => [c.placed_by, c.answered_by]),
+    ].filter((v: unknown): v is string => typeof v === "string" && !!v),
+  ));
+  if (peopleIds.length) {
+    const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", peopleIds));
+    for (const u of users as any[]) {
+      knownUsers.add(u.user_id);
+      if (u.full_name) nameByUser.set(u.user_id, u.full_name);
     }
   }
   const whoIs = (v: string | null): string =>
@@ -488,8 +564,225 @@ export async function buildCrmFeed(
     });
   }
 
+  // CALLS. Rendered by a pure function (below) so the wording is unit-tested; the names are
+  // the same resolution the owner-change lines use. A person with no client_users row any more
+  // is "a former team member", the same fact the owner line states.
+  const callerName = (v: string) =>
+    nameByUser.get(v) ?? (knownUsers.has(v) ? "a team member" : "a former team member");
+  for (const e of callFeedEvents(callRows, callerName)) push(e);
+
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
+}
+
+/**
+ * What happened to one email after it left (Resend's events, recorded by migration 262's
+ * record_email_event), as the label the record page shows beside it. Pure — exported for the tests.
+ *   complained_at set                               → "Marked as spam" (262 keeps a complaint
+ *                                                     there, NOT as a bounce: the email arrived)
+ *   bounced                                         → "Bounced"
+ *   opened at least once                            → "Opened", with the first time and the count
+ *   delivered                                       → "Delivered"
+ *   anything else                                   → null (sent, still sending, or failed:
+ *                                                     the title says those)
+ * A complaint outranks everything: it is the one thing the builder must act on (don't email them
+ * again). It is NOT a bounce, though: the email arrived (often it was opened first), so "Bounced,
+ * check the address and send again" would be false, and sending again to someone who just reported
+ * them is what hurts their sending domain most. A bounce outranks an open: an open recorded before a
+ * late bounce does not make the bounce any less the thing to act on. An open outranks a delivery
+ * whatever the status says, because a delivery receipt can go missing while the open still arrives.
+ *
+ * Opens are approximate: some mail apps block the tracking image, and some open mail by
+ * themselves. The record page says so where the label is shown.
+ */
+// deno-lint-ignore no-explicit-any
+export function emailDelivery(e: any): { label: "Opened" | "Delivered" | "Bounced" | "Marked as spam"; openedAt: string | null; openCount: number } | null {
+  if (!e) return null;
+  const openedAt = typeof e.opened_at === "string" && e.opened_at ? e.opened_at : null;
+  const openCount = Math.max(Number(e.open_count) || 0, openedAt ? 1 : 0);
+  if (typeof e.complained_at === "string" && e.complained_at) return { label: "Marked as spam", openedAt, openCount };
+  if (e.status === "bounced") return { label: "Bounced", openedAt, openCount };
+  if (openedAt) return { label: "Opened", openedAt, openCount };
+  if (e.status === "delivered" || (e.delivered_at && e.status !== "failed" && e.status !== "claimed")) {
+    return { label: "Delivered", openedAt: null, openCount: 0 };
+  }
+  return null;
+}
+
+/**
+ * The receiving side's verdict on an inbound email (email_inbound.spam_verdict), as the three
+ * states the screen shows: true = every check it reported passed; false = one did not; null = it
+ * told us nothing we can read. See the email_in loop above for why null is not true.
+ *
+ * Exported for the phone-api Worker's email thread (workers/phone-api/src/emailThread.ts), so the
+ * phone and the portal can never disagree about a reply. The Worker can import it only because
+ * this file imports nothing: keep this function pure.
+ *
+ * TOKENISED, not one regex with a word boundary. The first version wrote a word-boundary escape
+ * into this file through a script and got a literal 0x08 BACKSPACE byte instead, so the lookahead
+ * could never match, the test always passed, and senderVerified was always false - every reply
+ * would have worn the NOT VERIFIED chip, which is precisely the badge-fatigue this design set out
+ * to avoid. Nothing threw; the unit test passed because it exercised a retyped copy of the regex
+ * rather than this file.
+ *
+ * No parseable token means UNKNOWN, not verified: a verdict string we cannot read is not a
+ * verdict we may vouch for.
+ */
+export function senderVerifiedFrom(verdict: unknown): boolean | null {
+  if (verdict == null) return null;
+  const toks = String(verdict).toLowerCase()
+    .match(/(?:spam|virus|spf|dkim|dmarc)=[a-z0-9_-]+/g);
+  if (!toks || !toks.length) return null;
+  return toks.every((t) => t.endsWith("=pass"));
+}
+
+/**
+ * Is this call one a phone:'own' person may see? The phone-api Worker's rule for the same rows,
+ * restated (workers/phone-api/src/scope.ts callIsMine, plus routes/calls.ts mayViewCall's
+ * transferred_from clause) because the Worker is a separate deploy:
+ *   placed it or answered it                                  → yes
+ *   handed it on (transferred_from)                           → yes
+ *   unanswered (missed / voicemail / ringing): the contact's owner when it has one, otherwise
+ *   everyone the number rang                                  → yes
+ *   anything else                                             → no
+ * Keep the two identical: a voicemail shown here that the Worker then refuses plays nothing.
+ */
+// deno-lint-ignore no-explicit-any
+export function callVisibleToOwn(userId: string | null, c: any, contactOwner: string | null): boolean {
+  if (!userId || !c) return false;
+  if (c.placed_by === userId || c.answered_by === userId || c.transferred_from === userId) return true;
+  const status = String(c.status ?? "");
+  if (status !== "missed" && status !== "voicemail" && status !== "ringing") return false;
+  if (contactOwner) return contactOwner === userId;
+  return Array.isArray(c.rang_user_ids) && c.rang_user_ids.includes(userId);
+}
+
+/** The phone_calls rows this viewer may see (buildCrmFeed's opts.phone). Fails closed: no scope
+ *  given is "none". */
+// deno-lint-ignore no-explicit-any
+export function scopeCallRows(rows: any[], phone?: { level: "none" | "own" | "team"; userId: string | null; contactOwner?: string | null }): any[] {
+  const level = phone?.level ?? "none";
+  if (level === "team") return rows || [];
+  if (level !== "own") return [];
+  return (rows || []).filter((c) => callVisibleToOwn(phone?.userId ?? null, c, phone?.contactOwner ?? null));
+}
+
+/** 42 → "42s", 192 → "3m 12s", 3720 → "1h 2m". A call length, as a person says it. */
+export function fmtCallLength(seconds: unknown): string {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return `${s}s`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) return `${h}h ${m}m`;
+  return r ? `${m}m ${r}s` : `${m}m`;
+}
+
+/**
+ * A call's recording (its phone_call_recordings embed, migration 263) → what the timeline line
+ * shows and offers. Null when the call has none (or the embed was not read, before 263).
+ *   recordingId     the recording, while its audio exists (null once retention deleted it)
+ *   recordingReady  Twilio has finished it: the portal offers Play (GET /recordings/:id/audio)
+ *   recordingState  live | paused | processing | ready | failed, the phone-api Worker's words
+ *                   (routes/reads.ts recordingOut), so the portal and the apps say the same thing
+ *   summary         2-4 sentences and action items; KEPT after the audio is deleted
+ *   hasTranscript   the portal may offer "Show transcript" (fetched from the Worker on the press)
+ *   transcriptPending  the transcript and summary are still being made
+ */
+// deno-lint-ignore no-explicit-any
+export function recordingMeta(c: any): Record<string, unknown> | null {
+  const r = Array.isArray(c?.phone_call_recordings) ? (c.phone_call_recordings[0] ?? null) : (c?.phone_call_recordings ?? null);
+  if (!r || !r.id) return null;
+  const gone = !!r.deleted_at;
+  const status = String(r.status ?? "");
+  const live = String(c?.status ?? "") === "ringing" || String(c?.status ?? "") === "in_progress";
+  const state = status === "completed" ? "ready"
+    : status === "failed" || status === "absent" ? "failed"
+    : !live ? "processing"
+    : status === "paused" ? "paused" : "live";
+  const ts = String(r.transcript_status ?? "");
+  const summary = typeof r.summary === "string" && r.summary.trim() ? r.summary.trim() : null;
+  return {
+    recordingId: gone ? null : r.id,
+    recordingReady: !gone && status === "completed",
+    recordingState: gone ? null : state,
+    recordingDurationS: !gone && Number(r.duration_s) > 0 ? Number(r.duration_s) : null,
+    recordingDeleted: gone,
+    summary,
+    hasTranscript: !gone && ts === "done",
+    transcriptPending: !gone && (ts === "pending" || ts === "working"),
+  };
+}
+
+/**
+ * phone_calls rows (with their phone_voicemails embed) → timeline events.
+ *
+ * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
+ *   outbound, any outcome          → `call`. The builder placed it; "no answer" is how it went,
+ *                                    not a missed call — a MISSED call is one the customer made.
+ *   inbound, somebody answered     → `call` — unless a message was left on it after all (a
+ *                                    transfer nobody took), which is the `voicemail` line below.
+ *   inbound, still ringing/on-line → `call`, said as such (the feed can be opened mid-call).
+ *   inbound, a message was left    → `voicemail` (the embed, or status 'voicemail').
+ *   inbound, anything else         → `call_missed`.
+ *
+ * The number is shown as the stored E.164, the same way the texting lines show theirs.
+ */
+// deno-lint-ignore no-explicit-any
+export function callFeedEvents(rows: any[], nameOf: (userId: string) => string): FeedEvent[] {
+  const out: FeedEvent[] = [];
+  for (const c of rows || []) {
+    if (!c || !c.id) continue;
+    // PostgREST embeds a one-to-one as an object and a one-to-many as an array; call_id is
+    // UNIQUE, so it should be the object, and either shape is accepted rather than trusted.
+    const vm = Array.isArray(c.phone_voicemails) ? (c.phone_voicemails[0] ?? null) : (c.phone_voicemails ?? null);
+    const status = String(c.status ?? "");
+    const live = status === "ringing" || status === "in_progress";
+    const dur = Number(c.duration_s) || 0;
+    const base = {
+      id: `pc:${c.id}`,
+      at: iso(c.started_at),
+      meta: {
+        callId: c.id, direction: c.direction, status: status || null, durationS: dur || null,
+        voicemailId: vm?.id ?? null, listened: !!vm?.listened_at,
+        // The portal plays a voicemail from the Worker (/voicemails/:id/audio) only while the
+        // recording still exists at Twilio; a deleted one keeps its line but has nothing to play.
+        voicemailDeleted: !!vm?.deleted_at,
+        // The call's own recording, its summary and whether there is a transcript (migration
+        // 263, recordingMeta above). Absent on a call that was not recorded.
+        ...(recordingMeta(c) ?? {}),
+      } as Record<string, unknown>,
+    };
+    if (c.direction === "out") {
+      const num = c.to_e164 || "an unknown number";
+      const outcome = live ? "In progress"
+        : c.answered_at && dur > 0 ? `Talked ${fmtCallLength(dur)}`
+        : status === "busy" ? "Busy"
+        : status === "failed" ? "Didn't connect"
+        : "No answer";
+      const by = c.placed_by ? `by ${nameOf(c.placed_by)}` : null;
+      out.push({ ...base, type: "call", icon: "call", title: `Call to ${num}`, body: [outcome, by].filter(Boolean).join(" · "), actor: c.placed_by ?? null });
+      continue;
+    }
+    const num = c.from_e164 || "an unknown number";
+    // A MESSAGE LEFT IS THE LINE, even on a call that was answered first: a cold transfer nobody
+    // took goes to the builder's voicemail on the SAME call, which the Worker keeps answered
+    // (fileVoicemail). Read as "Answered", the message had no player and no transcript here,
+    // while the apps show it (reads.ts callSummary carries the voicemail whatever the status).
+    if ((c.answered_by || (c.answered_at && !live)) && !vm) {
+      const who = c.answered_by ? `Answered by ${nameOf(c.answered_by)}` : "Answered";
+      out.push({ ...base, type: "call", icon: "call", title: `Call from ${num}`, body: dur > 0 ? `${who} · talked ${fmtCallLength(dur)}` : who, actor: c.answered_by ?? null });
+    } else if (live) {
+      out.push({ ...base, type: "call", icon: "call", title: `Call from ${num}`, body: status === "ringing" ? "Ringing" : "On the line now" });
+    } else if (vm || status === "voicemail") {
+      const len = vm && Number(vm.duration_s) > 0 ? `${fmtCallLength(vm.duration_s)} message` : "Left a message";
+      const body = vm?.deleted_at ? "The message was deleted."
+        : vm?.transcript ? String(vm.transcript)
+        : `${len}${vm && !vm.listened_at ? " · not listened to yet" : ""}`;
+      out.push({ ...base, type: "voicemail", icon: "voicemail", title: `Voicemail from ${num}`, body });
+    } else {
+      out.push({ ...base, type: "call_missed", icon: "call_missed", title: `Missed call from ${num}`, body: "Nobody answered" });
+    }
+  }
+  return out;
 }
 
 function labelKind(k: string): string {

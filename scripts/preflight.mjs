@@ -67,17 +67,26 @@
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
 //   7. `deno test` over the edge-function unit tests — the parts of supabase/functions that
-//      cannot be exercised any other way. Two groups with different invocations: the
+//      cannot be exercised any other way. Three groups with different invocations: the
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
-//      validation, which guards where the client secret gets sent), and the pre-existing
-//      `_shared/_test_stubs/*_test.ts`, which needs its own import map. Same skip-with-a-warning
-//      policy as step 6.
+//      validation, which guards where the client secret gets sent), the pre-existing
+//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, and `tests/phone/`
+//      (My Synergy Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
+//      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
+//      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
+//      without it the step prints a SKIPPED line and blocks nothing — unless CI is set or
+//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead.
 //   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
 //      standalone HTML file, so the eslint pass never reads its inline script and the deno
 //      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
 //      are charged, and it carries the figure their consent sentence quotes. The check LIFTS
 //      the shipped block out of the file rather than re-implementing it, so a copy cannot
 //      drift into passing while the page is broken.
+//   9. The bank rail's Routing and Checking boxes (my-quotes.html and portal/04-orders.jsx):
+//      both copies of the routing check digit and the account-length rule are lifted out and
+//      run against the same vectors, no line naming a bank number may also touch storage, a
+//      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
+//      off (checkAchBankInputs).
 //
 // Steps are numbered in the order they RUN.
 //
@@ -86,7 +95,7 @@
 
 import { Linter } from "eslint";
 import globalsPkg from "globals";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 // The compile targets are the single source of truth for WHICH sources exist and how each
 // one is assembled. Importing them means a new file (or a new portal part) is linted the
 // moment it is compiled -- the alternative, a second hand-kept list here, is precisely how
@@ -909,6 +918,117 @@ function checkMyQuotesPayFigures(html) {
 }
 
 
+// ── The bank rail's Routing and Checking boxes: twins that must agree, numbers that go nowhere ─
+//
+// Since 2026-10 a bank account is typed into TWO boxes of our own (Carolyn 2026-09-02: "one says
+// routing and one says checking"), on two surfaces: the customer's pay panel in my-quotes.html
+// and the builder's Record-a-payment modal in portal/04-orders.jsx. Each composes
+// "routing/account" and tokenizes it straight from the browser with CardSecure. So for the first
+// time OUR code holds a bank account number, in two hand-kept copies, in two dialects. Three
+// things are checked on the SHIPPED text of both files:
+//
+//   1. The validators AGREE. achRoutingOk (9 digits + the ABA check digit) and achAccountOk
+//      (4-17 digits) are lifted out of each file and run against the same vectors, so one copy
+//      cannot drift into accepting what the other refuses.
+//   2. The numbers go NOWHERE but the tokenize POST. No line that names an ach* number may also
+//      touch storage, a URL, the console, the error log, or an error sentence. Line-based on
+//      purpose: it is a tripwire, and tests/harness/achBankBoxes.mjs is the runtime proof (it
+//      reads storage, the URL, the console and every request after a real run).
+//   3. The boxes carry autocomplete off, and the tokenize URL carries no query string and is
+//      built from the SERVED origin: no CardPointe host is written into either file (the repo is
+//      public, and the test/production switch is a secret on the server, not an edit here).
+//
+// Takes the texts as arguments so --self-test can hand it broken variants.
+const ACH_FILES = ["my-quotes.html", "portal/04-orders.jsx"];
+function checkAchBankInputs(files) {
+  const errors = [];
+  const takeBlock = (text, needle) => {
+    const lines = text.split("\n");
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+  const ROUTING = [["031201360", true], ["031201361", false], ["123456780", true], ["123456789", false],
+    ["03120136", false], ["0312013600", false], ["03120136a", false], ["", false], [null, false]];
+  const ACCOUNT = [["000987654321", true], ["1234", true], ["123", false], ["12345678901234567", true],
+    ["123456789012345678", false], ["12a4", false], ["", false], [null, false]];
+  // Anything that writes somewhere a number must never go. `error:` and the setters cover the
+  // sentences shown to a person; the rest are storage, the address bar, and the logs.
+  const SINK = /localStorage|sessionStorage|\blsSet\(|console\.|\blocation\b|\bhistory\.|URLSearchParams|indexedDB|document\.cookie|log_error|logEdgeError|sendBeacon|\bsetError\(|\bsetTokenErr\(|\bsetMsg\(|textContent|innerHTML|innerText|\balert\(|\berror\s*:/;
+  const NUMBER = /\b(?:setAch|ach)(?:Routing|Account)(?!Ok\b)\w*/;
+
+  for (const f of ACH_FILES) {
+    const text = (files[f] ?? "").replace(/\r\n/g, "\n");
+    const rSrc = takeBlock(text, "function achRoutingOk(");
+    const aSrc = takeBlock(text, "function achAccountOk(");
+    const tSrc = takeBlock(text, "function achTokenize(");
+    if (!rSrc || !aSrc || !tSrc) {
+      errors.push(`${f}: achRoutingOk / achAccountOk / achTokenize is gone — the bank rail's Routing and `
+        + "Checking boxes validate and tokenize through them, and this check lifts them out of the file. "
+        + "If the boxes were removed on purpose, remove this check too.");
+      continue;
+    }
+    let fns;
+    try {
+      // eslint-disable-next-line no-new-func
+      fns = new Function([rSrc, aSrc, "return { achRoutingOk, achAccountOk };"].join("\n"))();
+    } catch (e) {
+      errors.push(`${f}: achRoutingOk / achAccountOk do not run in isolation — ${e.message}`);
+      continue;
+    }
+    for (const [v, want] of ROUTING) {
+      if (fns.achRoutingOk(v) !== want) errors.push(`${f}: achRoutingOk(${JSON.stringify(v)}) should be ${want}`);
+    }
+    for (const [v, want] of ACCOUNT) {
+      if (fns.achAccountOk(v) !== want) errors.push(`${f}: achAccountOk(${JSON.stringify(v)}) should be ${want}`);
+    }
+
+    text.split("\n").forEach((line, i) => {
+      if (NUMBER.test(line) && SINK.test(line)) {
+        errors.push(`${f}:${i + 1}  a bank number meets "${line.match(SINK)[0]}" — routing and account `
+          + "numbers may only go into the tokenize request, never into storage, a URL, the console, "
+          + "the error log or a sentence on screen");
+      }
+    });
+
+    const host = /[a-z0-9-]+\.cardconnect\.com/i.exec(text);
+    if (host) {
+      const at = text.slice(0, host.index).split("\n").length;
+      errors.push(`${f}:${at}  CardPointe host "${host[0]}" written into a `
+        + "browser-served file — the tokenize URL is built from the origin the server serves (pay_options)");
+    }
+    if (!/\/cardsecure\/api\/v1\/ccn\/tokenize["'`]/.test(tSrc) || /ccn\/tokenize\?/.test(tSrc)) {
+      errors.push(`${f}: achTokenize must POST to /cardsecure/api/v1/ccn/tokenize with no query string — `
+        + "a query string puts the numbers in server and proxy logs");
+    }
+
+    if (f.endsWith(".html")) {
+      const boxes = takeBlock(text, "function mountBankBoxes(");
+      if (!boxes || !/setAttribute\("autocomplete", "off"\)/.test(boxes)) {
+        errors.push(`${f}: the Routing and Checking boxes must set autocomplete="off" (mountBankBoxes) — `
+          + "a browser that offers to remember a bank account number has stored it");
+      }
+    } else {
+      for (const v of ["achRouting", "achAccount"]) {
+        const at = text.indexOf(`value={${v}}`);
+        const open = at < 0 ? -1 : text.lastIndexOf("<input", at);
+        const close = at < 0 ? -1 : text.indexOf("/>", at);
+        if (open < 0 || close < 0 || !/autoComplete="off"/.test(text.slice(open, close))) {
+          errors.push(`${f}: the input bound to ${v} must carry autoComplete="off" — a browser that `
+            + "offers to remember a bank account number has stored it");
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+
 // ── The customer-facing standalone pages must PARSE ────────────────────────────────────
 // 2026-09-08: a multiline regex whose newline escapes did not survive an edit landed in
 // my-quotes.html. One SyntaxError takes the whole inline script down, so the page rendered
@@ -1639,6 +1759,10 @@ function denoCheck() {
 // resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
 // designs. Discovering it by convention rather than listing it means a new file in either shape is
 // covered the day it lands.
+// My Synergy Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
+const PHONE_TESTS_DIR = "tests/phone";
+const SQL_TESTS_DIR = "tests/sql";
+
 function testGroups() {
   const shared = join(root, FUNCTIONS_DIR, "_shared");
   const stubs = join(shared, "_test_stubs");
@@ -1663,13 +1787,29 @@ function testGroups() {
     }
   }
 
+  // tests/phone — My Synergy Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
+  // in supabase/functions/portal-settings). They sat outside every gate until 2026-09-29. Run from
+  // the REPO ROOT (they read the shipped sources by paths relative to themselves, portal/ and
+  // workers/ included), with exactly the flags their headers document: --allow-env because the
+  // shared purchase test sets its fake credentials (without it that test reports IGNORED, not
+  // passed), and no network, so a test that reaches the internet fails instead of passing slowly.
+  const phone = join(root, PHONE_TESTS_DIR);
+  if (existsSync(phone)) {
+    const files = readdirSync(phone)
+      .filter((f) => f.endsWith("_test.ts") || f.endsWith(".test.ts"))
+      .map((f) => `${PHONE_TESTS_DIR}/${f}`)
+      .sort();
+    if (files.length) groups.push({ label: PHONE_TESTS_DIR, files, importMap: null, cwd: root, readFlag: "--allow-read" });
+  }
+
   return groups;
 }
+
 
 function denoTest() {
   const groups = testGroups();
   const total = groups.reduce((n, g) => n + g.files.length, 0);
-  if (!total) return { errors: [], skipped: true, why: `no test files under ${FUNCTIONS_DIR}/_shared/` };
+  if (!total) return { errors: [], skipped: true, why: `no test files under ${FUNCTIONS_DIR}/_shared/ or ${PHONE_TESTS_DIR}/` };
   if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
 
   const errors = [];
@@ -1681,16 +1821,62 @@ function denoTest() {
     // against the SHIPPED source rather than a copy of it (wallSlab_test lifts the designer's
     // slab rules; the my-quotes check does the same for that page) — a copied-out copy would keep
     // passing while the real file drifted. Scoped to the repo so a test still cannot wander.
-    const args = ["test", "--quiet", "--allow-env", `--allow-read=${root}`, "--node-modules-dir=none"];
+    //
+    // tests/phone is the one group that runs from the repo root, with the unscoped --allow-read its
+    // own headers document (g.readFlag); the edge groups keep the repo-scoped grant.
+    const args = ["test", "--quiet", "--allow-env", g.readFlag ?? `--allow-read=${root}`, "--node-modules-dir=none"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
     args.push(...g.files);
-    const res = runDeno(args, join(root, FUNCTIONS_DIR));
+    const res = runDeno(args, g.cwd ?? join(root, FUNCTIONS_DIR));
     if (res.status !== 0) {
       const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
       errors.push(`edge functions: deno test failed in ${g.label} (${g.files.length} file(s))\n${out}`);
     }
   }
   return { errors, skipped: false, count: total, groups: groups.length };
+}
+
+// ── Migration tests: tests/sql/*.test.cjs (PGlite) ───────────────────────────────────────
+// Each file applies a migration to Postgres-in-WASM and drives it (migration254.test.cjs,
+// migration255.test.cjs). Their one dependency, @electric-sql/pglite, lives in tests/sql's OWN
+// package.json so the root install stays as it is — and this gate NEVER installs it: a push must
+// not need the network. So the step runs only when tests/sql/node_modules already exists, and
+// otherwise says SKIPPED, loudly, and blocks nothing (the same posture as a missing Deno).
+//
+// ⚠️ UNLESS IT IS REQUIRED (review BE-6): with CI set (any CI runner sets it) or
+// SS_REQUIRE_SQL_TESTS=1, a missing install FAILS the gate instead of skipping. A skip that
+// exits 0 is how migration255.test.cjs went unrun while every other step was green; wherever the
+// deps can be installed, the migration tests are not optional. Set SS_REQUIRE_SQL_TESTS=1 on any
+// machine that has run `npm install --prefix tests/sql` and wants the gate to hold it to that.
+// `dir` and `required` are parameters so --self-test can drive both directions on a fixture.
+function sqlTestsRequired(env = process.env) {
+  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1";
+}
+function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()) {
+  if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SQL_TESTS_DIR}/ does not exist`, files: [] };
+  const files = readdirSync(dir).filter((f) => f.endsWith(".test.cjs")).sort();
+  if (!files.length) return { errors: [], skipped: true, why: `no *.test.cjs files in ${SQL_TESTS_DIR}/`, files };
+  if (!existsSync(join(dir, "node_modules"))) {
+    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once to include ${files.join(", ")}`;
+    if (required) {
+      return {
+        errors: [`migration tests: REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1) but ${SQL_TESTS_DIR}/node_modules is not installed — ${how}`],
+        skipped: false, files,
+      };
+    }
+    return { errors: [], skipped: true, files, why: `${SQL_TESTS_DIR}/node_modules is not installed (${how})` };
+  }
+  const errors = [];
+  for (const f of files) {
+    // process.execPath, no shell: the same Node that is running this gate, and no quoting of a
+    // path that may contain a space.
+    const res = spawnSync(process.execPath, [f], { cwd: dir, encoding: "utf8" });
+    if (res.status !== 0) {
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
+      errors.push(`migration tests: ${SQL_TESTS_DIR}/${f} failed (exit ${res.status ?? res.signal})\n${out}`);
+    }
+  }
+  return { errors, skipped: false, files };
 }
 
 /**
@@ -2324,11 +2510,20 @@ if (process.argv.includes("--self-test")) {
   // BOTH groups must be discovered. The _test_stubs suite was already in the repo and this step
   // originally missed it twice over — wrong directory AND a `_test.ts` rather than `.test.ts`
   // suffix — so it ran zero of those 14 cases while reporting clean.
-  for (const want of ["_shared", "_test_stubs"]) {
+  // tests/phone joined on 2026-09-29, and it is the one group that runs from the repo root with
+  // its own read flag: assert both, or a refactor that dropped either would run it wrongly (or
+  // not at all) and still report clean.
+  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR]) {
     if (!groups.some((g) => g.label === want)) {
       console.error(`self-test FAILED: test group "${want}" was not discovered`);
       process.exit(1);
     }
+  }
+  const phoneGroup = groups.find((g) => g.label === PHONE_TESTS_DIR);
+  if (phoneGroup.cwd !== root || phoneGroup.readFlag !== "--allow-read" || phoneGroup.importMap
+    || !phoneGroup.files.every((f) => f.startsWith(`${PHONE_TESTS_DIR}/`))) {
+    console.error(`self-test FAILED: the ${PHONE_TESTS_DIR} group is not run from the repo root with --allow-read and no import map`);
+    process.exit(1);
   }
   const tmpT = mkdtempSync(join(tmpdir(), "ss-preflight-test-"));
   try {
@@ -2342,7 +2537,55 @@ if (process.argv.includes("--self-test")) {
   } finally {
     rmSync(tmpT, { recursive: true, force: true });
   }
-  console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered`);
+  console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered (${phoneGroup.files.length} in ${PHONE_TESTS_DIR})`);
+
+  // ── The migration-test step (tests/sql, PGlite) ────────────────────────────
+  // Three directions, on fixture directories so nothing needs PGlite installed: with no
+  // node_modules the step SKIPS (and says how to include it) instead of installing or failing; with
+  // it, a failing test file fails the gate and a passing one does not. And the real directory is
+  // discovered, so the step cannot quietly be pointed at nothing.
+  const realSql = sqlTests();
+  for (const f of ["migration254.test.cjs", "migration255.test.cjs"]) {
+    if (!realSql.files.includes(f)) {
+      console.error(`self-test FAILED: ${SQL_TESTS_DIR}/${f} was not discovered by the migration-test step`);
+      process.exit(1);
+    }
+  }
+  const tmpS = mkdtempSync(join(tmpdir(), "ss-preflight-sql-"));
+  try {
+    writeFileSync(join(tmpS, "fails.test.cjs"), 'console.log("  FAIL deliberately"); process.exit(1);\n');
+    const skipped = sqlTests(tmpS, false);
+    if (!skipped.skipped || skipped.errors.length || !/node_modules is not installed/.test(skipped.why) || !/npm install --prefix/.test(skipped.why)) {
+      console.error("self-test FAILED: with no tests/sql/node_modules the migration step did not SKIP with instructions");
+      process.exit(1);
+    }
+    // Required (CI, or SS_REQUIRE_SQL_TESTS=1): the same missing install FAILS the gate.
+    const required = sqlTests(tmpS, true);
+    if (required.skipped || required.errors.length !== 1 || !/REQUIRED here/.test(required.errors[0]) || !/npm install --prefix/.test(required.errors[0])) {
+      console.error("self-test FAILED: a REQUIRED migration step with no tests/sql/node_modules did not fail the gate");
+      process.exit(1);
+    }
+    if (!sqlTestsRequired({ CI: "true" }) || !sqlTestsRequired({ SS_REQUIRE_SQL_TESTS: "1" }) || sqlTestsRequired({}) || sqlTestsRequired({ SS_REQUIRE_SQL_TESTS: "0" })) {
+      console.error("self-test FAILED: sqlTestsRequired does not read CI / SS_REQUIRE_SQL_TESTS=1");
+      process.exit(1);
+    }
+    mkdirSync(join(tmpS, "node_modules"));
+    const failed = sqlTests(tmpS, false);
+    if (failed.skipped || failed.errors.length !== 1 || !/fails\.test\.cjs failed/.test(failed.errors[0])) {
+      console.error("self-test FAILED: a failing migration test did not fail the gate");
+      process.exit(1);
+    }
+    rmSync(join(tmpS, "fails.test.cjs"));
+    writeFileSync(join(tmpS, "passes.test.cjs"), 'console.log("ALL CHECKS PASSED");\n');
+    const passed = sqlTests(tmpS);
+    if (passed.skipped || passed.errors.length) {
+      console.error("self-test FAILED: a passing migration test failed the gate:\n" + passed.errors.join("\n"));
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpS, { recursive: true, force: true });
+  }
+  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI or SS_REQUIRE_SQL_TESTS=1), and a failing one fails the gate (${realSql.files.length} file(s) found)`);
 
   // ── The my-quotes tax-breakdown step ───────────────────────────────────────
   // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
@@ -2396,6 +2639,45 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
+
+  // ── The bank rail's Routing and Checking boxes ──
+  // The real files pass; a checksum that drifted in ONE copy, a number written to storage or to an
+  // error sentence, an input the browser may remember, a missing validator and a hardcoded
+  // CardSecure host all fail.
+  const achReal = Object.fromEntries(ACH_FILES.map((f) => [f, read(f)]));
+  if (checkAchBankInputs(achReal).length) {
+    console.error("self-test FAILED: the real my-quotes.html / portal/04-orders.jsx do not pass checkAchBankInputs:");
+    for (const e of checkAchBankInputs(achReal)) console.error("  " + e);
+    process.exit(1);
+  }
+  const achMutants = [
+    ["a check digit that drifted in the portal's copy", "portal/04-orders.jsx",
+      "(n[2] + n[5] + n[8])) % 10 === 0;", "(n[2] + n[5] + n[8])) % 10 === 1;", /achRoutingOk/],
+    ["a routing number written to localStorage", "my-quotes.html",
+      "        var mine = achSeq;", "        var mine = achSeq; lsSet(\"ach_last\", achRoutingEl.value);", /meets "lsSet\("/],
+    ["an account number put in an error sentence", "portal/04-orders.jsx",
+      "else { setPayToken(null); setTokenErr(r.error); }", "else { setPayToken(null); setTokenErr(r.error + achAccount); }", /meets "setTokenErr\("/],
+    ["a bank box the browser may remember", "portal/04-orders.jsx",
+      "autoComplete=\"off\" autoCorrect", "autoComplete=\"on\" autoCorrect", /autoComplete="off"/],
+    ["a validator that is gone", "my-quotes.html", "function achAccountOk(", "function achAccountOkOLD(", /is gone/],
+    ["a hardcoded CardSecure host", "portal/04-orders.jsx",
+      "await fetch(`${origin}/cardsecure", "await fetch(`https://fts.cardconnect.com/cardsecure", /CardPointe host/],
+  ];
+  for (const [what, f, from, to, want] of achMutants) {
+    const src = achReal[f].replace(/\r\n/g, "\n");
+    const mutated = src.replace(from, to);
+    if (mutated === src) {
+      console.error(`self-test FAILED: could not plant "${what}" — the subject of checkAchBankInputs moved`);
+      process.exit(1);
+    }
+    if (!checkAchBankInputs({ ...achReal, [f]: mutated }).some((e) => want.test(e))) {
+      console.error(`self-test FAILED: checkAchBankInputs passed ${what}`);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: the Routing/Checking validators agree in both files, and a drifted check "
+    + "digit, a number in storage or an error sentence, a box the browser may remember, a missing "
+    + "validator and a hardcoded CardSecure host are each refused");
 
   // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
   // This rule had NO self-test at all until now, in either direction — while quietly running
@@ -2716,11 +2998,18 @@ if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
+const sql = sqlTests();
+errors.push(...sql.errors);
+if (sql.skipped) {
+  console.error(`preflight: migration tests SKIPPED — ${sql.why}.`);
+}
+
 errors.push(...checkStandalonePagesParse({
   "my-quotes.html": readFileSync(join(root, "my-quotes.html"), "utf8"),
 }));
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
+errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

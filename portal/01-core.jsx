@@ -42,7 +42,19 @@ const ssHasStepUpHeader = (url, opts) => {
   // supabase-js may hand us either (Request) or (url, init), so check both.
   return read(opts && opts.headers) || read(url && url.headers);
 };
-const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
+// Every edge-function call runs in the DATABASE's region, not the one nearest the caller.
+// Supabase runs a function wherever the request lands by default, and every query inside it
+// then crosses back to us-east-1 — measured 2026-10-01 from Pakistan: the function ran in
+// Singapore and `status` spent 2.2 s inside the server, 0.85 s once pinned. One long trip to
+// the function beats a long trip per query, and for anyone already near Virginia it changes
+// nothing. A query param, not the x-region header: the functions' CORS does not allow that
+// header, so the browser would refuse the call at the preflight.
+const SS_FN_REGION = "us-east-1";
+const ssPinFnRegion = (url) =>
+  (typeof url === "string" && url.indexOf("/functions/v1/") !== -1 && url.indexOf("forceFunctionRegion=") === -1)
+    ? url + (url.indexOf("?") === -1 ? "?" : "&") + "forceFunctionRegion=" + SS_FN_REGION
+    : url;
+const ssFetch = (url, opts) => fetch(ssPinFnRegion(url), opts).then((res) => {
   try {
     const u = String(url && url.url ? url.url : url);
     if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1)
@@ -288,6 +300,17 @@ __ssFunctions.invoke = async (name, opts) => {
     // Never mutate the caller's object — several call sites build a local `body` and reuse it.
     opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
   }
+  // Every catalog read asks for the items kept out of the customer's palette until priced (278's
+  // partition wall): this portal's Interior items card lists one so it can be priced, and the
+  // portal-settings catalog leaves it out for anyone who does not ask (production's portal from
+  // before 278). Here, not on the card's own call: window.__ssCatalogFlight shares one in-flight read
+  // per tenant between cards, so whichever card fires first decides the body. Copied, never mutated.
+  if (
+    name === "portal-settings" && opts && opts.body && typeof opts.body === "object" &&
+    opts.body.action === "catalog" && opts.body.withUnpriced === undefined
+  ) {
+    opts = { ...opts, body: { ...opts.body, withUnpriced: true } };
+  }
   // A tab whose session vanished under it must NOT fall back to the anon key. supabase-js
   // puts that key on the wire as the Bearer whenever getSession() resolves null — our
   // legacy `eyJ` anon key defeats supabase-js's own omitApiKeyAsBearer opt-out, which only
@@ -496,6 +519,8 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 
 const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
+  // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
+  advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
   projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
@@ -521,6 +546,10 @@ const TAB_META = {
   // do more than one quote for one deal, so let's leave it on the deals side right now."
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
   contacts: ["Contacts", "Everyone who has enquired, and their activity"],
+  // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
+  // would be email, all of it ... I want that bar at the top that shows that I can sort and see
+  // just that." One row per customer, from crm_inbox; replying happens on their record.
+  conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
   orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -539,6 +568,9 @@ const TAB_META = {
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
   "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
+  // My Synergy Phone's report (plan section 12). Carolyn, 08-27: "the reporting is inside Structure
+  // Studio ... so it's in one place" — the apps place and take the calls, this page counts them.
+  calls: ["Calls", "Calls and texts, person by person — yours, or the whole team's"],
 };
 
 // ── Path routing ─────────────────────────────────────────────────────────────
@@ -616,6 +648,33 @@ function ssIsBetaHost() {
 // stay clamped on production (Carolyn 2026-08-27, "Go ahead and do it, yes").
 const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units"];
 
+// The Advanced page (Carolyn 2026-09-28): "an advanced tab that is only available in Structure
+// Studio for us yet", later switched on per builder as "advanced mode" in Settings. THIS IS THE
+// ONE PLACE THAT RULE LIVES — the nav item, the route clamp and the page all ask it.
+//
+// On in two cases, both read off portal-billing's entitlement:
+//   * OUR OWN ACCOUNT, always: `reason: "internal"` for the one tenant flagged
+//     client_settings.internal_account (migration 169), the same signal 03-catalog's demoView reads.
+//     NOT the slug: this repo is public and _shared/internalTenant.ts explains why the literal must
+//     not appear in source.
+//   * A BUILDER WHO SWITCHED IT ON (2026-10-05, migration 270): `advancedMode: true`, from
+//     client_settings.advanced_mode, which an owner or admin sets in Settings → Designer (the
+//     "Advanced mode" card, portal-settings save_advanced_mode). Off for every builder until then,
+//     and free. Ahsan on the 09-28 call: they "turn on the advanced mode to access this tab, so
+//     everybody is not going to see"; Carolyn: "Yep, yep, no, that's good." Whether builders are
+//     offered the switch on production waits on her (it ships with the portal's promotion).
+// Strictly `=== true`: a server that predates the field sends nothing, and that is off.
+//
+// Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
+// which reads as off, so the nav item can never flash for a builder who does not have it.
+//
+// This is the TENANT half. WHO on that tenant gets the page is the shell's `advancedMayRun`
+// (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
+// save — already sets. It is not part of the per-tenant setting, so it stays out of here.
+function ssAdvancedOn(entitlement) {
+  return !!(entitlement && (entitlement.reason === "internal" || entitlement.advancedMode === true));
+}
+
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.
 function ssPagePath(page, sub) {
@@ -638,7 +697,7 @@ if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch
 // data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -650,12 +709,18 @@ const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
+  // The same area as the Designer: it IS the designer, one building at a time. Whether the page
+  // exists at all for this tenant is ssAdvancedOn's question, asked by ssClampTab, not this map's.
+  advanced: "designer",
   // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
   // the contacts list, and each gates on the area whose data it actually shows. The merged
   // tab needed EITHER because it showed both; a rep granted only contacts must not get the
   // customer-designs list back through a tab that no longer contains it.
   designs: "designs",
   contacts: "contacts",
+  // The same customers, seen by their latest message: whoever may open Contacts may open this,
+  // and crm_inbox narrows contacts:'own' and the calls row by row on the server.
+  conversations: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",
@@ -664,6 +729,9 @@ const TAB_AREA = {
   commissions: "commissions",
   reports: "reports",
   quickbooks: "settings_quickbooks",
+  // Any phone level reads it: 'own' sees their own line, the Team toggle needs literal
+  // view/edit (ssOwnPhoneOnly) and the server checks the same thing again.
+  calls: "phone",
 };
 // Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
 // missing from this map is not access-controlled.
@@ -723,13 +791,26 @@ const SETTINGS_TAB_AREA = {
   // has granted it. Reading the resulting status is contacts-level; that split lives in
   // portal-sms's GATES table, and this map only decides whether the sub-tab is worth showing.
   sms: "settings_billing",
+  // My Synergy Phone's calling setup (who answers, hours, forwarding) — the phone area itself, not
+  // settings_billing: choosing who picks up spends nothing and registers nothing. An 'own'
+  // holder who reaches the tab sees the install links and their own status only; the setup is
+  // phone_settings_get's team slice, which the server hands to literal view/edit.
+  phone: "phone",
   commissions: "commissions",
   team: "settings_team",
   billing: "settings_billing",
 };
 // Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
+// `phone` is here because Phone is a Settings card gated on the phone area itself
+// (SETTINGS_TAB_AREA.phone), and the people who answer the phone are mostly NOT settings
+// holders: the sales_rep, dealer and sales_manager presets grant phone 'own'/'view' and no
+// settings_* area at all. Without it they had no Settings tab, so no "Your calls" card to set
+// their own ring hours or greeting on (migration 264), and both apps' "Change in Structure
+// Studio" link (/portal/settings/phone) clamped them to their fallback page. ssSettingsTabs
+// still filters per card, so such a person's rail is Phone (where calling is offered) and My
+// Profile, and nothing else.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
-  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
+  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email", "phone"];
 
 // 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
 // commissions ("your own payouts") and, since migration 193, contacts ("the customers you
@@ -762,6 +843,529 @@ function ssCanWrite(access, area) {
   return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
 }
 
+// ══ MY SYNERGY PHONE — the portal's half of calling (2026-09-29) ═════════════════════════
+// The contract is structure-studio-phone/docs/SPEC.md, section 5: the portal NEVER places a
+// call itself. Call and Text on a contact hand the number to the My Synergy Phone Chrome extension on
+// this same computer through chrome.runtime.sendMessage — no network, no page change (Carolyn
+// 08-27: "it opens up the phone ... it's not taking them to a different place") — or, on a
+// phone's browser, open the My Synergy Phone app by a deep link.
+
+// Phone access, the browser's copy of access.ts' ownPhoneOnly(). The TEAM question — the Calls
+// report's Team toggle, the setup screen — asks for the LITERAL level, because RANK (and so
+// ssCanRead) scores 'own' and 'view' the same. FAILS CLOSED exactly like the server's: anything
+// that is not literally view or edit, including a missing key, is "own calls only".
+function ssOwnPhoneOnly(access) {
+  const v = access && access.phone;
+  return v !== "view" && v !== "edit";
+}
+
+// WHERE CALLING IS OFFERED AT ALL, and this is the ONE place that rule lives (the ssAdvancedOn
+// pattern): the Settings → Phone tab, the Calls rail item and the contact page's Call button all
+// ask it. Plan D9: My Synergy Phone is OFF for every builder until launch and switched on per tenant,
+// so a builder's owner on production does not get a Phone tab advertising a product that is not
+// released — and, with it, a switch that would turn calling on before billing exists. It is
+// offered when the tenant's phone_status is on, to an operator viewing a tenant (that is how a
+// tenant is switched on), and on beta/local hosts, where unreleased work is looked at.
+// ⚠️ AT BUILDER LAUNCH (plan phase 6, "self-serve switch-on in Settings") this becomes `true`
+// for owners, and nothing else has to change.
+function ssPhoneOffered(phoneStatus, operatorViewing) {
+  return phoneStatus === "on" || !!operatorViewing || ssIsBetaHost();
+}
+
+// The Chrome extension IDs allowed to answer, asked in LIST ORDER (the first that answers
+// wins, ssPhonePing). Today that is the UNPACKED DEV BUILD's id: stable because that build is
+// made with a fixed manifest `key` (the My Synergy Phone repo's EXTENSION_KEY, docs/extension-dev.md
+// "Keeping the extension ID stable"), so every developer and the pilot load it under one id. ⚠️ WHEN MY SYNERGY PHONE IS PUBLISHED, add the Chrome Web Store id to this list, FIRST, so a store
+// install beats a dev build on the same computer (and update SS_PHONE_LINKS.chrome below). The
+// extension checks this page's origin against its own allow-list either way (SPEC section 5), so
+// listing an id grants it nothing. Only a real Chrome extension ID shape (32 letters a-p) is ever
+// messaged. `window.` so the config is one line to find and so the harness can inject a test ID
+// before the app runs; a value already there wins.
+if (!Array.isArray(window.SS_PHONE_EXTENSION_IDS)) {
+  window.SS_PHONE_EXTENSION_IDS = ["deoplohngfikappgihmmofhfhhdcpkch", "ipiccbfkkbenmiaiaoecbhbjalkbikjk"];
+}
+// PHONE_API_BASE: the phone-api Worker's public address (SPEC section 1), which serves
+// voicemail audio to the contact timeline (GET /voicemails/:id/audio, SPEC section 3). Same
+// config shape as the IDs above: `window.` so the harness can point it at a stub before the app
+// runs, and a value already there wins. https only; anything else falls back to the default,
+// because the viewer's sign-in token is sent to this address.
+if (typeof window.SS_PHONE_API_BASE !== "string" || !/^https:\/\/[^/?#\s]+$/.test(window.SS_PHONE_API_BASE)) {
+  window.SS_PHONE_API_BASE = "https://phone.structurestudiosuite.com";
+}
+// A voicemail's audio address on the Worker. "" when there is nothing to ask for.
+//
+// ⚠️ NO TOKEN IN THE URL (review SSB-7). This used to be an <audio src> carrying
+// ?access_token=<the viewer's Supabase session>, because an <audio> tag cannot send a header.
+// The phone-api Worker has observability on, and Workers Logs record every request URL, so each
+// play wrote a live session token (an owner's included) into Cloudflare's logs and any other
+// URL log along the way — a token good against every Supabase API and portal-settings action
+// for up to an hour. The audio is now fetched with the token in the Authorization header
+// (ssPhoneFetchVoicemail, which the Worker's CORS allows from the portal's hosts) and played
+// from a blob: URL, so the address itself carries nothing.
+function ssPhoneVoicemailAudioUrl(voicemailId) {
+  const id = String(voicemailId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return "";
+  return `${window.SS_PHONE_API_BASE}/voicemails/${encodeURIComponent(id)}/audio`;
+}
+// Fetch one voicemail as the signed-in person and hand back a blob: URL an <audio> tag plays.
+// Throws a sentence. Only ever called from a press: the Worker marks a voicemail heard the first
+// time it streams, so merely opening the record must not fetch it. The caller revokes the URL.
+async function ssPhoneFetchVoicemail(voicemailId, accessToken, fetchImpl) {
+  const url = ssPhoneVoicemailAudioUrl(voicemailId);
+  if (!url) throw new Error("That voicemail isn't available.");
+  if (!accessToken) throw new Error("Sign in again to play this message.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The voicemail couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? "That voicemail isn't available any more."
+      : res.status === 401 ? "Sign in again to play this message."
+      : "The voicemail couldn't be loaded. Try again.");
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+// CALL RECORDINGS (migration 263): a recorded call's audio on the Worker (GET /recordings/:id/audio),
+// fetched the voicemail's way: the sign-in in the Authorization header, never in the URL (the
+// Worker refuses ?access_token= here outright), played from a blob: URL. "" when there is nothing
+// to ask for. Unlike a voicemail, playing it marks nothing, so only the press decides when.
+function ssPhoneRecordingAudioUrl(recordingId) {
+  const id = String(recordingId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return "";
+  return `${window.SS_PHONE_API_BASE}/recordings/${encodeURIComponent(id)}/audio`;
+}
+// The Worker's own sentence from a refusal ({ok:false, error:{message}}), or null.
+async function ssPhoneRefusalText(res) {
+  try {
+    const j = await res.json();
+    const m = j && j.error && j.error.message;
+    return typeof m === "string" && m.trim() ? m.trim() : null;
+  } catch (_e) { return null; }
+}
+// Fetch one call recording as the signed-in person → a blob: URL. Throws a sentence; a 404 is the
+// Worker's own ("The recording isn't ready yet. Try again in a minute.", "That recording is no
+// longer available."). The caller revokes the URL.
+async function ssPhoneFetchRecording(recordingId, accessToken, fetchImpl) {
+  const url = ssPhoneRecordingAudioUrl(recordingId);
+  if (!url) throw new Error("That recording isn't available.");
+  if (!accessToken) throw new Error("Sign in again to play this recording.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The recording couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to play this recording.");
+    const said = res.status === 404 ? await ssPhoneRefusalText(res) : null;
+    throw new Error(said || (res.status === 404 ? "That recording isn't available any more." : "The recording couldn't be loaded. Try again."));
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+// A recorded call's whole transcript and its summary (GET /calls/:id/transcript), read on
+// "Show transcript" only: the timeline carries whether there is one, never the text. Same header
+// rule. → { transcript, summary }. Throws a sentence.
+async function ssPhoneFetchTranscript(callId, accessToken, fetchImpl) {
+  const id = String(callId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("That transcript isn't available.");
+  if (!accessToken) throw new Error("Sign in again to read this transcript.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}/calls/${encodeURIComponent(id)}/transcript`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The transcript couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to read this transcript.");
+    if (res.status === 404) throw new Error("This call's transcript isn't available any more.");
+    throw new Error("The transcript couldn't be loaded. Try again.");
+  }
+  let j = null;
+  try { j = await res.json(); } catch (_e) { j = null; }
+  if (!j || typeof j.transcript !== "string") throw new Error("The transcript couldn't be loaded. Try again.");
+  return { transcript: j.transcript, summary: typeof j.summary === "string" ? j.summary : null };
+}
+// YOUR CALLS (migration 264): the signed-in person's own phone settings, read and saved on the
+// Worker exactly as My Synergy Phone does (GET and POST /settings/me), with the sign-in in the
+// Authorization header, never the URL. GET /team is who may be chosen. They answer for the
+// signed-in person's OWN business, which is why Settings › Phone doesn't show them to an operator
+// viewing someone else's. Each throws a sentence: the Worker's own when it refused ("That
+// teammate can't take calls."), else a plain one; `status` rides on it so the card can tell an
+// older Worker (405: only POST /settings/me) from a fault.
+async function ssPhoneApi(method, path, accessToken, body, fetchImpl) {
+  const fail = (message, status) => Object.assign(new Error(message), { status: status || 0 });
+  if (!accessToken) throw fail("Sign in again to change this.", 401);
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}${path}`, {
+      method,
+      headers: body ? { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } : { Authorization: `Bearer ${accessToken}` },
+      body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw fail("My Synergy Phone couldn't be reached. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw fail("Sign in again to change this.", 401);
+    throw fail((await ssPhoneRefusalText(res)) || "That didn't go through. Try again.", res.status);
+  }
+  let j = null;
+  try { j = await res.json(); } catch (_e) { j = null; }
+  if (!j || j.ok !== true) throw fail("That didn't go through. Try again.", res.status);
+  return j;
+}
+// → {dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting}
+async function ssPhoneMySettings(accessToken, fetchImpl) {
+  return (await ssPhoneApi("GET", "/settings/me", accessToken, null, fetchImpl)).settings || null;
+}
+// `patch` is any of those keys; → the row as the Worker saved it.
+async function ssPhoneSaveMySettings(patch, accessToken, fetchImpl) {
+  return (await ssPhoneApi("POST", "/settings/me", accessToken, patch, fetchImpl)).settings || null;
+}
+// → [{user_id, full_name, identity_base}]: everyone on the business with phone access.
+async function ssPhoneTeam(accessToken, fetchImpl) {
+  const j = await ssPhoneApi("GET", "/team", accessToken, null, fetchImpl);
+  return Array.isArray(j.members) ? j.members : [];
+}
+// YOUR VOICEMAIL GREETING (migration 264), recorded by phone: Record asks the Worker to ring the
+// signed-in person's own My Synergy Phone (in Chrome or on their phone), which then records them.
+// It throws the Worker's sentence when it can't ("Your phone is already ringing for your
+// greeting...", "Your business doesn't have a phone number yet."). The saved greeting shows up in
+// ssPhoneMySettings' `greeting` ({set, updated_at}) once the call ends.
+async function ssPhoneRecordGreeting(accessToken, fetchImpl) {
+  await ssPhoneApi("POST", "/settings/me/greeting/record", accessToken, {}, fetchImpl);
+}
+// "Use the standard greeting": the recording is forgotten and deleted. → the settings as saved.
+async function ssPhoneClearGreeting(accessToken, fetchImpl) {
+  return (await ssPhoneApi("POST", "/settings/me/greeting/clear", accessToken, {}, fetchImpl)).settings || null;
+}
+// Play: your own greeting's audio (GET /settings/me/greeting/audio), the sign-in in the header,
+// never the URL → a blob: URL for an <audio> tag. Throws a sentence. The caller revokes the URL.
+async function ssPhoneFetchGreeting(accessToken, fetchImpl) {
+  if (!accessToken) throw new Error("Sign in again to play your greeting.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}/settings/me/greeting/audio`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("Your greeting couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to play your greeting.");
+    throw new Error((await ssPhoneRefusalText(res)) || "Your greeting couldn't be loaded. Try again.");
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+// Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
+// is shown as "coming soon" rather than as a button to a page that does not exist.
+const SS_PHONE_LINKS = {
+  chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_MY_SYNERGY_PHONE_EXTENSION_ID",
+  ios: "https://apps.apple.com/app/PLACEHOLDER_MY_SYNERGY_PHONE_IOS",
+  android: "https://play.google.com/store/apps/details?id=PLACEHOLDER_MY_SYNERGY_PHONE_ANDROID",
+};
+function ssPhoneLinkReady(url) { return !!url && !/PLACEHOLDER/.test(url); }
+
+function ssPhoneExtensionIds() {
+  const ids = Array.isArray(window.SS_PHONE_EXTENSION_IDS) ? window.SS_PHONE_EXTENSION_IDS : [];
+  return ids.filter((id) => typeof id === "string" && /^[a-p]{32}$/.test(id));
+}
+
+// One message to one extension ID → its reply, or null (not installed, no answer, not Chrome).
+// ⚠️ chrome.runtime.lastError MUST be read inside the callback: an ID with no extension behind
+// it (the normal state for most visitors) answers through lastError, and an unread lastError is
+// logged by Chrome as "Unchecked runtime.lastError" on every click.
+function ssPhoneMessage(id, msg, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = (v) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(v); };
+    timer = setTimeout(() => finish(null), timeoutMs);
+    try {
+      const rt = window.chrome && window.chrome.runtime;
+      if (!rt || typeof rt.sendMessage !== "function") { finish(null); return; }
+      rt.sendMessage(id, msg, (reply) => {
+        const err = window.chrome && window.chrome.runtime && window.chrome.runtime.lastError;
+        finish(err || reply === undefined ? null : reply);
+      });
+    } catch (_e) { finish(null); }
+  });
+}
+
+// Which My Synergy Phone answers on this computer: { id, reply } or null. Every listed ID is asked at
+// once and the first in LIST order that answers wins, so a store build listed first beats a
+// developer build. A found extension is remembered briefly (a second click should not ask
+// again); not-found is never remembered, so installing it and pressing Call again just works.
+let ssPhoneFound = null;
+async function ssPhonePing() {
+  if (ssPhoneFound && Date.now() - ssPhoneFound.at < 15000) return ssPhoneFound;
+  const ids = ssPhoneExtensionIds();
+  const replies = await Promise.all(ids.map((id) => ssPhoneMessage(id, { type: "sss.ping" }, 800)));
+  const i = replies.findIndex((r) => r && r.ok === true);
+  ssPhoneFound = i < 0 ? null : { id: ids[i], reply: replies[i], at: Date.now() };
+  return ssPhoneFound;
+}
+
+// Ask My Synergy Phone to call or text. → { installed, reply }. `reply` is the extension's own
+// { ok } / { ok:false, error } (SPEC section 5); a silence after a successful ping is reported
+// as error "no_reply" so the screen can say what to do rather than nothing.
+async function ssPhoneSend(type, payload) {
+  const found = await ssPhonePing();
+  if (!found) return { installed: false, reply: null };
+  const reply = await ssPhoneMessage(found.id, { type, ...payload }, 4000);
+  if (!reply) { ssPhoneFound = null; return { installed: true, reply: { ok: false, error: "no_reply" } }; }
+  return { installed: true, reply };
+}
+
+// What each refusal means, in words a builder can act on. Codes are the extension's (SPEC
+// section 5 plus the bridge's own busy / bad_request / emergency_blocked).
+function ssPhoneRefusal(reply) {
+  const code = reply && reply.error;
+  if (code === "wrong_user") {
+    return reply.signed_in_as
+      ? `My Synergy Phone on this computer is signed in as ${reply.signed_in_as}. Sign in to My Synergy Phone as yourself, then try again.`
+      : "My Synergy Phone on this computer is signed in as someone else. Sign in to My Synergy Phone as yourself, then try again.";
+  }
+  if (code === "signed_out") return "My Synergy Phone isn't signed in. Open it from your Chrome toolbar, sign in with your Structure Studio login, then try again.";
+  if (code === "no_access") return "Your account doesn't include calling. Ask an owner or admin to turn on Phone access for you on the Team tab.";
+  if (code === "busy") return "Finish your current call in My Synergy Phone first.";
+  if (code === "emergency_blocked") return "For emergencies, call 911 from your cell phone.";
+  if (code === "bad_request") return "My Synergy Phone couldn't use that number. Check the contact's phone number.";
+  return "My Synergy Phone didn't answer. Open it from your Chrome toolbar and try again.";
+}
+
+// A phone's browser, where there is no extension and the My Synergy Phone APP takes the call.
+function ssIsPhoneBrowser() {
+  try {
+    const uad = navigator.userAgentData;
+    if (uad && typeof uad.mobile === "boolean" && uad.mobile) return true;
+    const ua = String(navigator.userAgent || "");
+    if (/Android|iPhone|iPod|iPad/i.test(ua)) return true;
+    // iPadOS asks for the desktop site and reports itself as a Mac with a touch screen.
+    return /Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+  } catch (_e) { return false; }
+}
+
+// Anything a person typed as a phone number → E.164, or "" when it cannot be dialed. US numbers
+// in any format; an explicit "+" number is passed through for the extension and the Worker to
+// judge (their geo rules, not ours).
+function ssPhoneE164(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  const d = s.replace(/\D/g, "");
+  if (s.charAt(0) === "+") return d.length >= 8 && d.length <= 15 ? "+" + d : "";
+  if (d.length === 10) return "+1" + d;
+  if (d.length === 11 && d.charAt(0) === "1") return "+" + d;
+  return "";
+}
+
+// Plan section 14 (911 is deferred): "the clients also block before dialing". 933 is Twilio's
+// emergency test number and 112 dials emergency services on most phones.
+function ssPhoneIsEmergency(raw) {
+  const d = String(raw == null ? "" : raw).replace(/\D/g, "");
+  return d === "911" || d === "933" || d === "112";
+}
+
+// The My Synergy Phone app's deep link (SPEC section 7, "Call link"):
+//   mysynergyphone://call?to=<E.164>&contact_id=<uuid>&user_id=<uuid>&client_id=<slug>&ts=<epoch ms>
+// The same four fields the extension message carries (SPEC section 5), so the app refuses a
+// different signed-in person the same way the extension does, plus `ts`, when this page made the
+// link: a custom scheme has no sender, so the app drops a link more than a minute old (or ahead)
+// by it, which is what stops a link replayed later (Android reopening the app from Recents, a
+// link copied into a text) from offering a call nobody just asked for. `now` is for tests only.
+function ssPhoneDeepLink(kind, p, now) {
+  const q = new URLSearchParams();
+  q.set("to", p.to_e164 || "");
+  if (p.contact_id) q.set("contact_id", p.contact_id);
+  if (p.user_id) q.set("user_id", p.user_id);
+  if (p.client_id) q.set("client_id", p.client_id);
+  q.set("ts", String(Math.floor(Number.isFinite(now) ? now : Date.now())));
+  return "mysynergyphone://" + kind + "?" + q.toString();
+}
+
+// CALL, the ONE hand-off: the contact page's Call tab and the contact list's Call button both
+// come through here, so the two cannot drift into different rules. `raw` is the contact's phone
+// as stored; `ids` are the other three SPEC fields (the SIGNED-IN person and the tenant on
+// screen, never a contact's owner). → what to show:
+//   { kind: "error", text }    nothing was dialed, and the sentence says why
+//   { kind: "app", to }        a phone's browser: the My Synergy Phone app was asked to open
+//   { kind: "install", to }    no My Synergy Phone answered on this computer
+//   { kind: "calling", to }    the extension took the call; it runs there, the page stays put
+// `badNumber` words the undialable case for where the button is ("Check it under Summary").
+async function ssPhoneStartCall(raw, ids, badNumber) {
+  // Plan section 14, 911 deferred: "the clients also block before dialing".
+  if (ssPhoneIsEmergency(raw)) return { kind: "error", text: "For emergencies, call 911 from your cell phone." };
+  const msg = {
+    to_e164: ssPhoneE164(raw),
+    contact_id: (ids && ids.contact_id) || null,
+    user_id: (ids && ids.user_id) || null,
+    client_id: (ids && ids.client_id) || null,
+  };
+  if (!msg.to_e164) return { kind: "error", text: badNumber || "This contact's phone number can't be dialed." };
+  if (ssIsPhoneBrowser()) {
+    try { window.location.href = ssPhoneDeepLink("call", msg); } catch (_e) { /* the panel says what to do */ }
+    return { kind: "app", to: msg.to_e164 };
+  }
+  const out = await ssPhoneSend("sss.call", msg);
+  if (!out.installed) return { kind: "install", to: msg.to_e164 };
+  if (out.reply && out.reply.ok) return { kind: "calling", to: msg.to_e164 };
+  return { kind: "error", text: ssPhoneRefusal(out.reply) };
+}
+
+// ── QUICK SENDS: saved messages, in the record's Email and SMS boxes ─────────────────────
+// Carolyn 2026-09-30: "I think I want to call it quick sends, okay, for them to do quick sends on
+// text and email, both of them, okay, so that they can easily just click and choose the list of
+// things. And obviously putting in first name, last name". The list is each person's OWN and it
+// is the SAME list My Synergy Phone keeps (migration 258, phone_quick_sends), read through
+// portal-settings' quick_sends_list. Insert fills the box and nothing else; the person reads it
+// and presses Send, which goes through crm_send_email / crm_send_sms with all their checks.
+// "Inserting fills the box. Sending is yours."
+//
+// ssFillQuickSend and ssInsertIntoDraft are LINE-FOR-LINE PORTS of fillQuickSend and
+// insertIntoDraft in the phone repo's packages/phone-core/src/quickSends.ts, so a quick send
+// reads the same here as it does in the app. Change both copies together:
+// tests/phone/quickSends_test.ts holds this source to phone-core's own cases
+// (tests/phone/quickSendCases.mjs), and tests/harness/crmQuickSends.mjs holds the COMPILED
+// artifact to the same cases and, when the phone repo is checked out beside this one, to
+// phone-core itself. The helpers below them are ports of the app's mobile/src/logic/quickSends.ts.
+const SS_QUICK_SEND_TOKEN_RE = /\{(first_name|last_name|my_name)\}/g;
+// Digits, +, spaces, dashes, parens (and dots): a number shown where a name would be.
+const SS_QUICK_SEND_PHONE_LIKE = /^[\d+\s\-().]*$/;
+
+function ssQuickSendWords(s) {
+  return String(s == null ? "" : s).trim().split(/\s+/).filter(Boolean);
+}
+
+// A quick send's text with the fill-ins replaced. {first_name} is the first word of contactName
+// and {last_name} the rest; {my_name} is the first word of myName. A fill-in with no value is
+// dropped with one space or ", " before it ("Hey {first_name}, happy" becomes "Hey, happy"), and
+// the gap it leaves is tidied. Other {words} are left as they are, and text without fill-ins
+// comes back unchanged. A phone number standing in for the customer's name counts as no name.
+function ssFillQuickSend(body, fill) {
+  const text = String(body == null ? "" : body);
+  if (!text.includes("{")) return text;
+  const f = fill || {};
+  const contact = SS_QUICK_SEND_PHONE_LIKE.test(String(f.contactName == null ? "" : f.contactName).trim()) ? [] : ssQuickSendWords(f.contactName);
+  const values = {
+    first_name: contact[0] || "",
+    last_name: contact.slice(1).join(" "),
+    my_name: ssQuickSendWords(f.myName)[0] || "",
+  };
+
+  let out = "";
+  let from = 0;
+  for (const m of text.matchAll(SS_QUICK_SEND_TOKEN_RE)) {
+    const at = m.index || 0;
+    out += text.slice(from, at);
+    from = at + m[0].length;
+    const value = values[m[1]];
+    if (value) {
+      out += value;
+      continue;
+    }
+    // Drop one ", " (or a lone comma or space) that led into the missing value.
+    if (out.endsWith(", ")) out = out.slice(0, -2);
+    else if (out.endsWith(",") || out.endsWith(" ")) out = out.slice(0, -1);
+    const rest = text.slice(from);
+    if (out === "" || out.endsWith("\n")) {
+      // At the start of a line the fill-in was a greeting: its own comma or dash goes with it.
+      from += /^[ \t]*(?:[,.!?:;]|[—–-])?[ \t]*/.exec(rest)[0].length;
+      continue;
+    }
+    // Close the gap to one space, or none before punctuation or a line break.
+    const trailing = /[ \t]*$/.exec(out)[0].length;
+    const leading = /^[ \t]*/.exec(rest)[0].length;
+    if (!trailing && !leading) continue;
+    out = out.slice(0, out.length - trailing);
+    from += leading;
+    if (from < text.length && !/^[,.!?\n\r]/.test(text.slice(from))) out += " ";
+  }
+  return out + text.slice(from);
+}
+
+// The box after an Insert. An empty (or blank) box gets the text; otherwise the text goes after
+// what is there, with one space between. Nothing is ever sent from here.
+function ssInsertIntoDraft(draft, text) {
+  const current = String(draft == null ? "" : draft);
+  const add = String(text == null ? "" : text);
+  if (!add.trim()) return current;
+  if (!current.trim()) return add;
+  return `${current.trimEnd()} ${add}`;
+}
+
+// The most each box holds: a text's 1,600 characters (the SMS box's maxLength and the send's
+// limit), an email body's 20,000 (crm_send_email keeps no more).
+const SS_QUICK_SEND_MAX = { sms: 1600, email: 20000 };
+
+// What the box says when Insert refuses a quick send that would run past its limit. Refused, not
+// cut: a cut-off message is easy to send without noticing.
+function ssQuickSendTooLong(channel) {
+  const holds = channel === "email" ? "An email holds up to 20,000" : "A text holds up to 1,600";
+  return `That quick send doesn't fit. ${holds} characters, so shorten what's in the box first.`;
+}
+
+// Insert: the quick send filled in for this customer and added to the box. → the box's new text,
+// or null when it won't fit in this channel's box (the box then stays as it was). Never touches
+// an email's subject; the caller puts this in the BODY only.
+function ssInsertQuickSend(draft, quickSend, fill, channel) {
+  const next = ssInsertIntoDraft(draft, ssFillQuickSend(quickSend && quickSend.body, fill));
+  const max = SS_QUICK_SEND_MAX[channel] || SS_QUICK_SEND_MAX.sms;
+  return next.length > max ? null : next;
+}
+
+// The picker's chips: "All · N" first, then each category in the order it first appears in the
+// list. `category` null is All.
+function ssQuickSendChips(list) {
+  const rows = Array.isArray(list) ? list : [];
+  const chips = [{ category: null, label: `All · ${rows.length}` }];
+  const seen = new Set();
+  for (const q of rows) {
+    const cat = q && typeof q.category === "string" ? q.category.trim() : "";
+    if (!cat || seen.has(cat)) continue;
+    seen.add(cat);
+    chips.push({ category: cat, label: cat });
+  }
+  return chips;
+}
+
+// The rows under a chip, in the list's own order. A chip whose last quick send is gone falls
+// back to All.
+function ssQuickSendsIn(list, category) {
+  const rows = Array.isArray(list) ? list : [];
+  const has = (q, c) => !!q && typeof q.category === "string" && q.category.trim() === c;
+  if (category === null || category === undefined || !rows.some((q) => has(q, category))) return rows.slice();
+  return rows.filter((q) => has(q, category));
+}
+
+// The two phone-core ports, published for tests/harness/crmQuickSends.mjs, which holds the
+// COMPILED artifact to phone-core's own cases (everything else in it is hidden inside the
+// artifact's wrapper). Pure functions of their arguments: calling them changes nothing on the page.
+window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: ssInsertIntoDraft });
+
 // ── The Settings sub-pages ───────────────────────────────────────────────────────────────
 // ONE list, read by TWO renderers: the Settings sidebar in 12-shell.jsx and SettingsShell's
 // own body dispatch in 08-integrations.jsx. It lived inside SettingsShell until the sidebar
@@ -775,7 +1379,7 @@ function ssCanWrite(access, area) {
 // all. Carolyn 2026-09-11: Structures / Options / Colors / Designer "aren't grouped … they
 // have their own nav on the side" — they are top-level items, like Designer and Contacts are
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
-function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}) {
+function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
     ["structures", "Structures", "Building styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
@@ -819,6 +1423,13 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // it was already the generic word, so no link moved.
     ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
     ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
+    // MY SYNERGY PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
+    // with. The number is bought and registered on Text Messaging; this tab is the owner's
+    // one-time setup of who answers it, plus the install links. `phoneOffered` is
+    // ssPhoneOffered()'s answer for the tenant on screen — see there for why a builder on
+    // production does not see it until calling is switched on for them. The area filter at the
+    // bottom (SETTINGS_TAB_AREA.phone) still applies on top.
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps", null]] : []),
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
@@ -1049,6 +1660,7 @@ const ROW_SCOPE_AREA = {
   contacts: "contacts",    // the customer list itself
   orders: "contacts",      // orders_designs is filtered server-side by the same rule
   inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
+  conversations: "contacts", // crm_inbox narrows every thread through crm_visible_contact_ids
 };
 
 // Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
@@ -1120,7 +1732,16 @@ function ssFallbackTab(access) {
 // this function is called from three places and one of them is a hook-order-sensitive
 // effect, so a required parameter would be a silent behaviour change at whichever call site
 // somebody missed.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator) {
+// `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
+// ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
+// canProjects' default: a call site that forgets it refuses the page rather than offering it.
+// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /portal/settings/myprofile.
+// The shell's two route clamps pass it; every other caller asks about a non-settings tab and
+// leaves it null, which changes nothing for them.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
+  // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
+  // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
+  if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /portal/reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
@@ -1141,6 +1762,15 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // Team without any access to builders' accounts. `!supportView` still applies to both —
   // someone standing in a builder's shoes has no business in either console.
   if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
+  // MY PROFILE IS EVERY ROLE'S. It is the one Settings sub-page with no permission area
+  // (ssSettingsTabs), the account menu offers it to everyone, the needsDetails nudge sends
+  // people there, and its two actions (save_prefs / save_profile) are "self" on the server.
+  // The tab-level rule below asks for a Settings area (SETTINGS_AREAS). Phone holders (sales
+  // rep, dealer, sales manager) reach Settings through `phone`; a scheduler, crew member or
+  // driver holds none, so without this line My Profile and "Add details" bounced them straight
+  // back to their fallback page. Only the route: the Settings nav item still follows
+  // ssCanSeeTab, so nobody gains a rail entry.
+  if (tab === "settings" && sub === "myprofile") return tab;
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
@@ -1198,10 +1828,17 @@ const SS_WHEN = [
 ];
 const SS_WHEN_PARAM = Object.fromEntries(SS_WHEN.map(([k, _l, p]) => [k, p]));
 // ISO date + or - N days/weeks/months, in local time.
+// Months CLAMP to the target month's last day: a bare setMonth() overflows from the 29th–31st,
+// so "In the last 1 month" on Mar 31 started at Mar 3 (Feb 31 rolled over) and "In the next
+// 1 month" on Jan 31 ran to Mar 3.
 const ssShiftIso = (iso, n, unit) => {
   const d = ssLocalDate(iso);
-  if (unit === "months") d.setMonth(d.getMonth() + n);
-  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  if (unit === "months") {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + n);
+    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  } else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
   return ssLocalIso(d);
 };
 // Does a date pass the condition? p = { a, b, month, n, unit }. A condition whose parameter
@@ -1474,11 +2111,11 @@ function EmbedCodeBlock({ clientId }) {
 
 // ─── Paid add-ons, named for a human ───
 // How a feature key reads in tenant-facing copy, and whether pointing someone at Billing
-// would actually help. `buyable: false` means there is nothing to purchase — view_3d is
-// operator-GRANTED only (see view3dUnlocked in 12-shell.jsx, which reads
-// entitlement.granted rather than entitlement.features for exactly this reason), so
-// "Add 3D — see Billing" would send a builder to a page with no such button. Used by the
-// setup checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
+// would actually help. `buyable: false` means there is nothing to purchase (Self Serve
+// Displays is still coming soon), so "Add it — see Billing" would send a builder to a page
+// with no such button. view_3d IS buyable: the 3D View plans are on sale, and since
+// 2026-10-05 buying one switches 3D on by itself (ssView3dOn below). Used by the setup
+// checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
 // FEATURE_KEYS, which is what the operator editor validates against.
 const SS_FEATURE_LABELS = {
   schedule_builds:     { label: "Scheduling",           buyable: true },
@@ -1487,9 +2124,46 @@ const SS_FEATURE_LABELS = {
   crm:                 { label: "the Built-in CRM",     buyable: true },
   simple_layout:       { label: "Simple Layout",        buyable: true },
   self_serve_displays: { label: "Self Serve Displays",  buyable: false },
-  view_3d:             { label: "3D",                   buyable: false },
+  view_3d:             { label: "3D",                   buyable: true },
 };
 const ssFeatureLabel = (key) => (SS_FEATURE_LABELS[key] || {}).label || "an add-on";
+
+// ─── Is 3D on for this account? ───
+// THE ONE RULE, asked by the shell's view3dUnlocked for the tenant on screen (the viewed one in
+// view-as); everything 3D in the portal follows that value. Pass that tenant's entitlement from
+// portal-billing. 3D is on when either list it sends names view_3d:
+//   granted  switched on for them by Structure Studio (a comp). A non-billable or internal
+//            account's grantable features ride in here as well (migration 228).
+//   paid     bought, and usable right now: active, past due inside the 7-day grace, or cancelled
+//            but still inside the period already paid for. The Suite counts, because the server
+//            expands it into what it includes.
+// `paid` arrived 2026-10-05 (migration 270). Before it, a builder who bought 3D saw Billing say
+// Active while the designer stayed locked, until an operator switched 3D on by hand. The public
+// designer asks the same question of the same tables through get_config's view3d.
+//
+// NOT entitlement.features. That map gives every non-billable account every feature in one
+// blanket, and it cannot tell a comp from a purchase; these two lists name each feature on its
+// own. null (not answered yet) or a list that is missing reads as off.
+function ssView3dOn(entitlement) {
+  if (!entitlement) return false;
+  const names = (list) => Array.isArray(list) && list.indexOf("view_3d") !== -1;
+  return names(entitlement.granted) || names(entitlement.paid);
+}
+
+// ─── The entitlement changed: ask the shell to read it again ───
+// The shell reads portal-billing's entitlement once per sign-in token (12-shell.jsx), so a
+// purchase made on the Billing tab did not reach anything that reads it (3D, the paywall, the
+// paid tabs) until a reload. Whatever just changed what this account pays for calls this; the
+// shell listens, bumps one counter, and refetches its own entitlement (or, in view-as, the
+// viewed tenant's). A window event rather than a prop, because the Billing view is mounted in
+// two places (the Billing tab and the paywall) far from the shell, and anything else that
+// changes the entitlement later can raise the same signal. A browser that cannot dispatch it
+// simply catches up on the next reload, as before.
+const SS_ENTITLEMENT_CHANGED = "ss-entitlement-changed";
+function ssEntitlementChanged() {
+  try { window.dispatchEvent(new Event(SS_ENTITLEMENT_CHANGED)); } catch (_e) { /* the next reload catches up */ }
+}
+
 // What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
 // _shared/featureCheck.ts, which validates the save and rejects anything else — a typo
 // stored here would padlock a step for every builder forever, with nothing on screen to
@@ -2125,7 +2799,9 @@ function ssCacheClear() { ssTabCache.clear(); }
 // predates the ?warm=1 endpoint this must fail in complete silence.
 function ssWarmFn(name) {
   try {
-    fetch(SUPABASE_URL + "/functions/v1/" + name + "?warm=1", {
+    // Pinned like every real call (ssPinFnRegion): isolates are per region, so warming the
+    // nearest one would boot a worker the real call never uses.
+    fetch(ssPinFnRegion(SUPABASE_URL + "/functions/v1/" + name + "?warm=1"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2136,6 +2812,58 @@ function ssWarmFn(name) {
     }).catch(() => {});
   } catch (_e) { /* a warm-up must never be why something failed */ }
 }
+
+// ── Warm on INTENT, and on flags that resolve late ─────────────────────────────────────
+// The boot waves (12-shell) warm each isolate once, and isolates recycle within minutes, so a
+// click several minutes in lands cold (~2.5 s before the function runs a line). These fire when
+// a person is about to open something — the pointer enters a rail link, keyboard focus reaches
+// it — at most once per function per minute however much the pointer wanders.
+// The stamp is taken when a ping is SENT, never when it is scheduled: a caller whose timer was
+// cleared before it fired has sent nothing and must not have spent its minute. That is the boot
+// effect's deps trap, and why the operator warm-up uses this rather than a page flag.
+// ⚠️ Only functions that answer ?warm=1 may be named here. Without that endpoint an anon-key ping
+// runs the real auth — admin-catalog would count it as a FAILED ADMIN PASSWORD (it gained the
+// endpoint 2026-10-02, deployed before this code shipped).
+const SS_WARM_EVERY_MS = 60000;
+const ssWarmSentAt = new Map(); // function name -> Date.now() of this page's last ping
+function ssWarmThrottled(name) {
+  try {
+    const now = Date.now();
+    if (now - (ssWarmSentAt.get(name) || 0) < SS_WARM_EVERY_MS) return;
+    ssWarmSentAt.set(name, now);
+    ssWarmFn(name);
+  } catch (_e) { /* a warm-up must never be why something failed */ }
+}
+// What each rail destination calls when it OPENS. Designer/Advanced are absent on purpose: they
+// open on REST plus the designer bundle, and submit-estimate is minutes away.
+const SS_NAV_WARM = {
+  designs: ["sync-design-status"],                      // REST list paints, then the status sync
+  contacts: ["sync-design-status"],
+  conversations: ["portal-settings"],                   // crm_inbox
+  inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
+  orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
+  "build-schedule": ["portal-schedule"],
+  "delivery-schedule": ["portal-schedule"],
+  repairs: ["portal-schedule"],
+  commissions: ["portal-commissions"],
+  calls: ["portal-settings"],                           // phone_calls_report
+  settings: ["portal-settings"],                        // Structures' catalog read
+  support: ["portal-setup"],                            // the setup checklist
+  accounts: ["operator-portal"],
+  admin: ["admin-catalog"],
+  projects: ["portal-projects"],
+};
+// Settings rail items that open on something other than portal-settings.
+const SS_SETTINGS_WARM = { billing: ["portal-billing"], sms: ["portal-sms"] };
+function ssWarmNav(id, viewing) {
+  // View-as reads Pipeline/Contacts through operator-portal with no status sync, and Commissions
+  // renders a refusal card there.
+  const fns = viewing && (id === "designs" || id === "contacts") ? ["operator-portal"]
+    : viewing && id === "commissions" ? []
+    : (SS_NAV_WARM[id] || []);
+  fns.forEach(ssWarmThrottled);
+}
+function ssWarmSettings(id) { (SS_SETTINGS_WARM[id] || ["portal-settings"]).forEach(ssWarmThrottled); }
 
 // Table-shaped skeleton: the same column count as the real table, so the header row and the
 // first paint line up and nothing jumps when the rows arrive.
@@ -2289,6 +3017,16 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const ready = !busy && (!needsConfirm || typed.trim() === expected);
+  // Has an invoice been made from this design? The server decides for real (invoiceExists in
+  // _shared/designStorageKeys.ts also reads the invoice ledger, which this page cannot). This is
+  // the same answer from what the row carries: a StructureStudio invoice leaves the design
+  // 'accepted' with ss_invoice_sent_at set (migration 136), so status alone would promise to
+  // delete a quote the server keeps.
+  const invoiced = st === "invoiced" || st === "delivered" || !!design.ss_invoice_sent_at;
+  // The CRM estimate's own, narrower rule (crmInvoiceExists): a StructureStudio invoice was made
+  // from the StructureStudio quote, so it leaves no CRM invoice to void and the estimate still goes.
+  const crmInvoiced = st === "invoiced" || st === "delivered";
+  const quoteNo = design.ss_quote_number || null;
 
   const go = async () => {
     if (!ready) return;
@@ -2311,16 +3049,18 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 14 }}>
         <strong>{(design.contact || {}).name || "This customer"}</strong>
-        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : null} · {STATUS_LABELS[st]}
+        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : quoteNo ? <> · {quoteNo}</> : null} · {STATUS_LABELS[st]}
         <div style={{ marginTop: 8 }}>
-          Removes the design, its full version history and the saved PDFs. This cannot be undone.
+          {invoiced
+            ? "Removes the design, its full version history, and its floor plans and pictures. This cannot be undone."
+            : "Removes the design, its full version history, and the saved PDFs and pictures. This cannot be undone."}
         </div>
         {/* The CRM half, stated plainly, because it is the part that reaches outside this
             app. Three genuinely different outcomes, so this says which one applies to THIS
             design rather than one sentence that is wrong two-thirds of the time. The server
             decides for real (it checks the invoice ledger, not just the cached status). */}
         {design.ghl_estimate_number ? (
-          (st === "invoiced" || st === "delivered") ? (
+          crmInvoiced ? (
             <div style={{ marginTop: 8, color: "#92400E" }}>
               EST-{design.ghl_estimate_number} is <strong>kept</strong> in your CRM — an invoice was created from it.
               Void that invoice there if you want the estimate gone too.
@@ -2331,11 +3071,28 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
               opportunity stay — only the estimate goes.
             </div>
           )
-        ) : (
+        ) : null}
+        {/* The StructureStudio quote (2026-10-05). Its PDF is a public file the customer was
+            emailed a link to, so the builder is told it goes, and when it stays: an invoice
+            made from it keeps both, the same rule as the CRM estimate above. */}
+        {quoteNo ? (
+          invoiced ? (
+            <div style={{ marginTop: 8, color: "#92400E" }}>
+              Quote {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
+              The invoice stays too.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, color: "#64748B" }}>
+              Quote {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
+              quote email will stop working.
+            </div>
+          )
+        ) : null}
+        {!design.ghl_estimate_number && !quoteNo ? (
           <div style={{ marginTop: 8, color: "#64748B" }}>
-            No estimate has been created in your CRM for this design.
+            No quote or estimate has been made for this design yet.
           </div>
-        )}
+        ) : null}
       </div>
       {err && <div style={S.err}>{err}</div>}
       {needsConfirm && (
