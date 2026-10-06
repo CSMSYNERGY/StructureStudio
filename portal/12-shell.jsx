@@ -3285,6 +3285,12 @@ function Dashboard({ session }) {
                    than a guess. */
                 emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
                 onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
+                /* REPLY COPIES (My Profile, 2026-10-07). Whether the SIGNED-IN person asked for a
+                   copy of customers' replies in their own inbox, off the same boot prefs and kept
+                   current the same way as the signature above, so the line above the Email box
+                   says where a reply will go. Only exactly true is on (the server's rule). Null in
+                   view-as, where no prefs are read and the reply never comes to the operator. */
+                replyCopy={viewing ? null : !!(tenant.prefs && tenant.prefs.replyCopy === true)}
                 /* QUICK SENDS (the signed-in person's saved messages, beside the Email and SMS
                    boxes). Not in view-as: the person signed in is CSM Synergy staff, so the list
                    would be the operator's OWN, read and seeded under the builder's account.

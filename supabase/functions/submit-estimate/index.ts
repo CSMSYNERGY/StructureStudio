@@ -424,14 +424,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   // WHO A CUSTOMER'S REPLY TO THIS EMAIL IS COPIED TO (2026-10-05; the rule is
   // _shared/repReplyTo.ts). callerUserId is the verified session's person, so a rep submitting
-  // from the portal's designer gets the customer's answer in their own inbox as well as on the
-  // record. repReplyTo names them only as a member of THIS tenant who is not a CSM Synergy
-  // operator on a customer's account (an operator in view-as has no membership here); a member
-  // with no usable address gets no copy rather than a colleague's. For anyone else, and for a
-  // shopper's own submit (no session at all), the copy goes to the rep the customer is
-  // assigned to, or to nobody. Membership, not mayPrice: who wrote the quote decides whose inbox,
-  // not what they were allowed to price. Asked only when an email is actually built, and a failed
-  // lookup costs the copy, never the quote.
+  // from the portal's designer gets the customer's answer on the record, and in their own inbox
+  // as well if they switched reply copies on in My Profile (or while replies aren't routed to the
+  // record on this account; sendTenantEmail decides, 2026-10-07). repReplyTo names them only as a
+  // member of THIS tenant who is not a CSM Synergy operator on a customer's account (an operator
+  // in view-as has no membership here); a member with no usable address gets no copy rather than
+  // a colleague's. For anyone else, and for a shopper's own submit (no session at all), the copy
+  // goes to the rep the customer is assigned to, on that rep's own switch, or to nobody.
+  // Membership, not mayPrice: who wrote the quote decides whose inbox, not what they were allowed
+  // to price. Asked only when an email is actually built, and a failed lookup costs the copy,
+  // never the quote.
   //
   // `recipient` is where this email goes: the email in the REQUEST, which on a shopper's submit is
   // whatever they typed. The assigned rep is named only when it is the contact's own address,

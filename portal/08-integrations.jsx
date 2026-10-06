@@ -3143,10 +3143,12 @@ function CommissionsReport({ clientId }) {
 //
 // THE REPLY-TO CARD BELOW has worked since 2026-09-06, when save_prefs learned to keep
 // `replyToEmail`. Since 2026-10-05 it covers every email a customer gets from us, not only the
-// ones typed in a record: a quote, an invoice or a change order carries the address of whoever
+// ones typed in a record: an estimate, an invoice or a change order carries the address of whoever
 // sent it, and a confirmation the customer set off themselves carries their assigned rep's
 // (supabase/functions/_shared/repReplyTo.ts has the rule, and why an operator is never named).
-// If save_prefs ever stops keeping the key, the card still says so on screen rather than "Saved."
+// Since 2026-10-07 the copy is OPT-IN: `replyCopy` (only `true` is kept by save_prefs) chooses
+// between "StructureStudio only", the default, and "StructureStudio and my inbox". If save_prefs
+// ever stops keeping either key, the card still says so on screen rather than "Saved."
 //
 // The address goes into a mail header, so this box and the server check it with the SAME rule:
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
@@ -3165,6 +3167,13 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const [addrBusy, setAddrBusy] = useState(false);
   const [addrMsg, setAddrMsg] = useState(null);
   const savedAddr = (prefs && prefs.replyToEmail) || "";
+  // Reply copies, OFF unless the saved prefs say exactly true (the server's rule). copyKept is what
+  // the server last kept from ANY card's save (commit sets it), so a failed save puts the choice
+  // back to something true.
+  const [copyOn, setCopyOn] = useState(!!(prefs && prefs.replyCopy === true));
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyMsg, setCopyMsg] = useState(null);
+  const copyKept = useRef(!!(prefs && prefs.replyCopy === true));
   // ── The email signature card's own state ────────────────────────────────────────
   // Seeded from prefs and not re-synced, for the same reason as the reply-to address above.
   const [sig, setSig] = useState(((prefs && prefs.emailSignature) || ""));
@@ -3204,6 +3213,10 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     const body = { action: "save_prefs", prefs: prefsWant.current };
     const { data, error } = await sb.functions.invoke("portal-settings", { body });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    // What the server now holds for reply copies, from EVERY card's save: each one carries
+    // prefsWant.replyCopy, so a signature save can change it too. A failed reply-copy save goes
+    // back to this, never to an older answer that another card's save has since overwritten.
+    copyKept.current = !!(data && data.prefs && data.prefs.replyCopy === true);
     // Hand the saved map back so the shell stops serving the stale one -- otherwise the
     // setting only takes effect on the next full reload, which reads as not having saved.
     if (onSaved) onSaved(data && data.prefs);
@@ -3244,6 +3257,37 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       }
     } catch (e) { setAddrMsg({ err: e.message }); }
     setAddrBusy(false);
+  };
+
+  // Reply copies on or off. OFF is sent as false, which save_prefs drops: no key is OFF. The
+  // whitelist check again: a server build that doesn't know the key answers ok and keeps nothing,
+  // so asking for ON and getting no `replyCopy: true` back is said plainly, and the choice goes
+  // back to what the server holds (the card-order rule: never show a state no email will follow).
+  // ⚠️ THE MESSAGE SAYS NOTHING CHANGED, NOT WHERE REPLIES GO. The only build that drops the key
+  // is one from before 2026-10-07, and that build's emailSend.ts puts the person's address on
+  // every email: replies are still reaching their inbox. "StructureStudio only for now" would be
+  // the opposite of the truth in the one case this message exists for.
+  // A press while a save is out is ignored, with "Saving…" on screen; the buttons are never
+  // `disabled`, which would also throw a keyboard user's focus off them.
+  const saveCopy = async (next) => {
+    if (copyBusy || next === copyOn) return;
+    setCopyOn(next); setCopyBusy(true); setCopyMsg(null);
+    try {
+      const back = await commit({ replyCopy: next });
+      const kept = !!(back && back.replyCopy === true);
+      if (next && !kept) {
+        prefsWant.current = { ...prefsWant.current, replyCopy: false };
+        setCopyOn(false);
+        setCopyMsg({ err: "Saved, but this server build didn't keep it, so nothing has changed yet. Tell CSM Synergy." });
+      } else {
+        setCopyMsg({ ok: "Saved." });
+      }
+    } catch (e) {
+      prefsWant.current = { ...prefsWant.current, replyCopy: copyKept.current };
+      setCopyOn(copyKept.current);
+      setCopyMsg({ err: e.message });
+    }
+    setCopyBusy(false);
   };
 
   // The server trims it and keeps at most 1,000 characters (_shared/emailSignature.ts); the box
@@ -3425,40 +3469,79 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           a "self"-gated action. The dialog is name/phone/password — who you are; this tab is
           how the portal behaves for you. Do not merge them without asking.
 
-          ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
-          address: the customer's reply reaches this address AND the customer's record in
-          StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
-          behaviour, which is what she was comparing us to, and the first person to notice a
-          reply still landing in the app would reasonably call it a bug.
+          ⚠️ WHAT THE COPY MUST NOT PROMISE. The inbox copy does not REDIRECT replies, it ADDS a
+          second address: with copies on, the customer's reply reaches this address AND the
+          customer's record in StructureStudio. Wording it as "send replies here" would describe
+          GoHighLevel's behaviour, which is what she was comparing us to, and the first person to
+          notice a reply still landing in the app would reasonably call it a bug.
+
+          COPIES ARE OPT-IN (2026-10-07). Carolyn asked for a per-person choice, default OFF:
+          "StructureStudio only" (the reply shows on the record and nowhere else) or
+          "StructureStudio and my inbox". Two buttons in the Pipeline-default style, saved through
+          the same commit as every card here; save_prefs keeps `replyCopy` only when it is true.
+          With copies off nothing tells the rep a reply came in: it shows on the record and in the
+          conversation feed, and the copy says no more than that.
+
+          ⚠️ THE RECORD KEEPS THE WORDS, NOT THE FILES (review 2026-10-07). email-inbound stores a
+          reply's subject and text but no attachments (email_inbound has no column for them and
+          nothing writes them to crm_files); it notes on the reply how many files there were, and
+          the files themselves only reach a person through the inbox copy. So the OFF line says so
+          and points at the other choice. Take that sentence out only when attachments land on the
+          record. The composer's line in 02-sales.jsx says the same.
 
           WHICH EMAILS (2026-10-05). Every email a customer gets from us: the ones typed in a
-          record, and the quotes, invoices and change orders a person sends. The confirmations a
-          customer sets off themselves (accepting a quote, signing an invoice) go to the rep the
-          customer is assigned to, so the card says that too. The rule is the server's
-          (_shared/repReplyTo.ts); keep this wording in step with it.
+          record, and the estimates, invoices and change orders a person sends. The confirmations
+          a customer sets off themselves (accepting an estimate, signing an invoice) go to the rep
+          the customer is assigned to, on THAT rep's own choice, so the card says that too. The
+          rule is the server's (_shared/repReplyTo.ts, emailSend.ts); keep this wording in step.
 
           WHAT IT CAN'T PROMISE ON EVERY ACCOUNT. The card shows on every tenant, but the copy
-          only rides on email StructureStudio itself sends: on a CRM tenant the quotes and
-          invoices go out from GoHighLevel, which this setting never touches. And a reply lands
-          on the record only once the company has set up replies (Settings → Email Settings);
-          until then it reaches the inbox alone. Most customers have no assigned rep yet, so the
-          confirmation line says "if they have one". Worded to be true everywhere rather than
+          only rides on email StructureStudio itself sends: on a CRM tenant the estimates and
+          invoices go out from GoHighLevel, which this setting never touches. And StructureStudio
+          can only receive a reply once the company has set up replies (Settings → Email
+          Settings); until then the server keeps putting the person's address on the email
+          whatever they picked, so a reply still reaches somebody, and the card says so. Most
+          customers have no assigned rep yet, so the confirmation line says "if they have one"
+          as well as "if they've switched this on". Worded to be true everywhere rather than
           switched per tenant, because a rep has no right to read the email settings it would
-          need. */}
+          need.
+
+          The address box stays: it is the inbox used when copies are on, and the one replies
+          come to until the company sets up replies. */}
       <div style={S.card}>
         <div style={S.h2}>Where replies to your emails go</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           When a customer hits Reply on an email you sent them from StructureStudio, whether it's a
-          message, a quote, an invoice or a change order, their reply comes to your own inbox too,
-          and lands on the customer's record here once your company has set up replies under
-          Settings → Email Settings. Leave this blank to use the email address you sign in with, or
-          fill it in to get those replies somewhere else.
+          message, an estimate, an invoice or a change order, their reply shows on that customer's
+          record here. Pick whether you want a copy in your own inbox as well.
         </p>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          This is for email StructureStudio sends. A quote or invoice your CRM sends for you follows
-          the CRM's own settings. A customer's reply to the confirmation they get after accepting a
-          quote or signing an invoice goes to the person that customer is assigned to, if they have
-          one.
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[[false, "StructureStudio only"], [true, "StructureStudio and my inbox"]].map(([on, label]) => (
+            <button key={label} data-ss-reply-copy={on ? "on" : "off"} onClick={() => saveCopy(on)}
+              aria-pressed={copyOn === on} aria-disabled={copyBusy}
+              style={{ ...S.btn(copyOn === on ? ACCENT : "#F1F5F9", copyOn === on ? "#FFF" : "#334155"), opacity: copyBusy ? 0.6 : 1, cursor: copyBusy ? "default" : "pointer" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#334155", lineHeight: 1.5 }}>
+          {copyOn
+            ? "Replies show on the customer's record, and a copy comes to your own inbox too."
+            : "Replies show on the customer's record in StructureStudio only. Files a customer attaches aren't kept there yet, so pick \"StructureStudio and my inbox\" if you need them."}
+        </div>
+        {(copyBusy || copyMsg) && (
+          <div style={{ marginTop: 6, fontSize: 12, color: copyBusy ? "#64748B" : (copyMsg.err ? "#DC2626" : "#15803D") }}>
+            {copyBusy ? "Saving…" : (copyMsg.err || copyMsg.ok)}
+          </div>
+        )}
+        <p style={{ fontSize: 13, color: "#64748B", margin: "12px 0 14px", lineHeight: 1.5 }}>
+          Until your company sets up replies under Settings → Email Settings, StructureStudio can't
+          receive them, so replies come to your inbox whichever you pick.
+        </p>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Your inbox for replies</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 8, lineHeight: 1.5 }}>
+          Leave this blank to use the email address you sign in with, or fill it in to get replies
+          somewhere else.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
           <input
@@ -3478,6 +3561,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           </button>
         </div>
         {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+        <p style={{ fontSize: 13, color: "#64748B", margin: "14px 0 0", lineHeight: 1.5 }}>
+          This is for email StructureStudio sends. An estimate or invoice your CRM sends for you
+          follows the CRM's own settings. When a customer replies to the confirmation they get after
+          accepting an estimate or signing an invoice, the copy goes to the person that customer is
+          assigned to, if they have one and they've switched this on.
+        </p>
       </div>
 
       {/* ── YOUR EMAIL SIGNATURE — Carolyn 2026-10-01 ─────────────────────────────────

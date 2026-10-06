@@ -30,6 +30,20 @@
 //   • A person's address is their own choice in My Profile (client_users.prefs.replyToEmail, read
 //     on THIS tenant), else the email they sign in with. crm_send_email's order since 09-06.
 //
+// THE COPY IS OPT-IN (2026-10-07). Carolyn asked for a per-person switch, default OFF: replies land
+// in StructureStudio only, and a person who wants them in their own inbox as well turns copies on
+// in My Profile (client_users.prefs.replyCopy === true, on THIS tenant; a missing key, "true", 1
+// or anything else is OFF). So repReplyTo answers WHO and WHETHER: `{ address, copy }` from the
+// same row and the same rule as above. Whose switch counts follows whose address: the staff
+// sender's own for a send they set off, the ASSIGNED REP's own (never the sender's) for the
+// confirmations a customer sets off, a shopper's own submit and view-as.
+//   This module does not decide what goes in the header. sendTenantEmail does, because only it
+// knows whether the account can receive the reply: with the switch OFF the address is dropped
+// only when the email carries a routing address (replies set up and active), and kept otherwise,
+// so on an account that hasn't set up replies yet a reply still reaches the person, exactly as it
+// did before the switch existed. Do NOT read the inbound status here instead: a disagreement
+// between the two would drop the person on an unrouted send and the reply would reach nobody.
+//
 // NEVER CSM SYNERGY ON A BUILDER'S PAPERWORK. A person counts only with a client_users row on
 // THIS tenant, and never in view-as. client_users.user_id is that table's primary key, so a login
 // belongs to one tenant at most, and an operator's one membership is our own account: the row
@@ -54,7 +68,14 @@
 // addresses in it), so the caller can log it.
 //
 // NO FORWARDING. The rep's copy arrives because the customer's own mail program sends the reply to
-// both addresses. email-inbound must never send mail (its header says so); nothing here changes that.
+// both addresses, and only when the rep's address is in Reply-To at all (copies on, or replies not
+// set up). email-inbound must never send mail (its header says so), so switching copies off is
+// the whole of "StructureStudio only": nothing is forwarded later, and nobody is notified.
+//   ⚠️ AND THE RECORD KEEPS THE WORDS, NOT THE FILES (review 2026-10-07). email-inbound stores no
+// attachments (email_inbound has no column for them), so with copies off a customer's photos or
+// PDF reach nobody; email-inbound notes on the reply how many there were and logs a `warn` row
+// (inbound_attachments_not_stored, _shared/inboundFiling.ts). The My Profile card and the record's
+// Email line say so. When attachments are stored on the record, take those sentences out.
 //
 // No network beyond the client handed in, no env, no jsr:/npm: imports (the _shared test rule).
 //
@@ -63,6 +84,7 @@
 //      portal-settings/index.ts
 //      submit-estimate/index.ts
 //      customer-accept/index.ts
+//    and _shared/emailSend.ts, for the ReplyCopy type (bundled by the same three).
 
 import { isInternalTenant } from "./internalTenant.ts";
 
@@ -98,6 +120,16 @@ const why = (e: unknown) => String((e as { message?: unknown } | null)?.message 
 export type ReplyLookupError = (why: string) => void;
 
 /**
+ * repReplyTo's answer: the person's reply address, and whether they switched reply copies on
+ * (My Profile). `copy: false` does not mean "leave them off": sendTenantEmail still puts the
+ * address in Reply-To when the email has no routing address, so a reply is never lost.
+ */
+export type ReplyCopy = { address: string; copy: boolean };
+
+/** The client_users.prefs key for the switch. Only `true` is ON; save_prefs keeps nothing else. */
+export const REPLY_COPY_PREF = "replyCopy";
+
+/**
  * This person's reply address on this tenant, or null when they are not someone a customer of
  * this tenant should be pointed at (see the header): not a member here, in view-as
  * (`operator: true`), or a CSM Synergy operator on a tenant that is not ours. Otherwise their
@@ -113,18 +145,19 @@ export async function personReplyAddress(
 }
 
 /**
- * personReplyAddress plus the one thing repReplyTo also needs: whether this is someone we name
- * here at all (`named`). That tells a member with no usable address ("named, nothing to put")
- * apart from a stranger to this tenant ("not someone we name"). Only the second may fall
- * through to the customer's assigned rep.
+ * personReplyAddress plus the two things repReplyTo also needs: whether this is someone we name
+ * here at all (`named`), and whether they switched reply copies on (`copy`). `named` tells a
+ * member with no usable address ("named, nothing to put") apart from a stranger to this tenant
+ * ("not someone we name"). Only the second may fall through to the customer's assigned rep.
+ * `copy` comes off the same client_users row as the address, on this tenant, with no extra read.
  */
 async function lookupPerson(
   admin: Admin,
   clientId: string,
   userId: string | null | undefined,
   opts: { operator?: boolean; onError?: ReplyLookupError },
-): Promise<{ named: boolean; address: string | null }> {
-  const nobody = { named: false, address: null };
+): Promise<{ named: boolean; address: string | null; copy: boolean }> {
+  const nobody = { named: false, address: null, copy: false };
   const fail = (what: string, e: unknown) => {
     try { opts.onError?.(`${what}: ${why(e)}`); } catch (_) { /* a logger must not cost the email */ }
     return nobody;
@@ -149,12 +182,15 @@ async function lookupPerson(
     // failed read, which lands in the catch below as "nobody": we could not tell, so we don't.
     if (op?.data && !(await isInternalTenant(admin, clientId))) return nobody;
 
-    const own = cleanReplyAddress((row.prefs as Record<string, unknown> | null)?.replyToEmail);
-    if (own) return { named: true, address: own };
+    const prefs = row.prefs as Record<string, unknown> | null;
+    // Strictly true: a hand-edited "true" or 1 is OFF, the same as save_prefs keeps it.
+    const copy = prefs?.[REPLY_COPY_PREF] === true;
+    const own = cleanReplyAddress(prefs?.replyToEmail);
+    if (own) return { named: true, address: own, copy };
     const { data: u, error: uErr } = await admin.auth.admin.getUserById(userId);
     if (uErr) return fail("auth user read failed", uErr);
     // A text-message login has no email at all; that is "nothing to put", not a fault.
-    return { named: true, address: cleanReplyAddress(u?.user?.email) };
+    return { named: true, address: cleanReplyAddress(u?.user?.email), copy };
   } catch (e) {
     return fail("reply address lookup failed", e);
   }
@@ -182,6 +218,20 @@ export async function ownerReplyAddress(
   ref: { shortCode?: string | null; contactId?: string | null; recipient?: string | null },
   opts: { onError?: ReplyLookupError } = {},
 ): Promise<string | null> {
+  return (await ownerReplyCopy(admin, clientId, ref, opts))?.address ?? null;
+}
+
+/**
+ * ownerReplyAddress with the OWNER's own reply-copy switch beside the address. The switch is the
+ * assigned rep's, read off their own client_users row on this tenant, never the switch of whoever
+ * set the send off: the rep is the one whose inbox it is.
+ */
+async function ownerReplyCopy(
+  admin: Admin,
+  clientId: string,
+  ref: { shortCode?: string | null; contactId?: string | null; recipient?: string | null },
+  opts: { onError?: ReplyLookupError },
+): Promise<ReplyCopy | null> {
   const fail = (what: string, e: unknown) => {
     try { opts.onError?.(`${what}: ${why(e)}`); } catch (_) { /* a logger must not cost the email */ }
     return null;
@@ -204,7 +254,8 @@ export async function ownerReplyAddress(
     if (!isUuid(c?.owner_user_id)) return null;
     // The email is going to somebody other than this customer (see above): no rep for them.
     if (!sameAddress(c?.email, ref.recipient)) return null;
-    return await personReplyAddress(admin, clientId, c.owner_user_id, { onError: opts.onError });
+    const owner = await lookupPerson(admin, clientId, c.owner_user_id, { onError: opts.onError });
+    return owner.address ? { address: owner.address, copy: owner.copy } : null;
   } catch (e) {
     return fail("owner reply address lookup failed", e);
   }
@@ -216,7 +267,9 @@ export async function ownerReplyAddress(
  * person set off (the verified session's id, never anything from the request body), `operator`
  * when that session is view-as, the design's short code (or the contact's id) for the rep, and
  * `recipient`, the address the email is going to: the rep is named only for their customer's own
- * address (ownerReplyAddress). Put the answer in TenantMail.replyTo; null means "add nothing".
+ * address (ownerReplyAddress). Put the answer in TenantMail.replyTo as it is; null means "add
+ * nothing". `copy` is the named person's own switch, and sendTenantEmail decides from it (and from
+ * whether replies are routed) whether the address goes in the header.
  */
 export async function repReplyTo(
   admin: Admin,
@@ -229,7 +282,7 @@ export async function repReplyTo(
     recipient?: string | null;
     onError?: ReplyLookupError;
   },
-): Promise<string | null> {
+): Promise<ReplyCopy | null> {
   let failed = false;
   const onError: ReplyLookupError = (w) => {
     failed = true;
@@ -242,9 +295,9 @@ export async function repReplyTo(
     // of this tenant gets their own address or no copy at all; only someone we don't name here
     // (view-as, no membership) falls through to the customer's rep.
     if (failed) return null;
-    if (sender.named) return sender.address;
+    if (sender.named) return sender.address ? { address: sender.address, copy: sender.copy } : null;
   }
-  return await ownerReplyAddress(
+  return await ownerReplyCopy(
     admin, clientId,
     { shortCode: who.shortCode, contactId: who.contactId, recipient: who.recipient },
     { onError: who.onError },

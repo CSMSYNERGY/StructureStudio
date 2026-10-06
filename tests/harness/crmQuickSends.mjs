@@ -14,7 +14,10 @@
 //      app's sentence, the box unchanged and nothing counted
 //   F. view-as (quickSendsOn=false): no Quick sends button, and the list is never asked for; the
 //      line above the box doesn't tell the operator replies come back to them (the server never
-//      puts an operator's address on a builder's email), while a builder's own record still does
+//      puts an operator's address on a builder's email), while a builder's own record says where
+//      a reply goes: the record, and the writer's inbox only if they switched reply copies on in
+//      My Profile (2026-10-07; until the company sets up replies, the inbox either way, and all
+//      three lines say so); with copies off it also says attached files aren't kept on the record
 //   G. every phone-core case (tests/phone/quickSendCases.mjs) against the compiled
 //      ssFillQuickSend / ssInsertIntoDraft (window.__ssQuickSends); and when the phone repo is
 //      checked out beside this one (or SS_PHONE_CORE_DIR names its packages/phone-core), the
@@ -100,7 +103,7 @@ const json = (route, body, status = 200) => route.fulfill({ status, contentType:
  * body the page posted, in order.
  *   list: what quick_sends_list answers (an array), or "old" for a server that doesn't know it.
  */
-async function scenario(browser, { name, operator = false, list = QUICK_SENDS, viewport = { width: 1400, height: 1000 } }) {
+async function scenario(browser, { name, operator = false, list = QUICK_SENDS, prefs = null, viewport = { width: 1400, height: 1000 } }) {
   const ctx = await browser.newContext({ viewport });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
@@ -132,7 +135,7 @@ async function scenario(browser, { name, operator = false, list = QUICK_SENDS, v
     const clientId = body.targetClientId || CLIENT;
     switch (body.action) {
       case "status":
-        return json(route, { ok: true, clientId, role: "owner", operatorMode: !!body.targetClientId, access: OWNER_ACCESS, prefs: null,
+        return json(route, { ok: true, clientId, role: "owner", operatorMode: !!body.targetClientId, access: OWNER_ACCESS, prefs,
           phoneStatus: "off", configured: false, invoiceInGhl: false, ghlInvoicingAllowed: false, businessAddress: {}, branding: { companyName: "Acme Sheds" }, emailReady: true });
       case "crm_record":
         return json(route, {
@@ -233,8 +236,9 @@ try {
     const rendered = ok("A0 the Email box rendered on the contact record", (await subject.count()) === 1 && (await bodyBox.count()) === 1);
     if (!rendered) throw new Error("the Email box never rendered; refusing to report the rest as passes");
     const bodyText = await s.page.locator("body").innerText();
-    ok("F5 (outside view-as, the line still says replies come back to the writer)",
-      /To alex@example\.test — replies come back to you, not to a no-reply address\./.test(bodyText));
+    ok("F5 (outside view-as, with reply copies off, the line says replies come back to the record, the inbox only until replies are set up, and files aren't kept on the record)",
+      /To alex@example\.test — replies come back to this record \(your inbox until your company sets up replies\)\. Files a customer attaches aren't kept on the record yet: switch on reply copies in My Profile if you need them\./.test(bodyText)
+        && !/replies come back here and to your inbox/.test(bodyText), bodyText.match(/To alex@example\.test.{0,260}/)?.[0]);
     ok("A1 the list is not read when the record opens", actions(s, "quick_sends_list").length === 0,
       JSON.stringify(s.calls.map((c) => c.action)));
     const btn = s.page.locator('[data-ss-quick-sends="email"]');
@@ -419,6 +423,17 @@ try {
     await s.ctx.close();
   }
 
+  // ── F6. Reply copies switched on in My Profile: the line says the inbox too ──────────────────
+  {
+    const s = await scenario(browser, { name: "copies-on", prefs: { replyCopy: true } });
+    await openRecordTab(s, "Email");
+    const t = await s.page.locator("body").innerText();
+    ok("F6 with reply copies on, the line says replies come back here and to the writer's inbox (just the inbox until replies are set up), with no files caveat",
+      /To alex@example\.test — replies come back here and to your inbox \(just your inbox until your company sets up replies\)\./.test(t)
+        && !/aren't kept on the record/.test(t), t.match(/To alex@example\.test.{0,200}/)?.[0]);
+    await s.ctx.close();
+  }
+
   // ── F. View-as: no button, and the list is never asked for ────────────────────────────────────
   {
     const s = await scenario(browser, { name: "view-as", operator: true });
@@ -430,8 +445,8 @@ try {
       ok("F2 (it is the VIEWED builder's record)", !!rec && rec.targetClientId === VIEWED, JSON.stringify(rec));
       const t = await s.page.locator("body").innerText();
       ok("F4 the line above the box says replies won't come to the operator, and where they go",
-        /To alex@example\.test — you're viewing as Demo Builder, so replies won't come to you\. They go to this customer's assigned rep, if they have one\./.test(t)
-          && !/replies come back to you/.test(t), t.match(/To alex@example\.test.{0,160}/)?.[0]);
+        /To alex@example\.test — you're viewing as Demo Builder, so replies won't come to you\. They come back to this record, and to this customer's assigned rep if they've switched reply copies on \(until this company sets up replies, to the rep only\)\./.test(t)
+          && !/replies come back (to you|here and to your inbox)/.test(t), t.match(/To alex@example\.test.{0,260}/)?.[0]);
     }
     ok("F3 and the list is never asked for", actions(s, "quick_sends_list").length === 0);
     await s.page.screenshot({ path: join(shots, "F-view-as.png") });

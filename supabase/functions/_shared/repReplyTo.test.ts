@@ -6,14 +6,19 @@
 // it can go wrong without anyone noticing: a CSM Synergy address on a builder's quote, a colleague
 // getting someone else's replies, an address that breaks the mail header and with it the whole
 // email. Each edge is pinned here against a stub database: no network, no real database, and
-// nothing is sent (the one send below goes to a stubbed fetch).
+// nothing is sent (the sends below go to a stubbed fetch).
+//
+// Since 2026-10-07 the copy is opt-in per person (client_users.prefs.replyCopy === true, default
+// OFF), so repReplyTo answers `{ address, copy }` and sendTenantEmail decides what rides. The
+// switch's edges are pinned here too: whose switch counts, that only `true` is ON, and that an
+// account with no routing address still gets the person whatever the switch says.
 //
 // Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/repReplyTo.test.ts
 // (the pre-push gate runs it with those flags; see scripts/preflight.mjs)
 //
 // Fixtures are made up (Acme Sheds, example.test), per the public-repo rule.
 
-import { cleanReplyAddress, ownerReplyAddress, personReplyAddress, REPLY_ADDRESS_MAX, REPLY_ADDRESS_RE, repReplyTo } from "./repReplyTo.ts";
+import { cleanReplyAddress, ownerReplyAddress, personReplyAddress, REPLY_ADDRESS_MAX, REPLY_ADDRESS_RE, REPLY_COPY_PREF, repReplyTo } from "./repReplyTo.ts";
 import { sendTenantEmail } from "./emailSend.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -156,6 +161,13 @@ const USERS: Record<string, string | null> = {
   [ELSE]: "pat.login@other-sheds.example.test",
 };
 const db = (opts: StubOpts = {}) => stubDb(TABLES, USERS, opts);
+/** TABLES with one member's prefs on one tenant merged with `patch`. */
+function withPrefs(userId: string, clientId: string, patch: Row): Record<string, Row[]> {
+  const t = structuredClone(TABLES);
+  const row = t.client_users.find((r) => r.user_id === userId && r.client_id === clientId) as Row;
+  row.prefs = { ...((row.prefs as Row | null) ?? {}), ...patch };
+  return t;
+}
 
 // ── The address check ───────────────────────────────────────────────────────────────────────
 
@@ -364,15 +376,19 @@ Deno.test("the rep is named only when the email goes to their customer's own add
 
 // ── The one call every sender makes ─────────────────────────────────────────────────────────
 
+// What repReplyTo answers for someone who never touched the switch: their address, copies OFF.
+const off = (address: string) => ({ address, copy: false });
+const on = (address: string) => ({ address, copy: true });
+
 Deno.test("repReplyTo: the staff sender first, else the customer's rep, else nobody", async () => {
   // A rep sends a quote for a customer assigned to a colleague: the reply copy is the SENDER's.
-  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), "jamie.quotes@acme-sheds.example.test");
+  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("jamie.quotes@acme-sheds.example.test"));
   // View-as: the operator is never named; the customer's rep is.
-  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: OP, operator: true, shortCode: "SS-AAAA1111", recipient: ALEX }), "sam@acme-sheds.example.test");
+  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: OP, operator: true, shortCode: "SS-AAAA1111", recipient: ALEX }), off("sam@acme-sheds.example.test"));
   // An operator in the designer (no view-as flag there, and no membership at Acme): the rep.
-  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: OP, shortCode: "SS-AAAA1111", recipient: ALEX }), "sam@acme-sheds.example.test");
+  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: OP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("sam@acme-sheds.example.test"));
   // The customer set it off (no sender): the rep.
-  assertEquals(await repReplyTo(db().admin, ACME, { shortCode: "SS-AAAA1111", recipient: ALEX }), "sam@acme-sheds.example.test");
+  assertEquals(await repReplyTo(db().admin, ACME, { shortCode: "SS-AAAA1111", recipient: ALEX }), off("sam@acme-sheds.example.test"));
   // Nobody to name anywhere: null, which the senders turn into "add nothing".
   assertEquals(await repReplyTo(db().admin, ACME, { shortCode: "SS-NONE3333", recipient: NOONE }), null);
   assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: OP, operator: true, shortCode: "SS-GONE2222", recipient: FORMER }), null);
@@ -387,7 +403,7 @@ Deno.test("repReplyTo: a member who sent it with no usable address gets no copy,
   d = stubDb(TABLES, { ...USERS, [TEXTER]: "pat@acmé-sheds.example.test" });
   assertEquals(await repReplyTo(d.admin, ACME, { senderUserId: TEXTER, shortCode: "SS-AAAA1111", recipient: ALEX }), null, "unusable sign-in email");
   // And the same customer, sent by nobody we name here, still reaches their rep.
-  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: ELSE, shortCode: "SS-AAAA1111", recipient: ALEX }), "sam@acme-sheds.example.test", "a login from another tenant");
+  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: ELSE, shortCode: "SS-AAAA1111", recipient: ALEX }), off("sam@acme-sheds.example.test"), "a login from another tenant");
 });
 
 Deno.test("repReplyTo: a stranger's submit on a known customer's phone number learns nothing", async () => {
@@ -410,46 +426,170 @@ Deno.test("repReplyTo: a sender we could not READ is no copy, never a colleague'
   assertEquals(d2.reads.filter((r) => r.table === "designs").length, 0, "the owner path was never tried");
 });
 
+// ── The reply-copy switch (2026-10-07) ──────────────────────────────────────────────────────
+
+Deno.test("reply copies: no replyCopy key is OFF, and only `true` is ON", async () => {
+  assertEquals(REPLY_COPY_PREF, "replyCopy", "the key save_prefs keeps and My Profile writes");
+  // Nobody in the fixtures has the key: every answer above is copy:false.
+  assertEquals(await repReplyTo(db().admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("jamie.quotes@acme-sheds.example.test"), "no key");
+  // Strictly true. A hand-edited row, an older writer, a string from a form: all OFF.
+  for (const v of ["true", 1, "1", "yes", null, false, {}, [true]]) {
+    const d = stubDb(withPrefs(REP, ACME, { [REPLY_COPY_PREF]: v }), USERS);
+    assertEquals(await repReplyTo(d.admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("jamie.quotes@acme-sheds.example.test"), JSON.stringify(v));
+  }
+  const d = stubDb(withPrefs(REP, ACME, { [REPLY_COPY_PREF]: true }), USERS);
+  assertEquals(await repReplyTo(d.admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), on("jamie.quotes@acme-sheds.example.test"), "true");
+  assertEquals(d.reads.filter((r) => r.table === "client_users").length, 1, "the switch comes off the same row as the address: one read");
+  // With nothing saved, the sign-in email carries the switch just the same.
+  const d2 = stubDb(withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }), USERS);
+  assertEquals(await repReplyTo(d2.admin, ACME, { senderUserId: REP2, shortCode: "SS-AAAA1111", recipient: ALEX }), on("sam@acme-sheds.example.test"), "sign-in email, copies on");
+  // The string helpers are unchanged: an address, never the switch.
+  assertEquals(await personReplyAddress(d.admin, ACME, REP), "jamie.quotes@acme-sheds.example.test");
+  assertEquals(await ownerReplyAddress(d2.admin, ACME, { shortCode: "SS-AAAA1111", recipient: ALEX }), "sam@acme-sheds.example.test");
+});
+
+Deno.test("reply copies: the switch is read on THIS tenant only", async () => {
+  // REP switched copies on somewhere else; on Acme they never did. (A login holds one membership
+  // today, but the read must not depend on that.)
+  const t = structuredClone(TABLES);
+  t.client_users.push({ user_id: REP, client_id: OTHER, prefs: { replyToEmail: "jamie@other-sheds.example.test", [REPLY_COPY_PREF]: true } });
+  const d = stubDb(t, USERS);
+  assertEquals(await repReplyTo(d.admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("jamie.quotes@acme-sheds.example.test"));
+  assertEquals(d.reads.find((r) => r.table === "client_users")?.filters, { user_id: REP, client_id: ACME }, "keyed on the person AND the tenant");
+  // And the other way round: on for Acme, off elsewhere.
+  const t2 = withPrefs(REP, ACME, { [REPLY_COPY_PREF]: true });
+  t2.client_users.push({ user_id: REP, client_id: OTHER, prefs: { replyToEmail: "jamie@other-sheds.example.test" } });
+  assertEquals(await repReplyTo(stubDb(t2, USERS).admin, OTHER, { senderUserId: REP }), off("jamie@other-sheds.example.test"));
+});
+
+Deno.test("reply copies: the owner path carries the OWNER's switch, never the sender's", async () => {
+  // Alex is assigned to REP2. The operator's own row (our account) has copies on; REP2's doesn't.
+  let t = withPrefs(OP, OURS, { [REPLY_COPY_PREF]: true });
+  for (const who of [
+    { senderUserId: OP, operator: true },   // view-as
+    { senderUserId: OP },                    // an operator in the designer, no membership here
+    { senderUserId: ELSE },                  // a login from another tenant
+    {},                                      // the customer set it off
+  ]) {
+    assertEquals(await repReplyTo(stubDb(t, USERS).admin, ACME, { ...who, shortCode: "SS-AAAA1111", recipient: ALEX }), off("sam@acme-sheds.example.test"), JSON.stringify(who));
+  }
+  // REP2 switches copies on: now the same sends carry it.
+  t = withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true });
+  for (const who of [{ senderUserId: OP, operator: true }, {}]) {
+    assertEquals(await repReplyTo(stubDb(t, USERS).admin, ACME, { ...who, shortCode: "SS-AAAA1111", recipient: ALEX }), on("sam@acme-sheds.example.test"), JSON.stringify(who));
+  }
+  // A staff sender is their own switch, whatever the customer's rep chose: REP sends, REP2 is on.
+  assertEquals(await repReplyTo(stubDb(t, USERS).admin, ACME, { senderUserId: REP, shortCode: "SS-AAAA1111", recipient: ALEX }), off("jamie.quotes@acme-sheds.example.test"));
+});
+
+Deno.test("reply copies: no usable address is still nobody, whatever the switch", async () => {
+  // A text-message login with copies on sends from Alex's record: no copy, never their colleague's.
+  let d = stubDb(withPrefs(TEXTER, ACME, { [REPLY_COPY_PREF]: true }), USERS);
+  assertEquals(await repReplyTo(d.admin, ACME, { senderUserId: TEXTER, shortCode: "SS-AAAA1111", recipient: ALEX }), null);
+  // An assigned rep with copies on who has left: nobody.
+  d = stubDb(withPrefs(TEXTER, ACME, { [REPLY_COPY_PREF]: true }), USERS);
+  assertEquals(await repReplyTo(d.admin, ACME, { shortCode: "SS-GONE2222", recipient: FORMER }), null, "left the company");
+  // An assigned rep with copies on, whose only address the header check refuses: nobody.
+  d = stubDb(withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }), { ...USERS, [REP2]: "sam@acmé-sheds.example.test" });
+  assertEquals(await repReplyTo(d.admin, ACME, { shortCode: "SS-AAAA1111", recipient: ALEX }), null, "unusable address");
+  // A stranger's submit on Alex's phone number with REP2's copies on: still nothing.
+  d = stubDb(withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }), USERS);
+  assertEquals(await repReplyTo(d.admin, ACME, { shortCode: "SS-AAAA1111", recipient: "stranger@example.test" }), null, "a different recipient");
+});
+
 // ── End to end: what goes on the wire ───────────────────────────────────────────────────────
 
-Deno.test("the answer rides in Reply-To after the routing address: two addresses, token first", async () => {
+/** Acme set up to send through Resend, replies routed to the record when `inbound_status` is "active". */
+function sendingTables(inbound_status: string, base: Record<string, Row[]> = TABLES): Record<string, Row[]> {
+  const t = structuredClone(base);
+  Object.assign(t.client_settings.find((r) => r.client_id === ACME) as Row, {
+    email_provider: "resend", email_domain_status: "verified", email_domain: "acme-sheds.example.test",
+    email_from_local: "quotes", email_from_name: "Acme Sheds", business_name: "Acme Sheds",
+    beta_mode: false, beta_email: null, inbound_domain: "reply.acme-sheds.example.test", inbound_status,
+    invoice_in_ghl: false,
+  });
+  return t;
+}
+
+/** Runs `fn` with Resend stubbed; returns each send's posted body. */
+async function onTheWire(fn: () => Promise<void>): Promise<Record<string, unknown>[]> {
   const realFetch = globalThis.fetch;
   Deno.env.set("RESEND_API_KEY", "test-resend-key");
   Deno.env.delete("SUPABASE_URL");
   Deno.env.delete("SUPABASE_SERVICE_ROLE_KEY");
   Deno.env.delete("PLATFORM_EMAIL_DOMAIN_READY");
-  const bodies: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
   globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
-    bodies.push(typeof init?.body === "string" ? init.body : "");
+    bodies.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}"));
     return Promise.resolve(new Response(JSON.stringify({ id: "rs-msg-1" }), { status: 200, headers: { "Content-Type": "application/json" } }));
   }) as typeof fetch;
   try {
-    const t = structuredClone(TABLES);
-    Object.assign(t.client_settings.find((r) => r.client_id === ACME) as Row, {
-      email_provider: "resend", email_domain_status: "verified", email_domain: "acme-sheds.example.test",
-      email_from_local: "quotes", email_from_name: "Acme Sheds", business_name: "Acme Sheds",
-      beta_mode: false, beta_email: null, inbound_domain: "reply.acme-sheds.example.test", inbound_status: "active",
-      invoice_in_ghl: false,
-    });
-    const d = stubDb(t, USERS);
-    // A quote re-sent by REP2 (nothing saved, so their sign-in email).
-    const replyTo = await repReplyTo(d.admin, ACME, { senderUserId: REP2, shortCode: "SS-AAAA1111", recipient: ALEX });
-    const out = await sendTenantEmail(d.admin, ACME, {
-      kind: "estimate", shortCode: "SS-AAAA1111", to: ALEX,
-      subject: "Your quote", html: "<p>Hi</p>", text: "Hi", ...(replyTo ? { replyTo } : {}),
-    });
-    assert(out.sent, "sent (to the stub)");
-    assertEquals(JSON.parse(bodies[0]).reply_to, ["d.ss-aaaa1111@reply.acme-sheds.example.test", "sam@acme-sheds.example.test"],
-      "the routing address first, so a reply always reaches the record; the rep second");
-    // And the customer-set-off case with nobody assigned: the routing address alone, as before.
-    const none = await repReplyTo(d.admin, ACME, { shortCode: "SS-NONE3333", recipient: NOONE });
-    await sendTenantEmail(d.admin, ACME, {
-      kind: "acceptance", shortCode: "SS-NONE3333", to: NOONE,
-      subject: "Accepted", html: "<p>Thanks</p>", text: "Thanks", ...(none ? { replyTo: none } : {}),
-    });
-    assertEquals(JSON.parse(bodies[1]).reply_to, "d.ss-none3333@reply.acme-sheds.example.test");
+    await fn();
   } finally {
     globalThis.fetch = realFetch;
     Deno.env.delete("RESEND_API_KEY");
   }
+  return bodies;
+}
+
+/** A quote re-sent by REP2 (nothing saved, so their sign-in email), exactly as the senders do it. */
+async function quoteByRep2(t: Record<string, Row[]>) {
+  const d = stubDb(t, USERS);
+  const replyTo = await repReplyTo(d.admin, ACME, { senderUserId: REP2, shortCode: "SS-AAAA1111", recipient: ALEX });
+  const out = await sendTenantEmail(d.admin, ACME, {
+    kind: "estimate", shortCode: "SS-AAAA1111", to: ALEX,
+    subject: "Your estimate", html: "<p>Hi</p>", text: "Hi", ...(replyTo ? { replyTo } : {}),
+  });
+  assert(out.sent, "sent (to the stub)");
+}
+
+const TOKEN = "d.ss-aaaa1111@reply.acme-sheds.example.test";
+const SAM = "sam@acme-sheds.example.test";
+
+Deno.test("copies OFF, replies routed: the routing address alone, so the reply lands on the record only", async () => {
+  const [body] = await onTheWire(() => quoteByRep2(sendingTables("active")));
+  assertEquals(body.reply_to, TOKEN, "REP2 never switched copies on");
+});
+
+Deno.test("copies ON, replies routed: two addresses, token first", async () => {
+  const [body] = await onTheWire(() => quoteByRep2(sendingTables("active", withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }))));
+  assertEquals(body.reply_to, [TOKEN, SAM], "the routing address first, so a reply always reaches the record; the rep second");
+});
+
+Deno.test("copies OFF, replies NOT routed: the rep's address alone, so a reply still reaches somebody", async () => {
+  // The account hasn't set up replies (pending, or never connected): StructureStudio can't receive
+  // the reply, so the switch doesn't bite and the rep is copied exactly as before it existed.
+  for (const status of ["pending", "", "failed"]) {
+    const [body] = await onTheWire(() => quoteByRep2(sendingTables(status)));
+    assertEquals(body.reply_to, SAM, JSON.stringify(status));
+  }
+  // With copies on it is the same one address.
+  const [body] = await onTheWire(() => quoteByRep2(sendingTables("pending", withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }))));
+  assertEquals(body.reply_to, SAM, "copies on, unrouted");
+});
+
+Deno.test("a confirmation nobody is assigned to: the routing address alone, as before", async () => {
+  const [body] = await onTheWire(async () => {
+    const d = stubDb(sendingTables("active"), USERS);
+    const none = await repReplyTo(d.admin, ACME, { shortCode: "SS-NONE3333", recipient: NOONE });
+    assertEquals(none, null);
+    await sendTenantEmail(d.admin, ACME, {
+      kind: "acceptance", shortCode: "SS-NONE3333", to: NOONE,
+      subject: "Accepted", html: "<p>Thanks</p>", text: "Thanks", ...(none ? { replyTo: none } : {}),
+    });
+  });
+  assertEquals(body.reply_to, "d.ss-none3333@reply.acme-sheds.example.test");
+});
+
+Deno.test("a confirmation the customer set off follows the ASSIGNED rep's switch", async () => {
+  const send = (t: Record<string, Row[]>) => onTheWire(async () => {
+    const d = stubDb(t, USERS);
+    const rep = await repReplyTo(d.admin, ACME, { shortCode: "SS-AAAA1111", recipient: ALEX });
+    await sendTenantEmail(d.admin, ACME, {
+      kind: "acceptance", shortCode: "SS-AAAA1111", to: ALEX,
+      subject: "Accepted", html: "<p>Thanks</p>", text: "Thanks", ...(rep ? { replyTo: rep } : {}),
+    });
+  });
+  assertEquals((await send(sendingTables("active")))[0].reply_to, TOKEN, "REP2 off");
+  assertEquals((await send(sendingTables("active", withPrefs(REP2, ACME, { [REPLY_COPY_PREF]: true }))))[0].reply_to, [TOKEN, SAM], "REP2 on");
 });

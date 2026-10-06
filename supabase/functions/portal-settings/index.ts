@@ -1819,6 +1819,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const addr = cleanReplyAddress(raw.replyToEmail);
       if (addr) clean.replyToEmail = addr;
     }
+    // Whether this person also gets a copy of customers' replies in their own inbox (My Profile,
+    // 2026-10-07; _shared/repReplyTo.ts reads it on the way out). OFF by default, so only `true`
+    // is kept: false, "true" or a missing key all store nothing, and nothing means OFF. A save
+    // from a screen that doesn't know the key therefore turns copies off, which is the safe way
+    // round: replies still land on the record.
+    if (raw.replyCopy === true) clean.replyCopy = true;
     // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
     // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
     // email_send_test put it under what this person sends. Same rule as the reply-to above: an
@@ -8774,10 +8780,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Every email this function sends is set off by the person signed in: crm_send_email below,
   // and the quote re-send and re-price, the change order and the invoice sends, re-issues and
   // retries further down. So the reply copy names THEM (their My Profile address, else their
-  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. The
-  // rule and its reasons are _shared/repReplyTo.ts. The senders take a ReplySender rather than
-  // reading the session themselves (sendQuoteEmail and restampQuoteTax take it as a parameter),
-  // so a sender added later has to say whose email it is. `recipient` is the address the email
+  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. It is
+  // advertised only if the person named switched reply copies on in My Profile, or when replies
+  // aren't routed to the record on this account (2026-10-07; sendTenantEmail decides, from the
+  // `copy` flag in the answer). The rule and its reasons are _shared/repReplyTo.ts. The senders
+  // take a ReplySender rather than reading the session themselves (sendQuoteEmail and
+  // restampQuoteTax take it as a parameter), so a sender added later has to say whose email it is. `recipient` is the address the email
   // goes to, and is required: the assigned rep is named only for their customer's own address.
   // A failed lookup is logged and the email goes with the routing address only, as every
   // document email did before.
@@ -8859,9 +8867,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // REPLY-TO: the person who wrote it, resolved SERVER-SIDE from the verified session and
-    // never from the body, so nobody can route a customer's replies at a third party. There is
-    // no `business_email` column to default one from (emailSend.ts says so in as many words),
-    // and the tenant's sending address is a no-reply-shaped local part, so without this a
+    // never from the body, so nobody can route a customer's replies at a third party. Since
+    // 2026-10-07 it names them, and it is advertised only if they switched reply copies on, or
+    // when replies aren't routed to the record (sendTenantEmail decides; see emailSend.ts).
+    // There is no `business_email` column to default one from (emailSend.ts says so in as many
+    // words), and the tenant's sending address is a no-reply-shaped local part, so without this a
     // customer hitting Reply on a tenant with no reply domain had nowhere real to land.
     //
     // The ROUTABLE address (`d.SS-…@reply.<their domain>`) is not computed here: sendTenantEmail
@@ -8873,8 +8883,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // sign-in email. Two things changed for this branch when it moved there. The preference is
     // read on THIS tenant (it used to be limit(1) on the user alone). And in view-as the writer is
     // CSM Synergy staff, whose address must never go on a builder's email: it used to be the
-    // operator's own sign-in address, and is now the customer's assigned rep, or nobody. The
-    // address is validated on the way out as well as at save_prefs, because it goes into a header.
+    // operator's own sign-in address, and is now the customer's assigned rep (on their own
+    // reply-copy switch), or nobody. The address is validated on the way out as well as at
+    // save_prefs, because it goes into a header.
     const replyTo = await replyCopy(signedIn, { shortCode, contactId: contactFound ? contactId : null, recipient: to });
     // VIEW-AS WITH NOWHERE FOR A REPLY TO GO IS REFUSED. Until 2026-10-05 the operator's own
     // address was on this email, so a reply always reached somebody. Without it, an operator
@@ -8882,6 +8893,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // routed to the record (no active reply domain), would send with no Reply-To at all: the
     // customer's answer goes to the From address and reaches no person and no record. Said
     // before anything is sent. Only view-as: a member writing as themselves is not refused here.
+    // A rep who is named but has reply copies off is not "nobody": on an unrouted account
+    // sendTenantEmail keeps their address whatever the switch says, and on a routed one the
+    // reply lands on the record.
     if (operator && !replyTo) {
       const { data: rs, error: rsErr } = await admin.from("client_settings")
         .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
@@ -11815,7 +11829,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // first. `refused` carries this action's own refusals, unchanged. `noEmail` is for the
   // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
   // `sender` is whoever set the send off, for the reply copy (replyCopy above): a customer who
-  // answers the quote reaches the record and that person's inbox.
+  // answers the estimate reaches the record, and that person's inbox if they switched copies on.
   const sendQuoteEmail = async (
     shortCode: string,
     sender: ReplySender,
@@ -12432,7 +12446,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       reviewUrl: myQuotesUrl(clientId, req),
       quoteTerms: cs?.quote_terms,
     });
-    // The rep who raised or re-sent it gets the customer's answer too (replyCopy above).
+    // The rep who raised or re-sent it gets the customer's answer too, if they switched reply
+    // copies on (replyCopy above).
     const replyTo = await replyCopy(signedIn, { shortCode: String(co.short_code), recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "change_order", shortCode: co.short_code, to,
