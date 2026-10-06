@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { mintAccessToken, pushCredentialFor } from "../src/accessToken";
 import { b64urlDecodeJson } from "../src/b64";
 import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
-import { businessNumbersOf } from "../src/db";
+import { businessNumbersOf, callerContext, type Admin } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
 
@@ -102,6 +102,21 @@ describe("POST /token", () => {
     const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
     expect(res.status).toBe(200);
     expect(json.user.can_text_contacts).toBe(can);
+  });
+
+  // contacts:'own_view' (migration 286): own customers, view only. The apps hide the composer on
+  // can_text_contacts and narrow their lists on own_contacts_only, so they need no change of their own.
+  it.each([
+    ["the RPC says narrowed", true],
+    // A database before 286 answers own_contacts_only false for this level; the Worker narrows anyway.
+    ["the RPC says not narrowed (before 286)", false],
+  ])("contacts own_view: can_text_contacts false and own_contacts_only true when %s", async (_l, rpcOwn) => {
+    const { auth, env } = await setup(callerCtx({ contacts_level: "own_view", own_contacts_only: rpcOwn }));
+    const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
+    expect(res.status).toBe(200);
+    expect(json.user).toMatchObject({ can_text_contacts: false, own_contacts_only: true });
+    // The level itself is not shipped to the apps (they never parse it).
+    expect(JSON.stringify(json)).not.toContain("own_view");
   });
 
   it("adds _dev only for the iPhone development client, with the development bundle's credential", async () => {
@@ -332,5 +347,29 @@ describe("POST /token with more than one business number", () => {
     expect(businessNumbersOf(undefined, "+15555550100")).toEqual(["+15555550100"]);
     expect(businessNumbersOf(Array.from({ length: 80 }, (_, i) => `+1555555${String(1000 + i)}`), null)).toHaveLength(50);
     expect(NUMBER_ID).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+// db.ts callerContext, on its own: what the RPC answers about the contacts level, and what the
+// Worker keeps of it. contacts:'own_view' (migration 286) survives; an unknown level is 'none'.
+describe("callerContext keeps the contacts level", () => {
+  const rpcAnswering = (data: Record<string, unknown>) =>
+    ({ rpc: async () => ({ data: { ...callerCtx(), ...data }, error: null }) }) as unknown as Admin;
+  it.each([
+    [{ contacts_level: "own_view", own_contacts_only: true }, "own_view", true],
+    [{ contacts_level: "own_view", own_contacts_only: false }, "own_view", true],
+    [{ contacts_level: "own", own_contacts_only: false }, "own", true],
+    [{ contacts_level: "view", own_contacts_only: false }, "view", false],
+    [{ contacts_level: "edit", own_contacts_only: false }, "edit", false],
+    [{ contacts_level: "sideways", own_contacts_only: false }, "none", false],
+  ])("%j → contacts_level %s, own_contacts_only %s", async (data, level, own) => {
+    const ctx = await callerContext(rpcAnswering(data), USER_A);
+    expect(ctx?.contacts_level).toBe(level);
+    expect(ctx?.own_contacts_only).toBe(own);
+  });
+
+  it("the phone level never takes own_view", async () => {
+    const ctx = await callerContext(rpcAnswering({ phone_level: "own_view" }), USER_A);
+    expect(ctx?.phone_level).toBe("none");
   });
 });

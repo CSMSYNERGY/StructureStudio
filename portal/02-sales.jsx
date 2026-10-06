@@ -4928,7 +4928,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               <div style={{ marginBottom: 12 }}>
                 {(data.focus || []).map((f) => (
                   <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0" }}>
-                    <input type="checkbox" onChange={async (e) => {
+                    {/* Completing an activity is a contacts:'edit' write (crm_complete_activity), so
+                        it is offered only to someone who may change this customer — not to a
+                        View holder or someone on Own · View (migration 286), who used to get a
+                        live box that 403'd on click. */}
+                    <input type="checkbox" disabled={!canEdit}
+                      title={canEdit ? undefined : (!crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to complete activities.")}
+                      style={canEdit ? undefined : { cursor: "not-allowed" }}
+                      onChange={async (e) => {
                       // The box is uncontrolled, so a failed complete would leave it ticked
                       // while the item stays in Focus — looking done when it isn't. Untick
                       // it and say what happened instead of failing silently.

@@ -10,6 +10,12 @@ import { logFault } from "./log";
 
 export type Admin = SupabaseClient;
 export type Level = "none" | "own" | "view" | "edit";
+/**
+ * The contacts area speaks one more level than the rest (2026-10-06, migration 286): 'own_view',
+ * own customers, view only. Kept off `Level` on purpose: phone_level never carries it, and a phone
+ * check that met it would have to decide what it means.
+ */
+export type ContactsLevel = Level | "own_view";
 
 let cached: { url: string; key: string; client: Admin } | null = null;
 
@@ -84,7 +90,8 @@ export interface CallerContext {
   client_id: string;
   phone_status: string;
   phone_level: Level;
-  contacts_level: Level;
+  /** Includes 'own_view' (own customers, view only; migration 286). */
+  contacts_level: ContactsLevel;
   own_contacts_only: boolean;
   device_generation: number;
   /**
@@ -111,8 +118,10 @@ export async function callerContext(admin: Admin, userId: string): Promise<Calle
     client_id: String(data.client_id),
     phone_status: String(data.phone_status ?? "off"),
     phone_level: normLevel(data.phone_level),
-    contacts_level: normLevel(data.contacts_level),
-    own_contacts_only: data.own_contacts_only === true || data.contacts_level === "own",
+    contacts_level: normContactsLevel(data.contacts_level),
+    // Either own-scope level narrows, whatever the RPC's own flag says: a database before 286
+    // answers own_contacts_only false for an own_view person, and the level is the fact.
+    own_contacts_only: data.own_contacts_only === true || data.contacts_level === "own" || data.contacts_level === "own_view",
     device_generation: Number.isInteger(Number(data.device_generation)) && Number(data.device_generation) >= 1
       ? Number(data.device_generation)
       : 1,
@@ -149,6 +158,11 @@ export function businessNumbersOf(v: unknown, number?: string | null): string[] 
 
 export function normLevel(v: unknown): Level {
   return v === "own" || v === "view" || v === "edit" ? v : "none";
+}
+
+/** normLevel for the contacts area, which keeps 'own_view'. Anything unknown is still 'none'. */
+export function normContactsLevel(v: unknown): ContactsLevel {
+  return v === "own_view" ? v : normLevel(v);
 }
 
 // ── phone_route_for_number(p_e164) ──────────────────────────────────────────────────
