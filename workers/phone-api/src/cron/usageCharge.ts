@@ -72,10 +72,17 @@
 // A connected leg Twilio has not priced keeps the row pending, until fallback_after_hours
 // (default 6) after the call ended: then the missing pieces are ESTIMATED at the fallback
 // rates (cost_source 'estimate'). A text is its message price plus the carrier-fee estimate
-// per segment (carrier fees are billed separately and never appear on the message).
+// per segment (carrier fees are billed separately and never appear on the message). A photo
+// text received (num_media > 0) that Twilio has not priced is estimated at Twilio's published
+// inbound MMS price, MMS_IN_MICROS a message, not at the text rate per segment (outbound MMS
+// can't be sent: routes/sms.ts refuses media).
 //
 // THE CHARGE = round(cost × markup), half up; with a ceiling set, at most ceiling × units
-// (minutes or segments), so Carolyn can promise "never more than you pay now".
+// (minutes or segments), so Carolyn can promise "never more than you pay now". The markup is
+// the ONLY multiplier: it lands on the whole cost (every leg, the conference and voicemail
+// estimates, the carrier fee), whether Twilio priced it or the fallback did. Carolyn's answer
+// of 2026-10-06 is ×1.25, the whole margin, kept when Twilio starts returning real prices. It
+// is an operator setting (Admin › Billing); nothing in this file knows the number.
 //
 // ── THE REQUEST CAP ─────────────────────────────────────────────────────────────────────
 // About 300 outside requests per run (Supabase and Twilio together), well inside a Worker's
@@ -141,6 +148,12 @@ export const MAX_DEPTH = 3;
 export const CONFERENCE_MIN_MICROS = 1800;
 /** Twilio's recording price per minute, for a recording it has not priced by the fallback. */
 export const RECORDING_MIN_MICROS = 2500;
+/**
+ * Twilio's published US price for a photo text RECEIVED (MMS), per message, for one it has not
+ * priced by the fallback. Without it an inbound MMS was estimated as a text (8,300 a segment).
+ * Outbound MMS can't be sent (routes/sms.ts refuses media), so it has no constant.
+ */
+export const MMS_IN_MICROS = 16500;
 /** Budget a row needs before it is started. */
 const ROW_MIN = 12;
 /** Budget that must be left to claim another batch. */
@@ -325,6 +338,8 @@ export interface UsageSms {
   to_number: string;
   provider_sid: string | null;
   num_segments: number | null;
+  /** Photos that came with an inbound text (migration 254; 0 on every other text). */
+  num_media: number | null;
   created_at: string;
 }
 
@@ -352,7 +367,7 @@ interface RecCallJoin {
 
 const CALL_SELECT =
   "id, client_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, transfer_state, status, started_at, answered_at, ended_at, duration_s, cost_cents, error_code, phone_voicemails(recording_sid, duration_s)";
-const SMS_SELECT = "id, client_id, direction, status, from_number, to_number, provider_sid, num_segments, created_at";
+const SMS_SELECT = "id, client_id, direction, status, from_number, to_number, provider_sid, num_segments, num_media, created_at";
 const REC_SELECT =
   "id, client_id, recording_sid, status, duration_s, completed_at, deleted_at, transcript_status, summary_status, stt_cost_micros, llm_cost_micros, phone_calls(direction, from_e164, to_e164)";
 
@@ -1257,10 +1272,13 @@ async function chargeSms(run: Run, row: ChargeRow, msg: UsageSms | null): Promis
   else if (!billable) micros = 0; // a text that failed was never priced, and cost nothing
   else if (!allowEstimate) return reschedule(run, row, backoffAt(run, row), twErr ?? "the text is not priced yet");
   else {
-    micros = segments * s.fallbackSmsSegMicros;
+    // A photo text received is one MMS message at Twilio, priced per message, not per segment.
+    const mms = direction === "in" && Number(msg.num_media) > 0;
+    micros = mms ? MMS_IN_MICROS : segments * s.fallbackSmsSegMicros;
     source = "estimate";
     detail.fallback = (twErr ?? "not priced in time").slice(0, 200);
     detail.price_micros = micros;
+    if (mms) detail.mms = true;
   }
   // Carrier fees are billed apart and never appear on the message: a standing estimate.
   const carrier = billable ? segments * (direction === "out" ? s.carrierFeeOutMicros : s.carrierFeeInMicros) : 0;

@@ -40,7 +40,11 @@
 //      doesn't say "recorded" is refused before Save, the announcement can't be unticked; anyone
 //      else sees the card read-only; before 263 the card says it is not available; with the
 //      server's switch (the Worker's CALL_RECORDING rail) off, the owner's on reads "On, not
-//      started yet" and never "Calls are recorded".
+//      started yet" and never "Calls are recorded". Since migration 287: the standard sentence is
+//      "This call may be recorded." ("... and transcribed" only with the CALL_TRANSCRIBE rail on,
+//      and with it off the card says transcripts haven't started); a business no owner has saved
+//      is on by default and the card says so, and its first save asks "Record calls?" (a stamped
+//      choice doesn't ask again).
 //   Q. A recorded call in the contact timeline: its summary shows, Play recording fetches
 //      <PHONE_API_BASE>/recordings/<id>/audio only on the press (header, blob: URL), and "Show
 //      transcript" reads /calls/<id>/transcript the same way; neither in view-as or with calling off.
@@ -175,8 +179,9 @@ async function scenario(browser, opts) {
     smsStatus = null,
     // Call recording (P): the client_settings row's recording columns (null = before migration
     // 263), whether this caller may change them (the server's owner rule), and the server's
-    // switch (portal-settings' copy of the Worker's CALL_RECORDING rail).
-    recordingRow = {}, canChangeRecording = true, recordingServerOn = true,
+    // switches (portal-settings' copies of the Worker's CALL_RECORDING and CALL_TRANSCRIBE rails;
+    // transcripts ship off).
+    recordingRow = {}, canChangeRecording = true, recordingServerOn = true, transcribeServerOn = false,
     // Your calls (R): the signed-in person's own settings the stub Worker answers GET and POST
     // /settings/me with (null = the stub answers those paths as it always has), the team screen's
     // list, and the browser's time zone.
@@ -221,13 +226,15 @@ async function scenario(browser, opts) {
 
   const page = await ctx.newPage();
   page.on("pageerror", (e) => pageErrors.push(`${opts.name}: ${e.message}`));
-  page.on("dialog", (d) => d.accept());
+  // Every confirm is accepted, and its words kept (P20/P21: which saves ask "Record calls?").
+  const dialogs = [];
+  page.on("dialog", (d) => { dialogs.push(d.message()); d.accept(); });
   const calls = [];
   const state = {
     phoneStatus, route: null,
     callerId: { available: trustAvailable, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null },
     sms: smsStatus,
-    recording: recordingRow ? recordingView(recordingRow, recordingServerOn) : null,
+    recording: recordingRow ? recordingView(recordingRow, recordingServerOn, transcribeServerOn) : null,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
     my,
     numbers: numbers ? numbers.map((n) => ({ ...n })) : null,
@@ -415,7 +422,7 @@ async function scenario(browser, opts) {
         if (!state.recording) return json(route, { error: "Call recording isn't set up on this server yet." }, 503);
         const r = parseRecording(body);
         if (!r.ok) return json(route, { error: r.error }, 400);
-        state.recording = recordingView({ ...r.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id }, recordingServerOn);
+        state.recording = recordingView({ ...r.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id }, recordingServerOn, transcribeServerOn);
         return json(route, { ok: true, recording: state.recording });
       }
       // Plan phase 6, caller ID. STUBS: nothing reaches Twilio. The server refuses non-operators;
@@ -500,7 +507,7 @@ async function scenario(browser, opts) {
     await page.waitForTimeout(1200);
   };
   const sent = () => page.evaluate(() => (window.__sssSent || []).map((s) => ({ id: s.id, ...s.msg })));
-  return { ctx, page, calls, go, sent, vm, state };
+  return { ctx, page, calls, go, sent, vm, state, dialogs };
 }
 
 // R. The phone-api Worker's POST /settings/me for the person's own hours (routes/me.ts
@@ -831,18 +838,28 @@ try {
 
   // ── P. Settings → Phone, Call recording (migration 263) ──────────────────────────────────
   {
-    const s = await scenario(browser, { name: "P" });
+    // An owner who turned recording OFF (a stamped choice, which 287 never overrides) turns it
+    // back on with their own wording.
+    const s = await scenario(browser, { name: "P", recordingRow: {
+      phone_record_calls: false, phone_recording_updated_at: "2026-10-05T12:00:00Z", phone_recording_updated_by: USER.id } });
     await s.go("/portal/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
-    const rendered = ok("P0 the Phone tab has a Call recording card, off by default", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1);
+    const rendered = ok("P0 the Phone tab has a Call recording card, off as the owner left it", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1
+      && (await s.page.locator("[data-ss-phone-recording-default]").count()) === 0);
     if (rendered) {
       const save = s.page.locator("[data-ss-phone-recording-save]");
       const words = s.page.locator("[data-ss-phone-recording-notice]");
       ok("P1 its Save waits for a change", (await save.count()) === 1 && await save.isDisabled());
       const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
       ok("P2 the announcement is ticked and can't be unticked", (await notice.isChecked()) && (await notice.isDisabled()));
-      ok("P3 the wording box shows the standard sentence", (await words.getAttribute("placeholder")) === "This call will be recorded and transcribed.");
+      ok("P3 the wording box shows the standard sentence, without \"and transcribed\" while transcripts haven't started",
+        (await words.getAttribute("placeholder")) === "This call may be recorded."
+          && /Leave it empty for the standard sentence: \u201cThis call may be recorded\.\u201d/.test(await card.innerText().catch(() => "")));
+      ok("P3b the transcripts box is still there and ticked, and says transcripts haven't started on this account",
+        (await s.page.locator('[data-ss-phone-recording-check="transcribe"]').isChecked())
+          && /Transcripts haven\u2019t started on this account yet\. Your choice is saved and takes effect once they do\./.test(
+            await s.page.locator("[data-ss-phone-recording-transcripts-waiting]").innerText().catch(() => "")));
       ok("P4 recordings are kept for a year unless the owner picks otherwise", (await s.page.locator("[data-ss-phone-recording-keep]").inputValue()) === "365");
       ok("P5 the legal note is on the card", (await s.page.locator("[data-ss-phone-recording-legal]").count()) === 1);
       await card.scrollIntoViewIfNeeded().catch(() => {});
@@ -868,6 +885,14 @@ try {
       ok("P10 and who changed it, and when", /Last changed today by Olive Owner\./.test(after));
       ok("P11 the routing form's Save was never sent", !s.calls.some((c) => c.action === "phone_settings_save"));
       await card.screenshot({ path: join(shots, "P-recording-on.png") }).catch(() => {});
+      const asked = s.dialogs.filter((m) => /^Record calls\?/.test(m)).length;
+      await s.page.locator("[data-ss-phone-recording-keep]").selectOption("730");
+      await tap(save);
+      for (let i = 0; i < 80 && s.calls.filter((c) => c.action === "phone_recording_save").length < 2; i++) await s.page.waitForTimeout(100);
+      const again = s.calls.filter((c) => c.action === "phone_recording_save");
+      ok("P21 once the owner's own choice is stamped on, keeping recordings longer saves without asking \"Record calls?\" again",
+        again.length === 2 && again[1].retentionDays === 730 && s.dialogs.filter((m) => /^Record calls\?/.test(m)).length === asked && asked === 1,
+        JSON.stringify(s.dialogs));
     }
     await s.ctx.close();
   }
@@ -885,6 +910,62 @@ try {
         && /Only the business owner can change call recording\./.test(await card.innerText().catch(() => ""))
         && (await s.page.locator("[data-ss-phone-recording-keep]").inputValue()) === "180");
     await card.screenshot({ path: join(shots, "P-recording-not-owner.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
+    // Migration 287: a business no owner has saved is ON by default. With the server recording,
+    // the card says calls are recorded, and that it is the default rather than who changed it.
+    const s = await scenario(browser, { name: "P-default-on", recordingRow: { phone_record_calls: true } });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator('[data-ss-phone-recording="on"]');
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const text = await card.innerText().catch(() => "");
+    ok("P16 on by default: the card reads \"Calls are recorded\" and says it is on by default for every business",
+      (await s.page.locator('[data-ss-phone-recording-status="on"]').innerText().catch(() => "")) === "Calls are recorded"
+        && (await s.page.locator('[data-ss-phone-recording-check="on"]').isChecked())
+        && /On by default for every business\. The business owner can turn it off\./.test(text) && !/Last changed/.test(text), text.slice(0, 200));
+    ok("P17 the owner can still turn it off", await s.page.locator('[data-ss-phone-recording-check="on"]').isEnabled());
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-default-on.png") }).catch(() => {});
+    // Its first save stamps the owner as having chosen recording, so it asks first, even when
+    // only the keep length changed (longer, so the shorter-keep confirm doesn't ask instead).
+    await s.page.locator("[data-ss-phone-recording-keep]").selectOption("730");
+    await tap(s.page.locator("[data-ss-phone-recording-save]"));
+    await s.page.waitForFunction(() => /Saved\./.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const first = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    ok("P20 the first save of a business on by default asks \"Record calls?\" before it stamps the owner's choice",
+      s.dialogs.length === 1 && /^Record calls\? From your next call on, every call to and from your business number is announced and then recorded\./.test(s.dialogs[0])
+        && !!first && first.on === true && first.retentionDays === 730,
+      JSON.stringify({ dialogs: s.dialogs, first }));
+    await s.ctx.close();
+  }
+  {
+    // Between 287 and the rail (SETUP.md 7d steps 1-4): on by default, but nothing records yet.
+    const s = await scenario(browser, { name: "P-default-waiting", recordingRow: { phone_record_calls: true }, recordingServerOn: false });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator('[data-ss-phone-recording="on"]');
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const text = await card.innerText().catch(() => "");
+    ok("P19 on by default with the server's switch off: 'On, not started yet', never 'Calls are recorded'",
+      (await s.page.locator('[data-ss-phone-recording-status="waiting"]').innerText().catch(() => "")) === "On, not started yet"
+        && (await s.page.locator("[data-ss-phone-recording-waiting]").count()) === 1 && !/Calls are recorded/.test(text)
+        && /On by default for every business\./.test(text), text.slice(0, 200));
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-default-waiting.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
+    // The CALL_TRANSCRIBE rail on (not the case today): the standard sentence says "and
+    // transcribed", and the "haven't started" note is gone.
+    const s = await scenario(browser, { name: "P-transcribing", recordingRow: { phone_record_calls: true }, transcribeServerOn: true });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    ok("P18 with the transcripts rail on the placeholder becomes \"... and transcribed\" and the note is hidden",
+      (await s.page.locator("[data-ss-phone-recording-notice]").getAttribute("placeholder")) === "This call may be recorded and transcribed."
+        && (await s.page.locator("[data-ss-phone-recording-transcripts-waiting]").count()) === 0);
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-transcribing.png") }).catch(() => {});
     await s.ctx.close();
   }
   {

@@ -10,8 +10,9 @@
 //
 // ── OFF AT THREE LEVELS ────────────────────────────────────────────────────────────────────
 //   1. env CALL_RECORDING must be exactly "on" (recordingEnvOn);
-//   2. the business turned it on (client_settings.phone_record_calls, owner only), with the
-//      announcement on (it is locked on; RecordingSettings.notice);
+//   2. the business's switch is on (client_settings.phone_record_calls: on by default since
+//      migration 287, and only the owner turns it off), with the announcement on (it is locked
+//      on; RecordingSettings.notice);
 //   3. the call is ARMED (phone_calls.recording_armed): written true by /voice/inbound and
 //      /voice/outbound only when the TwiML they answered with carried the announcement. Never for
 //      an emergency call, the 911 callback window, or a voicemail-only answer. Recording can only
@@ -78,8 +79,10 @@ export function armedFor(env: Env, s: RecordingSettings, emergency = false): boo
 
 // ── The announcement ────────────────────────────────────────────────────────────────────
 
-export const STANDARD_NOTICE = "This call will be recorded.";
-export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and transcribed.";
+// Carolyn's wording (2026-10-06, migration 287). Word for word portal-settings/phone.ts and the
+// portal's Settings card, which only show it (tests/phone/callRecordingUi_test.ts pins all three).
+export const STANDARD_NOTICE = "This call may be recorded.";
+export const STANDARD_NOTICE_TRANSCRIBED = "This call may be recorded and transcribed.";
 
 /**
  * What the announcement says: the business's own sentence, else the standard one, which

@@ -158,7 +158,7 @@ import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 // same, so it is the only thing that can tell "my calls" from "the team's calls". Every Team
 // read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
 import { ownPhoneOnly } from "../_shared/access.ts";
-import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
+import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, transcribeServerOn, type ReportCall, type ReportText } from "./phone.ts";
 // Migration 266: more than one number, each with a name and maybe a person (phone.ts).
 import {
   callerNumberFor, carriesRoute, MAX_NUMBERS, ONE_NUMBER_PER_PERSON, parseAssignee, parseNumberLabel, pickNumber, suggestedMembersFor,
@@ -9471,7 +9471,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // logged and shows the same. The phone-api Worker's CALL_RECORDING rail can't be seen from
     // the database, so this function holds a copy as its own secret (recordingServerOn, set with
     // the Worker var, SETUP 7c): `serverOn` false makes the card say recording hasn't started,
-    // rather than that calls are recorded while nothing records.
+    // rather than that calls are recorded while nothing records. CALL_TRANSCRIBE is mirrored the
+    // same way (transcribeServerOn), so the card promises transcripts only while they are made.
     const recRes = await admin.from("client_settings")
       .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
       .eq("client_id", clientId).maybeSingle();
@@ -9479,7 +9480,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_recording_read_failed", severity: "error",
         message: `client_settings recording read failed: ${recRes.error.message ?? "unknown"}` }).catch(() => {});
     }
-    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)));
+    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k)));
 
     // AN 'own' CALLER GETS THEIR OWN SLICE. The gate let them in on `view` because RANK scores
     // own == view; the setup — who answers, when, where calls forward — is the team's business
@@ -9751,7 +9752,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     audit(parsed.row.phone_record_calls ? "phone_recording_on" : "phone_recording_off", 1,
       `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"}`).catch(() => {});
-    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k))) });
+    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k))) });
   }
 
   // THE SWITCH, and what it does to the number (phoneNumber.ts switchCalling). ON is behind the

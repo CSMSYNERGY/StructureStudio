@@ -5,9 +5,10 @@
 // ⚠️ PUBLIC REPO: every number, SID and id here is fake (555-01xx, zero-padded SIDs).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  backoffMinutes, callBillability, chargeFor, DEFAULT_SETTINGS, displayNumber, idemFor, meterFor, recordingMemo, runUsageCharges,
-  settingsFrom, smsMemo, type ChargeRow,
+  backoffMinutes, callBillability, chargeFor, DEFAULT_SETTINGS, displayNumber, idemFor, meterFor, MMS_IN_MICROS, recordingMemo,
+  runUsageCharges, settingsFrom, smsMemo, type ChargeRow,
 } from "../src/cron/usageCharge";
+import { PHONE_METERS, previewChargeMicros } from "../../../supabase/functions/_shared/phoneBillingAdmin.ts";
 import { fetchCallCost, listUsageDaily, priceMicros } from "../src/twilioRest";
 import { adminClient } from "../src/db";
 import { installDenoShim, type Env } from "../src/env";
@@ -59,7 +60,7 @@ function callRow(id: string, over: Record<string, unknown> = {}) {
 function smsRow(id: string, over: Record<string, unknown> = {}) {
   return {
     id, client_id: CLIENT, direction: "out", status: "delivered", from_number: BUSINESS_NUMBER, to_number: CUSTOMER,
-    provider_sid: SM(1), num_segments: 2, created_at: ago(10), ...over,
+    provider_sid: SM(1), num_segments: 2, num_media: 0, created_at: ago(10), ...over,
   };
 }
 
@@ -235,6 +236,32 @@ describe("pricing arithmetic", () => {
     expect(chargeFor(46000, 2, 40000, 3)).toBe(92000); // under the ceiling: untouched
     expect(chargeFor(1000, 1.333, null, 1)).toBe(1333);
     expect(chargeFor(0, 3, null, 1)).toBe(0);
+  });
+
+  it("×1.25 (Carolyn, 2026-10-06): the prices at Twilio's published US rates, half up on the quarter", () => {
+    expect(chargeFor(54000, 1.25, null, 3)).toBe(67500); // a 3-minute outbound app call: 3 × (14,000 + 4,000)
+    expect(chargeFor(12800, 1.25, null, 1)).toBe(16000); // a text sent: 8,300 + 4,500 carrier fee
+    expect(chargeFor(11800, 1.25, null, 1)).toBe(14750); // a text received: 8,300 + 3,500
+    expect(chargeFor(2, 1.25, null, 1)).toBe(3); // 2.5 → up
+    expect(chargeFor(1, 1.25, null, 1)).toBe(1); // 1.25 → down
+    // Per minute: outbound app call $0.0225, inbound answered in the app $0.015625.
+    expect(chargeFor(DEFAULT_SETTINGS.fallbackOutMinMicros + DEFAULT_SETTINGS.fallbackClientMinMicros, 1.25, null, 1)).toBe(22500);
+    expect(chargeFor(DEFAULT_SETTINGS.fallbackInMinMicros + DEFAULT_SETTINGS.fallbackClientMinMicros, 1.25, null, 1)).toBe(15625);
+    // A photo text received, at Twilio's MMS price: 16,500 + 3,500.
+    expect(MMS_IN_MICROS).toBe(16500);
+    expect(chargeFor(MMS_IN_MICROS + DEFAULT_SETTINGS.carrierFeeInMicros, 1.25, null, 1)).toBe(25000);
+  });
+
+  it("the Billing card's would-have-charged (previewChargeMicros) is this charge, to the micro", () => {
+    for (const markup of [1, 1.1, 1.25, 1.333, 2.5]) {
+      for (let cost = 0; cost <= 120_000; cost += 97) {
+        const units = 1 + (cost % 5);
+        const none = { markup, ceiling_min_micros: null, ceiling_seg_micros: null };
+        expect(previewChargeMicros(cost, units, "minute", none)).toBe(chargeFor(cost, markup, null, units));
+        expect(previewChargeMicros(cost, units, "minute", { ...none, ceiling_min_micros: 17_000 })).toBe(chargeFor(cost, markup, 17_000, units));
+        expect(previewChargeMicros(cost, units, "segment", { ...none, ceiling_seg_micros: 9_000 })).toBe(chargeFor(cost, markup, 9_000, units));
+      }
+    }
   });
 
   it("backoff by attempts: 3, 10, 30, 60, 120, then 240 minutes", () => {
@@ -752,6 +779,191 @@ describe("texts", () => {
     const net = world({ queue: [row], sms: [smsRow(id, { status: "sent" })], messages: [{ sid: SM(1), status: "sending", num_segments: 1, price: null }] });
     await runIt();
     expect(rowPatch(net, row.id)).toMatchObject({ last_error: "the text is still being sent", next_try_at: new Date(NOW.getTime() + 10 * 60_000).toISOString() });
+  });
+
+  describe("a photo text received (MMS)", () => {
+    const late = { created_at: ago(6 * 60 + 1) };
+    const inbound = (id: string, over: Record<string, unknown> = {}) =>
+      smsRow(id, { direction: "in", status: "received", from_number: CUSTOMER, to_number: BUSINESS_NUMBER, provider_sid: SM(7), num_segments: 1, ...late, ...over });
+
+    it("unpriced after the fallback hours: Twilio's MMS price a message plus the carrier fee, not the text rate", async () => {
+      const id = uuid(406);
+      const row = charge("sms", id, { direction: "in", attempts: 7 });
+      const net = world({ queue: [row], sms: [inbound(id, { num_media: 1 })], messages: [{ sid: SM(7), status: "received", num_segments: 1, price: null, direction: "inbound" }] });
+      await runIt();
+      // 16,500 + 3,500 carrier fee = 20,000; the markup (2 here) on the whole of it.
+      expect(debits(net)).toEqual([expect.objectContaining({
+        p_meter_kind: "sms_in", p_cost_micros: 20000, p_charge_micros: 40000, p_memo: "Text from (555) 555-0142 · 1 segment",
+        p_usage: { units: 1, unit: "segment", direction: "in" },
+      })]);
+      expect(rowPatch(net, row.id)).toMatchObject({
+        state: "charged", cost_source: "estimate", units: 1, unit: "segment",
+        cost_detail: { mms: true, price_micros: 16500, carrier_fee_micros: 3500, segments: 1 },
+      });
+      // num_media is read with the text (it was not before, so a photo text was priced as a text).
+      expect(net.reads("sms_messages")[0].url.searchParams.get("select")).toContain("num_media");
+    });
+
+    it("per message, whatever the segments; several photos are still one message", async () => {
+      const id = uuid(407);
+      const row = charge("sms", id, { direction: "in", attempts: 7 });
+      const net = world({ queue: [row], sms: [inbound(id, { num_media: 3, num_segments: 2 })], messages: [{ sid: SM(7), status: "received", num_segments: 2, price: null, direction: "inbound" }] });
+      await runIt();
+      // 16,500 once; the carrier-fee estimate stays per segment (2 × 3,500).
+      expect(debits(net)[0]).toMatchObject({ p_cost_micros: 16500 + 7000, p_usage: { units: 2, unit: "segment", direction: "in" } });
+    });
+
+    it("Twilio's own price wins when it has one; a text with no photo and anything sent are unchanged", async () => {
+      const a = uuid(408);
+      const b = uuid(409);
+      const c = uuid(410);
+      const rows = [charge("sms", a, { direction: "in", attempts: 7 }), charge("sms", b, { direction: "in", attempts: 7 }), charge("sms", c, { attempts: 7 })];
+      const net = world({
+        queue: rows,
+        sms: [
+          inbound(a, { num_media: 1, provider_sid: SM(8) }),
+          inbound(b, { num_media: 0 }),
+          smsRow(c, { num_media: 1, num_segments: 1, provider_sid: SM(9), ...late }), // can't happen (routes/sms.ts refuses media), pinned anyway
+        ],
+        messages: [
+          { sid: SM(8), status: "received", num_segments: 1, price: "-0.01650", direction: "inbound" },
+          { sid: SM(7), status: "received", num_segments: 1, price: null, direction: "inbound" },
+          { sid: SM(9), status: "delivered", num_segments: 1, price: null },
+        ],
+      });
+      await runIt();
+      expect(debits(net).map((d) => [d.p_ref_id, d.p_cost_micros])).toEqual([[a, 16500 + 3500], [b, 8300 + 3500], [c, 8300 + 4500]]);
+      expect(rowPatch(net, rows[0].id)).toMatchObject({ cost_source: "twilio" });
+      expect(rowPatch(net, rows[0].id).cost_detail.mms).toBeUndefined();
+      expect(rowPatch(net, rows[1].id).cost_detail.mms).toBeUndefined();
+      expect(rowPatch(net, rows[2].id).cost_detail.mms).toBeUndefined();
+    });
+  });
+});
+
+// ── Carolyn's prices (2026-10-06) ───────────────────────────────────────────────────
+
+describe("Carolyn's prices (2026-10-06): the cost × 1.25, one line per call or text, recordings absorbed", () => {
+  // As it will run once armed for everyone: markup 1.25 saved on the card (numeric(6,3) comes
+  // back as "1.250"), the fallback wait cut to 1 hour, the four call and text meters active
+  // (Start charging, every builder), call_recording left inactive. Twilio prices nothing on
+  // this account today, so every line is the published-rate estimate.
+  const CAROLYN = { markup: "1.250", armed_at: ARMED_AT, fallback_after_hours: 1 };
+  const fourMeters = (_c: string, meter: string) => (PHONE_METERS as readonly string[]).includes(meter);
+  const ENDED = ago(61);
+  const OUT = uuid(1001), IN = uuid(1002), VM = uuid(1003), MISSED = uuid(1004);
+  const TXT_OUT = uuid(1005), TXT_IN = uuid(1006), PHOTO_IN = uuid(1007), REC = uuid(1008);
+  const callAt = { occurred_at: ago(65), attempts: 3 };
+  const fromCustomer = { direction: "in", from_e164: CUSTOMER, to_e164: BUSINESS_NUMBER };
+  const textIn = { direction: "in", status: "received", from_number: CUSTOMER, to_number: BUSINESS_NUMBER, num_segments: 1, created_at: ago(65) };
+
+  function carolynWorld(over: Partial<World> = {}) {
+    const rows = [
+      charge("call", OUT, callAt),
+      charge("call", IN, { ...callAt, direction: "in" }),
+      charge("call", VM, { ...callAt, direction: "in" }),
+      charge("call", MISSED, { ...callAt, direction: "in" }),
+      charge("sms", TXT_OUT, callAt),
+      charge("sms", TXT_IN, { ...callAt, direction: "in" }),
+      charge("sms", PHOTO_IN, { ...callAt, direction: "in" }),
+      { ...charge("call", REC, callAt), source: "recording" } as ChargeRow,
+    ];
+    const net = world({
+      queue: rows,
+      settings: CAROLYN,
+      armed: fourMeters,
+      calls: [
+        callRow(OUT, { client_call_sid: CA(10), twilio_call_sid: CA(11), ended_at: ENDED, duration_s: 175 }),
+        callRow(IN, { ...fromCustomer, twilio_call_sid: CA(20), client_call_sid: CA(21), ended_at: ENDED, duration_s: 170 }),
+        callRow(VM, {
+          ...fromCustomer, status: "voicemail", answered_at: null, duration_s: null, twilio_call_sid: CA(30), ended_at: ENDED,
+          phone_voicemails: { recording_sid: RE(30), duration_s: 40 },
+        }),
+        callRow(MISSED, { ...fromCustomer, status: "missed", answered_at: null, duration_s: null, twilio_call_sid: CA(40), ended_at: ENDED }),
+      ],
+      legs: [
+        { sid: CA(10), status: "completed", duration: 180, price: null, direction: "inbound", from: APP, to: CUSTOMER },
+        { sid: CA(11), parent: CA(10), status: "completed", duration: 175, price: null, direction: "outbound-dial", from: BUSINESS_NUMBER, to: CUSTOMER },
+        { sid: CA(20), status: "completed", duration: 180, price: null, direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER },
+        { sid: CA(21), parent: CA(20), status: "completed", duration: 170, price: null, direction: "outbound-dial", from: CUSTOMER, to: APP },
+        { sid: CA(30), status: "completed", duration: 45, price: null, direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER },
+        { sid: CA(31), parent: CA(30), status: "no-answer", duration: 0, price: null, direction: "outbound-dial", from: CUSTOMER, to: APP },
+        { sid: CA(40), status: "completed", duration: 30, price: null, direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER },
+        { sid: CA(41), parent: CA(40), status: "no-answer", duration: 0, price: null, direction: "outbound-dial", from: CUSTOMER, to: APP },
+      ],
+      recordings: [{ sid: RE(30), duration: 40, price: null }, { sid: RE(60), duration: 150, price: null }],
+      sms: [
+        smsRow(TXT_OUT, { provider_sid: SM(51), num_segments: 1, created_at: ago(65) }),
+        smsRow(TXT_IN, { ...textIn, provider_sid: SM(52) }),
+        smsRow(PHOTO_IN, { ...textIn, provider_sid: SM(53), num_media: 1 }),
+      ],
+      messages: [
+        { sid: SM(51), status: "delivered", num_segments: 1, price: null },
+        { sid: SM(52), status: "received", num_segments: 1, price: null, direction: "inbound" },
+        { sid: SM(53), status: "received", num_segments: 1, price: null, direction: "inbound" },
+      ],
+      ...over,
+    });
+    net.rest("GET", "phone_call_recordings", () => [{
+      id: REC, client_id: CLIENT, recording_sid: RE(60), status: "completed", duration_s: 150, completed_at: ago(65), deleted_at: null,
+      transcript_status: "off", summary_status: "off", stt_cost_micros: null, llm_cost_micros: null,
+      phone_calls: { direction: "out", from_e164: BUSINESS_NUMBER, to_e164: CUSTOMER },
+    }]);
+    return { net, rows };
+  }
+
+  it("every Twilio price missing, past the 1-hour wait: each line is the published-rate estimate × 1.25", async () => {
+    const { net, rows } = carolynWorld();
+    expect(await runIt()).toMatchObject({ ran: true, claimed: 8, charged: 6, shadow: 1, not_billable: 1, pending: 0, failed: 0 });
+    expect(debits(net).map((d) => [d.p_ref_id, d.p_meter_kind, d.p_cost_micros, d.p_charge_micros, d.p_memo])).toEqual([
+      // 3 min × (14,000 out + 4,000 app leg) = 54,000 → $0.0675 ($0.0225 a minute)
+      [OUT, "voice_minute", 54000, 67500, "Outbound call to (555) 555-0142 · 3 min"],
+      // 3 min × (8,500 in + 4,000 app leg) = 37,500 → $0.046875 ($0.015625 a minute)
+      [IN, "voice_minute_in", 37500, 46875, "Incoming call from (555) 555-0142 · 3 min"],
+      // A voicemail IS charged: 1 min in at 8,500 + the recording at 2,500 a minute
+      [VM, "voice_minute_in", 11000, 13750, "Missed call from (555) 555-0142 · voicemail 1 min"],
+      [TXT_OUT, "sms_segment", 12800, 16000, "Text to (555) 555-0142 · 1 segment"],
+      [TXT_IN, "sms_in", 11800, 14750, "Text from (555) 555-0142 · 1 segment"],
+      [PHOTO_IN, "sms_in", 20000, 25000, "Text from (555) 555-0142 · 1 segment"],
+    ]);
+    for (const r of rows.filter((x) => x.source_id !== MISSED && x.source !== "recording")) {
+      const p = rowPatch(net, r.id);
+      expect(p).toMatchObject({ state: "charged", cost_source: "estimate", markup: 1.25 });
+      expect(p.charge_micros).toBe(chargeFor(p.cost_micros, 1.25, null, p.units));
+      expect(p.wallet_tx_id).toEqual(expect.any(Number));
+    }
+    // A missed call with no voicemail is never charged; what it cost us is recorded (absorbed).
+    expect(rowPatch(net, rows[3].id)).toMatchObject({ state: "not_billable", cost_micros: 8500, cost_source: "estimate", charge_micros: null, markup: null });
+    // The call recording: its own meter is off, so it is absorbed. The row records its cost and
+    // what it would have charged, and no wallet line is posted.
+    expect(rowPatch(net, rows[7].id)).toMatchObject({ state: "shadow", cost_micros: 3 * 2500, cost_source: "estimate", charge_micros: 9375, markup: 1.25 });
+    expect(debits(net).some((d) => d.p_meter_kind === "call_recording" || d.p_meter_kind === "call_transcription")).toBe(false);
+    // Each charged pair asked once; the recording's meter asked and refused; the missed call never asked.
+    expect(net.rpcCalls("phone_usage_armed").map((s) => s.json.p_meter).sort()).toEqual(
+      ["call_recording", "sms_in", "sms_segment", "voice_minute", "voice_minute_in"],
+    );
+  });
+
+  it("under the 1-hour wait, nothing is estimated yet: every line waits for Twilio's price", async () => {
+    const { net } = carolynWorld({ settings: { ...CAROLYN, fallback_after_hours: 2 } });
+    expect(await runIt()).toMatchObject({ charged: 0, pending: 8, not_billable: 0, shadow: 0 });
+    expect(debits(net)).toEqual([]);
+  });
+
+  it("when Twilio does price an item, the same ×1.25 lands on its real price (cost_source twilio)", async () => {
+    const id = uuid(1010);
+    const row = charge("call", id, callAt);
+    const net = world({
+      queue: [row], settings: CAROLYN, armed: fourMeters,
+      calls: [callRow(id, { client_call_sid: CA(70), twilio_call_sid: CA(71), ended_at: ago(5), duration_s: 150 })],
+      legs: [
+        { sid: CA(70), status: "completed", duration: 152, price: "-0.01200", direction: "inbound", from: APP, to: CUSTOMER },
+        { sid: CA(71), parent: CA(70), status: "completed", duration: 150, price: "-0.04200", direction: "outbound-dial", from: BUSINESS_NUMBER, to: CUSTOMER },
+      ],
+    });
+    await runIt();
+    expect(debits(net)[0]).toMatchObject({ p_cost_micros: 54000, p_charge_micros: 67500 });
+    expect(rowPatch(net, row.id)).toMatchObject({ state: "charged", cost_source: "twilio", markup: 1.25, charge_micros: 67500 });
   });
 });
 

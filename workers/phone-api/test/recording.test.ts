@@ -73,6 +73,13 @@ describe("armed and the announcement", () => {
     expect(armedFor(recEnv(), ON, true)).toBe(false);
   });
 
+  it("the standard sentence is Carolyn's \"may be recorded\" (2026-10-06)", () => {
+    expect(STANDARD_NOTICE).toBe("This call may be recorded.");
+    expect(STANDARD_NOTICE_TRANSCRIBED).toBe("This call may be recorded and transcribed.");
+    // The sentence 263 shipped is now a business's own wording like any other: it says "recorded".
+    expect(noticeText(recEnv(), { ...ON, notice_text: "This call will be recorded." })).toBe("This call will be recorded.");
+  });
+
   it("the standard sentence mentions transcription only while it will happen; a business's own wins", () => {
     expect(noticeText(recEnv(), ON)).toBe(STANDARD_NOTICE);
     expect(noticeText(recEnv({ CALL_TRANSCRIBE: "on" }), ON)).toBe(STANDARD_NOTICE_TRANSCRIBED);
@@ -154,7 +161,7 @@ describe("/voice/inbound", () => {
   it("armed: the announcement plays BEFORE the <Dial>, every <Client> says recorded=1, and the row is armed with a notice mark", async () => {
     const net = setup(routeInfo({ recording: ON }));
     const { text } = await ring();
-    expect(text).toMatch(/^<\?xml[^>]*><Response><Say language="en-US">This call will be recorded\.<\/Say><Dial /);
+    expect(text).toMatch(/^<\?xml[^>]*><Response><Say language="en-US">This call may be recorded\.<\/Say><Dial /);
     expect((text.match(/<Parameter name="recorded" value="1"\/>/g) ?? []).length).toBe(3);
     expect(text).not.toMatch(/record=/i);
     expect(net.writes("phone_calls", "POST")[0].json.recording_armed).toBe(true);
@@ -163,7 +170,7 @@ describe("/voice/inbound", () => {
 
   it("says \"and transcribed\" while transcripts will be made, and a business's own sentence escaped", async () => {
     setup(routeInfo({ recording: ON }));
-    expect((await ring(recEnv({ CALL_TRANSCRIBE: "on" }))).text).toContain("<Say language=\"en-US\">This call will be recorded and transcribed.</Say><Dial");
+    expect((await ring(recEnv({ CALL_TRANSCRIBE: "on" }))).text).toContain("<Say language=\"en-US\">This call may be recorded and transcribed.</Say><Dial");
     setup(routeInfo({ recording: { ...ON, notice_text: "Calls with Bob & Sons <Sheds> are recorded." } }));
     expect((await ring()).text).toContain("<Say language=\"en-US\">Calls with Bob &amp; Sons &lt;Sheds&gt; are recorded.</Say><Dial");
   });
@@ -172,7 +179,7 @@ describe("/voice/inbound", () => {
     const closed = { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
     setup(routeInfo({ recording: ON }, { business_hours: closed, after_hours: "forward", forward_to: "+15555550177" }));
     const { text } = await ring();
-    expect(text).toMatch(/<Response><Say language="en-US">This call will be recorded\.<\/Say><Dial /);
+    expect(text).toMatch(/<Response><Say language="en-US">This call may be recorded\.<\/Say><Dial /);
     expect(attr(text, "Number", "url")).toMatch(/\/voice\/screen\?call=[0-9a-f-]{36}&b=Demo%20Sheds&r=1&key=/);
   });
 
@@ -604,6 +611,15 @@ describe("/voice/notice (the outbound whisper)", () => {
     expect(res.headers.get("content-type")).toContain("text/xml");
     expect(text).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US">Calls with Bob &amp; Sons are recorded.</Say></Response>');
     expect(net.writes("phone_call_events")[0].json).toMatchObject({ call_id: CALL_ID, type: "recording_notice", data: { leg: "out" } });
+  });
+
+  it("with no business on the URL it says the standard sentence and reads nothing", async () => {
+    const env = recEnv();
+    const net = new FakeNet().install();
+    net.rest("GET", "client_settings", () => []);
+    const { text } = await call(env, await twilioPost(env, "/voice/notice", { CallSid: CALL_SID }, { call: CALL_ID }));
+    expect(text).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US">This call may be recorded.</Say></Response>');
+    expect(net.reads("client_settings")).toHaveLength(0);
   });
 
   it("a read that fails still announces, in the standard words", async () => {
