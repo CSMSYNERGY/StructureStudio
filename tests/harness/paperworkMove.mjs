@@ -3,32 +3,42 @@
 //
 // 280 changes the column default and nothing on this page. Each existing builder moves when the owner,
 // or an operator viewing as them, saves Settings → CRM Connection → Quotes & Invoices with the
-// builder's own next quote number, next invoice number and tax rate. This drives the COMPILED portal
-// with Supabase stubbed at the network layer (no login, nothing leaves the machine) through the tenant
-// shapes that move, and asserts what shows, what gets posted and what the page says back:
+// builder's tax rate and, if they have them, their own next quote and invoice numbers: since migration
+// 283 (Carolyn 2026-10-06) a blank number starts at 1000, so only the rate is asked for. This drives
+// the COMPILED portal with Supabase stubbed at the network layer (no login, nothing leaves the machine)
+// through the tenant shapes that move, and asserts what shows, what gets posted and what the page says
+// back:
 //
 //   A. a grandfathered tenant (CRM mode on its row, no capability, no numbering): no "through my CRM"
-//      checkbox, the numbering and tax boxes are in front of them with the "Before saving, set …"
-//      banner, and the save posts invoiceInGhl false with exactly what was typed; the success line
-//      says StructureStudio issues the paperwork now, and the card re-reads status
+//      checkbox, the numbering and tax boxes are in front of them (both number boxes read "1000" as
+//      the placeholder) with a banner asking for the tax rate ONLY, and the save posts invoiceInGhl
+//      false with exactly what was typed; the success line says StructureStudio issues the paperwork
+//      now, and the card re-reads status
 //   B. a tenant with NO settings row (status answers as portal-settings does for a missing row): the
 //      same card and the same save
 //   C. a blank tax rate: the server's own sentence is shown (not a generic failure), and no success
 //   D. 0% tax: posted as "0" and saved
 //   E. the one tenant WITH the capability: the checkbox is there and on, no numbering is asked for, and
 //      the save posts invoiceInGhl true and says the CRM keeps the paperwork
+//   F. blank numbers with a tax rate (283): the help text says a blank starts at 1000, the previews
+//      read 1000, the save posts "" for both starts and saves; the QuickBooks line shows only when
+//      status says a QuickBooks company is connected
+//   G. numbering already in use, boxes cleared: the previews name the counters the server keeps (a
+//      blank never unsets a counter in use), not 1000
 //
-// The stub answers `save` with portal-settings' own refusal sentences (the three Quotes & Invoices
-// guards, copied from the handler), so a page that only passes against a stub that says something the
-// server never says would fail here.
+// The stub answers `save` with portal-settings' own refusal sentence (the tax rate, the one Quotes &
+// Invoices guard left, copied from the handler), so a page that only passes against a stub that says
+// something the server never says would fail here.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/paperworkMove.mjs            (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is how to
-// prove the checks can fire. Against the artifact from just before 217's capability (95e8351b~1, which
-// shows every tenant the checkbox, on, with the numbering hidden behind it) A's first four checks fail,
-// and the run then stops at A's fill with no numbering box to type into.
+// prove the checks can fire. Against the artifact from just before 283's card (ea0a0de0, the "e.g. 1041"
+// placeholders and the three-part banner) A's banner and placeholder checks fail and the run stops at
+// A's fill with no "1000" box to type into; F is the case that pins the new copy. Against the artifact
+// from just before 217's capability (95e8351b~1, which shows every tenant the checkbox, on, with the
+// numbering hidden behind it) A's first checks fail the same way.
 //
 // Tenants and numbers are made up. The repo is public.
 import { readFileSync } from "node:fs";
@@ -45,14 +55,13 @@ const SESSION = {
 
 // The SAVED row, as status reports it. `noRow` answers the way status does for a tenant with no
 // client_settings row: CRM mode (anything but an explicit false), not allowed, nothing configured.
-const S = { invoiceInGhl: true, allowed: false, crm: true, noRow: false, quoteNext: null, invoiceNext: null, taxPct: null };
+const S = { invoiceInGhl: true, allowed: false, crm: true, noRow: false, quoteNext: null, invoiceNext: null, taxPct: null, qbo: false };
 const saves = [];
 let statusReads = 0;
 
-// portal-settings' three Quotes & Invoices refusals, word for word (supabase/functions/portal-settings
-// /index.ts, the `save` action's numbering guard).
-const NEED_QUOTE = "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.";
-const NEED_INVOICE = "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.";
+// portal-settings' one Quotes & Invoices refusal left since migration 283, word for word
+// (supabase/functions/portal-settings/index.ts, the `save` action's guard). The two numbering
+// refusals are gone: a blank start is stored NULL and allocated as 1000.
 const NEED_TAX = "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.";
 
 const { ok, failed, results } = reporter();
@@ -90,7 +99,7 @@ const handler = async (route) => {
       configured: S.crm && !S.noRow, hasApiKey: S.crm && !S.noRow, ghlLocationIdMasked: S.crm && !S.noRow ? "loc-••••1234" : null,
       invoiceInGhl: S.noRow ? true : S.invoiceInGhl, ghlInvoicingAllowed: S.noRow ? false : S.allowed,
       ssQuoteNext: S.quoteNext, ssQuotePrefix: "", ssInvoiceNext: S.invoiceNext, ssInvoicePrefix: "",
-      ssTaxRate: S.taxPct, ssTaxLabel: "Sales tax", ssTaxDelivery: false,
+      ssTaxRate: S.taxPct, ssTaxLabel: "Sales tax", ssTaxDelivery: false, qboConnected: S.qbo,
       businessAddress: {}, branding: {}, emailReady: false,
     });
   }
@@ -99,13 +108,12 @@ const handler = async (route) => {
     // The server's rule (217): a tenant without the capability can only be written false.
     const nextInGhl = S.allowed && !S.noRow && Boolean(body.invoiceInGhl);
     const blank = (v) => String(v ?? "").trim() === "";
-    if (!nextInGhl && blank(body.ssQuoteNext)) return json(route, { error: NEED_QUOTE }, 400);
-    if (!nextInGhl && blank(body.ssInvoiceNext)) return json(route, { error: NEED_INVOICE }, 400);
     if (!nextInGhl && blank(body.ssTaxRate)) return json(route, { error: NEED_TAX }, 400);
     Object.assign(S, {
       noRow: false, invoiceInGhl: nextInGhl,
-      quoteNext: blank(body.ssQuoteNext) ? null : Number(body.ssQuoteNext),
-      invoiceNext: blank(body.ssInvoiceNext) ? null : Number(body.ssInvoiceNext),
+      // The server's rule (283): a blank start over a counter already in use keeps the counter.
+      quoteNext: blank(body.ssQuoteNext) ? S.quoteNext : Number(body.ssQuoteNext),
+      invoiceNext: blank(body.ssInvoiceNext) ? S.invoiceNext : Number(body.ssInvoiceNext),
       taxPct: blank(body.ssTaxRate) ? null : Number(body.ssTaxRate),
     });
     return json(route, { ok: true });
@@ -128,7 +136,7 @@ const waitText = (s, timeout = 20000) => page.waitForFunction((x) => document.bo
 const CHECKBOX = "Quote and invoice through my CRM";
 const SAVE = "Save Quote & Invoice Settings";
 const boot = async (shape) => {
-  Object.assign(S, { invoiceInGhl: true, allowed: false, crm: true, noRow: false, quoteNext: null, invoiceNext: null, taxPct: null }, shape);
+  Object.assign(S, { invoiceInGhl: true, allowed: false, crm: true, noRow: false, quoteNext: null, invoiceNext: null, taxPct: null, qbo: false }, shape);
   saves.length = 0;
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
@@ -138,13 +146,21 @@ const boot = async (shape) => {
   await waitText(SAVE);
   await page.waitForTimeout(400);
 };
-// The card's inputs, found by their placeholders (labels are siblings, not <label for>).
+// The card's inputs, found by their placeholders (labels are siblings, not <label for>). Both number
+// boxes read "1000" since 283: the quote box comes first in the card, the invoice box second.
 const box = (placeholder) => page.locator(`input[placeholder="${placeholder}"]`).first();
+const numberBoxes = () => page.locator('input[placeholder="1000"]');
+const quoteBox = () => numberBoxes().nth(0);
+const invoiceBox = () => numberBoxes().nth(1);
 const fill = async ({ quote, invoice, tax }) => {
-  if (quote != null) await box("e.g. 1041").fill(quote);
-  if (invoice != null) await box("e.g. 2001").fill(invoice);
+  if (quote != null) await quoteBox().fill(quote);
+  if (invoice != null) await invoiceBox().fill(invoice);
   if (tax != null) await box("e.g. 7.25").fill(tax);
 };
+const BANNER_TAX = "Before saving, set your sales tax rate (0 counts).";
+const QUOTE_HELP = "Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last quote). Counts up by one per quote.";
+const INVOICE_HELP = "Invoices number separately from quotes. Leave blank to start at 1000 (or carry on after your last invoice).";
+const QBO_HELP = "Connected to QuickBooks? Enter your next QuickBooks invoice number.";
 const press = async () => {
   const before = statusReads;
   await page.getByRole("button", { name: SAVE }).click();
@@ -161,8 +177,9 @@ try {
   let t = await text();
   ok("A: no \"through my CRM\" checkbox for a tenant without the capability", !t.includes(CHECKBOX));
   ok("A: the card says StructureStudio issues the paperwork", t.includes("StructureStudio issues your quotes and invoices."));
-  ok("A: the numbering boxes and the tax rate are in front of them", (await box("e.g. 1041").count()) === 1 && (await box("e.g. 2001").count()) === 1 && (await box("e.g. 7.25").count()) === 1);
-  ok("A: the banner names all three things still missing", /Before saving, set a starting quote number, a starting invoice number and your sales tax rate \(0 counts\)\./.test(t), (t.match(/Before saving[^\n]*/) || [""])[0]);
+  ok("A: the numbering boxes (placeholder 1000) and the tax rate are in front of them", (await numberBoxes().count()) === 2 && (await box("e.g. 7.25").count()) === 1);
+  ok("A: the banner asks for the tax rate only", t.includes(BANNER_TAX), (t.match(/Before saving[^\n]*/) || [""])[0]);
+  ok("A: and no longer for numbers, nor warns about restarting at 1", !/Before saving, set a starting/.test(t) && !/restarted at 1/.test(t));
   await fill({ quote: "3101", invoice: "7001", tax: "6.5" });
   ok("A: with all three typed, the banner is gone", !(await text()).includes("Before saving, set"));
   let reread = await press();
@@ -178,7 +195,7 @@ try {
   await boot({ noRow: true, crm: false });
   t = await text();
   ok("B: no-row tenant: no checkbox", !t.includes(CHECKBOX));
-  ok("B: no-row tenant: the numbering boxes are there", (await box("e.g. 1041").count()) === 1 && (await box("e.g. 7.25").count()) === 1);
+  ok("B: no-row tenant: the numbering boxes are there", (await numberBoxes().count()) === 2 && (await box("e.g. 7.25").count()) === 1);
   await fill({ quote: "1", invoice: "1", tax: "7.25" });
   await press();
   const sb = saves[0] || {};
@@ -206,10 +223,43 @@ try {
   t = await text();
   ok("E: capable tenant: the checkbox is there", t.includes(CHECKBOX));
   ok("E: capable tenant: it is on", await page.getByRole("checkbox", { name: CHECKBOX }).isChecked());
-  ok("E: capable tenant: no numbering asked for", (await box("e.g. 1041").count()) === 0 && !t.includes("Before saving, set"));
+  ok("E: capable tenant: no numbering asked for", (await numberBoxes().count()) === 0 && !t.includes("Before saving, set"));
   await press();
   ok("E: capable tenant: the save posts invoiceInGhl true", saves.length === 1 && saves[0].invoiceInGhl === true, JSON.stringify(saves[0] || {}));
   ok("E: capable tenant: the page says the CRM keeps the paperwork", await waitText(SAVED_CRM, 5000));
+
+  // F — blank numbers, a tax rate: saved, and the card says what a blank means (283)
+  await boot({ invoiceInGhl: true, allowed: false, crm: false });
+  t = await text();
+  ok("F: the quote help says a blank starts at 1000", t.includes(QUOTE_HELP), (t.match(/Pick up where[^\n]*/) || [""])[0]);
+  ok("F: the invoice help says a blank starts at 1000", t.includes(INVOICE_HELP), (t.match(/Invoices number separately[^\n]*/) || [""])[0]);
+  ok("F: the previews read 1000 for both books", t.includes("Shows on the document as 1000.") && t.includes("Shows on the invoice as 1000."));
+  ok("F: no QuickBooks line without a connected company", !t.includes(QBO_HELP));
+  await fill({ tax: "6" });
+  ok("F: with the rate typed and both numbers blank, no banner at all", !(await text()).includes("Before saving, set"));
+  await press();
+  const sf = saves[0] || {};
+  ok("F: the save posts \"\" for both starts, paperwork mode and the rate", saves.length === 1 && sf.ssQuoteNext === "" && sf.ssInvoiceNext === "" && sf.ssTaxRate === "6" && sf.invoiceInGhl === false, JSON.stringify(sf));
+  ok("F: and it saves", await waitText(SAVED_SS, 5000));
+  // The same card for a tenant whose QuickBooks company is connected: the invoice help asks for the
+  // next QuickBooks number (send_invoice refuses a blank start while the push would run).
+  await boot({ invoiceInGhl: false, allowed: false, crm: false, taxPct: 6, qbo: true });
+  t = await text();
+  ok("F: QuickBooks connected: the invoice help asks for the next QuickBooks invoice number", t.includes(`${INVOICE_HELP} ${QBO_HELP}`), (t.match(/Invoices number separately[^\n]*/) || [""])[0]);
+  ok("F: QuickBooks connected: the quote help is unchanged", t.includes(QUOTE_HELP));
+
+  // G — numbering already in use, both boxes cleared: the previews show the numbers the server keeps
+  // (a blank never unsets a counter in use, 283), never a 1000 that will not happen
+  await boot({ invoiceInGhl: false, allowed: false, crm: false, taxPct: 6, quoteNext: 1043, invoiceNext: 2001 });
+  ok("G: the boxes load the counters in use", (await quoteBox().inputValue()) === "1043" && (await invoiceBox().inputValue()) === "2001");
+  await quoteBox().fill("");
+  await invoiceBox().fill("");
+  t = await text();
+  ok("G: cleared, the previews show the counters kept, not 1000", t.includes("Shows on the document as 1043.") && t.includes("Shows on the invoice as 2001.") && !t.includes("Shows on the document as 1000."), (t.match(/Shows on the[^\n]*/g) || []).join(" | "));
+  await press();
+  ok("G: the save posts the blanks and saves", saves.length === 1 && saves[0].ssQuoteNext === "" && saves[0].ssInvoiceNext === "" && await waitText(SAVED_SS, 5000), JSON.stringify(saves[0] || {}));
+  t = await text();
+  ok("G: after the save the previews still name the kept counters", t.includes("Shows on the document as 1043.") && t.includes("Shows on the invoice as 2001."));
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {

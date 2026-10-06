@@ -186,9 +186,25 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     // ── Idempotency: an invoice with this DocNumber may already exist (crashed run) ─
     const docNumber = (args.docNumber ?? "").toString().slice(0, 21) || null; // QBO cap: 21 chars
     if (docNumber) {
+      // `select *`, not a field list: the customer check below needs CustomerRef, and the whole row
+      // of one invoice is a cheaper risk than a projection QuickBooks might refuse on every push.
       const r = await qboFetch(admin, clientId, realmId,
-        `/query?query=${encodeURIComponent(`select Id, DocNumber, TotalAmt from Invoice where DocNumber = '${q(docNumber)}' maxresults 1`)}&minorversion=75`);
+        `/query?query=${encodeURIComponent(`select * from Invoice where DocNumber = '${q(docNumber)}' maxresults 1`)}&minorversion=75`);
       const existing = r?.QueryResponse?.Invoice?.[0];
+      // ONLY OUR OWN CRASHED RUN IS ADOPTED: same number AND same customer. Since migration 283 a
+      // blank invoice start numbers from 1000, so a QuickBooks company connected after the first
+      // invoices went out (or one connected all along, whose own numbering began at 1001) can
+      // already hold an unrelated invoice under the same number. Adopted on its Id alone, that
+      // invoice was linked to this one, nothing reached the books, and with qbo_error cleared it
+      // never showed under Retry. A crashed run made its invoice for the customer the lookup above
+      // just resolved again (email first), so a different customer means a different invoice.
+      // NOT the total: Automated Sales Tax can change it legitimately (see lineTaxCodesOk below),
+      // and matching on it would refuse a real recovery. Recorded as `rejected:` (a retry fails the
+      // same way until the numbering moves), so the invoice is listed under Retry.
+      if (existing?.Id && String(existing.CustomerRef?.value ?? "") !== String(customerId)) {
+        await fail(`rejected: QuickBooks already has an invoice numbered ${docNumber} for a different customer, so this one was not added to your books. Add it in QuickBooks by hand, and set your next invoice number past QuickBooks' own under Settings → CRM Connection → Quotes & Invoices`);
+        return;
+      }
       if (existing?.Id) {
         await admin.from("invoice_sends").update({
           qbo_invoice_id: String(existing.Id),
