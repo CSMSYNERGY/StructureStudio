@@ -1,4 +1,4 @@
-// The apps' read endpoints: GET /threads, /threads/:key, /calls, /search and /team.
+// The apps' read endpoints: GET /threads, /threads/:key, /calls, /search, /contacts and /team.
 //
 // THE APPS NEVER READ THE PHONE TABLES DIRECTLY (plan section 7). Realtime broadcasts carry ids
 // only, and the app comes here for the row, so every read applies:
@@ -669,6 +669,60 @@ export async function search(env: Env, req: Request): Promise<Response> {
     if (contacts.length >= 20) break;
   }
   return ok({ contacts });
+}
+
+// ── contacts (A-Z) ──────────────────────────────────────────────────────────────────
+
+/** Contacts read per page of GET /contacts. */
+export const CONTACTS_PAGE = 200;
+/** PostgREST: the requested range starts past the last row (an offset beyond the end). */
+const RANGE_PAST_END = "PGRST103";
+
+/** The page marker of GET /contacts: how many contacts the earlier pages read. */
+function contactsOffset(url: URL): number {
+  const raw = url.searchParams.get("cursor");
+  if (!raw) return 0;
+  if (!/^\d{1,7}$/.test(raw)) throw new ApiError("bad_request", "That page marker isn't valid.");
+  return Number(raw);
+}
+
+/**
+ * GET /contacts?cursor=: every contact the caller may see, A-Z by name (2026-10-07, the phone
+ * app's Contacts tab, which used to be search only). Rows are shaped like /search?email=1:
+ * { id, name, e164, email }, where e164 is null for an email-only contact; a contact with
+ * neither is left out, as there is nothing to call, text or email. A contact with no name
+ * sorts last (its name is "").
+ *
+ * Postgres sorts: the database's ICU collation already orders names the way people read them
+ * (case and accents folded), so the app keeps this order and never re-sorts. Pages are read
+ * by offset, CONTACTS_PAGE rows at a time, like the portal's Contacts list. Someone limited to
+ * their own customers gets the visible rows of each read, so a page can come back short or
+ * even empty: "cursor" is there whenever the READ was full, which is what "there may be more"
+ * means, and the app keeps asking until it is gone.
+ */
+export async function listContacts(env: Env, req: Request): Promise<Response> {
+  const c = await requireCaller(env, req);
+  if (c.ctx.contacts_level === "none") return ok({ contacts: [] });
+  const from = contactsOffset(new URL(req.url));
+
+  type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email: string | null };
+  const res = await c.admin.from("crm_contacts").select("id, name, phone, phone_digits, email")
+    .eq("client_id", c.ctx.client_id).is("merged_into", null)
+    .order("name", { ascending: true, nullsFirst: false }).order("id", { ascending: true })
+    .range(from, from + CONTACTS_PAGE - 1);
+  // A marker that now points past the end (contacts merged away since the last page) is the end.
+  const rows = res.error?.code === RANGE_PAST_END ? [] : ((must(res, "list contacts") as Row[] | null) ?? []);
+
+  const visible = await visibleContactIds(c, rows.map((r) => r.id));
+  const contacts = [];
+  for (const r of rows) {
+    if (!visible.has(r.id)) continue;
+    const e164 = toE164(r.phone) ?? toE164(r.phone_digits);
+    const email = emailAddress(r.email);
+    if (!e164 && !email) continue; // nothing to call, text or email
+    contacts.push({ id: r.id, name: r.name ?? "", e164, email });
+  }
+  return ok({ contacts, ...(rows.length >= CONTACTS_PAGE ? { cursor: String(from + CONTACTS_PAGE) } : {}) });
 }
 
 // ── team ────────────────────────────────────────────────────────────────────────────

@@ -30,7 +30,7 @@ import { events, transfer, voicemailAudio } from "./routes/calls";
 import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
-import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
+import { getThread, listCalls, listContacts, listThreads, search, team } from "./routes/reads";
 import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushEmail, pushText } from "./routes/push";
@@ -163,6 +163,7 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/threads\/([^/]+)$/, h: (r, env, _ec, m) => getThread(env, r, m[1]) },
   { method: "GET", re: /^\/calls$/, h: (r, env) => listCalls(env, r) },
   { method: "GET", re: /^\/search$/, h: (r, env) => search(env, r) },
+  { method: "GET", re: /^\/contacts$/, h: (r, env) => listContacts(env, r) },
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
   { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
   // Your own settings for the portal's "Your calls" card (the apps read them from /token, and

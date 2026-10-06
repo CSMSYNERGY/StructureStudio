@@ -66,16 +66,32 @@ function table(rows: Record<string, unknown>[]) {
   return (s: Seen) => {
     const p = s.url.searchParams;
     let out = rows.filter((r) => [...p.entries()].every(([k, v]) => {
-      if (k === "select" || k === "order" || k === "limit") return true;
+      if (k === "select" || k === "order" || k === "limit" || k === "offset") return true;
       if (k === "or") return splitTop(v.slice(1, -1)).some((part) => holds(r[part.slice(0, part.indexOf("."))], part.slice(part.indexOf(".") + 1)));
       return holds(r[k], v);
     }));
     const order = p.get("order");
     if (order) {
-      const [col, dir] = order.split(".");
-      const sign = dir === "desc" ? -1 : 1;
-      out = [...out].sort((a, b) => (String(a[col]) < String(b[col]) ? -sign : String(a[col]) > String(b[col]) ? sign : 0));
+      // Every order column in turn ("name.asc.nullslast,id.asc"); nulls last unless nullsfirst.
+      // Values compare as plain strings: fixtures pick names whose order doesn't need ICU.
+      const keys = order.split(",").map((o) => {
+        const [col, dir, nulls] = o.split(".");
+        return { col, sign: dir === "desc" ? -1 : 1, nullsFirst: nulls === "nullsfirst" };
+      });
+      out = [...out].sort((a, b) => {
+        for (const { col, sign, nullsFirst } of keys) {
+          const x = a[col], y = b[col];
+          if (x == null || y == null) {
+            if (x == null && y == null) continue;
+            return (x == null) === nullsFirst ? -1 : 1;
+          }
+          if (String(x) !== String(y)) return String(x) < String(y) ? -sign : sign;
+        }
+        return 0;
+      });
     }
+    const offset = p.get("offset");
+    if (offset) out = out.slice(Number(offset));
     const limit = p.get("limit");
     if (limit) out = out.slice(0, Number(limit));
     const cols = (p.get("select") ?? "*").split(",");
@@ -1039,6 +1055,114 @@ describe("GET /search and /team", () => {
     const { json } = await call(env, appRequest("GET", "/team", token));
     // Owners are always edit; a crew member has no phone access.
     expect(json.members).toEqual([{ user_id: USER_A, full_name: "Avery", identity_base: `u_${USER_A.replace(/-/g, "")}_g2` }]);
+  });
+});
+
+describe("GET /contacts, everyone A-Z for the phone app's Contacts tab (2026-10-07)", () => {
+  const contact = (id: string, over: Record<string, unknown>) =>
+    ({ id, client_id: CLIENT, merged_into: null, name: null, phone: null, phone_digits: null, email: null, ...over });
+  const cid = (n: number) => `00000000-0000-4000-8000-0000000f${String(n).padStart(4, "0")}`;
+  const ROWS = [
+    contact(cid(3), { name: "Casey Phone", phone: "(555) 555-0143", phone_digits: "5555550143" }),
+    contact(cid(1), { name: "Avery Both", phone: "555-555-0142", phone_digits: "5555550142", email: "avery@example.com" }),
+    contact(cid(2), { name: "Blake Mail", email: " Blake@Example.com " }),
+    // No name: last, with "" for a name.
+    contact(cid(4), { phone: "555-555-0144", phone_digits: "5555550144" }),
+    // Nothing to call, text or email.
+    contact(cid(5), { name: "Drew Nothing", phone: "555-01", phone_digits: "55501", email: "not an address" }),
+    // Merged away, and another business's: never listed.
+    contact(cid(6), { name: "Avery Merged", phone: "555-555-0145", phone_digits: "5555550145", merged_into: cid(1) }),
+    contact(cid(7), { name: "Avery Elsewhere", phone: "555-555-0146", phone_digits: "5555550146", client_id: OTHER_TENANT }),
+  ];
+
+  it("lists every contact the person may see, in the database's name order, shaped like /search?email=1", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    net.rest("GET", "crm_contacts", table(ROWS));
+    const { res, json } = await call(env, appRequest("GET", "/contacts", token));
+    expect(res.status).toBe(200);
+    expect(json.contacts).toEqual([
+      { id: cid(1), name: "Avery Both", e164: "+15555550142", email: "avery@example.com" },
+      { id: cid(2), name: "Blake Mail", e164: null, email: "Blake@Example.com" },
+      { id: cid(3), name: "Casey Phone", e164: "+15555550143", email: null },
+      { id: cid(4), name: "", e164: "+15555550144", email: null },
+    ]);
+    expect(json.cursor).toBeUndefined();
+    const [q] = net.reads("crm_contacts");
+    expect(filter(q, "client_id")).toBe(CLIENT);
+    expect(q.url.searchParams.get("merged_into")).toBe("is.null");
+    expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
+    // Postgres does the A-Z (its ICU collation folds case and accents); nameless rows go last.
+    expect(q.url.searchParams.get("order")).toBe("name.asc.nullslast,id.asc");
+    expect(q.url.searchParams.get("offset")).toBe("0");
+    expect(q.url.searchParams.get("limit")).toBe("200");
+  });
+
+  it("pages by offset: a full read hands back a cursor, and the next page starts after it", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    const many = Array.from({ length: 250 }, (_, i) =>
+      contact(cid(100 + i), { name: `Pat ${String(i).padStart(3, "0")}`, email: `pat${i}@example.com` }));
+    net.rest("GET", "crm_contacts", table(many));
+    const { json: first } = await call(env, appRequest("GET", "/contacts", token));
+    expect(first.contacts).toHaveLength(200);
+    expect(first.contacts[0].name).toBe("Pat 000");
+    expect(first.cursor).toBe("200");
+    const { json: second } = await call(env, appRequest("GET", "/contacts?cursor=200", token));
+    expect(second.contacts).toHaveLength(50);
+    expect(second.contacts[0].name).toBe("Pat 200");
+    expect(second.cursor).toBeUndefined();
+    expect(net.reads("crm_contacts")[1].url.searchParams.get("offset")).toBe("200");
+  });
+
+  it("keeps the own-customers scope, and still hands back a cursor when a full read filters down to nothing", async () => {
+    const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), [cid(3)]);
+    net.rest("GET", "crm_contacts", table(ROWS));
+    const { json } = await call(env, appRequest("GET", "/contacts", token));
+    expect(ids(json.contacts)).toEqual([cid(3)]);
+    expect(net.rpcCalls("crm_visible_contact_ids")).toHaveLength(1);
+
+    const many = Array.from({ length: 200 }, (_, i) => contact(cid(300 + i), { name: `Rep ${String(i).padStart(3, "0")}`, phone: "555-555-0150", phone_digits: "5555550150" }));
+    const narrowed = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), []);
+    narrowed.net.rest("GET", "crm_contacts", table(many));
+    const { json: empty } = await call(narrowed.env, appRequest("GET", "/contacts", narrowed.token));
+    expect(empty.contacts).toEqual([]);
+    expect(empty.cursor).toBe("200");
+  });
+
+  it("contacts none sees nobody, and nothing is read", async () => {
+    const { net, token, env } = await setup(callerCtx({ contacts_level: "none" }));
+    net.rest("GET", "crm_contacts", table(ROWS));
+    const { json } = await call(env, appRequest("GET", "/contacts", token));
+    expect(json.contacts).toEqual([]);
+    expect(net.reads("crm_contacts")).toHaveLength(0);
+  });
+
+  it("a marker past the end (contacts merged away since) is the end, not an error", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    net.rest("GET", "crm_contacts", () =>
+      jsonRes({ code: "PGRST103", message: "Requested range not satisfiable", details: "An offset of 400 was requested, but there are only 380 rows." }, 416));
+    const { res, json } = await call(env, appRequest("GET", "/contacts?cursor=400", token));
+    expect(res.status).toBe(200);
+    expect(json.contacts).toEqual([]);
+    expect(json.cursor).toBeUndefined();
+  });
+
+  it("refuses a page marker that isn't one", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    net.rest("GET", "crm_contacts", table(ROWS));
+    for (const bad of ["-1", "abc", "1.5", "12345678", "2026-10-07T00:00:00Z"]) {
+      const { res, json } = await call(env, appRequest("GET", `/contacts?cursor=${encodeURIComponent(bad)}`, token));
+      expect(res.status).toBe(400);
+      expect(json.error.code).toBe("bad_request");
+    }
+    expect(net.reads("crm_contacts")).toHaveLength(0);
+  });
+
+  it("a failed read answers internal, never an empty list", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    net.rest("GET", "crm_contacts", () => jsonRes({ code: "57014", message: "canceling statement due to statement timeout" }, 500));
+    const { res, json } = await call(env, appRequest("GET", "/contacts", token));
+    expect(res.status).toBe(500);
+    expect(json.error.code).toBe("internal");
   });
 });
 
