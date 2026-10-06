@@ -45,7 +45,7 @@ export function makeEnv(over: Partial<Env> = {}): Env {
     TWILIO_API_SECRET: "test-api-secret",
     TWILIO_TWIML_APP_SID: "AP" + "0".repeat(31) + "1",
     TWILIO_ECHO_APP_SID: "AP" + "0".repeat(31) + "2",
-    TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX: "CR" + "0".repeat(31) + "1",
+    TWILIO_PUSH_CREDENTIAL_APNS_DEV: "CR" + "0".repeat(31) + "1",
     TWILIO_PUSH_CREDENTIAL_APNS_PROD: "CR" + "0".repeat(31) + "2",
     TWILIO_PUSH_CREDENTIAL_FCM: "CR" + "0".repeat(31) + "3",
     PHONE_WEBHOOK_SECRET: WEBHOOK_KEY,

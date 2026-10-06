@@ -16,7 +16,7 @@
 // tenant with auto top-up on gets a top-up asked for here too, so "topping up" is true.
 
 import type { Ctx, Env } from "../env";
-import { mintAccessToken, pushCredentialFor, type BuildType, type Platform } from "../accessToken";
+import { mintAccessToken, pushCredentialFor, pushCredentialSecretFor, type BuildType, type Platform } from "../accessToken";
 import { adminClient, callerContext } from "../db";
 import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
@@ -88,10 +88,22 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     if (verdict.refuse && verdict.autoTopupEnabled) ec.waitUntil(requestAutoTopup(env, ctx.client_id));
   }
 
-  // Only iPhone development-profile builds get _dev: they use sandbox push and must never share
-  // a push binding with the TestFlight build (plan D8).
+  // Only the iPhone development client gets _dev: it is a separate app (its own bundle id and
+  // push credential) and must never share a push binding with the store build (plan D8).
   const identity = toIdentity(claims.sub, ctx.device_generation, platform === "ios" && buildType === "dev");
   const ttl = preflight ? PREFLIGHT_TTL : TOKEN_TTL;
+  // A phone's token without a push credential still signs the person in and still places calls,
+  // but Twilio refuses to register it for incoming ones. That is a missing secret, not the
+  // person's problem: logged by name, and `incoming_push: false` tells the app why.
+  const pushCredential = preflight ? undefined : pushCredentialFor(env, platform, buildType);
+  const wantsPush = !preflight && platform !== "chrome";
+  if (wantsPush && !pushCredential) {
+    const name = String(pushCredentialSecretFor(platform, buildType));
+    ec.waitUntil(logFault({
+      code: `token_no_${name.toLowerCase()}`, severity: "warn", throttleMs: 10 * 60_000,
+      message: `${name} is not set: ${platform} ${buildType} builds sign in, but can't register for incoming calls.`,
+    }));
+  }
   const jwtOut = await mintAccessToken({
     accountSid: env.TWILIO_ACCOUNT_SID,
     apiKeySid: env.TWILIO_API_KEY,
@@ -103,7 +115,7 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       : {
         incoming: { allow: true },
         outgoing: { application_sid: appSid },
-        push_credential_sid: pushCredentialFor(env, platform, buildType),
+        push_credential_sid: pushCredential,
       },
   });
 
@@ -157,5 +169,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and
     // GET /calls/:id/transcript, and the recording keys on a call (routes/reads.ts).
     features: { handoff: true, recordings: true },
+    // Whether this token can register the phone for incoming calls (it carries the build's push
+    // credential). false: the Worker has no credential for this platform and build, so register()
+    // would only fail. null: not a phone token (the extension, or the setup test).
+    incoming_push: wantsPush ? !!pushCredential : null,
   });
 }
