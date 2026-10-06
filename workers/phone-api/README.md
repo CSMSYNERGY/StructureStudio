@@ -91,19 +91,23 @@ The `ai` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`) is Workers AI
 | `TWILIO_API_SECRET` | yes | That key's secret. |
 | `TWILIO_TWIML_APP_SID` | yes | The calls TwiML App (outgoing grant). |
 | `TWILIO_ECHO_APP_SID` | yes | The setup-test TwiML App that answers `<Echo/>` (preflight tokens). |
-| `TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX` | phase 4 | Push credential for iPhone development-profile builds. |
-| `TWILIO_PUSH_CREDENTIAL_APNS_PROD` | phase 4 | Push credential for TestFlight and App Store builds. |
+| `TWILIO_PUSH_CREDENTIAL_APNS_DEV` | iPhone dev client | Push credential (a Twilio `apn` credential, Sandbox UNTICKED) for the iPhone development client (`build_type: dev`), made from the development bundle id's VoIP Services certificate. Unticked because EAS signs the development client ad hoc, and ad hoc builds get production push tokens (DEVIATIONS 75). Replaces `TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX`, which is no longer read. |
+| `TWILIO_PUSH_CREDENTIAL_APNS_PROD` | iPhone release | Push credential (a Twilio `apn` credential, Sandbox unticked) for preview, TestFlight and App Store builds (`build_type: prod`), made from the store bundle id's VoIP Services certificate. |
 | `TWILIO_PUSH_CREDENTIAL_FCM` | phase 4 | Push credential for Android. |
 | `PHONE_WEBHOOK_SECRET` | yes | The `?key=` on every Twilio URL this Worker serves. Use letters and digits only (32 or more). If it is missing, every Twilio request is refused (503), and Twilio falls back to the number's Voice Fallback URL. |
 | `SMS_INBOUND_SECRET` | yes | Same value as on the edge functions. Texts sent from the apps carry it on their `sms-status` callback URL. |
 | `PUSH_WEBHOOK_SECRET` | yes | The `x-push-secret` header the database webhooks send to `/push/text` and `/push/email` (one value, Vault's `sss_phone_push_secret`). |
 | `LOG_PSEUDONYM_KEY` | yes | The HMAC key for the Chrome extension's error reports: they store `user_ref` and `client_ref` (keyed pseudonyms) instead of the user and business ids (DEVIATIONS 64). 32 characters or more. Keep a copy in the password manager: `scripts/log-ref.mjs` needs it to find a person's reports when they ask for help, and Cloudflare never shows a secret again. Unset or shorter, those reports are saved with no refs at all and `log_pseudonym_key_missing` is logged at `warn` once per isolate. Changing it starts new refs: older reports keep the old ones. |
 | `FCM_SERVICE_ACCOUNT_JSON` | phase 4 | The Firebase service account JSON, whole. Android text and email alerts. Unset means they are skipped and logged once an hour. |
-| `APNS_KEY_P8` | phase 4 | The APNs auth key (.p8 text). iPhone text alerts. |
-| `APNS_KEY_ID` | phase 4 | That key's id. |
-| `APNS_TEAM_ID` | phase 4 | The Apple team id. |
-| `APNS_BUNDLE_ID` | phase 4 | The `apns-topic` for devices registered with `build_type: prod`. A secret rather than a var because bundle ids stay out of this repo (plan D7). |
-| `APNS_BUNDLE_ID_DEV` | later | The `apns-topic` for `build_type: dev` devices. Unset means `APNS_BUNDLE_ID` is used for them too, which is right while both builds share the `.dev` bundle id (the individual Apple account). Set it when production moves to the final bundle id. |
+| `APNS_KEY_P8` | iPhone release | The APNs auth key (the whole .p8 file). iPhone text and email alerts. Create it team scoped (all topics, so it serves both bundle ids) and enabled for **Production**: every alert goes to Apple's production host, because every EAS build, the development client included, has production push tokens (DEVIATIONS 75). A Sandbox-only key is refused (`push_apns_auth_failed`, `BadEnvironmentKeyIdInToken`); a topic-specific key must list both bundle ids. |
+| `APNS_KEY_ID` | iPhone release | That key's id. |
+| `APNS_TEAM_ID` | iPhone release | The Apple team id. |
+| `APNS_BUNDLE_ID` | iPhone release | The `apns-topic` for devices registered with `build_type: prod` (TestFlight, App Store): the store bundle id. A secret rather than a var because bundle ids stay out of this repo (plan D7). |
+| `APNS_BUNDLE_ID_DEV` | iPhone dev client | The `apns-topic` for `build_type: dev` devices: the development bundle id. Set it. Unset means `APNS_BUNDLE_ID` + `.dev`, the app's own rule for its development builds (an `APNS_BUNDLE_ID` that already ends in `.dev` is used as it is), but a Worker from before that rule sends `dev` devices `APNS_BUNDLE_ID` itself; with both set, the order of setting secrets and deploying doesn't matter. |
+
+A push credential unset: that platform and build still gets a token and signs in, but without a push credential it can't register for incoming calls. `/token` then answers `incoming_push: false` and logs `token_no_<secret name>` (for example `token_no_twilio_push_credential_apns_prod`) at `warn`, every 10 minutes at most per isolate.
+
+An `APNS_*` secret a build needs unset: that build's iPhones get no text or email alerts, and `push_apns_not_configured` is logged at `warn`, naming the missing secrets, once an hour per isolate. Android is unaffected.
 
 ## Endpoints
 
@@ -111,7 +115,7 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 
 | Endpoint | Notes |
 |---|---|
-| `POST /token` | Local JWT check, then one parallel round: `phone_caller_context`, the person's settings, and Auth's session check. Answers `recording: {on}` (the business recorded AND `CALL_RECORDING` on) and `features.recordings`. `number` is the number this person's calls show (their own first, migration 266) and `numbers` every number of the business (DEVIATIONS 74). |
+| `POST /token` | Local JWT check, then one parallel round: `phone_caller_context`, the person's settings, and Auth's session check. Answers `recording: {on}` (the business recorded AND `CALL_RECORDING` on) and `features.recordings`. `incoming_push` is whether a phone's token carries its build's push credential (false: that secret is unset, so registering for incoming calls would fail; null for Chrome and preflight). `number` is the number this person's calls show (their own first, migration 266) and `numbers` every number of the business (DEVIATIONS 74). |
 | `POST /voice/outbound` | 911/933/112 block, team and generation re-check, tenant check on `ContactId`, daily minute cap, caller ID = the builder's number, `answerOnBridge`, status callback on the `<Number>`. On a recorded business the `<Number>` also carries the announcement as its whisper `url` (`/voice/notice`) and the row is armed. |
 | `POST /voice/inbound` | DND, busy, access, business hours in the route's time zone, `all_at_once` or `in_order`, the 911 callback rule, straight to voicemail when nobody is available. A member on DND who chose a cover hands their place to that teammate, who need not be on the answer list (migration 264, DEVIATIONS 70). Outside their own hours (`ring_hours`, in their zone, else the number's) a member is away in the same way; the business hours stay the outer gate (DEVIATIONS 71). On a recorded business the announcement is said before the first ring (or an after-hours forward), every `<Client>` carries `recorded=1`, and the row is armed; never for voicemail-only answers or the 911 callback window. |
 | `POST /voice/notice` | The outbound whisper: the business's announcement, `<Say>` only. A read that fails still says the standard sentence. |

@@ -58,19 +58,35 @@ export type BuildType = "dev" | "prod";
 /**
  * Which Twilio push credential this build registers with. A wrong match means no incoming calls
  * and no error anywhere (plan section 11), so the choice lives here, in one place:
- *   iPhone development-profile builds → the APNs SANDBOX credential
- *   iPhone TestFlight / App Store     → the APNs PRODUCTION credential
+ *   iPhone development client (build_type dev)  → TWILIO_PUSH_CREDENTIAL_APNS_DEV
+ *   iPhone preview, TestFlight, App Store (prod) → TWILIO_PUSH_CREDENTIAL_APNS_PROD
  *   Android (one FCM credential; FCM has no sandbox)
  *   Chrome → none (the extension holds a live connection instead of receiving pushes)
+ * The two iPhone credentials differ by bundle id (each is made from that bundle id's VoIP
+ * Services certificate), never by APNs environment: both have Sandbox UNTICKED. EAS signs every
+ * iPhone build with a distribution profile (ad hoc for the development client), and Apple gives
+ * such a build production tokens, PushKit's VoIP tokens included (routes/push.ts APNS_HOST). A
+ * sandbox credential would be for a build signed with a development profile, which only Xcode
+ * makes, and none is read here.
+ * Unset (or blank) → undefined: the token is still minted, without a push credential.
  */
 export function pushCredentialFor(
-  env: { TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX?: string; TWILIO_PUSH_CREDENTIAL_APNS_PROD?: string; TWILIO_PUSH_CREDENTIAL_FCM?: string },
+  env: { TWILIO_PUSH_CREDENTIAL_APNS_DEV?: string; TWILIO_PUSH_CREDENTIAL_APNS_PROD?: string; TWILIO_PUSH_CREDENTIAL_FCM?: string },
   platform: Platform,
   buildType: BuildType,
 ): string | undefined {
-  if (platform === "ios") {
-    return (buildType === "dev" ? env.TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX : env.TWILIO_PUSH_CREDENTIAL_APNS_PROD) || undefined;
-  }
-  if (platform === "android") return env.TWILIO_PUSH_CREDENTIAL_FCM || undefined;
-  return undefined;
+  const name = pushCredentialSecretFor(platform, buildType);
+  // Trimmed: a SID piped into `wrangler secret put` from PowerShell arrives with a newline, and
+  // Twilio would not recognise it.
+  return name ? String(env[name] ?? "").trim() || undefined : undefined;
+}
+
+/** The Worker secret that holds this build's push credential SID; null for Chrome. */
+export function pushCredentialSecretFor(
+  platform: Platform,
+  buildType: BuildType,
+): "TWILIO_PUSH_CREDENTIAL_APNS_DEV" | "TWILIO_PUSH_CREDENTIAL_APNS_PROD" | "TWILIO_PUSH_CREDENTIAL_FCM" | null {
+  if (platform === "ios") return buildType === "dev" ? "TWILIO_PUSH_CREDENTIAL_APNS_DEV" : "TWILIO_PUSH_CREDENTIAL_APNS_PROD";
+  if (platform === "android") return "TWILIO_PUSH_CREDENTIAL_FCM";
+  return null;
 }

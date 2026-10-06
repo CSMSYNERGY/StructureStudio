@@ -247,12 +247,25 @@ async function alertDevices(env: Env, admin: Admin, owners: string[], alert: Ale
   ) as Device[] | null) ?? [];
   if (!devices.length) return;
 
-  const results = await Promise.allSettled(devices.map((d) =>
-    d.push_kind === "fcm" ? sendFcm(env, d.push_token, alert) : sendApns(env, d.push_token, d.build_type === "dev" ? "dev" : "prod", alert)));
+  const results = await Promise.allSettled(devices.map((d): Promise<SendResult> =>
+    d.push_kind === "fcm" ? sendFcm(env, d.push_token, alert)
+      : d.push_kind === "apns" ? sendApns(env, d.push_token, d.build_type === "dev" ? "dev" : "prod", alert)
+      : Promise.resolve("skipped")));
   const dead: string[] = [];
+  const faults: Promise<void>[] = [];
   results.forEach((r, i) => {
-    if (r.status === "fulfilled" && r.value === "unregistered") dead.push(devices[i].id);
+    if (r.status === "fulfilled") {
+      if (r.value === "unregistered") dead.push(devices[i].id);
+      return;
+    }
+    // One device's failure never stops the others (allSettled), but it must not vanish either:
+    // a Google token exchange that failed, or anything else a sender didn't catch, lands here.
+    faults.push(logFault({
+      code: `push_${devices[i].push_kind === "apns" ? "apns" : "fcm"}_threw`, throttleMs: 10 * 60_000,
+      message: `A ${devices[i].platform} alert threw: ${String((r.reason as Error)?.message ?? r.reason).slice(0, 300)}`,
+    }));
   });
+  await Promise.all(faults);
   if (dead.length) await admin.from("phone_devices").delete().in("id", dead);
 }
 
@@ -326,75 +339,193 @@ export async function sendFcm(env: Env, token: string, a: Alert): Promise<SendRe
 
 // ── APNs ────────────────────────────────────────────────────────────────────────────
 
-let apnsJwt: { value: string; iat: number; kid: string } | null = null;
+/**
+ * Every iPhone alert goes to Apple's PRODUCTION host, whatever the device's build_type. A token's
+ * APNs environment comes from the provisioning profile the build was signed with, not from the
+ * build's entitlements file or its build_type: Xcode sets aps-environment from the profile, and
+ * only a development profile gives "development" (sandbox). Every iPhone build of this app comes
+ * from EAS, which signs with distribution profiles only: ad hoc for the development and preview
+ * profiles (distribution "internal"), App Store for production. So every token, the dev client's
+ * included, is a production token, and api.sandbox.push.apple.com would answer BadDeviceToken
+ * to all of them. build_type still picks the topic (apnsTopic), since a development build has
+ * its own bundle id. A build signed with a development profile (run from Xcode on a Mac) is the
+ * one thing this can't reach (DEVIATIONS 75).
+ */
+export const APNS_HOST = "https://api.push.apple.com";
 
-async function apnsProviderToken(env: Env): Promise<string> {
+/** A development build's bundle id is the store build's plus this (the app's own rule, app.config.ts). */
+const DEV_BUNDLE_SUFFIX = ".dev";
+
+/** Apple accepts a provider token for up to an hour; a fresh one is signed after this long. */
+const APNS_TOKEN_LIFE_S = 50 * 60;
+
+/** A secret as set, without the newline a pasted or piped value tends to bring along. */
+function secret(v: string | undefined): string {
+  return String(v ?? "").trim();
+}
+
+/**
+ * The provider token (an ES256 JWT) every send carries. Apple refuses one that is more than an
+ * hour old, and answers TooManyProviderTokenUpdates to a sender that changes it more often than
+ * every 20 minutes, so ONE is kept per isolate and replaced after 50 minutes. What is kept is the
+ * promise, so a fan-out to several iPhones on a cold isolate signs once rather than once per
+ * phone. A failure is not kept: a corrected key works on the next send.
+ */
+let apnsJwt: { value: Promise<string>; iat: number; key: string } | null = null;
+
+function apnsProviderToken(env: Env): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  // Apple accepts a provider token for up to an hour and refuses one refreshed too often.
-  if (apnsJwt && apnsJwt.kid === env.APNS_KEY_ID && now - apnsJwt.iat < 50 * 60) return apnsJwt.value;
-  const key = await crypto.subtle.importKey("pkcs8", pemToDer(env.APNS_KEY_P8!), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
-  const input = `${b64urlEncodeString(JSON.stringify({ alg: "ES256", kid: env.APNS_KEY_ID }))}.${b64urlEncodeString(JSON.stringify({ iss: env.APNS_TEAM_ID, iat: now }))}`;
-  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(input));
-  const value = `${input}.${b64urlEncode(sig)}`;
-  apnsJwt = { value, iat: now, kid: env.APNS_KEY_ID! };
+  const kid = secret(env.APNS_KEY_ID);
+  const iss = secret(env.APNS_TEAM_ID);
+  const cacheKey = `${iss}/${kid}`;
+  if (apnsJwt && apnsJwt.key === cacheKey && now - apnsJwt.iat < APNS_TOKEN_LIFE_S) return apnsJwt.value;
+  const value = (async () => {
+    const key = await crypto.subtle.importKey("pkcs8", pemToDer(env.APNS_KEY_P8!), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const input = `${b64urlEncodeString(JSON.stringify({ alg: "ES256", kid }))}.${b64urlEncodeString(JSON.stringify({ iss, iat: now }))}`;
+    // WebCrypto's ECDSA signature is r||s, 64 bytes: the JWS form, no DER to unwrap.
+    const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(input));
+    return `${input}.${b64urlEncode(sig)}`;
+  })();
+  const entry = { value, iat: now, key: cacheKey };
+  apnsJwt = entry;
+  value.catch(() => {
+    if (apnsJwt === entry) apnsJwt = null;
+  });
   return value;
 }
 
-/**
- * The apns-topic (the app's bundle id) for a device's build type. A dev build and a store
- * build can have different bundle ids (the .dev id stays on the individual Apple account;
- * the final one lives on the organisation account), so each build type has its own secret.
- * APNS_BUNDLE_ID_DEV unset falls back to APNS_BUNDLE_ID: for the whole individual-account
- * period both builds share the .dev bundle id, and one secret is all that is set.
- */
-export function apnsTopic(env: Env, buildType: "dev" | "prod"): string | null {
-  const topic = buildType === "dev" ? (env.APNS_BUNDLE_ID_DEV || env.APNS_BUNDLE_ID) : env.APNS_BUNDLE_ID;
-  return topic ? String(topic).trim() || null : null;
+/** Tests only: forget the cached Google access token and APNs provider token. */
+export function resetPushTokens(): void {
+  fcmToken = null;
+  apnsJwt = null;
 }
 
 /**
- * `buildType` is the device row's build_type, which picks both the host (dev builds carry
- * sandbox tokens) and the topic.
+ * The apns-topic (the app's bundle id) for a device's build type:
+ *   prod (preview, TestFlight, App Store) → APNS_BUNDLE_ID.
+ *   dev  (the development client)         → APNS_BUNDLE_ID_DEV when set, otherwise APNS_BUNDLE_ID
+ *                                           with ".dev" added, the app's own rule for its
+ *                                           development id. An APNS_BUNDLE_ID that already ends
+ *                                           in ".dev" is used as it is (the old plan, where every
+ *                                           build shared the .dev id).
+ * A prod device never falls back to a dev topic. Bundle ids are secrets, not vars, so they stay
+ * out of this public repo (plan D7). null: no topic for this build type.
+ */
+export function apnsTopic(env: Env, buildType: "dev" | "prod"): string | null {
+  const store = secret(env.APNS_BUNDLE_ID);
+  if (buildType === "prod") return store || null;
+  const dev = secret(env.APNS_BUNDLE_ID_DEV);
+  if (dev) return dev;
+  if (!store) return null;
+  return store.endsWith(DEV_BUNDLE_SUFFIX) ? store : `${store}${DEV_BUNDLE_SUFFIX}`;
+}
+
+/** The secrets a send to this build type still needs, by name. Empty: it can send. */
+export function apnsMissing(env: Env, buildType: "dev" | "prod"): string[] {
+  const missing = (["APNS_KEY_P8", "APNS_KEY_ID", "APNS_TEAM_ID"] as const).filter((k) => !secret(env[k]));
+  return apnsTopic(env, buildType) ? missing : [...missing, "APNS_BUNDLE_ID"];
+}
+
+/**
+ * One alert to one iPhone. `buildType` is the device row's build_type: it picks the topic, never
+ * the host (APNS_HOST says why). Never throws for anything Apple or the configuration does: every
+ * outcome is a SendResult, so one iPhone never costs another its alert.
  */
 export async function sendApns(env: Env, token: string, buildType: "dev" | "prod", a: Alert): Promise<SendResult> {
-  const topic = apnsTopic(env, buildType);
-  if (!env.APNS_KEY_P8 || !env.APNS_KEY_ID || !env.APNS_TEAM_ID || !topic) {
+  const missing = apnsMissing(env, buildType);
+  if (missing.length) {
     await logFault({
-      code: `push_apns_not_configured_${buildType}`, severity: "info", throttleMs: 3_600_000,
-      message: `The APNs key, key id, team id or the ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV / APNS_BUNDLE_ID" : "APNS_BUNDLE_ID"} topic is not set; iPhone text and email alerts for ${buildType} builds are skipped.`,
+      code: "push_apns_not_configured", severity: "warn", throttleMs: 3_600_000,
+      message: `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set: iPhone text and email alerts are skipped (first seen for a ${buildType} build).`,
     });
     return "skipped";
   }
-  const host = buildType === "dev" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
-  const res = await fetch(`${host}/3/device/${encodeURIComponent(token)}`, {
-    method: "POST",
-    headers: {
-      authorization: `bearer ${await apnsProviderToken(env)}`,
-      "apns-topic": topic,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
-      "apns-collapse-id": a.threadKey.slice(0, 64),
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      aps: { alert: { title: a.title, body: a.body }, sound: "default", "thread-id": a.threadKey },
-      type: a.kind ?? "sms", thread_key: a.threadKey, message_id: a.messageId,
-    }),
-  });
+  const topic = apnsTopic(env, buildType)!;
+
+  let providerToken: string;
+  try {
+    providerToken = await apnsProviderToken(env);
+  } catch (e) {
+    await logFault({
+      code: "push_apns_bad_key", throttleMs: 3_600_000,
+      message: `APNS_KEY_P8 couldn't sign (${String((e as Error)?.message ?? e).slice(0, 200)}): iPhone alerts are skipped. It must be the whole .p8 file Apple gave out.`,
+    });
+    return "skipped";
+  }
+
+  const host = APNS_HOST;
+  let res: Response;
+  try {
+    res = await fetch(`${host}/3/device/${encodeURIComponent(token)}`, {
+      method: "POST",
+      headers: {
+        authorization: `bearer ${providerToken}`,
+        "apns-topic": topic,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "apns-collapse-id": a.threadKey.slice(0, 64),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        aps: { alert: { title: a.title, body: a.body }, sound: "default", "thread-id": a.threadKey },
+        // expo-notifications hands the app a remote notification's `body` object as its data
+        // (iOS, NotificationRecords.serializedNotificationData), and nothing else of the
+        // payload: without it, tapping an alert could not open its thread. The same keys stay
+        // at the top level for anything that reads the raw payload.
+        body: { type: a.kind ?? "sms", thread_key: a.threadKey, message_id: a.messageId },
+        type: a.kind ?? "sms", thread_key: a.threadKey, message_id: a.messageId,
+      }),
+    });
+  } catch (e) {
+    // Apple speaks HTTP/2 only (DEVIATIONS 28). A Worker that can't reach it fails here, and
+    // this row is what says so.
+    await logFault({
+      code: "push_apns_unreachable", throttleMs: 10 * 60_000,
+      message: `Couldn't reach ${host} (${String((e as Error)?.message ?? e).slice(0, 200)}).`,
+    });
+    return "failed";
+  }
   if (res.ok) return "sent";
   let reason = "";
   try {
     reason = String(((await res.json()) as { reason?: string })?.reason ?? "");
   } catch { /* no body */ }
-  if (res.status === 410 || reason === "BadDeviceToken" || reason === "Unregistered") return "unregistered";
-  if (reason === "DeviceTokenNotForTopic" || reason === "TopicDisallowed") {
-    // Our configuration, not the device: the token is fine, the bundle id we sent is not its app's.
+
+  // 410 (Unregistered, ExpiredToken): the app is gone from that phone, or its token expired.
+  if (res.status === 410 || reason === "Unregistered" || reason === "ExpiredToken") return "unregistered";
+  if (reason === "BadDeviceToken") {
+    // Not a token the production host knows: a sandbox token (a build signed with a development
+    // profile, which only Xcode makes; every EAS build is production, APNS_HOST) or a damaged
+    // one. Neither can ever be reached here, so it is forgotten like a dead one (the app saves its
+    // token again on its next launch), and logged.
+    await logFault({
+      code: "push_apns_bad_device_token", severity: "warn", throttleMs: 3_600_000,
+      message: `APNs (${host}) refused a ${buildType} build's token (BadDeviceToken); it was forgotten. Every EAS build has a production token, so this is a build signed with a development profile (run from Xcode), which this Worker doesn't send to, or a damaged token.`,
+    });
+    return "unregistered";
+  }
+  if (reason === "DeviceTokenNotForTopic" || reason === "TopicDisallowed" || reason === "BadTopic") {
+    // Our configuration, not the device: the token is fine, the bundle id we sent is not its app's
+    // (or the key may not send to it).
     await logFault({
       code: "push_apns_wrong_topic", throttleMs: 3_600_000,
-      message: `APNs refused the topic for a ${buildType} build (${reason}). Check ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV" : "APNS_BUNDLE_ID"}.`,
+      message: `APNs refused topic "${topic}" for a ${buildType} build (${reason}). Check ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV (unset: APNS_BUNDLE_ID + \".dev\")" : "APNS_BUNDLE_ID"}, and that the APNs key is Team Scoped (a Topic Specific key only sends to the bundle ids it lists).`,
     });
     return "failed";
   }
-  await logFault({ code: "push_apns_failed", throttleMs: 60_000, message: `APNs send failed (HTTP ${res.status} ${reason}).` });
+  // A token Apple calls expired is signed again on the next send. (Not on InvalidProviderToken:
+  // re-signing a wrong key id or team id fixes nothing, and changing tokens too often is its own
+  // refusal.)
+  if (reason === "ExpiredProviderToken") apnsJwt = null;
+  await logFault({
+    code: res.status === 403 ? "push_apns_auth_failed" : "push_apns_failed",
+    throttleMs: res.status === 403 ? 3_600_000 : 60_000,
+    message: res.status !== 403 ? `APNs send failed (HTTP ${res.status} ${reason}).`
+      // Apple's keys are made for one environment now (Sandbox or Production). One made for
+      // Sandbox signs perfectly and is still refused by the production host, under this reason.
+      : reason === "BadEnvironmentKeyIdInToken"
+        ? `APNs refused the provider token (HTTP 403 BadEnvironmentKeyIdInToken): the key APNS_KEY_ID names isn't enabled for Production, the only environment this Worker sends to. Create a Team Scoped key for Production in the Apple Developer account and set APNS_KEY_P8 and APNS_KEY_ID to it.`
+        : `APNs refused the provider token (HTTP 403 ${reason}). Check that APNS_KEY_ID, APNS_TEAM_ID and APNS_KEY_P8 are one key of one team, and that the key is enabled for Production.`,
+  });
   return "failed";
 }
