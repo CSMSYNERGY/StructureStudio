@@ -46,6 +46,10 @@
     // else: nothing is charged and nothing is refused. Turn this on (and deploy) BEFORE
     // setting armed_at: anything after armed_at that a Worker still on "off" settles is a final
     // shadow row, never charged (the ARMING notes at the bottom of migration 259).
+    // ⚠️ STAYS "off" until Ahsan says go (Carolyn's prices of 2026-10-06: the cost × 1.25). The
+    // order (the edge secret first, then this, then a pilot business, then everyone) is
+    // SETUP.md 7e. Once it is "on" live, commit it here too: a deploy from a tree that still
+    // says "off" stops every charge without a word, and the same goes for CALL_RECORDING.
     "PHONE_USAGE_METERS": "off",
     // Release 2. Anything but "off" records what every call and text cost at Twilio, and what
     // it would charge at the current markup, as `shadow` rows in usage_charges, while nothing
@@ -56,14 +60,21 @@
     // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, about
     // $0.05/minute, English, 2 s to 2 min). Anything else: off.
     "TRANSCRIBE": "off",
-    // Release B2, call recording's kill switch. Exactly "on" lets a business that turned
-    // recording on (Settings › Phone, owner only) have its calls announced and recorded, through
-    // Twilio's REST API on the customer's leg (src/recording.ts). Anything else: no announcement
-    // and no recording for anyone. Needs migration 263 applied first.
+    // Release B2, call recording's kill switch. Exactly "on" lets a business whose switch is on
+    // (on by default since migration 287, Carolyn 2026-10-06; only the owner turns it off, in
+    // Settings › Phone) have its calls announced ("This call may be recorded.") and recorded,
+    // through Twilio's REST API on the customer's leg (src/recording.ts). Anything else: no
+    // announcement and no recording for anyone. Needs migrations 263 and 287 applied first.
+    // ⚠️ STAYS "off" until the updated privacy policy and store disclosures are published and
+    // Ahsan says go: with 287 every business is on, so "on" records every business with calling
+    // on from its next call. The order, and the kill switch, are SETUP.md 7d.
+    // The kill switch is "off" + deploy + commit to beta. A tree saying "on" while live says
+    // "off" re-arms recording for everyone: stop and ask.
     "CALL_RECORDING": "off",
     // Release B2. Exactly "on" transcribes recorded calls with Workers AI (the "ai" binding
     // below, Deepgram nova-3, about $0.005-0.01 per minute) from the minute tick, and asks the
-    // phone-call-summary edge function for a summary of each. Anything else: off.
+    // phone-call-summary edge function for a summary of each. Anything else: off. Set the Supabase
+    // function secret of the same name with it (portal-settings reads it for the Settings card).
     "CALL_TRANSCRIBE": "off"
     // The wallet floor that refuses an outbound call is no longer a var here: it is
     // phone_billing_settings.floor_cents (migration 259), so calls and texts share one number.

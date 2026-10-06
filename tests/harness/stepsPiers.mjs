@@ -27,6 +27,9 @@
 //      A flight down a side of the deck (2026-10-03) counts the same way; a RECESSED porch's steps
 //      (2026-10-03) show the box too, "blank = 3" on the same piers, and a typed count saves beside
 //      porchDepthFt; switching back to projecting keeps the steps and their count.
+//      WHAT THE COUNT COUNTS (Carolyn 2026-10-06): a line of its own under the box, between it and the
+//      rise hint, says the count is the treads you walk on, not the porch floor at the top; it shows
+//      with every kind of steps (front, down a side, a recessed porch's) and goes with "None".
 //   D. zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -407,6 +410,12 @@ async function runPanel(ctx, ok, shots) {
   };
   const count = () => page.locator('input[data-ss-step-count="ss-grid"]');
   const rise = () => page.locator('div[data-ss-step-rise="ss-grid"]');
+  // The treads line (Carolyn 2026-10-06): its own element, so the rise hint's exact text is untouched.
+  const what = () => page.locator('div[data-ss-step-what="ss-grid"]');
+  const TREADS = "The treads you walk on, not counting the porch floor at the top.";
+  const whatSays = async () => (await what().count()) === 1 && (await what().isVisible())
+    && (await what().innerText()).replace(/\s+/g, " ").trim() === TREADS;
+  const whatText = async () => ((await what().count()) ? (await what().innerText()).replace(/\s+/g, " ").trim() : "(none)");
   const stepsSel = () => page.locator("label").filter({ hasText: /^Porch steps/ }).locator("select");
   const typeCount = async (v) => {
     await count().click();
@@ -433,6 +442,14 @@ async function runPanel(ctx, ok, shots) {
     ok(`${tag}: ...labelled "Number of steps"`, /^Number of steps/.test(label.trim()), label.slice(0, 80));
     let r = await riseText();
     ok(`${tag}: the hint says each step rises 4.5 in, not amber`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    ok(`${tag}: ⚠️ UNDER THE BOX, THE COUNT IS THE TREADS YOU WALK ON, NOT THE PORCH FLOOR`, await whatSays(), await whatText());
+    const order = await what().evaluate((e) => {
+      const lab = e.closest("label"), box = lab && lab.querySelector('input[data-ss-step-count="ss-grid"]'), hint = lab && lab.querySelector('[data-ss-step-rise="ss-grid"]');
+      return { inLabel: !!lab, afterBox: !!box && !!(box.compareDocumentPosition(e) & 4), beforeRise: !!hint && !!(e.compareDocumentPosition(hint) & 4),
+        apart: !!hint && !e.contains(hint) && !hint.contains(e) };
+    });
+    ok(`${tag}: ...a line of its own, after the box and before the rise hint`, order.inLabel && order.afterBox && order.beforeRise && order.apart, JSON.stringify(order));
+    if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "C-0-panel-treads-left.png") }).catch(() => {});
     let d3 = await save();
     ok(`${tag}: ⚠️ SAVED UNTOUCHED, NO COUNT IS SENT`, !has(d3.roof, "porchStepCount") && d3.roof.porchSteps === "left", JSON.stringify(d3.roof));
 
@@ -465,6 +482,7 @@ async function runPanel(ctx, ok, shots) {
     await stepsSel().selectOption("");
     await settle(page);
     ok(`${tag}: "None" for the steps hides the count`, (await count().count()) === 0);
+    ok(`${tag}: ...and the treads line with it`, (await what().count()) === 0, await whatText());
     d3 = await save();
     ok(`${tag}: ⚠️ ...AND DELETES IT WITH THE STEPS`, !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount"), JSON.stringify(d3.roof));
     await stepsSel().selectOption("right");
@@ -488,6 +506,8 @@ async function runPanel(ctx, ok, shots) {
     ok(`${tag}: steps down a side show the box, "blank = 3" on the same piers`, (await count().count()) === 1 && (await count().getAttribute("placeholder")) === "blank = 3", await count().getAttribute("placeholder"));
     r = await riseText();
     ok(`${tag}: ...each rising 4.5 in`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    ok(`${tag}: ...and the treads line says the same for steps down a side`, await whatSays(), await whatText());
+    if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "C-0-panel-treads-left-side.png") }).catch(() => {});
     d3 = await save();
     ok(`${tag}: ...and save their word, no count`, d3.roof.porchSteps === "leftSide" && !has(d3.roof, "porchStepCount"), JSON.stringify(d3.roof));
     // A RECESSED PORCH'S STEPS (2026-10-03): the same box, the same count, beside porchDepthFt.
@@ -500,6 +520,14 @@ async function runPanel(ctx, ok, shots) {
       (await stepsSel().inputValue()) === "center" && (await count().count()) === 1 && (await count().getAttribute("placeholder")) === "blank = 3", await count().getAttribute("placeholder"));
     r = await riseText();
     ok(`${tag}: ...its hint the same 4.5 in rise`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    ok(`${tag}: ...and the treads line shows for a recessed porch's steps too`, await whatSays(), await whatText());
+    if (shots) {
+      await stepsSel().selectOption("left");
+      await settle(page);
+      await count().locator("xpath=../..").screenshot({ path: join(shots, "C-0-panel-treads-recessed-left.png") }).catch(() => {});
+      await stepsSel().selectOption("center");
+      await settle(page);
+    }
     await typeCount(4);
     d3 = await save();
     ok(`${tag}: ⚠️ a typed 4 saves beside porchDepthFt, the steps with it`, d3.roof.porchDepthFt > 0.5 && !has(d3.roof, "porchOutFt") && d3.roof.porchSteps === "center" && d3.roof.porchStepCount === 4, JSON.stringify(d3.roof));

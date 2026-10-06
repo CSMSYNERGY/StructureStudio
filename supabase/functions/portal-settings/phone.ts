@@ -153,11 +153,13 @@ export function parseRoute(
 //
 // The settings card's form → the client_settings columns, or the first thing wrong with it.
 // The columns' CHECKs are mirrored here so a bad value is refused in words the owner can act on.
-// Decided for Ahsan on 2026-10-04 (Carolyn can change the settings later): recording off until the
-// owner turns it on; the announcement on and LOCKED ON while calls are recorded (this refuses
-// turning it off; the column stays for a later decision); transcripts on; recordings kept 365
-// days unless the owner picks another of the five lengths. The standard wording is the phone-api
-// Worker's (src/recording.ts STANDARD_NOTICE*), repeated here only to show the owner.
+// Decided for Ahsan on 2026-10-04, and by Carolyn on 2026-10-06 (migration 287): recording ON by
+// default, and only the owner turns it off; the announcement on and LOCKED ON while calls are
+// recorded (this refuses turning it off; the column stays for a later decision); transcripts on
+// per business, but they run only once the Worker's CALL_TRANSCRIBE rail is on (off: Carolyn left
+// them a separate decision); recordings kept 365 days unless the owner picks another of the five
+// lengths. The standard wording is the phone-api Worker's (src/recording.ts STANDARD_NOTICE*),
+// repeated here only to show the owner; tests/phone/callRecordingUi_test.ts pins the copies equal.
 
 /** client_settings_phone_recording_retention_chk. */
 export const RECORDING_RETENTION_DAYS = [30, 90, 180, 365, 730] as const;
@@ -165,8 +167,8 @@ export const DEFAULT_RECORDING_RETENTION_DAYS = 365;
 /** client_settings_phone_recording_notice_text_chk, counted after trimming. */
 export const NOTICE_MIN = 10;
 export const NOTICE_MAX = 300;
-export const STANDARD_NOTICE = "This call will be recorded.";
-export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and transcribed.";
+export const STANDARD_NOTICE = "This call may be recorded.";
+export const STANDARD_NOTICE_TRANSCRIBED = "This call may be recorded and transcribed.";
 
 /** The sentence a business with no wording of its own hears (the Worker adds "and transcribed" only while it will happen). */
 export function standardNotice(transcribe: boolean): string {
@@ -188,7 +190,8 @@ export type RecordingRow = {
  *   noticeText    blank, or either standard sentence, means the standard wording (stored NULL,
  *                 so it follows the transcripts switch); otherwise 10-300 characters once spaces
  *                 are tidied, one line, and it has to say the call is recorded and not deny it
- *                 (noticeSaysRecorded)
+ *                 (noticeSaysRecorded). The sentence before 287 ("This call will be recorded.")
+ *                 is now an owner's own wording like any other
  *   transcribe    default true
  *   retentionDays one of 30, 90, 180, 365, 730; default 365
  */
@@ -248,12 +251,26 @@ export function recordingServerOn(env: (k: string) => string | undefined): boole
 }
 
 /**
- * A client_settings row's recording columns → what the Settings card shows. Missing columns read
- * as the defaults. `serverOn` is recordingServerOn: calls are recorded only while the owner's
- * `on` AND it are true; with the owner's on and the server's off, the card says recording hasn't
- * started yet.
+ * Whether recorded calls are transcribed on this server at all: the phone-api Worker's
+ * CALL_TRANSCRIBE rail, mirrored the same way as CALL_RECORDING (this function's own secret of the
+ * same name, set together with the Worker var; unset reads off). Exactly "on", as the Worker reads
+ * it (src/recording.ts callTranscribeOn). Without it the card would promise transcripts, and show
+ * "... and transcribed", while callers hear the plain sentence and no transcript is ever made.
  */
-export function recordingView(row: Record<string, unknown> | null | undefined, serverOn = false) {
+export function transcribeServerOn(env: (k: string) => string | undefined): boolean {
+  return env("CALL_TRANSCRIBE") === "on";
+}
+
+/**
+ * A client_settings row's recording columns → what the Settings card shows. Missing columns read
+ * as the defaults, except `on`: a business with no settings row is not recorded (the RPCs read it
+ * as coalesce(..., false)), so it is not shown as recorded either. `serverOn` is recordingServerOn:
+ * calls are recorded only while the owner's `on` AND it are true; with the owner's on and the
+ * server's off, the card says recording hasn't started yet. `transcribeOnServer` is
+ * transcribeServerOn: the standard sentence says "and transcribed" only while the business's
+ * transcripts are on AND it is, which is exactly when the Worker says it (noticeText).
+ */
+export function recordingView(row: Record<string, unknown> | null | undefined, serverOn = false, transcribeOnServer = false) {
   const r = row ?? {};
   const transcribe = r.phone_transcribe_calls !== false;
   const days = Number(r.phone_recording_retention_days);
@@ -261,9 +278,10 @@ export function recordingView(row: Record<string, unknown> | null | undefined, s
   return {
     on: r.phone_record_calls === true,
     serverOn: serverOn === true,
+    transcribeServerOn: transcribeOnServer === true,
     notice: true,
     noticeText: text,
-    standardText: standardNotice(transcribe),
+    standardText: standardNotice(transcribe && transcribeOnServer === true),
     transcribe,
     retentionDays: (RECORDING_RETENTION_DAYS as readonly number[]).includes(days) ? days : DEFAULT_RECORDING_RETENTION_DAYS,
     retentionChoices: [...RECORDING_RETENTION_DAYS],

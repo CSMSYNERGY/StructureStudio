@@ -1539,7 +1539,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
       )}
       {data && view === "board" && jobs.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-          Nothing on the board yet. Sold orders, inventory builds, and repairs appear in the tray above — one click adds them. Every order job takes the next shop serial number automatically.
+          Nothing on the board yet. Sold orders, inventory builds, and repairs appear in the tray above — one click adds them. A customer's building takes the next shop serial number the first time it goes on the board, and keeps it.
         </p>
       )}
 
@@ -4314,8 +4314,9 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
 }
 
 // ─── Building serial numbers (Settings → Company → Business Details) ───
-// ONE shared per-builder sequence: every inventory building and every customer order that
-// reaches the build board takes the next number, in creation order.
+// ONE shared per-builder sequence: every inventory building, and every customer building the
+// first time it reaches the build board, takes the next number in creation order and keeps it
+// (one number per building, migration 284).
 //
 // Reads the number from `list_locations`, which returns it alongside the lots — that action is
 // named for its main payload, not its only one, and a second endpoint for one integer was not
@@ -4345,8 +4346,8 @@ function SerialNumbersCard() {
     <div style={S.card}>
       <div style={S.h2}>Building Serial Numbers</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        Every inventory building — and every customer order that reaches your build board — takes
-        the next number in one shared sequence, in the order they're created.
+        Every inventory building, and every customer building the first time it reaches your build
+        board, takes the next number in one shared sequence. A building keeps its number for good.
       </div>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <div>

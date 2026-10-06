@@ -1521,12 +1521,13 @@ function phoneNumberOwner(n, team) {
 }
 
 // ── Call recording (migration 263) ──────────────────────────────────────────────────────
-// The standard announcement, word for word portal-settings/phone.ts STANDARD_NOTICE and
-// STANDARD_NOTICE_TRANSCRIBED (tests/phone/callRecordingUi_test.ts pins the two copies). Shown
-// so the owner knows what callers hear when the wording box is left empty; the server stores an
-// empty box as "the standard wording", which follows the transcripts switch.
-const PHONE_REC_STANDARD = "This call will be recorded.";
-const PHONE_REC_STANDARD_TRANSCRIBED = "This call will be recorded and transcribed.";
+// On by default since migration 287. The standard announcement (Carolyn's wording, 2026-10-06),
+// word for word portal-settings/phone.ts STANDARD_NOTICE and STANDARD_NOTICE_TRANSCRIBED and the
+// phone-api Worker's (tests/phone/callRecordingUi_test.ts pins the three copies). Shown so the
+// owner knows what callers hear when the wording box is left empty; the server stores an empty
+// box as "the standard wording", which follows the transcripts switch.
+const PHONE_REC_STANDARD = "This call may be recorded.";
+const PHONE_REC_STANDARD_TRANSCRIBED = "This call may be recorded and transcribed.";
 // How long recordings are kept: client_settings_phone_recording_retention_chk's five lengths.
 const PHONE_REC_KEEP_WORDS = { 30: "30 days", 90: "90 days", 180: "6 months", 365: "1 year", 730: "2 years" };
 
@@ -2234,7 +2235,14 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // Calls are recorded only while the owner's `on` AND the server's switch (`serverOn`, the
   // phone-api Worker's CALL_RECORDING rail as portal-settings sees it) are both true. With the
   // owner's on and the server's off, the card says recording hasn't started yet: never that calls
-  // are recorded while nothing records.
+  // are recorded while nothing records. Transcripts the same: the owner's choice AND the server's
+  // (`transcribeServerOn`, the CALL_TRANSCRIBE rail). Until both, the standard sentence leaves out
+  // "and transcribed" (as the Worker does) and nothing promises a transcript.
+  // Recording is ON by default (migration 287, Carolyn 2026-10-06): a business whose owner never
+  // saved this card is on, and the card says that is the default rather than who changed it. The
+  // first save of such a business (no updatedAt yet) asks "Record calls?" too, even when only the
+  // retention changed: the save stamps the owner as having chosen recording, so that choice always
+  // went past the same words as turning it on.
   const rec = data.recording || null;
   const recLive = !!(rec && rec.on && rec.serverOn);
   const recEdit = !!data.canChangeRecording && canEdit && !!recForm;
@@ -2245,8 +2253,8 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const saveRecording = async () => {
     const keep = Number(recForm.retentionDays);
     const keepWords = PHONE_REC_KEEP_WORDS[keep] || `${keep} days`;
-    const recWho = `The people who can see a call can play its recording${recForm.transcribe ? " and read its transcript and summary" : ""}.`;
-    if (recForm.on && !rec.on && !window.confirm(rec.serverOn
+    const recWho = `The people who can see a call can play its recording${recForm.transcribe && rec.transcribeServerOn ? " and read its transcript and summary" : ""}.`;
+    if (recForm.on && (!rec.on || !rec.updatedAt) && !window.confirm(rec.serverOn
       ? `Record calls? From your next call on, every call to and from your business number is announced and then recorded. ${recWho}`
       : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is announced and then recorded. ${recWho}`)) return;
     if (keep < Number(rec.retentionDays) && !window.confirm(`Keep recordings for ${keepWords}? Recordings older than that, and their transcripts, are deleted at the next daily clean-up. Their summaries stay with the calls.`)) return;
@@ -2272,7 +2280,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       <div style={{ fontSize: 13, color: "#64748B" }}>Call recording isn&rsquo;t available on this account yet.</div>
     </div>
   ) : (() => {
-    const standard = recForm.transcribe ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;
+    const standard = recForm.transcribe && rec.transcribeServerOn ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;
     const who = rec.updatedBy ? ((team.find((t) => t.userId === rec.updatedBy) || {}).name || null) : null;
     const when = phoneWhen(rec.updatedAt);
     const check = (checked, disabled, onChange, label, sub, key) => (
@@ -2323,7 +2331,15 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           </label>
           {check(recForm.transcribe, !recEdit, (e) => setRecForm((f) => ({ ...f, transcribe: e.target.checked })),
             "Transcripts and summaries",
-            "A written transcript of each recorded call, and a short summary with any action items, a minute or two after the call ends. Cloudflare writes the transcript and Anthropic's Claude writes the summary.",
+            <>
+              A written transcript of each recorded call, and a short summary with any action items, a minute or two after the
+              call ends. Cloudflare writes the transcript and Anthropic&rsquo;s Claude writes the summary.
+              {!rec.transcribeServerOn && (
+                <span data-ss-phone-recording-transcripts-waiting style={{ display: "block", marginTop: 3, color: "#92400E" }}>
+                  Transcripts haven&rsquo;t started on this account yet. Your choice is saved and takes effect once they do.
+                </span>
+              )}
+            </>,
             "transcribe")}
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", flexWrap: "wrap" }}>
             Keep recordings for
@@ -2351,6 +2367,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           )}
           {when && (
             <span style={{ fontSize: 12, color: "#64748B" }}>Last changed {when}{who ? ` by ${who}` : ""}.</span>
+          )}
+          {!when && rec.on && (
+            <span data-ss-phone-recording-default style={{ fontSize: 12, color: "#64748B" }}>
+              On by default for every business. The business owner can turn it off.
+            </span>
           )}
           {recNote && recNote.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{recNote.err}</span>}
           {recNote && recNote.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{recNote.ok}</span>}

@@ -1744,7 +1744,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
       );
     }
     if (!schedOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Not scheduled</span>;
-    return schedLinkBtn("Add to build schedule", "Put this building on the Build Schedule — it takes the next shop serial number",
+    return schedLinkBtn("Add to build schedule", "Put this building on the Build Schedule — it takes the next shop serial number the first time, and keeps it",
       () => addToBuildSchedule(r), schedBusy === r.o.id);
   };
   const balOf = (r) => (r.o.total_cents == null ? null : r.o.total_cents - r.paid);
