@@ -421,9 +421,12 @@ Rules that are easy to break and expensive to get wrong:
 2. **The delivered fence:** `sync-design-status` skips rows with `delivered_at` set. Remove
    that skip and the GHL recompute (which never reports delivered) downgrades every
    locally-delivered design on the next portal load.
-3. **Serials:** order build jobs mint from `take_next_serial()` LAST, after all validation —
-   a rejected payload must not burn a number. Testing "add order to board" on a real tenant
-   consumes a real serial.
+3. **Serials:** an order building mints its shop serial ONCE (`orders.shop_serial`,
+   migration 284); `create_job` reuses it, so deleting a job and adding it back keeps the
+   number. Only a building without one calls `take_next_serial()`, LAST after all validation
+   (a rejected payload must not burn a number), and writes it to the order before the job
+   insert. Stops and repairs read it through `buildingSerialFor()`, which never mints. Testing
+   "add order to board" on a real tenant still consumes a real serial the first time.
 4. **Built-before-delivered:** loads can't go out/delivered with an unbuilt stop; the 409
    carries `{blocked, unbuilt}` and the **owner/admin-only** override (required reason) is
    audit-logged and stamped on the load — see the per-area note above for why that role check
