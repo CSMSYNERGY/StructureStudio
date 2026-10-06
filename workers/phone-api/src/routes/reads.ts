@@ -24,7 +24,7 @@ import {
 import { switchUnderWay } from "../handoff";
 import { ApiError, ok, pathParam, UUID_RE } from "../http";
 import { toE164, toIdentity } from "../identity";
-import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, phoneLevelOf, visibleContactIds } from "../scope";
+import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, narrowedToOwn, phoneLevelOf, visibleContactIds } from "../scope";
 
 const PAGE = 50;
 const SCAN = 500;
@@ -675,8 +675,13 @@ export async function search(env: Env, req: Request): Promise<Response> {
 
 /** Contacts read per page of GET /contacts. */
 export const CONTACTS_PAGE = 200;
-/** PostgREST: the requested range starts past the last row (an offset beyond the end). */
-const RANGE_PAST_END = "PGRST103";
+/**
+ * Someone limited to their own customers: one request reads on, page after page, until it has
+ * this many to show or has read CONTACTS_NARROWED_SCAN rows, so a rep with a handful of
+ * customers in a big business gets them in a request or two, not one empty page per 200.
+ */
+export const CONTACTS_NARROWED_WANT = 50;
+export const CONTACTS_NARROWED_SCAN = 2000;
 
 /** The page marker of GET /contacts: how many contacts the earlier pages read. */
 function contactsOffset(url: URL): number {
@@ -695,10 +700,11 @@ function contactsOffset(url: URL): number {
  *
  * Postgres sorts: the database's ICU collation already orders names the way people read them
  * (case and accents folded), so the app keeps this order and never re-sorts. Pages are read
- * by offset, CONTACTS_PAGE rows at a time, like the portal's Contacts list. Someone limited to
- * their own customers gets the visible rows of each read, so a page can come back short or
- * even empty: "cursor" is there whenever the READ was full, which is what "there may be more"
- * means, and the app keeps asking until it is gone.
+ * by offset, CONTACTS_PAGE rows at a time, like the portal's Contacts list. "cursor" (the next
+ * offset) is there whenever the last READ was full, which is what "there may be more" means;
+ * an offset past the end just reads nothing. Someone limited to their own customers gets the
+ * visible rows of what was read, so a page can still come back short or even empty, and the
+ * app keeps asking until "cursor" is gone.
  */
 export async function listContacts(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
@@ -706,23 +712,28 @@ export async function listContacts(env: Env, req: Request): Promise<Response> {
   const from = contactsOffset(new URL(req.url));
 
   type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email: string | null };
-  const res = await c.admin.from("crm_contacts").select("id, name, phone, phone_digits, email")
-    .eq("client_id", c.ctx.client_id).is("merged_into", null)
-    .order("name", { ascending: true, nullsFirst: false }).order("id", { ascending: true })
-    .range(from, from + CONTACTS_PAGE - 1);
-  // A marker that now points past the end (contacts merged away since the last page) is the end.
-  const rows = res.error?.code === RANGE_PAST_END ? [] : ((must(res, "list contacts") as Row[] | null) ?? []);
-
-  const visible = await visibleContactIds(c, rows.map((r) => r.id));
-  const contacts = [];
-  for (const r of rows) {
-    if (!visible.has(r.id)) continue;
-    const e164 = toE164(r.phone) ?? toE164(r.phone_digits);
-    const email = emailAddress(r.email);
-    if (!e164 && !email) continue; // nothing to call, text or email
-    contacts.push({ id: r.id, name: r.name ?? "", e164, email });
-  }
-  return ok({ contacts, ...(rows.length >= CONTACTS_PAGE ? { cursor: String(from + CONTACTS_PAGE) } : {}) });
+  const narrowed = narrowedToOwn(c.ctx);
+  const contacts: { id: string; name: string; e164: string | null; email: string | null }[] = [];
+  let at = from;
+  let more = true;
+  do {
+    const res = await c.admin.from("crm_contacts").select("id, name, phone, phone_digits, email")
+      .eq("client_id", c.ctx.client_id).is("merged_into", null)
+      .order("name", { ascending: true, nullsFirst: false }).order("id", { ascending: true })
+      .range(at, at + CONTACTS_PAGE - 1);
+    const rows = (must(res, "list contacts") as Row[] | null) ?? [];
+    at += CONTACTS_PAGE;
+    more = rows.length >= CONTACTS_PAGE;
+    const visible = await visibleContactIds(c, rows.map((r) => r.id));
+    for (const r of rows) {
+      if (!visible.has(r.id)) continue;
+      const e164 = toE164(r.phone) ?? toE164(r.phone_digits);
+      const email = emailAddress(r.email);
+      if (!e164 && !email) continue; // nothing to call, text or email
+      contacts.push({ id: r.id, name: r.name ?? "", e164, email });
+    }
+  } while (narrowed && more && contacts.length < CONTACTS_NARROWED_WANT && at - from < CONTACTS_NARROWED_SCAN);
+  return ok({ contacts, ...(more ? { cursor: String(at) } : {}) });
 }
 
 // ── team ────────────────────────────────────────────────────────────────────────────

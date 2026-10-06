@@ -1120,12 +1120,36 @@ describe("GET /contacts, everyone A-Z for the phone app's Contacts tab (2026-10-
     expect(ids(json.contacts)).toEqual([cid(3)]);
     expect(net.rpcCalls("crm_visible_contact_ids")).toHaveLength(1);
 
-    const many = Array.from({ length: 200 }, (_, i) => contact(cid(300 + i), { name: `Rep ${String(i).padStart(3, "0")}`, phone: "555-555-0150", phone_digits: "5555550150" }));
+    // A business bigger than one scan, where they may see nobody: the request reads on to
+    // CONTACTS_NARROWED_SCAN rows, then hands back where it stopped.
+    const many = Array.from({ length: 2500 }, (_, i) => contact(cid(3000 + i), { name: `Rep ${String(i).padStart(4, "0")}`, phone: "555-555-0150", phone_digits: "5555550150" }));
     const narrowed = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), []);
     narrowed.net.rest("GET", "crm_contacts", table(many));
     const { json: empty } = await call(narrowed.env, appRequest("GET", "/contacts", narrowed.token));
     expect(empty.contacts).toEqual([]);
-    expect(empty.cursor).toBe("200");
+    expect(empty.cursor).toBe("2000");
+    expect(narrowed.net.reads("crm_contacts").map((r) => r.url.searchParams.get("offset"))).toEqual(
+      Array.from({ length: 10 }, (_, i) => String(i * 200)));
+  });
+
+  it("someone narrowed reads on until there are enough to show, then stops", async () => {
+    // Every 10th contact is theirs, 20 in each read of 200, so 50 to show take three reads.
+    const many = Array.from({ length: 1000 }, (_, i) => contact(cid(6000 + i), { name: `Pat ${String(i).padStart(4, "0")}`, phone: "555-555-0151", phone_digits: "5555550151" }));
+    const mine = many.filter((_, i) => i % 10 === 0).map((r) => r.id);
+    const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), mine);
+    net.rpc("crm_visible_contact_ids", (s) => (s.json.p_ids as string[]).filter((id) => mine.includes(id)));
+    net.rest("GET", "crm_contacts", table(many));
+    const { json } = await call(env, appRequest("GET", "/contacts", token));
+    expect(json.contacts).toHaveLength(60);
+    expect(json.cursor).toBe("600");
+    expect(net.reads("crm_contacts")).toHaveLength(3);
+    // Someone who isn't narrowed always reads exactly one page.
+    const all = await setup(callerCtx());
+    all.net.rest("GET", "crm_contacts", table(many));
+    const { json: page } = await call(all.env, appRequest("GET", "/contacts", all.token));
+    expect(page.contacts).toHaveLength(200);
+    expect(page.cursor).toBe("200");
+    expect(all.net.reads("crm_contacts")).toHaveLength(1);
   });
 
   it("contacts none sees nobody, and nothing is read", async () => {
@@ -1136,11 +1160,16 @@ describe("GET /contacts, everyone A-Z for the phone app's Contacts tab (2026-10-
     expect(net.reads("crm_contacts")).toHaveLength(0);
   });
 
-  it("a marker past the end (contacts merged away since) is the end, not an error", async () => {
+  it("exactly a page's worth: the full read hands back a cursor, and the next read is the end", async () => {
     const { net, token, env } = await setup(callerCtx());
-    net.rest("GET", "crm_contacts", () =>
-      jsonRes({ code: "PGRST103", message: "Requested range not satisfiable", details: "An offset of 400 was requested, but there are only 380 rows." }, 416));
-    const { res, json } = await call(env, appRequest("GET", "/contacts?cursor=400", token));
+    const page = Array.from({ length: 200 }, (_, i) => contact(cid(9000 + i), { name: `Lee ${String(i).padStart(3, "0")}`, email: `lee${i}@example.com` }));
+    net.rest("GET", "crm_contacts", table(page));
+    const { json: first } = await call(env, appRequest("GET", "/contacts", token));
+    expect(first.contacts).toHaveLength(200);
+    expect(first.cursor).toBe("200");
+    // An offset past the end (or contacts merged away since) reads nothing: PostgREST answers
+    // 200 with no rows, as no count is asked for.
+    const { res, json } = await call(env, appRequest("GET", "/contacts?cursor=200", token));
     expect(res.status).toBe(200);
     expect(json.contacts).toEqual([]);
     expect(json.cursor).toBeUndefined();
