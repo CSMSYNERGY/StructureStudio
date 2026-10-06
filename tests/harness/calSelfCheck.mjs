@@ -175,6 +175,8 @@ async function main() {
   const { browser, ctx } = await launch({ width: 1500, height: 1100 });
   await ctx.addInitScript(([ref, s]) => {
     try { window.localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) {}
+    // Publishes window.__ssCalDraft, the draft the page shows (see `draft` below).
+    window.__SS3D_DEBUG = true;
     // COUNT THE RENDERS. Every off-screen shot ends in exactly one toDataURL, and each shot
     // opens its own WebGL context, so this is the cheapest true measure of how many contexts
     // a burst of presses asks for. Nothing else on this surface reads a canvas back.
@@ -304,6 +306,14 @@ async function main() {
   const dimIn = page.locator("input.ssc-dim-in");
   const gen = page.getByRole("button", { name: /Generate the 3D model/ });
   const text = () => page.evaluate(() => document.body.innerText);
+  // THE DRAFT, read off the page (2026-10-05). Settings → Designer → 3D is the Advanced page's form since
+  // then: the barn roof's knee and ridge rise are sliders there, not the old grid's boxes, so the numbers
+  // these checks pin are read from window.__ssCalDraft, which the page publishes under __SS3D_DEBUG only.
+  // Where the form does show a number, the check reads the box as well (the overhang, in inches).
+  const draft = () => page.evaluate(() => (window.__ssCalDraft ? JSON.parse(JSON.stringify(window.__ssCalDraft)) : null));
+  const roofNum = (k) => page.evaluate((k) => { const d = window.__ssCalDraft; return d && d.roof && d.roof[k] != null ? String(d.roof[k]) : null; }, k);
+  const porchKind = (d) => (!d || !d.roof ? null : Number(d.roof.porchOutFt) > 0.5 ? "projecting" : Number(d.roof.porchDepthFt) > 0.5 ? "recessed" : "none");
+  const ohBox = () => page.evaluate(() => { const i = document.querySelector('.ss-cal [data-ss-adv-f="overhang"] input[type="number"]'); return i ? i.value : null; });
 
   const openStyle = async () => {
     await page.getByRole("button", { name: "Barn", exact: true }).first().click();
@@ -371,8 +381,13 @@ async function main() {
   // line says with the meter off, exempt or unknown is 13, at the end.
   r.ok("⚠️ AND IT SAYS THE PRICE, ONCE, UNDER A RULE (meter armed at 2000)",
     card.includes("you are charged $20 once, however much we have to fix") && snap.charge === "priced", `${snap.charge} · ${card.slice(-90)}`);
+  // The check step has two names while it runs: "Checking our 3D against your video" before its first
+  // round, "Checking its work — round N of 3" once one is going. Which one this reading catches is the
+  // timing of the wallet read the loop above waits for (2026-10-05: on the Designer-frame page it lands
+  // in round 1), so either is the step named.
   r.ok("with all four steps named, including the two that are new",
-    card.includes("Checking our 3D against your video") && card.includes("Correcting anything that doesn't line up"));
+    /Checking our 3D against your video|Checking its work — round \d of \d/.test(card) && card.includes("Correcting anything that doesn't line up"),
+    (card.match(/Checking[^✓›]*/) || [""])[0].slice(0, 70));
   // "four to six minutes" since the streamed draft's reads got 300 s (2026-09-25; three to five while
   // they had 230 s): the reads think at effort "high", and the check rounds come after.
   r.ok("and an honest wait, not a spinner", card.includes("Usually four to six minutes — it studies your video carefully"));
@@ -537,20 +552,15 @@ async function main() {
   r.ok("the check ran again on the new generation, and looked twice",
     checkCalls.length - nBefore3 === 2 && checkCalls[nBefore3].round === 0 && checkCalls[nBefore3 + 1].round === 1,
     checkCalls.slice(nBefore3).map((c) => c.round).join(","));
-  const merged = await page.evaluate(() => {
-    const box = Array.from(document.querySelectorAll("input")).find((i) => /Overhang/.test((i.closest("label") || {}).textContent || ""));
-    return box ? box.value : null;
-  });
-  r.ok("⚠️ THE CORRECTION REACHED THE SPEC — the overhang field shows what the check said",
-    merged !== null && Math.abs(parseFloat(merged) - 0.15) < 0.001, String(merged));
-  const porch = await page.evaluate(() => {
-    // The porch-KIND select, found by the option only it has (porchPanel.mjs's locator). Other
-    // selects' labels say porch too (Porch end).
-    const sel = Array.from(document.querySelectorAll("select")).find((s) => s.querySelector('option[value="projecting"]'));
-    return sel ? sel.value : null;
-  });
+  const merged = await draft();
+  const mergedBox = await ohBox();
+  // The box is in inches: 0.15 ft is 1.8 in.
+  r.ok("⚠️ THE CORRECTION REACHED THE SPEC — the overhang box shows what the check said",
+    Boolean(merged) && Math.abs(Number(merged.roof.overhang) - 0.15) < 0.001 && mergedBox !== null && Math.abs(parseFloat(mergedBox) - 1.8) < 0.01,
+    `${merged && merged.roof.overhang} ft · box ${mergedBox} in`);
+  const porch = porchKind(merged);
   r.ok("⚠️ AND IT DID NOT RESURRECT THE PORCH THE DRAFT REPLACED",
-    porch === "projecting", `porch select reads ${porch}`);
+    porch === "projecting", `the draft's porch is ${porch}`);
   const body = await text();
   r.ok("the change is listed in words a builder owns, in inches",
     body.includes("How far the roof sticks out past the wall") && /12 in\s*→\s*2 in/.test(body),
@@ -726,12 +736,10 @@ async function main() {
   r.ok("and is offered no wings, which a one-slant roof cannot have", !shedTiles.includes("Both sides"));
   await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /^The front/ }).click();
   await page.waitForTimeout(300);
-  const hsSelect = await page.evaluate(() => {
-    const l = Array.from(document.querySelectorAll("label")).find((x) => /^High side \(single slant\)/.test(x.textContent || ""));
-    const sel = l ? l.querySelector("select") : null;
-    return sel ? sel.value : null;
-  });
-  r.ok("the tile writes roof.highSide, which the field grid reads back", hsSelect === "front", String(hsSelect));
+  const hsDraft = await draft();
+  const hsShown = await page.evaluate(() => { const b = document.querySelector('.ss-cal [data-ss-adv-f="highSide"] [aria-pressed="true"]'); return b ? b.textContent.trim() : null; });
+  r.ok("the tile writes roof.highSide, which the form reads back", Boolean(hsDraft) && hsDraft.roof.highSide === "front" && hsShown === "Front",
+    `${hsDraft && hsDraft.roof.highSide} · High side shows ${hsShown}`);
   r.ok("and What we drew says it in words", /The high side is the front\./.test(await spanLine()), await spanLine());
   // Back to the barn roof, so the slider assertions below are about the panel they were written
   // for. The re-shoot rides along with it.
@@ -745,16 +753,10 @@ async function main() {
 
   // Dragging the sliders must not be able to build the roof the warning refuses. The unit
   // test proves that over the whole grid; this proves the slider is wired to the function.
-  const before = await page.evaluate(() => {
-    const el = Array.from(document.querySelectorAll("input")).find((i) => /Ridge rise/.test((i.closest("label") || {}).textContent || ""));
-    return el ? el.value : null;
-  });
+  const before = await roofNum("ridgeRise");
   await page.locator('[data-ssc-question="roof"] input[type="range"]').first().fill("90");
   await page.waitForTimeout(250);
-  const after = await page.evaluate(() => {
-    const el = Array.from(document.querySelectorAll("input")).find((i) => /Ridge rise/.test((i.closest("label") || {}).textContent || ""));
-    return el ? el.value : null;
-  });
+  const after = await roofNum("ridgeRise");
   r.ok("a slider drag writes all three gambrel numbers, including the derived one",
     before !== null && after !== null && before !== after, `${before} -> ${after}`);
   await answer("roof", "Yes");
@@ -1175,8 +1177,11 @@ async function main() {
     };
   });
   r.ok("a pair can be opened out of the panel's column", zoomed.open && zoomed.imgs.length === 2, JSON.stringify(zoomed.imgs));
+  // 1.5x, not 1.8x, since 2026-10-05: the page is the Advanced page's frame now, and its column gives a
+  // pair 203 px at 375 where the amber panel gave 161, so the window is less of a step up. It is still
+  // the window's width, which is the claim.
   r.ok("⚠️ AT THE WIDTH OF THE WINDOW, not the width of the column",
-    zoomed.imgs.every((w) => w >= 330) && zoomed.imgs[0] > inPanelW * 1.8, `${zoomed.imgs.join(", ")} against ${inPanelW} in the panel`);
+    zoomed.imgs.every((w) => w >= 330) && zoomed.imgs[0] > inPanelW * 1.5, `${zoomed.imgs.join(", ")} against ${inPanelW} in the panel`);
   r.ok("with the turn controls still there, so a bad pairing can be straightened from here", zoomed.turn);
   r.ok("and it does not put the page into horizontal scroll", zoomed.doc[0] === zoomed.doc[1], zoomed.doc.join(" vs "));
   await page.locator("[data-ssc-zoom]").screenshot({ path: join(shots, "04-phone-enlarged.png") });
@@ -1192,11 +1197,9 @@ async function main() {
   // again, asked about again. Each helper reads the whole round list for one press.
   const draftAt = (over) => { const d = draftSpec({ wallHeightFt: 9 }, 1.0); return { ...d, roof: { ...d.roof, ...over } }; };
   const fixed = (d3, changed, note = "") => ({ status: 200, body: { ok: true, verdict: "corrections", d3, changed, checked: {}, note, renders: 3, ms: 1500 } });
-  const fieldValue = (re) => page.evaluate((src) => {
-    const rx = new RegExp(src);
-    const box = Array.from(document.querySelectorAll("input")).find((i) => rx.test((i.closest("label") || {}).textContent || ""));
-    return box ? box.value : null;
-  }, re.source);
+  // The draft's roof numbers (see `draft` above): the old grid's "Overhang (ft)", "Ridge rise" and "Knee
+  // rise" boxes are this form's sliders since 2026-10-05.
+  const fieldValue = (k) => roofNum(k);
   const verdictLine = async () => ((await text()).match(/We checked our own 3D[^\n]*/) || [""])[0];
   const pairShot = (vp) => page.evaluate((v) => {
     const el = document.querySelector(`[data-ssc-pair="${v}"]`);
@@ -1249,7 +1252,7 @@ async function main() {
   r.ok("⚠️ ROUND 2 WAS SHOWN THE CORRECTED BUILDING, not the draft again", dRound > 0.01, `${(dRound * 100).toFixed(2)}% of the eave close-up moved`);
   r.ok("⚠️ AND THOSE ARE THE PICTURES LEFT ON SCREEN — the builder judges what they will save",
     callsA.length === 2 && (await Promise.all(callsA[1].renders.map(async (x) => (await pairShot(x.viewpoint)) === x.base64))).every(Boolean));
-  r.ok("the cumulative spec reached the panel", Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001, String(await fieldValue(/^Overhang \(ft\)/)));
+  r.ok("the cumulative spec reached the panel", Math.abs(parseFloat(await fieldValue("overhang")) - 0.15) < 0.001, String(await fieldValue("overhang")));
   r.ok("the card says it looked twice and names the one correction", /2 times and corrected 1 thing/.test(await verdictLine()), await verdictLine());
 
   // B. Three corrections in a row: the loop stops at three rounds, with ONE merged list.
@@ -1267,15 +1270,12 @@ async function main() {
   r.ok("⚠️ THREE CORRECTIONS STOP AT THREE ROUNDS — never a fourth", callsB.map((c) => c.round).join(",") === "0,1,2",
     callsB.map((c) => c.round).join(","));
   r.ok("every round's correction reached the spec, merged onto the pre-generation spec",
-    Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001
-      && Math.abs(parseFloat(await fieldValue(/^Ridge rise/)) - 0.9) < 0.001
-      && Math.abs(parseFloat(await fieldValue(/^Knee rise/)) - 0.65) < 0.001,
-    [await fieldValue(/^Overhang \(ft\)/), await fieldValue(/^Ridge rise/), await fieldValue(/^Knee rise/)].join(" / "));
+    Math.abs(parseFloat(await fieldValue("overhang")) - 0.15) < 0.001
+      && Math.abs(parseFloat(await fieldValue("ridgeRise")) - 0.9) < 0.001
+      && Math.abs(parseFloat(await fieldValue("kneeRise")) - 0.65) < 0.001,
+    [await fieldValue("overhang"), await fieldValue("ridgeRise"), await fieldValue("kneeRise")].join(" / "));
   r.ok("⚠️ AND THE PORCH THE DRAFT REPLACED STAYED GONE through three merges",
-    (await page.evaluate(() => {
-      const sel = Array.from(document.querySelectorAll("select")).find((x) => /porch/i.test((x.closest("label") || {}).textContent || "") && x.querySelector('option[value="projecting"]'));
-      return sel ? sel.value : null;
-    })) === "projecting");
+    porchKind(await draft()) === "projecting");
   const listB = await page.evaluate(() => { const ul = document.querySelector('[data-ssc-card="compare"] ul'); return ul ? ul.innerText : ""; });
   r.ok("one list of three lines, one per field", listB.split("\n").filter(Boolean).length === 3 && /12 in\s*→\s*2 in/.test(listB),
     listB.split("\n").join(" | ").slice(0, 200));
@@ -1294,7 +1294,7 @@ async function main() {
   const callsC = checkCalls.slice(nC);
   r.ok("⚠️ A CORRECTION BACK TO A BUILDING ALREADY CHECKED STOPS THE LOOP", callsC.map((c) => c.round).join(",") === "0,1",
     callsC.map((c) => c.round).join(","));
-  r.ok("the spec is where the last round left it", Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 1.0) < 0.001, String(await fieldValue(/^Overhang \(ft\)/)));
+  r.ok("the spec is where the last round left it", Math.abs(parseFloat(await fieldValue("overhang")) - 1.0) < 0.001, String(await fieldValue("overhang")));
   r.ok("and the card says the corrections cancelled out, with no list of non-changes",
     /cancelled each other out/.test(await verdictLine()) && !(await page.evaluate(() => Boolean(document.querySelector('[data-ssc-card="compare"] ul')))),
     await verdictLine());
@@ -1310,8 +1310,8 @@ async function main() {
   const callsD = checkCalls.slice(nD);
   r.ok("a second round was asked for", callsD.map((c) => c.round).join(",") === "0,1", callsD.map((c) => c.round).join(","));
   r.ok("⚠️ A LATER ROUND THAT FAILS NEVER COSTS AN EARLIER ONE",
-    Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001 && /corrected 1 thing/.test(await verdictLine()),
-    `${await fieldValue(/^Overhang \(ft\)/)} · ${await verdictLine()}`);
+    Math.abs(parseFloat(await fieldValue("overhang")) - 0.15) < 0.001 && /corrected 1 thing/.test(await verdictLine()),
+    `${await fieldValue("overhang")} · ${await verdictLine()}`);
   r.ok("and it is not reported as a check that could not run", !(await text()).includes("We couldn't run our own check this time"));
   checkPlan = null;
 

@@ -323,7 +323,9 @@ async function main() {
   await setDim(widthIn, 12);
   await setDim(lengthIn, 32);
   await setDim(wallIn, 9);
-  const lowerWall = page.locator('label:has-text("Wall height (ft)") input:not(.ssc-dim-in)').first();
+  // The field further down is Walls & foundation's "Wall height (ft)" box since 2026-10-05 (the page is
+  // the Advanced page's form): a spinbutton of exactly that name, beside its slider ("…, slider").
+  const lowerWall = page.getByRole("spinbutton", { name: "Wall height (ft)", exact: true });
   r.ok("the wall height is ONE slice: the field further down moved with it",
     (await lowerWall.inputValue()) === "9", await lowerWall.inputValue());
 
@@ -333,23 +335,25 @@ async function main() {
     JSON.stringify(a2 && a2.dims));
 
   // ── 6: the overhang chips, and the one distinction that matters ───────────────────────────
-  await page.getByRole("button", { name: "Flush", exact: true }).click();
+  // In the card: Roof finish's overhang presets have a "Flush" too since 2026-10-05.
+  const chip = (name) => page.locator('[data-ssc-card="dims"]').getByRole("button", { name, exact: true });
+  await chip("Flush").click();
   await page.waitForTimeout(150);
   const a3 = await press("press 3 (flush)");
   r.ok("⚠️ FLUSH IS 0, AND 0 REACHES THE SERVER", Boolean(a3) && a3.dims.overhangIn === 0, JSON.stringify(a3 && a3.dims));
 
-  await page.getByRole("button", { name: "16 in", exact: true }).click();
+  await chip("16 in").click();
   await page.waitForTimeout(150);
   const a4 = await press("press 4 (16 in)");
   r.ok("a measured eave rides along in inches", Boolean(a4) && a4.dims.overhangIn === 16, JSON.stringify(a4 && a4.dims));
 
   // 24 in, the chip the 10-01 call asked for (builders sometimes build a 2 ft eave).
-  await page.getByRole("button", { name: "24 in", exact: true }).click();
+  await chip("24 in").click();
   await page.waitForTimeout(150);
   const a4b = await press("press 4b (24 in)");
   r.ok("a 24 in eave is a chip too, and rides along as 24", Boolean(a4b) && a4b.dims.overhangIn === 24, JSON.stringify(a4b && a4b.dims));
 
-  await page.getByRole("button", { name: "Read it from the video", exact: true }).click();
+  await chip("Read it from the video").click();
   await page.waitForTimeout(150);
   const a5 = await press("press 5 (read it from the video)");
   r.ok("⚠️ 'READ IT FROM THE VIDEO' IS NOT ZERO — the key is absent, not 0",
