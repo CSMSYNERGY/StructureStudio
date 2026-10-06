@@ -36,8 +36,14 @@ import { calendarDayIn, isTimeZone, numOrNull } from "../_shared/scheduleInput.t
 //     11 of SCHEDULING_SCOPE.md is that crew cannot override the built-before-delivered rule.
 //   * A building physically wider than the load's max_width_ft is REJECTED — no override;
 //     the remedy is a different truck or fixed specs.
-//   * Order build jobs mint their shop serial via take_next_serial() LAST, after all
-//     validation — a rejected payload must not burn a number (075's rule).
+//   * The shop serial is per BUILDING, minted once and kept (Carolyn 2026-10-06, migration
+//     284). An order building's number lives on its order (orders.shop_serial); create_job
+//     reuses it, so deleting a job and adding it back does not spend a new one. Only a
+//     building without one calls take_next_serial(), LAST, after all validation (a rejected
+//     payload must not burn a number, 075's rule), and the number is written to the order
+//     BEFORE the job insert. Stops and repairs find it through buildingSerialFor(); an open
+//     order stop added from the design code before the building had a number gets it from
+//     create_job.
 //   * Marking an order's stop delivered sets designs.status='delivered' + delivered_at
 //     (the fence in sync-design-status ships with the Delivery tab UI — Phase 4).
 
@@ -72,7 +78,8 @@ const GATES: GateTable = {
   clear_job_change: { area: "build_schedule", level: "edit" },
   add_note:     { area: "build_schedule", level: "edit" },
   save_stages:  { area: "build_schedule", level: "edit" },
-  // create_job burns a number from the shared take_next_serial() sequence, so this level
+  // create_job can burn a number from the shared take_next_serial() sequence (an order
+  // building's first time on the board; after that it keeps its number), so this level
   // also spends an Inventory-visible resource. Deliberately still build_schedule alone:
   // it is the board's own "add to schedule" button, and requiring inventory:edit would stop
   // a crew leader scheduling a build.
@@ -425,6 +432,45 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // RPC not deployed yet -- the build must still complete. The order simply keeps a null
       // serial, which the order card renders as "not yet", and a later re-run fills it.
     }
+  };
+
+  // ── THE SHOP SERIAL IS THE BUILDING'S (Carolyn 2026-10-06: "one per building") ──────────
+  // Not the tag code above. This is the plain per-builder number from take_next_serial()
+  // (075) that the boards show as "#1042". An order building gets it ONCE, the first time it
+  // goes on the build board (create_job), and it is kept on the order (orders.shop_serial,
+  // migration 284) because the job can be deleted and the stop is only a snapshot.
+  //
+  // This is the one place that answers "what is this building's number?" for a design code,
+  // and it NEVER mints: a building that skipped the build board and has no number yet keeps
+  // none (the default Carolyn's answer left: numbers are handed out on the build board and in
+  // inventory only). Order of lookup:
+  //   1. the order's shop_serial;
+  //   2. the building's ORDER build job: a job the previous code created between migration 284
+  //      and this deploy carries a number its order does not record yet;
+  //   3. an INVENTORY sale: the lot building's own unit number, through the buyer's design
+  //      (designs.inventory_unit_id) or the unit sold to that code;
+  //   4. none.
+  // Every read is scoped to this tenant: another builder's order with the same code is not ours.
+  const buildingSerialFor = async (code: string | null): Promise<number | null> => {
+    if (!code) return null;
+    const { data: order, error: oErr } = await admin.from("orders")
+      .select("shop_serial").eq("client_id", clientId).eq("short_code", code).maybeSingle();
+    if (oErr) throw oErr;
+    if (order?.shop_serial != null) return Number(order.shop_serial);
+    const { data: jobs, error: jErr } = await admin.from("build_jobs")
+      .select("serial").eq("client_id", clientId).eq("design_short_code", code).eq("source", "order").limit(1);
+    if (jErr) throw jErr;
+    if (jobs?.[0]?.serial != null) return Number(jobs[0].serial);
+    const { data: design, error: dErr } = await admin.from("designs")
+      .select("inventory_unit_id").eq("client_id", clientId).eq("short_code", code).maybeSingle();
+    if (dErr) throw dErr;
+    const { data: unit, error: uErr } = design?.inventory_unit_id
+      ? await admin.from("inventory_units").select("serial")
+        .eq("client_id", clientId).eq("id", design.inventory_unit_id).maybeSingle()
+      : await admin.from("inventory_units").select("serial")
+        .eq("client_id", clientId).eq("sold_design_short_code", code).maybeSingle();
+    if (uErr) throw uErr;
+    return unit?.serial != null ? Number(unit.serial) : null;
   };
 
   // Team names for rendering (assignees, drivers, activity). Names live on
@@ -1402,6 +1448,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       }
 
       let mintSerial = false;
+      // The building's order, when the number is minted below and has to be kept on it.
+      let serialOrder: { id: string } | null = null;
+      let serialKept = false;
+      let serialUnkept = false; // minted, but no order to keep it on (logged after the insert)
       if (source === "order") {
         const code = str(payload?.designShortCode);
         if (!code) return json({ error: "designShortCode is required for an order job." }, 400);
@@ -1441,11 +1491,26 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         // permanent: the counter can never be wound back past a used number. The duplicate is
         // easy to produce — the tray card stays draggable until the board reloads — so ask
         // first. Same predicate as the index, so this refuses nothing the insert would allow;
-        // the 23505 handler stays as the race backstop.
+        // the 23505 handler stays as the race backstop. (Since 284 a building that already has
+        // a number reuses it and mints nothing, so only a first-time race can still leave a gap.)
         const { data: dupeJobs, error: dupeErr } = await admin.from("build_jobs")
           .select("id").eq("client_id", clientId).eq("design_short_code", design.short_code).limit(1);
         if (dupeErr) throw dupeErr;
         if (dupeJobs?.length) return json({ error: "That building is already on the build schedule." }, 409);
+        // ONE NUMBER PER BUILDING (Carolyn 2026-10-06). A building that has been on the board
+        // before (its job deleted and now added back, or a warranty rebuild) already holds its
+        // number on the order and keeps it: no take_next_serial() call at all. Only a building
+        // without one mints, at the "Serial LAST" point below.
+        const { data: order, error: orderErr } = await admin.from("orders")
+          .select("id, shop_serial").eq("client_id", clientId).eq("short_code", design.short_code).maybeSingle();
+        if (orderErr) throw orderErr;
+        if (order?.shop_serial != null) {
+          row.serial = Number(order.shop_serial);
+          serialKept = true;
+        } else {
+          serialOrder = order ? { id: String(order.id) } : null;
+          mintSerial = true;
+        }
         row.design_short_code = design.short_code;
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
@@ -1453,7 +1518,6 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         row.width_ft = row.width_ft ?? dims.widthFt;
         row.length_ft = row.length_ft ?? dims.lengthFt;
         Object.assign(row, await appearanceFrom(admin, clientId, design.selections, design.paint_colors));
-        mintSerial = true;
       } else if (source === "inventory") {
         const unit = await requireRow("inventory_units", payload?.inventoryUnitId, "Inventory unit");
         // Creating this job IS the approval (migration 105) — a requested building becomes
@@ -1486,6 +1550,49 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         const { data: serial, error } = await admin.rpc("take_next_serial", { p_client_id: clientId });
         if (error) throw error;
         row.serial = serial;
+        if (serialOrder) {
+          // The ORDER first, then the job: the building owns the number from this moment, so a
+          // job insert that fails below (the 23505 race, a fault) no longer throws it away; the
+          // next attempt finds it here. `.is(shop_serial, null)` means a number already on the
+          // order is never overwritten.
+          const { data: kept, error: keepErr } = await admin.from("orders")
+            .update({ shop_serial: serial, updated_at: new Date().toISOString() })
+            .eq("id", serialOrder.id).eq("client_id", clientId).is("shop_serial", null)
+            .select("shop_serial");
+          if (keepErr) throw keepErr;
+          if (!kept?.length) {
+            // Lost a race: someone else's create_job numbered this building between our read
+            // and our write. Theirs stands; ours becomes a gap in the count, which is allowed
+            // (a number must never be reused; skipping one is harmless).
+            const { data: winner, error: winErr } = await admin.from("orders")
+              .select("shop_serial").eq("id", serialOrder.id).eq("client_id", clientId).maybeSingle();
+            if (winErr) throw winErr;
+            if (winner?.shop_serial != null) {
+              row.serial = Number(winner.shop_serial);
+              serialKept = true;
+            } else {
+              serialOrder = null; // the order is gone: treat it as the no-order case below
+            }
+          }
+        }
+        // An invoiced design with no orders row (none live on 2026-10-06): the job still gets its
+        // number, as before 284, but nothing keeps it for the building. Logged once the job
+        // exists, below.
+        if (!serialOrder) serialUnkept = true;
+      }
+
+      // The building's number now lives on its order (kept, just written, or the race winner's).
+      // An open stop added from the design code before the building had one (add_stop never
+      // mints) still shows none: give it the number too, so the delivery board and route sheet
+      // agree with the build board. Before the job insert, like the order write: a failure here
+      // leaves no job, and the retry reuses the number and lands here again. Only a stop with NO
+      // number, and never a delivered one (that is history).
+      if (source === "order" && (serialKept || serialOrder) && row.serial != null) {
+        const { error: stopErr } = await admin.from("delivery_stops")
+          .update({ serial: row.serial, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId).eq("design_short_code", row.design_short_code).eq("source", "order")
+          .is("delivered_at", null).is("serial", null);
+        if (stopErr) throw stopErr;
       }
 
       const { data: job, error: insErr } = await admin.from("build_jobs").insert(row).select("*").single();
@@ -1495,7 +1602,20 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         }
         throw insErr;
       }
-      await act("build_job", job.id, "created", { detail: `${source}${job.serial ? ` · serial #${job.serial}` : ""}` });
+      if (serialUnkept) {
+        // After the insert, so the row names a job and a number that exist: a refused insert
+        // (the 23505 race above) logs nothing. Delete this job and the next one mints again, so
+        // the missing order has to be found and fixed (awaited: the row is the whole point, and
+        // logEdgeError never throws).
+        await logEdgeError({
+          fn: "portal-schedule", req, clientId, code: "serial_no_order",
+          message: `create_job: design ${String(job.design_short_code)} has no order, so serial #${String(job.serial)} is kept on the job only`,
+          context: { action, jobId: job.id, designShortCode: job.design_short_code, serial: job.serial },
+        });
+      }
+      await act("build_job", job.id, "created", {
+        detail: `${source}${job.serial ? ` · serial #${job.serial}${serialKept ? " (kept)" : ""}` : ""}`,
+      });
       if (createdDone) {
         await act("build_job", job.id, "completed", { to: stage.id, detail: "created in a finished stage" });
         await mintBuildingSerial(job, createdAt);
@@ -1845,6 +1965,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           .eq("client_id", clientId).eq("short_code", code).maybeSingle();
         if (!design) return json({ error: "That design isn't in your account." }, 404);
         row.design_short_code = design.short_code;
+        // The building's own number, when it has one (it went on the build board before, or it
+        // is a lot building). This branch used to leave the stop with none. It never MINTS: a
+        // building that skipped the build board stays without a number, as it always has.
+        row.serial = await buildingSerialFor(design.short_code);
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.customer_phone = row.customer_phone ?? str((design.contact as Record<string, unknown>)?.phone);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
@@ -2220,17 +2344,27 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           const { data: design } = await admin.from("designs").select("short_code")
             .eq("client_id", clientId).eq("short_code", code).maybeSingle();
           if (design) row.design_short_code = design.short_code;
+          // The building's shop serial too, so service history (which matches on the serial)
+          // finds this repair alongside the ones logged by number. None for a building that
+          // never had one, and nothing is minted for a repair.
+          row.serial = row.serial ?? await buildingSerialFor(design?.short_code ?? code);
         } else {
           const n = Number(ref.replace(/[^0-9]/g, ""));
           if (Number.isFinite(n) && n > 0) {
             row.serial = n;
-            // A serial belongs to an inventory unit; the unit knows its design, which is
-            // what ties the repair to the actual building.
+            // A serial belongs to an inventory unit OR, since 284, to a customer's building
+            // through its order; either one knows its design, which is what ties the repair to
+            // the actual building.
             const { data: unit } = await admin.from("inventory_units")
               .select("id, design_short_code").eq("client_id", clientId).eq("serial", n).maybeSingle();
             if (unit) {
               row.inventory_unit_id = row.inventory_unit_id ?? unit.id;
               row.design_short_code = row.design_short_code ?? unit.design_short_code;
+            } else {
+              const { data: order, error: orderErr } = await admin.from("orders")
+                .select("short_code").eq("client_id", clientId).eq("shop_serial", n).maybeSingle();
+              if (orderErr) throw orderErr;
+              if (order?.short_code) row.design_short_code = row.design_short_code ?? order.short_code;
             }
           }
         }
