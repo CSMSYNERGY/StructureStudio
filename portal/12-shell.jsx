@@ -1725,6 +1725,11 @@ function Dashboard({ session }) {
         // ssD3WithFall sends for level ground clears them on a slab; an older panel's null, which only
         // knew raised floors, keeps them (carryForwardFoundation).
         const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front", slabGround: true };
+        // `seatAware: true` (2026-10-06) says this panel draws where the roof sits on the wall (roof.seat,
+        // roof.rafterDepthIn), so a roof without them clears them: its "On the plate" and its blank rafter
+        // box. An older panel never knew them (its AI redraft drops both), and the server keeps the stored
+        // pair over its silence (carryForwardRoofSeat).
+        body.seatAware = true;
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
