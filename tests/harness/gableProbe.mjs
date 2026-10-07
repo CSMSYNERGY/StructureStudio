@@ -366,7 +366,7 @@ export function openGableChecks(ok, tag, meshes, e, sb, H, depth) {
   if (ceil.length && beam) {
     const z0 = Math.min(...ceil.map((m) => m.min[2])), z1 = Math.max(...ceil.map((m) => m.max[2]));
     ok(`[${tag}] open: the ceiling runs from the set-back gable to the frame's back face`, Math.abs(z0 - (L / 2 - depth + 0.15)) <= 0.011 && Math.abs(z1 - beam.min[2]) <= 0.011, `z ${f3(z0)}..${f3(z1)}`);
-    ok(`[${tag}] open: the ceiling is pine`, ceil.every((m) => m.color === "#c98b4f"), ceil[0].color);
+    ok(`[${tag}] open: the ceiling is pine`, ceil.every((m) => m.color === "#d89a55"), ceil[0].color);
   }
   const frame = meshes.filter((m) => ["post", "beam", "sideBeam", "chord", "kingPost", "strut"].includes(m.tag));
   ok(`[${tag}] open: every frame member takes the wood colour`, frame.length >= 9 && frame.every((m) => m.color === WOOD), [...new Set(frame.map((m) => m.color))].join(" "));
