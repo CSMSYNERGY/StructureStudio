@@ -7,14 +7,15 @@
 // measuredPitchLock (styleD3.test.ts pins its rules) decides it off the ROW, the v2 prompt says so,
 // and applySelfCheck drops a correction to roof.pitch. What only the handler can get wrong:
 //
-//   1. the claim hands back draft_tokens, and the lock is worked out from IT and the first draft,
-//      never from anything the request carries;
+//   1. the claim hands back draft_tokens, and the lock is worked out from IT and the spec the round
+//      judges (the last round's answer, or the first draft), never from anything the request carries;
 //   2. a locked row's pitch correction is dropped (and logged as dropped) while another field's
 //      correction on the same answer lands, and the prompt the model was sent says the pitch was
 //      measured;
 //   3. a row without two measured reads lets the pitch correction through, with the prompt every
 //      check sent before this;
-//   4. the lock holds on a later round too, because it is a property of the drafted row;
+//   4. the lock holds on a later round too, while the spec that round judges keeps the measured
+//      pitch; a later round judging a pitch an earlier one set by eye is not locked on it;
 //   5. a legacy check (production's older designer) is untouched: d3ab404's prompt and rules.
 //
 // HOW: aiSelfCheckClaimWiring_test's idiom. Everything from the claim to the action's last
@@ -24,7 +25,8 @@
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import {
-  applySelfCheck, measuredOverhangLock, measuredPitchLock, modelReplyText, parseKnownDims, parseSelfCheck, sanitizeD3Spec,
+  applySelfCheck, measuredOverhangLock, measuredPitchLock, measuredPorchLock, modelReplyText, parseKnownDims, parseSelfCheck,
+  sanitizeD3Spec,
   selfCheckChangedFields, selfCheckPrompt, selfCheckReverted, selfCheckRequest, selfCheckTotalChanges,
   legacySelfCheckPrompt, SELF_CHECK_CLAIM_WINDOW_MS, SELF_CHECK_MAX_ROUNDS,
 } from "../styleD3.ts";
@@ -61,10 +63,11 @@ for (const [ts, js] of [["let checkRes: Response;", "let checkRes;"], ["let chec
 // The wiring this file is about, named so a diff that drops one fails with its name.
 for (const must of [
   '.select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens")',
-  'const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);',
+  "const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, draftRead.d3);",
   "round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,",
-  // The measured-overhang lock rides beside it (2026-09-29, aiSelfCheckOverhangLockWiring_test).
-  "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);",
+  // The measured-overhang lock rides beside it (2026-09-29, aiSelfCheckOverhangLockWiring_test), and the
+  // measured porch depth's (2026-10-07, aiSelfCheckPorchLockWiring_test).
+  "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked, porchLocked);",
 ]) {
   assert(BLOCK.includes(must), `the check lost ${must}`);
 }
@@ -165,6 +168,8 @@ const PARAMS = [
   "selfCheckReverted", "SELF_CHECK_MAX_ROUNDS",
   // 2026-09-29: the measured-overhang lock, which none of these rows has.
   "measuredOverhangLock",
+  // 2026-10-07: the measured porch depth's lock, which none of these rows has either.
+  "measuredPorchLock",
 ];
 const RUN = new AsyncFunction(...PARAMS, `${BLOCK}\n  return { fellThrough: true };`);
 
@@ -195,7 +200,7 @@ async function runCheck(opts: { row: Row; round?: number; mode?: "v2" | "legacy"
     // deno-lint-ignore require-await
     async (code: string) => ({ failed: code }),
     Date.now(), modelReplyText, parseSelfCheck, applySelfCheck, selfCheckTotalChanges, selfCheckReverted,
-    SELF_CHECK_MAX_ROUNDS, measuredOverhangLock,
+    SELF_CHECK_MAX_ROUNDS, measuredOverhangLock, measuredPorchLock,
   );
   assert(out && out.body && out.status === 200, `the check answered: ${JSON.stringify(out)}`);
   assertEquals(sent.length, 1, "one model call");
@@ -244,7 +249,7 @@ Deno.test("the draft's measured reads are what count: a consensus far from them 
   assertEquals(reply.d3.roof.pitch, 0.7, "the check may move it");
 });
 
-Deno.test("⚠️ the lock holds on a LATER round: it is a property of the drafted row", async () => {
+Deno.test("⚠️ the lock holds on a LATER round, while the spec it judges keeps the measured pitch", async () => {
   // Round 0 opened the eave; round 1 judges that result and tries the pitch again.
   const after = spec({ ...DRAFTED, roof: { ...DRAFTED.roof, eave: "open" } });
   const row = freshRow({
@@ -258,6 +263,23 @@ Deno.test("⚠️ the lock holds on a LATER round: it is a property of the draft
   assertEquals(dropped(logged)?.context.pitchLocked, true);
   assert(prompt.includes("THIS IS CHECK ROUND 2 OF"), "it really is round 1");
   assert(prompt.includes("WAS MEASURED"), "and it is told the pitch was measured");
+});
+
+Deno.test("⚠️ a later round judging a pitch an earlier round set by eye is not locked on it", async () => {
+  // Round 0 turned the gable into a gambrel (the lock let go), and round 1 turned it back into a gable
+  // at 0.6, judged by eye. Round 2 judges that 0.6, which no read measured: off the first draft (0.415)
+  // the row read as locked and froze the 0.6 (review, 2026-10-07). Off the judged spec it does not.
+  const judged = spec({ ...DRAFTED, roof: { ...DRAFTED.roof, pitch: 0.6 } });
+  assert(measuredPitchLock(TWO_MEASURED, DRAFTED) && !measuredPitchLock(TWO_MEASURED, judged), "the first draft locks, the judged spec does not");
+  const row = freshRow({
+    draft_tokens: TWO_MEASURED, self_check_at: new Date().toISOString(), self_check_round: 2,
+    self_check_verdict: "corrections", self_check_after: judged,
+    self_check_changed: [{ field: "roof.pitch", from: 0.415, to: 0.6, why: "by eye" }],
+  });
+  const { reply, prompt, logged } = await runCheck({ row, round: 2 });
+  assertEquals(reply.d3.roof.pitch, 0.7, "the check may move it");
+  assertEquals(dropped(logged), undefined, "nothing dropped");
+  assert(prompt.includes("THIS IS CHECK ROUND 3 OF") && !prompt.includes("WAS MEASURED"), "and is not told it was measured");
 });
 
 Deno.test("⛔ a legacy check is untouched: d3ab404's prompt, and its rules let the pitch through", async () => {
