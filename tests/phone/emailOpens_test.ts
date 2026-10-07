@@ -112,7 +112,7 @@ Deno.test("buildCrmFeed: email rows carry the label in meta, and Delivered/Bounc
   assertEquals(byId("e1").meta, { delivery: "Opened", openedAt: "2026-10-04T13:00:00Z", openCount: 2 });
   assertEquals(byId("e1").title, "Your shed");
   assertEquals([byId("e2").title, byId("e2").meta?.delivery], ["Delivery", "Bounced"], "no '(bounced)' in the title any more: the label says it");
-  assertEquals([byId("e3").title, byId("e3").meta?.delivery], ["Quote emailed to cam@example.test", "Delivered"]);
+  assertEquals([byId("e3").title, byId("e3").meta?.delivery], ["Estimate emailed to cam@example.test", "Delivered"]);
   assertEquals([byId("e4").title, byId("e4").meta ?? null], ["Oops (failed)", null], "a failed send keeps its words in the title");
   assertEquals([byId("e5").title, byId("e5").meta?.delivery], ["Offer", "Marked as spam"], "a complaint is not a bounce, and no '(bounced)' either");
 });

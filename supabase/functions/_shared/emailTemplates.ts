@@ -61,12 +61,12 @@ export interface EstimateEmailInput {
    *  second document link — absent renders nothing, so pre-existing callers are unchanged. */
   formalPdfUrl?: string | null;
   quoteTerms?: string | null;
-  /** Which word the document goes by. StructureStudio-issued paperwork says "quote"
-   *  (Carolyn's terminology, migration 121+); the GHL path keeps "estimate" so existing
-   *  tenants' emails don't change under them. "quote" also flips the CTA to "View & Accept
-   *  Your Quote" and leaves the total OUT of the email (Carolyn, 2026-09-14 — see
-   *  estimateEmail). The signature moved to the invoice on 2026-08-26, so the quote CTA no
-   *  longer says "Sign". */
+  /** Which paperwork this is, as an internal KEY: "quote" = StructureStudio-issued (migration
+   *  121+), "estimate" = the GHL path. Both SAY "estimate" to the customer since 2026-10-06
+   *  (Carolyn Q12: "estimate" everywhere a person reads it). "quote" still leaves the total
+   *  OUT of the email (Carolyn, 2026-09-14 — see estimateEmail) and reads the builder's
+   *  wording from the "quote" tab; the GHL email is byte-identical to what it was. The
+   *  signature moved to the invoice on 2026-08-26, so neither CTA says "Sign". */
   docWord?: "estimate" | "quote";
 }
 
@@ -319,6 +319,11 @@ export type TemplateCopy = {
 export const TEMPLATE_KINDS = ["estimate", "quote", "invoice"] as const;
 export type TemplateKind = typeof TEMPLATE_KINDS[number];
 
+/** How a sentence names each kind: the wording screen's own tab names (portal/08-integrations.jsx),
+ *  so a refusal points at the tab the builder is looking at. The keys stay as stored; "quote" is
+ *  StructureStudio's own paperwork, which every customer reads as an estimate (2026-10-06). */
+const KIND_WORDS: Record<TemplateKind, string> = { estimate: "CRM estimate", quote: "estimate", invoice: "invoice" };
+
 /** The longest each field may be, in characters (code points). The editor's boxes stop at the
  *  same lengths, so what is saved is what was typed. */
 export const TEMPLATE_LIMITS = { subject: 300, intro: 300, closing: 1000, button: 40 } as const;
@@ -388,7 +393,7 @@ export function cleanTemplateCopy(raw: unknown): { copy: Partial<Record<Template
     for (const f of COPY_FIELDS) {
       const t = copyField(f, o[f]);
       if (!t) continue;
-      if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${kind} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
+      if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${KIND_WORDS[kind]} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
       out[f] = t;
     }
     if (o.picture === false && kind !== "invoice") out.picture = false;
@@ -460,9 +465,12 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const num = oneLine(input.estimateNumber);
   const money = formatMoney(input.total);
-  // "quote" for StructureStudio-issued paperwork, "estimate" (the default) for the GHL path.
-  const word = input.docWord === "quote" ? "quote" : "estimate";
-  const Word = word === "quote" ? "Quote" : "Estimate";
+  // The word the customer READS is "estimate" on both paths (Carolyn Q12, 2026-10-06).
+  // docWord stays the key for what BEHAVES differently — the missing total and the builder's
+  // wording tab below both test docWord, never this word, so the word can never move them.
+  const ssPaperwork = input.docWord === "quote";
+  const word = "estimate";
+  const Word = "Estimate";
   const building = [input.styleLabel, input.sizeLabel]
     .map((v) => (v == null ? "" : String(v).trim()))
     .filter(Boolean)
@@ -476,7 +484,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // The CRM-mode ESTIMATE email keeps its total: those tenants' emails don't change under them.
   // `money` stays in the token map below, so a builder's saved wording using {total} still
   // fills — that is their own choice of words, and a literal "{total}" would read as our bug.
-  const showTotal = word !== "quote";
+  const showTotal = input.docWord !== "quote";
 
   const rows = [detailRow(`${Word} #`, esc(num))];
   if (building) rows.push(detailRow("Building", esc(building)));
@@ -488,7 +496,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // tenant subject containing {building} would otherwise put a CR/LF straight back into
   // a Subject header — the one thing tenantCopy() already strips from the template. The
   // detail row and the plain-text line keep the raw value; a break there is only ugly.
-  const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
+  const copy = tenantCopy(input.templateCopy, ssPaperwork ? "quote" : "estimate");
   const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
   // The builder's button words, filled. Blank once filled (a lone {customer} with no name on the
   // design) falls back to ours rather than drawing an empty button.
@@ -505,7 +513,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // The quote CTA said "Sign" until 2026-09-15. The signature moved to the INVOICE on
   // 2026-08-26 (migration 136); what the quote page asks for now is a click to accept.
   const cta = input.estimateUrl
-    ? ctaButton(input.estimateUrl, buttonText || (word === "quote" ? "View & Accept Your Quote" : "View & Accept Your Estimate"))
+    ? ctaButton(input.estimateUrl, buttonText || "View & Accept Your Estimate")
     : "";
   const pdfLink = input.pdfUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a></p>`
@@ -544,7 +552,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   if (input.estimateUrl) {
     text.push(buttonText
       ? `${buttonText}: ${input.estimateUrl}`
-      : word === "quote" ? `View & accept your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
+      : `View & accept your estimate: ${input.estimateUrl}`);
   }
   if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
   if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
@@ -577,7 +585,7 @@ export function changeOrderEmail(input: ChangeOrderEmailInput): EmailContent {
   // structure in HTML the same way quote terms do.
   const descHtml = esc(String(input.description ?? "").replace(/\r\n/g, "\n").trim()).replace(/\n/g, "<br>");
 
-  const rows = [detailRow("Quote #", esc(num)), detailRow("Change order", esc(co))];
+  const rows = [detailRow("Estimate #", esc(num)), detailRow("Change order", esc(co))];
   if (beforeMoney) rows.push(detailRow("Previous total", esc(beforeMoney)));
   if (afterMoney) rows.push(detailRow("New total", esc(afterMoney)));
 
@@ -595,7 +603,7 @@ export function changeOrderEmail(input: ChangeOrderEmailInput): EmailContent {
     "",
     String(input.description ?? "").replace(/\r\n/g, "\n").trim(),
     "",
-    `Quote #: ${num}`,
+    `Estimate #: ${num}`,
     `Change order: ${co}`,
   ];
   if (beforeMoney) text.push(`Previous total: ${beforeMoney}`);
@@ -604,14 +612,14 @@ export function changeOrderEmail(input: ChangeOrderEmailInput): EmailContent {
   text.push(...textFooter(input));
 
   return {
-    subject: `A change to your quote ${num} needs your approval`,
+    subject: `A change to your estimate ${num} needs your approval`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `A change to quote ${num} needs your approval.`,
+      preheader: `A change to estimate ${num} needs your approval.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",
@@ -627,8 +635,8 @@ export function acceptanceEmail(input: AcceptanceEmailInput): EmailContent {
   const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
 
   const isInvoice = input.docWord === "invoice";
-  const doc = isInvoice ? "invoice" : "quote";
-  const Doc = isInvoice ? "Invoice" : "Quote";
+  const doc = isInvoice ? "invoice" : "estimate";
+  const Doc = isInvoice ? "Invoice" : "Estimate";
   const signed = input.method !== "click";
   // You ACCEPT a quote and you SIGN an invoice — the verb follows the document, not the
   // gesture. (A drawn signature on a quote was still "accepted" before this change, and
@@ -642,13 +650,13 @@ export function acceptanceEmail(input: AcceptanceEmailInput): EmailContent {
   const lead = isInvoice
     ? `Thank you! You signed invoice ${esc(num)} from ${esc(name)}. A copy is below for your records.`
     : signed
-    ? `Thank you! You accepted your quote from ${esc(name)}. A copy of the signed document is attached below for your records.`
-    : `Thank you! You accepted your quote from ${esc(name)}. Your invoice will follow shortly for you to sign.`;
+    ? `Thank you! You accepted your estimate from ${esc(name)}. A copy of the signed document is attached below for your records.`
+    : `Thank you! You accepted your estimate from ${esc(name)}. Your invoice will follow shortly for you to sign.`;
   const leadText = isInvoice
     ? `Thank you! You signed invoice ${num} from ${name}.`
     : signed
-    ? `Thank you! You accepted your quote from ${name}.`
-    : `Thank you! You accepted your quote from ${name}. Your invoice will follow shortly for you to sign.`;
+    ? `Thank you! You accepted your estimate from ${name}.`
+    : `Thank you! You accepted your estimate from ${name}. Your invoice will follow shortly for you to sign.`;
 
   const rows = [detailRow(`${Doc} #`, esc(num))];
   if (money) rows.push(detailRow("Total", esc(money)));
@@ -800,13 +808,13 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
   const d = new Date(input.acceptedAtIso);
   const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
 
-  const rows = [detailRow("Quote #", esc(num))];
+  const rows = [detailRow("Estimate #", esc(num))];
   if (customer) rows.push(detailRow("Customer", esc(customer)));
   if (building) rows.push(detailRow("Building", esc(building)));
-  if (money) rows.push(detailRow("Quote total", esc(money)));
+  if (money) rows.push(detailRow("Estimate total", esc(money)));
   rows.push(detailRow("Accepted", esc(when)));
 
-  const leadText = `${who} accepted quote ${num}. The invoice is waiting for your approval — nothing has been sent to the customer yet.`;
+  const leadText = `${who} accepted estimate ${num}. The invoice is waiting for your approval — nothing has been sent to the customer yet.`;
   const nextText = "Approving issues the invoice with your next invoice number and emails it to the customer to sign.";
 
   const bodyHtml = `<p style="margin:0 0 12px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(leadText)}</p>
@@ -816,17 +824,17 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
             </table>
             ${ctaButton(input.reviewUrl, "Review & send invoice")}`;
 
-  const text: string[] = [name, "", leadText, nextText, "", `Quote #: ${num}`];
+  const text: string[] = [name, "", leadText, nextText, "", `Estimate #: ${num}`];
   if (customer) text.push(`Customer: ${customer}`);
   if (building) text.push(`Building: ${building}`);
-  if (money) text.push(`Quote total: ${money}`);
+  if (money) text.push(`Estimate total: ${money}`);
   text.push(`Accepted: ${when}`, "", `Review & send invoice: ${input.reviewUrl}`);
 
   return {
-    subject: `Invoice to approve: quote ${num} was accepted`,
+    subject: `Invoice to approve: estimate ${num} was accepted`,
     html: htmlShell({
       businessName: name,
-      preheader: `${who} accepted quote ${num}. Approve the invoice when you're ready.`,
+      preheader: `${who} accepted estimate ${num}. Approve the invoice when you're ready.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

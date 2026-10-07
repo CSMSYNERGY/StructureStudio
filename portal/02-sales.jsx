@@ -145,7 +145,7 @@ async function ssReadAllRows(page, keyOf) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, onViewChange = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, viewPending = false, onViewChange = null }) {
   // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
   // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
   // pipelines ... this may become the pipeline view."
@@ -181,7 +181,16 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // A locked tenant can hold no view but "list". Enforced here rather than only at the
   // toggle: `view` also survives in this component across a refresh of the entitlement, and
   // a builder who was mid-board when their subscription lapsed must not keep the board.
-  const shownView = crmUnlocked ? view : "list";
+  //
+  // THE DEFAULT FOLLOWS THE CRM (Carolyn Q12, 2026-10-06): someone who never picked a view
+  // opens on the board when the business has the built-in CRM, and on the list when it does
+  // not. The shell works that default out and passes it as defaultView, so a saved choice
+  // still wins. On your own portal the CRM answer arrives a moment after the rows can, so the
+  // shell passes viewPending until it does: the body stays on its loading blocks with neither
+  // toggle lit, rather than painting the list and snapping to the board under the cursor.
+  // It clears when the entitlement call FAILS too (the shell's entitlementSettled), so the
+  // table can never hang here.
+  const shownView = viewPending ? null : (crmUnlocked ? view : "list");
   // Cache-seeded so returning to Designs paints at once and refreshes behind it (see
   // ssTabCache in 01-core, and LeadsTable/Orders which already do this). Operator view-as
   // reads through a service-role path and is left uncached, same rule as Contacts.
@@ -459,8 +468,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     if (data && data.error) { setInvMsg({ err: data.error }); return; }
     setInvMsg(data && data.sent
-      ? { ok: `Quote ${r.ss_quote_number || ""} emailed to the customer.` }
-      : { err: `Quote email not sent${data && data.reason ? ` — ${data.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+      ? { ok: `Estimate ${r.ss_quote_number || ""} emailed to the customer.` }
+      : { err: `Estimate email not sent${data && data.reason ? ` — ${data.reason}` : ""}. Print the PDF or copy the customer link instead.` });
   };
 
   // Chip filter first, then facets, then the free-text search over what survives.
@@ -521,10 +530,13 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               {/* The Pipeline button stays VISIBLE when locked, with a padlock, and routes to
                   Billing instead of switching view. Hiding it would make the thing being sold
                   invisible to the only people who might buy it. */}
+              {/* While viewPending the CRM answer is not in yet, so crmUnlocked's false means
+                  "not known": no padlock, and a press switches view like any other (the view it
+                  names goes into the URL and wins) instead of sending a CRM builder to Billing. */}
               {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => {
-                const locked = k === "pipeline" && !crmUnlocked;
+                const locked = k === "pipeline" && !crmUnlocked && !viewPending;
                 return (
-                  <button key={k}
+                  <button key={k} aria-pressed={shownView === k}
                     title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
                     onClick={() => { if (!locked) { setView(k); } else if (onSeeBilling) { onSeeBilling(); } }}
                     style={{
@@ -566,8 +578,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {error && <div style={S.err}>{error}</div>}
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
-      {rows === null && !error && (
-        <div style={{ overflowX: "auto" }}>
+      {(rows === null || !shownView) && !error && (
+        <div style={{ overflowX: "auto" }} data-ss-designs-view="loading">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               {["Date", "Customer", "Contact", "Building", "Estimate #", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
@@ -576,10 +588,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </table>
         </div>
       )}
-      {rows && rows.length === 0 && !error && (
+      {rows && shownView && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
-      {rows && rows.length > 0 && filtered.length === 0 && (
+      {rows && shownView && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
             ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
@@ -596,7 +608,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           dragged card would snap back and look broken. Moving a deal by hand needs the
           local crm_stages table, which is the next increment, not this one. */}
       {rows && filtered.length > 0 && shownView === "pipeline" && (
-        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+        <div style={{ overflowX: "auto", paddingBottom: 4 }} data-ss-designs-view="pipeline">
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
             {CRM_STAGES.map((st) => {
               const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
@@ -642,7 +654,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                               platform have no estimate lines at all (drafts, browsing leads), and
                               a $0 pipeline card is a lie about a real deal. */}
                           <span style={{ fontSize: 13, fontWeight: money ? 800 : 600, color: money ? "#1E293B" : "#94A3B8", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                            {money || "No quote yet"}
+                            {money || "No estimate yet"}
                           </span>
                         </div>
                         <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -706,7 +718,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         </div>
       )}
       {rows && filtered.length > 0 && shownView === "list" && (
-        <div style={{ overflowX: "auto" }}>
+        <div style={{ overflowX: "auto" }} data-ss-designs-view="list">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               <SortTh label="Date" col="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -782,8 +794,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           // the two hand-delivery tools — most lot customers want paper, and a
                           // design with no email address never blocks.
                           r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && {
-                            key: "quote", label: "Quote PDF", title: "Open the printable quote document",
-                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` }),
+                            key: "quote", label: "Estimate PDF", title: "Open the printable estimate document",
+                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Estimate ${r.ss_quote_number} — ${c.name || r.short_code}` }),
                           },
                           // keepOpen, because "Copied ✓" IS the confirmation and it is drawn on
                           // this very item — closing the menu on click would take the only
@@ -791,7 +803,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "copy", keepOpen: true,
                             label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
-                            title: "Copy the customer's link to this quote (they log in with a code to accept it)",
+                            title: "Copy the customer's link to this estimate (they log in with a code to accept it)",
                             onClick: () => copyCustomerLink(r.short_code),
                           },
                           // These two report through the invMsg banner above the table, which is
@@ -799,7 +811,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "resend", disabled: resendBusyKey === r.short_code,
                             label: resendBusyKey === r.short_code ? "Sending…" : "Resend email",
-                            title: "Re-send the quote email to the customer",
+                            title: "Re-send the estimate email to the customer",
                             onClick: () => resendQuoteEmail(r),
                           },
                           // Only on an ACCEPTED design — that is the one state where an invoice
@@ -875,7 +887,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
             // CRM estimate from before the switch to StructureStudio paperwork, then a quote). A
             // server older than this page sends no `quote`, and every message then reads exactly
             // as before.
-            const quote = res.quoteNumber ? `Quote ${res.quoteNumber}` : null;
+            const quote = res.quoteNumber ? `Estimate ${res.quoteNumber}` : null;
             const quoteLine = !quote ? ""
               : res.quote === "removed" ? ` ${quote} and its PDF were deleted too.`
               : res.quote === "kept" ? ` ${quote} and its PDF were kept, because an invoice was made from it.`
@@ -938,7 +950,7 @@ function buildContactTimeline(act) {
     const vers = (act.versions || []).filter((v) => v.short_code === d.short_code); // ascending
     if (vers.length === 0) ev.push({ t: d.created_at, code: d.short_code, text: `Started ${label}` });
     vers.forEach((v, i) => {
-      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested a quote (v1)` }); return; }
+      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested an estimate (v1)` }); return; }
       const diff = diffVersionSelections(vers[i - 1], v); // whole rows — paint_colors sits beside selections
       ev.push({ t: v.created_at, code: d.short_code, text: `Changed the design and resubmitted (v${v.version})${diff ? " — " + diff : ""}` });
     });
@@ -1163,7 +1175,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           if (l.created_at && l.created_at < kept.firstSeen) kept.firstSeen = l.created_at;
           if (l.source === "details" && kept.source !== "details") {
             kept.source = "details";
-            kept.search = " browsing lead viewed pricing quote details";
+            kept.search = " browsing lead viewed pricing estimate details";
           }
           return;
         }
@@ -1177,7 +1189,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           name: l.name || "", email: l.email || "", phone: l.phone || "",
           count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
           latestCode: null, topStatus: "browsing",
-          search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
+          search: " browsing lead" + (l.source === "details" ? " viewed pricing estimate details" : ""),
           codes: [],
         };
         groups.set(lead.key, lead);
@@ -1540,7 +1552,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                     <td style={S.td}>{g.browsing || g.contactOnly ? "—" : g.count}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
-                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed quote details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
+                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed estimate details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
                       style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : g.contactOnly ? ssContactSourceLabel(g.source) : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {(g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
@@ -2062,7 +2074,7 @@ const CRM_SECTIONS = [
   // `note` is the line My Profile shows under it, so nobody arranging their cards wonders why
   // this one is missing from most records.
   { key: "tax", title: "Sales tax", kinds: ["contact", "design"], when: (c) => !!crmSsQuoteDesign(c),
-    note: "Shows for a deal with a StructureStudio quote" },
+    note: "Shows for a deal with a StructureStudio estimate" },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -2777,12 +2789,12 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         // Before migration 244 the column does not exist and PostgREST refuses the whole select.
         // The tax line still has something true to say without it.
         if (r.error && /sales_location_id/.test(String(r.error.message || ""))) r = await direct(false);
-        if (r.error) return { err: r.error.message || "Couldn't load this quote's tax." };
+        if (r.error) return { err: r.error.message || "Couldn't load this estimate's tax." };
         if (!r.data) return { err: "Not shown for your role." };
         return { row: r.data, known: Object.prototype.hasOwnProperty.call(r.data, "sales_location_id") };
       }
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [shortCode], detail: true } });
-      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this quote's tax." };
+      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this estimate's tax." };
       const d = (data.designs || [])[0];
       if (!d) return { err: "Not shown for your role." };
       // No total_cents in that projection; crm_record's own read of the same row carries it.
@@ -2824,7 +2836,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   const snap = row.estimate_lines || null;
   const tax = snap && snap.tax ? snap.tax : null;
   const basisText = ssTaxBasisText(tax);
-  const quoteNo = row.ss_quote_number || "this quote";
+  const quoteNo = row.ss_quote_number || "this estimate";
   // Signed means the tax is the customer's agreement now. Both server actions refuse
   // (accepted / ordered); not offering them is the courtesy half. The status arm is the server's
   // own agreed test (sync-design-status can re-project a status with accepted_at still null). An
@@ -2857,7 +2869,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   // address or a failed send, and a customer who got the quote by text or on paper may only
   // hear the new total from the rep. `resent` means it went out by email, the only re-send there is.
   const notResentText = (d) => { const why = String(d.resendReason || "").trim(); return why ? ` ${why}` : ""; };
-  const resentText = (d) => d.resent ? " The updated quote was emailed to the customer." : notResentText(d);
+  const resentText = (d) => d.resent ? " The updated estimate was emailed to the customer." : notResentText(d);
 
   const changeLocation = async (value) => {
     if (value === "__current") return;
@@ -2877,7 +2889,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
         setLocKnown(true);
         const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
-        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — estimate total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
         if (onChanged) onChanged();
         break;
       }
@@ -2890,7 +2902,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
           ? `its total will change from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}`
           : "its total will change";
         const qn = b.quoteNumber || row.ss_quote_number;
-        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
+        if (!window.confirm(`The customer already has ${qn ? `estimate ${qn}` : "this estimate"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
         confirmResend = true;
         continue;
       }
@@ -2910,7 +2922,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
     const cost = quoted != null
       ? `Each verification is a paid lookup: this one costs ${ssTaxMoney(quoted)} from your wallet.`
       : "Avalara bills each verification.";
-    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\n${cost} If the verified rate is different, the quote's tax and total change to it.`)) return;
+    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\n${cost} If the verified rate is different, the estimate's tax and total change to it.`)) return;
     setBusy("verify"); setMsg(null);
     const flags = {};
     // The server asks for each confirmation in turn — view-as first, then a quote the customer
@@ -2930,13 +2942,13 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         const t = d.tax || {};
         const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
         setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
-          + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
+          + (moved ? ` The estimate total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The estimate total didn't change.")
           + resentText(d) });
         if (onChanged) onChanged();
         break;
       }
       if (out.reason === "confirm_operator" && !flags.confirmVerify) {
-        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's quote. Verify anyway?`)) break;
+        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's estimate. Verify anyway?`)) break;
         flags.confirmVerify = true;
         continue;
       }
@@ -2946,7 +2958,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         // verified rate differs. Same rules as the location confirm — "already has", no promised
         // re-send.
         const qn = b.quoteNumber || row.ss_quote_number;
-        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
+        if (!window.confirm(`The customer already has ${qn ? `estimate ${qn}` : "this estimate"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
         flags.confirmResend = true;
         continue;
       }
@@ -2982,14 +2994,14 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
           {/* A staff resubmit to a different state or ZIP gives up a verified rate (the carry-over
               rule). The stamp says so in `reason`; the reader should know a verify would help. */}
           {tax.basis !== "avalara" && /address changed/i.test(String(tax.reason || "")) && (
-            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this quote is back on the default rate.</div>
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this estimate is back on the default rate.</div>
           )}
         </>
       ) : (
-        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this quote.</div>
+        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this estimate.</div>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#475569", marginTop: 6, paddingTop: 6, borderTop: "1px solid #F1F5F9" }}>
-        <span>Quote total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
+        <span>Estimate total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
       </div>
 
       <div style={{ marginTop: 10 }}>
@@ -3007,12 +3019,12 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         ) : (
           <div style={{ fontSize: 13, color: "#1E293B" }}>{locUnknown ? "—" : (curLocName || "None")}</div>
         )}
-        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the quote…</div>}
+        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the estimate…</div>}
       </div>
 
       {locked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
-          Accepted — this quote keeps the tax the customer agreed to.
+          Accepted — this estimate keeps the tax the customer agreed to.
         </div>
       )}
 
@@ -4308,7 +4320,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             );
           })}
-          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
+          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when an estimate is signed.</div>}
         </div>
       );
     }
@@ -4578,7 +4590,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {!crmUnlocked && (
               <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
                 Notes, activities, email, texts and customer files are part of the <strong>built-in CRM</strong>,
-                which isn&rsquo;t on this subscription yet. This design, its quotes, its documents and its
+                which isn&rsquo;t on this subscription yet. This design, its estimates, its documents and its
                 build and delivery schedule are unaffected.
                 {onSeeBilling ? (
                   <>{" "}
@@ -4884,7 +4896,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {tab === "invoice" && tabOn("invoice") && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
-                  This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
+                  This estimate is accepted, so it can be invoiced. Invoicing happens on the order — with the
                   payments, change orders and build schedule for the same building.
                 </div>
                 <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>

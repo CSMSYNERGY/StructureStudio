@@ -68,7 +68,7 @@ const PRICED = designRow({ priceOverrides: { building: { amount: "8500", was: 90
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 // The footer's submit — "Get Quote" for a design with no estimate yet. Exact, because the step rail
 // beside the plan has an item reading "6 Get quote" that is a link, not the submit.
-const submitButton = (page) => page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+const submitButton = (page) => page.getByRole("button", { name: /^(Get Estimate|Resubmit Quote|Resubmit)$/ }).last();
 
 /** Open Details if it is closed (the public page shows a call-to-action bar; the portal a toggle). */
 async function openDetails(page) {

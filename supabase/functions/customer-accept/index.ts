@@ -613,7 +613,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // does, so until this runs the building cannot reach the build board or the delivery pool.
   if (action === "sign_invoice") {
     const code = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
-    if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid quote reference." }, 400);
+    if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid estimate reference." }, 400);
 
     const { data: d, error: dErr } = await admin
       .from("designs")
@@ -886,7 +886,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
   // ═══ accept_quote ═══
   const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
-  if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
+  if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid estimate reference." }, 400);
 
   // ── The design, owned by this verified customer (phone or email) ────────────────────
   const { data: design, error: designErr } = await admin
@@ -900,7 +900,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   if (designErr) return dbFail(req, identity.clientId, "load the quote", designErr);
   // Same sentence for "not found" and "not yours": a verified customer probing other codes
   // learns nothing about which short codes exist.
-  const notYours = json({ error: "That quote wasn't found on your account." }, 404);
+  const notYours = json({ error: "That estimate wasn't found on your account." }, 404);
   if (!design) return notYours;
   const addr = await loadAddressStanding(admin, identity.clientId, identity);
   if (!addr.standing) return dbFail(req, identity.clientId, "load the quote", addr.error);
@@ -917,7 +917,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     return json({ error: "This builder handles acceptance through their estimate page — use the link in your email." }, 409);
   }
   if (!design.ss_quote_number) {
-    return json({ error: "This quote isn't ready to sign yet — ask your builder to resend it." }, 409);
+    return json({ error: "This estimate isn't ready to sign yet — ask your builder to resend it." }, 409);
   }
   const status = String(design.status || "");
   if (status === "invoiced" || status === "delivered") {

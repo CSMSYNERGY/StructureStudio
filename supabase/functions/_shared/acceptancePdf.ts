@@ -101,7 +101,7 @@ export async function appendAcceptancePage(pdfBytes: Uint8Array, cert: Acceptanc
     text(value, MARGIN + 150, 11, bold);
     y -= 22;
   };
-  row(cert.subjectLabel ? "Change to" : (cert.docLabel || "Quote"), cert.quoteNumber + (cert.subjectLabel ? ` — ${cert.subjectLabel}` : ""));
+  row(cert.subjectLabel ? "Change to" : (cert.docLabel || "Estimate"), cert.quoteNumber + (cert.subjectLabel ? ` — ${cert.subjectLabel}` : ""));
   if (cert.total != null && Number.isFinite(Number(cert.total))) row("Total", fmtMoney(Number(cert.total)));
   row("Signed by", cert.signerName);
   {
@@ -132,7 +132,7 @@ export async function appendAcceptancePage(pdfBytes: Uint8Array, cert: Acceptanc
   }
   page.drawLine({ start: { x: MARGIN, y }, end: { x: MARGIN + 300, y }, thickness: 0.75, color: INK });
   y -= 14;
-  text(cert.method === "drawn" ? "Signed by hand on the customer quote page" : "Typed signature, entered on the customer quote page",
+  text(cert.method === "drawn" ? "Signed by hand on the customer estimate page" : "Typed signature, entered on the customer estimate page",
     MARGIN, 8.5, helv, GRAY);
   y -= 30;
 
@@ -164,7 +164,7 @@ export async function appendAcceptancePage(pdfBytes: Uint8Array, cert: Acceptanc
   y -= 16;
   rule();
   y -= 16;
-  text("This page was generated automatically when the customer accepted, and is part of the quote document above.",
+  text("This page was generated automatically when the customer accepted, and is part of the estimate document above.",
     MARGIN, 8.5, helv, GRAY);
 
   return await doc.save();

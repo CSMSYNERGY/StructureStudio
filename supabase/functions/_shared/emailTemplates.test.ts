@@ -165,12 +165,15 @@ const baseAcceptance = () => ({
   quoteTerms: "50% deposit due on acceptance.",
 });
 
-Deno.test("docWord 'quote' reworders the estimate email; default stays 'estimate'", () => {
+Deno.test("docWord 'quote' SAYS estimate too (2026-10-06); the GHL default is unchanged", () => {
+  // "quote" is the internal key for StructureStudio paperwork. Since Carolyn's Q12 the customer
+  // reads "estimate" on both paths; what still differs is behaviour (the total, the wording tab).
   const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
-  assertIncludes(q.subject, "Your quote JB-1041");
-  assertIncludes(q.html, "View &amp; Accept Your Quote");
-  assertNotIncludes(q.html, "Your estimate is ready");
-  assertIncludes(q.text, "Quote #: JB-1041");
+  assertIncludes(q.subject, "Your estimate JB-1041");
+  assertIncludes(q.html, "View &amp; Accept Your Estimate");
+  assertIncludes(q.html, "Your estimate is ready");
+  assertIncludes(q.text, "Estimate #: JB-1041");
+  for (const s of [q.subject, q.html, q.text]) assertNotIncludes(s, "Quote");
   const e = estimateEmail(baseEstimate());
   assertIncludes(e.subject, "Your estimate EST-1042");
   assertIncludes(e.html, "View &amp; Accept Your Estimate");
@@ -185,10 +188,10 @@ Deno.test("quote email: no total in the html, the text, the subject or the inbox
   for (const [label, s] of [["html", q.html], ["text", q.text], ["subject", q.subject]] as const) {
     assertNotIncludes(s, "$12,345.50", `quote ${label} must not show the amount`);
     assertNotIncludes(s, "12,345", `quote ${label} must not show any form of the amount`);
-    assertNotIncludes(s, "Quote total", `quote ${label} must not carry a total row`);
+    assertNotIncludes(s, "Estimate total", `quote ${label} must not carry a total row`);
   }
   // The preheader is the hidden first div; pin its exact wording so the preview reads right.
-  assertIncludes(q.html, ">Your quote from Junior Barns is ready.</div>");
+  assertIncludes(q.html, ">Your estimate from Junior Barns is ready.</div>");
   // Everything else in the summary survives.
   assertIncludes(q.html, "JB-1041");
   assertIncludes(q.html, "Northwood - 12x24");
@@ -197,10 +200,10 @@ Deno.test("quote email: no total in the html, the text, the subject or the inbox
 
 Deno.test("quote email: the CTA says accept, never sign, in both halves", () => {
   const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
-  assertIncludes(q.html, "View &amp; Accept Your Quote");
-  assertIncludes(q.text, "View & accept your quote: https://pay.example.com/estimate/abc123");
-  assertNotIncludes(q.html, "Sign Your Quote");
-  assertNotIncludes(q.text.toLowerCase(), "sign your quote");
+  assertIncludes(q.html, "View &amp; Accept Your Estimate");
+  assertIncludes(q.text, "View & accept your estimate: https://pay.example.com/estimate/abc123");
+  assertNotIncludes(q.html, "Sign Your Estimate");
+  assertNotIncludes(q.text.toLowerCase(), "sign your estimate");
 });
 
 Deno.test("estimate (CRM) email is unchanged: total row, text line and the amount in the preview", () => {
@@ -224,19 +227,19 @@ Deno.test("a builder's saved quote wording that uses {total} still fills it — 
   assertIncludes(q.html, "Your Northwood - 12x24 comes to $12,345.50.");
   assertNotIncludes(q.subject + q.html + q.text, "{total}");
   // The builder chose to name the figure in their own words; the structural row stays gone.
-  assertNotIncludes(q.html, "Quote total");
+  assertNotIncludes(q.html, "Estimate total");
 });
 
 Deno.test("acceptanceEmail carries the number, signer, date and signed-PDF link", () => {
   const o = acceptanceEmail(baseAcceptance());
-  assertIncludes(o.subject, "You accepted quote JB-1041");
+  assertIncludes(o.subject, "You accepted estimate JB-1041");
   assertIncludes(o.html, "Pat Example");
   assertIncludes(o.html, "2026-08-23");
   assertIncludes(o.html, `href="${baseAcceptance().pdfUrl}"`);
   assertIncludes(o.text, "Signed by: Pat Example");
   // No PDF -> no link, still a valid email.
   const bare = acceptanceEmail({ ...baseAcceptance(), pdfUrl: null });
-  assertNotIncludes(bare.html, "signed quote (PDF)");
+  assertNotIncludes(bare.html, "signed estimate (PDF)");
   assert(bare.text.trim().length > 0, "text half must survive without a PDF");
 });
 
@@ -253,7 +256,7 @@ const baseChangeOrder = () => ({
 
 Deno.test("changeOrderEmail carries the description, totals, CO number and review CTA", () => {
   const o = changeOrderEmail(baseChangeOrder());
-  assertIncludes(o.subject, "A change to your quote JB-1041 needs your approval");
+  assertIncludes(o.subject, "A change to your estimate JB-1041 needs your approval");
   assertIncludes(o.html, "CO-2");
   assertIncludes(o.html, "Added: Window ×2");
   assertIncludes(o.html, "$2,800.00");
@@ -290,14 +293,14 @@ const baseInvoiceRequest = () => ({
 
 Deno.test("invoiceRequestEmail: subject, rows, date and the CTA to the order", () => {
   const o = invoiceRequestEmail(baseInvoiceRequest());
-  assertEq(o.subject, "Invoice to approve: quote JB-1041 was accepted");
-  assertIncludes(o.html, "Pat Example accepted quote JB-1041.");
+  assertEq(o.subject, "Invoice to approve: estimate JB-1041 was accepted");
+  assertIncludes(o.html, "Pat Example accepted estimate JB-1041.");
   assertIncludes(o.html, "Northwood - 12x24");
   assertIncludes(o.html, "$10,505.14");
   assertIncludes(o.html, "2026-09-15");
   assertIncludes(o.html, `href="${baseInvoiceRequest().reviewUrl}"`);
   assertIncludes(o.html, "Review &amp; send invoice");
-  assertIncludes(o.text, "Quote total: $10,505.14");
+  assertIncludes(o.text, "Estimate total: $10,505.14");
   assertIncludes(o.text, "Accepted: 2026-09-15");
   assertIncludes(o.text, `Review & send invoice: ${baseInvoiceRequest().reviewUrl}`);
   // The header is the builder's own business; the reader is the builder.
@@ -317,12 +320,12 @@ Deno.test("invoiceRequestEmail never reads as though an invoice already exists",
 
 Deno.test("invoiceRequestEmail: optional fields absent leave no empty rows and still read", () => {
   const o = invoiceRequestEmail({ ...baseInvoiceRequest(), customerName: null, styleLabel: null, sizeLabel: " ", total: null });
-  assertIncludes(o.html, "Your customer accepted quote JB-1041.");
+  assertIncludes(o.html, "Your customer accepted estimate JB-1041.");
   assertNotIncludes(o.html, ">Customer<");
   assertNotIncludes(o.html, ">Building<");
-  assertNotIncludes(o.html, "Quote total");
+  assertNotIncludes(o.html, "Estimate total");
   assertNotIncludes(o.text, "Customer:");
-  assertNotIncludes(o.text, "Quote total:");
+  assertNotIncludes(o.text, "Estimate total:");
   assertIncludes(o.text, "Accepted: 2026-09-15");
 });
 
@@ -580,7 +583,7 @@ Deno.test("markup in the closing or the button is dropped on the way out, so our
   });
   assertNotIncludes(q.html, "onerror");
   assertNotIncludes(q.html, "<b>");
-  assertIncludes(q.html, ">View &amp; Accept Your Quote</a>");
+  assertIncludes(q.html, ">View &amp; Accept Your Estimate</a>");
   assertEq(estimateEmail(acmeQuote()).html, q.html, "a dropped closing and button leave the shipped email");
 });
 
@@ -612,10 +615,10 @@ Deno.test("the closing sits after the button and both PDF links, in both halves,
     assert(i >= 0, `missing ${JSON.stringify(n)}`);
     return i;
   };
-  assert(at(q.html, "View &amp; Accept Your Quote") < at(q.html, "See you on delivery day."), "html: after the button");
-  assert(at(q.html, "View your quote (PDF)") < at(q.html, "See you on delivery day."), "html: after the PDF links");
+  assert(at(q.html, "View &amp; Accept Your Estimate") < at(q.html, "See you on delivery day."), "html: after the button");
+  assert(at(q.html, "View your estimate (PDF)") < at(q.html, "See you on delivery day."), "html: after the PDF links");
   assert(at(q.html, "See you on delivery day.") < at(q.html, "Quote good for 30 days."), "html: above the terms");
-  assert(at(q.text, "Quote (PDF): ") < at(q.text, "See you on delivery day."), "text: after the links");
+  assert(at(q.text, "Estimate (PDF): ") < at(q.text, "See you on delivery day."), "text: after the links");
   assert(at(q.text, "See you on delivery day.") < at(q.text, "Quote good for 30 days."), "text: above the terms");
   assertIncludes(q.text, "-quote.pdf\n\nSee you on delivery day.\n\nAcme Sheds |", "one blank line each side");
   // No links at all: still exactly one blank line above it.
@@ -628,9 +631,9 @@ Deno.test("button text changes the button's words, never where it goes", () => {
   const q = estimateEmail({ ...acmeQuote(), templateCopy: { quote: { button: "View Shed Quote" } } });
   assertIncludes(q.html, `href="${esc(url)}"`);
   assertIncludes(q.html, ">View Shed Quote</a>");
-  assertNotIncludes(q.html, "View &amp; Accept Your Quote");
+  assertNotIncludes(q.html, "View &amp; Accept Your Estimate");
   assertIncludes(q.text, `View Shed Quote: ${url}`);
-  assertNotIncludes(q.text, "View & accept your quote");
+  assertNotIncludes(q.text, "View & accept your estimate");
   // No hosted page, no button: the words have nothing to sit on.
   const noCta = estimateEmail({ ...acmeQuote(), estimateUrl: null, templateCopy: { quote: { button: "View Shed Quote" } } });
   assertNotIncludes(noCta.html + noCta.text, "View Shed Quote");
@@ -668,15 +671,15 @@ Deno.test("{customer} fills on the estimate and the quote, and is blank (not lit
 
 Deno.test("a button that fills to nothing falls back to ours rather than an empty button", () => {
   const q = estimateEmail({ ...acmeQuote(), templateCopy: { quote: { button: "{customer}" } } });
-  assertIncludes(q.html, ">View &amp; Accept Your Quote</a>");
-  assertIncludes(q.text, "View & accept your quote: ");
+  assertIncludes(q.html, ">View &amp; Accept Your Estimate</a>");
+  assertIncludes(q.text, "View & accept your estimate: ");
 });
 
 Deno.test("the building photo: drawn above the details for an https address, and only then", () => {
   const q = estimateEmail({ ...acmeQuote(), pictureUrl: PHOTO });
   assertIncludes(q.html, `<img src="${PHOTO}" alt="Lofted Barn - 12x24" width="536"`);
-  assert(q.html.indexOf(PHOTO) > q.html.indexOf("Your quote is ready."), "under the opening line");
-  assert(q.html.indexOf(PHOTO) < q.html.indexOf("Quote #"), "above the detail rows");
+  assert(q.html.indexOf(PHOTO) > q.html.indexOf("Your estimate is ready."), "under the opening line");
+  assert(q.html.indexOf(PHOTO) < q.html.indexOf("Estimate #"), "above the detail rows");
   assertNotIncludes(q.text, PHOTO, "the text half has no picture");
   const est = estimateEmail({ ...acmeQuote(), docWord: undefined, pictureUrl: PHOTO });
   assertIncludes(est.html, `<img src="${PHOTO}"`);
@@ -726,7 +729,7 @@ Deno.test("cleanTemplateCopy: keeps what says something, refuses markup by name,
   for (const [field, words] of [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]]) {
     const bad = cleanTemplateCopy({ quote: { [field]: "Hi <b>there</b>" } });
     assert("error" in bad, `${field} with markup must be refused`);
-    if ("error" in bad) assertEq(bad.error, `Remove the < > characters from the quote ${words} — this is plain text, not HTML.`);
+    if ("error" in bad) assertEq(bad.error, `Remove the < > characters from the estimate ${words} — this is plain text, not HTML.`);
   }
   const none = cleanTemplateCopy(null);
   assert("error" in none && none.error === "Nothing to save.", "null is nothing to save");

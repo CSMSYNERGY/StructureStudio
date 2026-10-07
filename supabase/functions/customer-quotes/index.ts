@@ -44,7 +44,7 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
     message: `${where}: ${err?.message ?? "unknown database error"}`,
     context: { where, pgCode: err?.code ?? null, details: err?.details ?? null, hint: err?.hint ?? null },
   }).catch(() => {});
-  return json({ error: "Couldn't load your quotes. Please try again in a moment." }, 500);
+  return json({ error: "Couldn't load your estimates. Please try again in a moment." }, 500);
 }
 
 /** The customer-facing status ladder. Anything else (null, a future internal state)

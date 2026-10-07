@@ -14,11 +14,11 @@ function assertEq(actual: unknown, expected: unknown, msg?: string) {
 Deno.test("click accept: the approved sentence, with and without a total", () => {
   assertEq(
     consentSentenceClick("JB-1041", "$12,345.50"),
-    "I accept quote JB-1041 for $12,345.50 and understand that my builder will send me an invoice to sign.",
+    "I accept estimate JB-1041 for $12,345.50 and understand that my builder will send me an invoice to sign.",
   );
   assertEq(
     consentSentenceClick("JB-1041", null),
-    "I accept quote JB-1041 and understand that my builder will send me an invoice to sign.",
+    "I accept estimate JB-1041 and understand that my builder will send me an invoice to sign.",
   );
 });
 
@@ -31,11 +31,11 @@ Deno.test("click accept never reads as a signature", () => {
 Deno.test("quote signature: the approved sentence, with and without a total", () => {
   assertEq(
     consentSentence("JB-1041", "$12,345.50"),
-    "I agree that my electronic signature is as binding as a handwritten one, and I accept quote JB-1041 for $12,345.50.",
+    "I agree that my electronic signature is as binding as a handwritten one, and I accept estimate JB-1041 for $12,345.50.",
   );
   assertEq(
     consentSentence("JB-1041", null),
-    "I agree that my electronic signature is as binding as a handwritten one, and I accept quote JB-1041.",
+    "I agree that my electronic signature is as binding as a handwritten one, and I accept estimate JB-1041.",
   );
 });
 
@@ -87,7 +87,7 @@ Deno.test("change order sign-off: the whole revised order, byte for byte", () =>
       invoiceNumber: null, quoteNumber: "JB-1041", coNo: 1, newTotal: null,
       feeCents: 0, feeTaxCents: 0, priorDate: null, refundCents: 0,
     }),
-    "I agree that my electronic signature is as binding as a handwritten one, and I accept the revised quote JB-1041 (revision 1), which includes change order CO-1.",
+    "I agree that my electronic signature is as binding as a handwritten one, and I accept the revised estimate JB-1041 (revision 1), which includes change order CO-1.",
   );
   assertEq(
     consentSentenceChangeOrder({

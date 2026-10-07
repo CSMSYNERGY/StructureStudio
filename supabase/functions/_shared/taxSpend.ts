@@ -105,13 +105,13 @@ export function parseVerifyTax(
  */
 export function lookupSwitchRefusal(input: { lookupEnabled: boolean; ssMode: boolean; configured: boolean }): SpendRefusal | null {
   if (input.lookupEnabled !== true) {
-    return refuse(403, "lookup_disabled", "Verified tax lookups aren't switched on for this account. The quote keeps its current tax rate.");
+    return refuse(403, "lookup_disabled", "Verified tax lookups aren't switched on for this account. The estimate keeps its current tax rate.");
   }
   if (input.ssMode !== true) {
-    return refuse(403, "lookup_disabled", "This account's quotes come from the CRM, so there's no StructureStudio quote to verify tax on.");
+    return refuse(403, "lookup_disabled", "This account's estimates come from the CRM, so there's no StructureStudio estimate to verify tax on.");
   }
   if (input.configured !== true) {
-    return refuse(403, "lookup_disabled", "Verified tax lookups aren't available right now. The quote keeps its current tax rate.");
+    return refuse(403, "lookup_disabled", "Verified tax lookups aren't available right now. The estimate keeps its current tax rate.");
   }
   return null;
 }
@@ -137,7 +137,7 @@ export function verifyQuoteRefusal(input: {
 }): SpendRefusal | null {
   const s = input.snap as Record<string, unknown> | null | undefined;
   if (!s || typeof s !== "object" || !s.tax || typeof s.tax !== "object" || !subtotalsFromSnapshot(s)) {
-    return refuse(409, "no_quote", "This design has no quote yet — issue the quote first, then verify its tax.");
+    return refuse(409, "no_quote", "This design has no estimate yet — issue the estimate first, then verify its tax.");
   }
   if (!taxable(input.address)) {
     return refuse(400, "no_address", "Add the customer's state and ZIP code to the delivery address first — the tax rate is looked up for that address.");
@@ -166,14 +166,14 @@ export function quoteSentRefusal(input: {
 }): SpendRefusal | null {
   if (!input.inCustomerHands || input.confirmResend === true) return null;
   return refuse(409, "quote_sent",
-    "The customer already has this quote, and verifying the tax may change its total. If it does, we email them the updated quote, or tell you to let them know if we can't. Confirm to go ahead.",
+    "The customer already has this estimate, and verifying the tax may change its total. If it does, we email them the updated estimate, or tell you to let them know if we can't. Confirm to go ahead.",
     { quoteNumber: input.quoteNumber ?? null, totalCents: input.totalCents });
 }
 
 /** Our own per-minute limit on Verify presses (claim_tax_lookup's `rate_limited`). 429, apart
  *  from Avalara's own 429, which is a 502 `lookup_failed` with failure `rate_limited`. */
 export function rateLimitedRefusal(): SpendRefusal {
-  return refuse(429, "rate_limited", "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
+  return refuse(429, "rate_limited", "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The estimate keeps its current tax rate.",
     { retryAfterSeconds: TAX_LOOKUP_MINUTE_WINDOW_SECONDS });
 }
 
@@ -249,7 +249,7 @@ const usd = (cents: number): string => `${cents < 0 ? "-" : ""}$${(Math.abs(cent
 export function verifyWalletRefusal(w: VerifyWallet): SpendRefusal | null {
   // Plain words for a builder: what they can act on is their wallet, not our meter.
   const unavailable = refuse(503, "meter_unavailable",
-    "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The quote keeps its current tax rate.");
+    "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The estimate keeps its current tax rate.");
   if (w.exempt === true) return null;
   if (w.armed === null) return unavailable;
   if (w.armed !== true) return null;
@@ -261,7 +261,7 @@ export function verifyWalletRefusal(w: VerifyWallet): SpendRefusal | null {
   const available = balance - held;
   if (available >= price) return null;
   return refuse(402, "insufficient_funds",
-    `A verified tax lookup costs ${usd(price)} and your wallet has ${usd(available)}. Add funds in Settings → Billing. The quote keeps its current tax rate.`,
+    `A verified tax lookup costs ${usd(price)} and your wallet has ${usd(available)}. Add funds in Settings → Billing. The estimate keeps its current tax rate.`,
     { code: "insufficient_funds", priceCents: price, balanceCents: available });
 }
 
@@ -290,7 +290,7 @@ export function verifyPriceRefusal(w: VerifyWallet, quotedPriceCents: number | n
   const cents = verifyChargeCents(w);
   if (cents <= 0 || quotedPriceCents === cents) return null;
   return refuse(409, "price_changed",
-    `A verified tax lookup costs ${usd(cents)} from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.`,
+    `A verified tax lookup costs ${usd(cents)} from your wallet. Nothing was looked up, and the estimate keeps its current tax rate. Reload the page to verify at that price.`,
     { priceCents: cents });
 }
 
@@ -390,7 +390,7 @@ export async function paidLookup(admin: Admin, input: {
 
 /** The failure a Verify press reports. The quote is unchanged in every case. */
 export function verifyLookupRefusal(failure: PaidLookupFailure): SpendRefusal {
-  const keeps = "The quote keeps its current tax rate.";
+  const keeps = "The estimate keeps its current tax rate.";
   switch (failure) {
     case "daily_cap":
       return refuse(429, "daily_cap",

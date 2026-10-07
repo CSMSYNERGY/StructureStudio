@@ -526,7 +526,7 @@ test("Services › Delivery: priced from the address, and Details charges the sa
   await page.getByPlaceholder("(555) 555-5555").fill("5550104477");
   await expect(panel).toContainText("12 mi from Main Lot");
   await expect(panel).toContainText("$150.00");
-  await page.getByRole("button", { name: /See your quote details/ }).click();
+  await page.getByRole("button", { name: /See your estimate details/ }).click();
   const row = page.locator(".ssd-dt-row").filter({ hasText: "12 mi from Main Lot" });
   await expect(row).toContainText("$150.00");
   expect(quotes.length, "delivery-quote was asked").toBeGreaterThan(0);

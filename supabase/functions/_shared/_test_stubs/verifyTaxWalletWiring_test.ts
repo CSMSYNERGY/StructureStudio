@@ -185,7 +185,7 @@ const PRESS = { action: "verify_tax", shortCode: CODE, confirmResend: true };
 /** A press whose confirm stated the armed price (ARMED, 10c). */
 const PRICED = { ...PRESS, quotedPriceCents: 10 };
 const SAY_FUNDS = (price: string, has: string) =>
-  `A verified tax lookup costs ${price} and your wallet has ${has}. Add funds in Settings → Billing. The quote keeps its current tax rate.`;
+  `A verified tax lookup costs ${price} and your wallet has ${has}. Add funds in Settings → Billing. The estimate keeps its current tax rate.`;
 
 /** The press got past the wallet: one claim, refused at the cap by the stub, nothing fetched. */
 function reachedClaim(out: Awaited<ReturnType<typeof drive>>, label: string) {

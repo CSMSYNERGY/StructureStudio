@@ -356,7 +356,7 @@ test("entering the code signs in: header, read-only phone, Quotes/Invoices, Sign
   expect(verified.body).toMatchObject({ clientId: CLIENT, phone: "+1" + PHONE10, code: "123456" });
 
   await expect(page.getByText(`Signed in as ${PHONE_SHOWN}`)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Quotes", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Estimates", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Invoices", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Enter your code" })).toHaveCount(0);
   expect(await ls(page, "ssq_token_" + CLIENT)).toBe(TOKEN);
@@ -369,9 +369,9 @@ test("entering the code signs in: header, read-only phone, Quotes/Invoices, Sign
   await expect(phoneField).toHaveValue(PHONE_SHOWN);
   await expect(page.getByText("Phone * ✓ verified")).toBeVisible();
 
-  await page.getByRole("button", { name: "Quotes", exact: true }).click();
-  const quotesPanel = page.getByRole("region", { name: "Your quotes" });
-  await expect(quotesPanel.getByRole("button", { name: "Quotes · 1" })).toBeVisible();
+  await page.getByRole("button", { name: "Estimates", exact: true }).click();
+  const quotesPanel = page.getByRole("region", { name: "Your estimates" });
+  await expect(quotesPanel.getByRole("button", { name: "Estimates · 1" })).toBeVisible();
   await expect(quotesPanel.locator("[data-ref]")).toHaveCount(1);
   const listCall = calls.filter((c) => c.fn === "customer-quotes").pop();
   expect(listCall.body).toMatchObject({ action: "list", token: TOKEN, clientId: CLIENT });
@@ -442,7 +442,7 @@ test("texting unavailable (503) says so kindly, and Get Quote still works withou
   const sheet = page.getByRole("dialog");
   await fillGateDetails(sheet);
   await sheet.getByRole("button", { name: "Log in →" }).click();
-  await expect(sheet.getByText("We couldn't text you a code right now — you can keep designing and still get your quote.")).toBeVisible();
+  await expect(sheet.getByText("We couldn't text you a code right now — you can keep designing and still get your estimate.")).toBeVisible();
   await shot(page, "08-sheet-unavailable");
   await sheet.getByRole("button", { name: "Keep designing →" }).click();
   await expect(sheet).toHaveCount(0);
@@ -452,8 +452,8 @@ test("texting unavailable (503) says so kindly, and Get Quote still works withou
   // Get Quote never asks for a code (decision 5): a whole quote goes out on the unverified
   // contact — saved, submitted, "Quote Created!" — with no sheet and no verify_code anywhere.
   await fillQuoteForm(page);
-  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+  await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
+  await expect(page.getByText("Estimate Created!")).toBeVisible({ timeout: 45_000 });
   expect(estimate, "submit-estimate was called").toBeTruthy();
   expect(calls.some((c) => c.fn === "rpc:save_design")).toBe(true);
   expect(authCall(calls, "verify_code")).toBeFalsy();
@@ -468,7 +468,7 @@ test("a 401 on a signed-in call clears the session and reopens the sheet", async
   const calls = await stubBackend(page, { quotes: { status: 401, body: { error: "Session expired — sign in again." } } });
   await boot(page);
   await expect(page.getByText(`Signed in as ${PHONE_SHOWN}`)).toBeVisible();
-  await page.getByRole("button", { name: "Quotes", exact: true }).click();
+  await page.getByRole("button", { name: "Estimates", exact: true }).click();
   const sheet = page.getByRole("dialog");
   await expect(sheet.getByText("Your session expired. Enter your number and we'll text you a new code.")).toBeVisible();
   await expect(sheet.getByText("Log in", { exact: true })).toBeVisible();   // login mode: the gate was already passed
@@ -507,7 +507,7 @@ test("a session carried over from /my-quotes learns who it is, and the phone hea
 // ── The account panel (plan 3.3: CustomerAccount) ─────────────────────────────────────────────
 // Fixtures shaped exactly like customer-quotes list (SS mode). The consent sentences are the
 // SERVER's strings — the panel must print these, never compose its own.
-const ACCEPT_SENTENCE = "I accept quote JB-1041 for $10,505.14 and understand that my builder will send me an invoice to sign.";
+const ACCEPT_SENTENCE = "I accept estimate JB-1041 for $10,505.14 and understand that my builder will send me an invoice to sign.";
 const SIGN_SENTENCE = "I agree that my electronic signature is as binding as a handwritten one, and I accept invoice INV-2001 for $8,200.00.";
 const SS_BASE = { pdfUrl: null, acceptUrl: null, ssQuote: true, view3dImageUrl: null, changeOrders: [], invoice: null, invoiceRequest: null,
   canAccept: false, canSignInvoice: false, acceptedAt: null, acceptConsentText: null, signConsentText: null };
@@ -546,9 +546,9 @@ test("Quotes and Invoices: cards, Review & Accept sends the click acceptance, ev
     },
   });
   await boot(page);
-  await page.getByRole("button", { name: "Quotes", exact: true }).click();
-  const panel = page.getByRole("region", { name: "Your quotes" });
-  await expect(panel.getByRole("button", { name: "Quotes · 1" })).toBeVisible();
+  await page.getByRole("button", { name: "Estimates", exact: true }).click();
+  const panel = page.getByRole("region", { name: "Your estimates" });
+  await expect(panel.getByRole("button", { name: "Estimates · 1" })).toBeVisible();
   await expect(panel.getByRole("button", { name: "Invoices · 5" })).toBeVisible();
   const card = panel.locator('[data-ref="SS-ACCEPT0001"]');
   await expect(card).toContainText("JB-1041");
@@ -563,20 +563,20 @@ test("Quotes and Invoices: cards, Review & Accept sends the click acceptance, ev
   const accept = card.locator('[data-panel="accept"]');
   await expect(accept.getByText(ACCEPT_SENTENCE, { exact: true })).toBeVisible();   // the server's words
   await accept.getByRole("textbox", { name: "Your full name" }).fill("Pat Tester");
-  await accept.getByRole("button", { name: "Accept Quote" }).click();
+  await accept.getByRole("button", { name: "Accept Estimate" }).click();
   await expect(accept.getByRole("alert")).toHaveText("Please tick the agreement box to accept.");
   expect(calls.some((c) => c.fn === "customer-accept")).toBe(false);
   await accept.getByRole("checkbox").check();
   await shot(page, "11-review-accept");
   const listsBefore = calls.filter((c) => c.fn === "customer-quotes").length;
-  await accept.getByRole("button", { name: "Accept Quote" }).click();
+  await accept.getByRole("button", { name: "Accept Estimate" }).click();
   await expect.poll(() => calls.some((c) => c.fn === "customer-accept")).toBe(true);
   const acc = calls.find((c) => c.fn === "customer-accept");
   expect(acc.body).toEqual({ clientId: CLIENT, token: TOKEN, action: "accept_quote", quoteRef: "SS-ACCEPT0001", signerName: "Pat Tester", consent: true, method: "click" });
   // The list reloads and the accepted quote moves to Invoices with "being prepared".
   await expect.poll(() => calls.filter((c) => c.fn === "customer-quotes").length).toBeGreaterThan(listsBefore);
-  await expect(panel.getByRole("button", { name: "Quotes · 0" })).toBeVisible();
-  await expect(panel.getByText("No quotes yet — press Get Quote when your design is ready.")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Estimates · 0" })).toBeVisible();
+  await expect(panel.getByText("No estimates yet — press Get Estimate when your design is ready.")).toBeVisible();
 
   await panel.getByRole("button", { name: "Invoices · 6" }).click();
   const inv = page.getByRole("region", { name: "Your invoices" });
@@ -648,7 +648,7 @@ test("a deep link lands on its card and opens the panel; a drawn signature sends
 
   // A bare ?q= opens Quotes and Review & Accept for that card.
   await boot(page, `/?client=${CLIENT}&q=SS-ACCEPT0001`);
-  const quotes = page.getByRole("region", { name: "Your quotes" });
+  const quotes = page.getByRole("region", { name: "Your estimates" });
   await expect(quotes.locator('[data-ref="SS-ACCEPT0001"] [data-panel="accept"]')).toBeVisible();
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
@@ -661,15 +661,15 @@ test("a 401 while accepting signs out and reopens the sheet", async ({ page }) =
     accept: { status: 401, body: { error: "Session expired — sign in again." } },
   });
   await boot(page, `/?client=${CLIENT}&q=SS-ACCEPT0001`);
-  const accept = page.getByRole("region", { name: "Your quotes" }).locator('[data-panel="accept"]');
+  const accept = page.getByRole("region", { name: "Your estimates" }).locator('[data-panel="accept"]');
   await accept.getByRole("textbox", { name: "Your full name" }).fill("Pat Tester");
   await accept.getByRole("checkbox").check();
-  await accept.getByRole("button", { name: "Accept Quote" }).click();
+  await accept.getByRole("button", { name: "Accept Estimate" }).click();
   const sheet = page.getByRole("dialog");
   await expect(sheet.getByText("Your session expired. Enter your number and we'll text you a new code.")).toBeVisible();
   expect(calls.find((c) => c.fn === "customer-accept").body.token).toBe(TOKEN);
   expect(await ls(page, "ssq_token_" + CLIENT)).toBeNull();
-  await expect(page.getByRole("region", { name: "Your quotes" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Your estimates" })).toHaveCount(0);
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
 
@@ -687,8 +687,8 @@ test("saved designs: listed under Quotes when the function exists, Open loads th
       contact: { name: "Pat Tester", phone: PHONE_SHOWN, email: "", street: "9 Saved Way", city: "", state: "", zip: "" } }] }) },
   });
   await boot(page);
-  await page.getByRole("button", { name: "Quotes", exact: true }).click();
-  const panel = page.getByRole("region", { name: "Your quotes" });
+  await page.getByRole("button", { name: "Estimates", exact: true }).click();
+  const panel = page.getByRole("region", { name: "Your estimates" });
   const row = panel.locator(`[data-saved-ref="${DRAFT}"]`);
   await expect(panel.getByText("Saved designs")).toBeVisible();
   await expect(row).toContainText("Utility 10x12");
@@ -701,7 +701,7 @@ test("saved designs: listed under Quotes when the function exists, Open loads th
   expect(await ls(page, "ss_draft_" + CLIENT)).toBe(DRAFT);                 // a draft becomes the refresh pointer
   await expect(page.getByRole("status").filter({ hasText: "Your saved design is open" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Quotes", exact: true }).click();
+  await page.getByRole("button", { name: "Estimates", exact: true }).click();
   hidden = true;
   await panel.locator(`[data-saved-ref="${DRAFT}"]`).getByRole("button", { name: "Remove" }).click();
   await expect(panel.locator(`[data-saved-ref="${DRAFT}"]`)).toHaveCount(0);
@@ -843,9 +843,9 @@ test("the rep's account link, opened signed out on a new phone: a phone-only log
   const calls = await stubBackend(page, { quotes: () => listBody(quoteFixtures()) });
   await boot(page, `/?client=${CLIENT}&account=invoices&q=SS-INVOICE002`);
   const sheet = page.getByRole("dialog");
-  await expect(sheet.getByText("Log in to see your quotes and invoices")).toBeVisible();
+  await expect(sheet.getByText("Log in to see your estimates and invoices")).toBeVisible();
   await expect(sheet.getByText("Log in to design your building")).toHaveCount(0);
-  await expect(sheet.getByText("We'll text you a code to open your quotes and invoices.")).toBeVisible();
+  await expect(sheet.getByText("We'll text you a code to open your estimates and invoices.")).toBeVisible();
   // Wait for the answer first: while login_options is pending the box is hidden in EVERY mode
   // (migration 242), so a count taken before it would pass without testing the account link.
   await expect.poll(() => Boolean(authCall(calls, "login_options"))).toBe(true);
@@ -900,7 +900,7 @@ test("success screen: signed in, the new quote's Review & Accept is right there;
   let code = null;
   const calls = await stubBackend(page, {
     quotes: () => listBody(code ? [{ ...SS_BASE, quoteRef: code, estimateNumber: "JB-1050", status: "sent", total: 9000, canAccept: true,
-      acceptConsentText: "I accept quote JB-1050 for $9,000.00 and understand that my builder will send me an invoice to sign." }] : []),
+      acceptConsentText: "I accept estimate JB-1050 for $9,000.00 and understand that my builder will send me an invoice to sign." }] : []),
     rpc: { save_design: (b) => { if (b.p_image_url) code = b.p_code; return { status: 200, body: null }; }, list_design_versions: { status: 200, body: [] } },
   });
   await page.route(/\/functions\/v1\/submit-estimate/, (route) => route.request().method() === "OPTIONS"
@@ -908,20 +908,20 @@ test("success screen: signed in, the new quote's Review & Accept is right there;
     : route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(SUBMIT_OK.body) }));
   await boot(page);
   await fillQuoteForm(page);
-  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByText("The quote has been emailed with a link to view and accept it.", { exact: false })).toBeVisible();
-  const inline = page.getByRole("region", { name: "Your quote" });
+  await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
+  await expect(page.getByText("Estimate Created!")).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText("The estimate has been emailed with a link to view and accept it.", { exact: false })).toBeVisible();
+  const inline = page.getByRole("region", { name: "Your estimate" });
   await expect(inline.locator(`[data-ref="${code}"] [data-panel="accept"]`)).toBeVisible();   // opened for them
-  await expect(inline.getByText("I accept quote JB-1050 for $9,000.00", { exact: false })).toBeVisible();
+  await expect(inline.getByText("I accept estimate JB-1050 for $9,000.00", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Copy customer link" })).toHaveCount(0);      // the portal's button, not the shopper's
   expect(calls.find((c) => c.fn === "customer-quotes").body).toMatchObject({ action: "list", token: TOKEN });
   expect(await ls(page, "ss_draft_" + CLIENT)).toBeNull();                                  // a sent quote needs no pointer
   await inline.scrollIntoViewIfNeeded();
   await shot(page, "16-success-inline-accept");
 
-  await page.getByRole("button", { name: "Start New Quote" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Your quote JB-1050 is saved under Quotes." })).toBeVisible();
+  await page.getByRole("button", { name: "Start New Estimate" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Your estimate JB-1050 is saved under Estimates." })).toBeVisible();
   await expect(page.getByText(`Signed in as ${PHONE_SHOWN}`)).toBeVisible();
   await expect(page.getByPlaceholder("Full Name")).toHaveValue("Pat Tester");                 // same person, new building
   expect(pageErrors(errors), "console errors").toEqual([]);
@@ -936,11 +936,11 @@ test("success screen: signed out, accepting asks for the code first", async ({ p
     : route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(SUBMIT_OK.body) }));
   await boot(page);
   await fillQuoteForm(page);
-  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+  await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
+  await expect(page.getByText("Estimate Created!")).toBeVisible({ timeout: 45_000 });
   await expect(page.getByRole("button", { name: "Copy customer link" })).toHaveCount(0);
   await expect(page.locator("[data-quote-texted]")).toHaveCount(0);                          // the rep's line, never the shopper's
-  await page.getByRole("button", { name: "Verify your phone to accept this quote" }).click();
+  await page.getByRole("button", { name: "Verify your phone to accept this estimate" }).click();
   const sheet = page.getByRole("dialog");
   await expect(sheet.getByText("Log in", { exact: true })).toBeVisible();
   await expect(sheet.getByPlaceholder("(555) 555-5555")).toHaveValue(PHONE_SHOWN);            // the number they just quoted with
@@ -995,9 +995,9 @@ test("a refused Get Quote (400) shows the reason, logs as info, and the design s
   // (saveDraftSilently), so the pointer can be visible here while the route has not yet recorded it.
   await expect.poll(() => saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
 
-  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+  await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
   await expect(page.getByText(NO_USER)).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByText("Quote Created!")).toHaveCount(0);
+  await expect(page.getByText("Estimate Created!")).toHaveCount(0);
   expect(saves.find((s) => s.p_image_url).p_code).toBe(code);                  // the submit saved the same row
   await shot(page, "19-quote-refused");
 
@@ -1045,9 +1045,9 @@ for (const mode of [
     await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
     const code = await ls(page, "ss_draft_" + CLIENT);
 
-    await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+    await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
     await expect(page.getByText(mode.message)).toBeVisible({ timeout: 45_000 });
-    await expect(page.getByText("Quote Created!")).toHaveCount(0);
+    await expect(page.getByText("Estimate Created!")).toHaveCount(0);
     expect(saves.find((s) => s.p_image_url).p_code).toBe(code);
     expect(await ls(page, "ss_draft_" + CLIENT), "the refresh pointer goes").toBeNull();
     const after = saves.length;
@@ -1079,8 +1079,8 @@ test("a Get Quote that issues drops the draft: the pointer goes, nothing is logg
   await flushDraft(page);
   await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
   const code = await ls(page, "ss_draft_" + CLIENT);
-  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+  await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
+  await expect(page.getByText("Estimate Created!")).toBeVisible({ timeout: 45_000 });
   expect(await ls(page, "ss_draft_" + CLIENT)).toBeNull();                      // a sent quote needs no pointer
   expect(saves.find((s) => s.p_image_url).p_code).toBe(code);
   // Leave the success screen and change something. While it is up, `submitted` alone keeps the
@@ -1303,7 +1303,7 @@ test("portal Settings: a status without the login-code key reads as Text", async
   await expect(page.getByRole("group", { name: "Customer login code" })).toHaveAttribute("data-ss-login-default", "sms");
 });
 
-test("portal email wording: {total} is marked not recommended on the Quote wording only", async ({ page }) => {
+test("portal email wording: {total} is marked not recommended on the Estimate wording only", async ({ page }) => {
   const errors = watchConsole(page);
   await stubPortal(page, {
     email_status: { body: { platformReady: true, domainStatus: "verified", domain: "testbarns.example", fromName: "Test Barns", fromLocal: "info",
@@ -1312,13 +1312,15 @@ test("portal email wording: {total} is marked not recommended on the Quote wordi
   await openPortal(page, "/portal/settings/email");
   const hint = page.locator('[data-token-hint="total"]');
   const kind = (name) => page.getByRole("button", { name, exact: true });
-  await expect(kind("Quote")).toBeVisible();
-  await expect(hint).toHaveCount(0);                                               // Estimate is the first tab
-  await kind("Quote").click();
-  await expect(hint).toHaveText("{total} is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.");
+  await expect(kind("Estimate")).toBeVisible();
+  await expect(kind("CRM estimate")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Quote", exact: true })).toHaveCount(0);   // no tab says quote (2026-10-06)
+  await expect(hint).toHaveCount(0);                                               // CRM estimate is the first tab
+  await kind("Estimate").click();
+  await expect(hint).toHaveText("{total} is not recommended for estimates — the estimate email leaves the price out, so the customer sees it when they open the estimate.");
   // The box has its own "Opening line" label now (2026-10-04), so the placeholder is just the example.
   await expect(page.getByLabel("Opening line", { exact: true }))
-    .toHaveAttribute("placeholder", "e.g. Thanks for designing with {business}! Your quote {number} is ready.");
+    .toHaveAttribute("placeholder", "e.g. Thanks for designing with {business}! Your estimate {number} is ready.");
   await hint.scrollIntoViewIfNeeded();
   await shot(page, "21-wording-total-hint");
   await kind("Invoice").click();
@@ -1394,12 +1396,12 @@ for (const c of [
       : route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ ...SUBMIT_OK.body, ...c.res }) }));
     await boot(page);
     await fillQuoteForm(page);
-    await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-    await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+    await page.getByRole("button", { name: "Get Estimate", exact: true }).click();
+    await expect(page.getByText("Estimate Created!")).toBeVisible({ timeout: 45_000 });
     const line = page.locator("[data-quote-texted]");
     if (c.line) await expect(line).toHaveText(c.line);
     else await expect(line).toHaveCount(0);
-    if (c.shot) { await page.getByText("Quote Created!").scrollIntoViewIfNeeded(); await shot(page, c.shot); }
+    if (c.shot) { await page.getByText("Estimate Created!").scrollIntoViewIfNeeded(); await shot(page, c.shot); }
     expect(code).toMatch(/^SS-[A-Z0-9]{10}$/);
     await page.getByRole("button", { name: "Copy customer link" }).click();
     const origin = await page.evaluate(() => location.origin);

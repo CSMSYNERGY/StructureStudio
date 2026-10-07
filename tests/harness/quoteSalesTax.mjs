@@ -81,19 +81,19 @@ const TAX_COMPANY = { rate: 0.065, amount: 585, label: "Sales tax", ...POOLS, so
 // The server's sentences, verbatim from the avalara-api branch (taxSpend.ts, locationTax.ts,
 // portal-settings restampQuoteTax / refuseIfAgreed, acceptTotal.ts).
 const SAY = {
-  verifyQuoteSent: "The customer already has this quote, and verifying the tax may change its total. If it does, we email them the updated quote, or tell you to let them know if we can't. Confirm to go ahead.",
-  locationQuoteSent: "The customer already has this quote, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
+  verifyQuoteSent: "The customer already has this estimate, and verifying the tax may change its total. If it does, we email them the updated estimate, or tell you to let them know if we can't. Confirm to go ahead.",
+  locationQuoteSent: "The customer already has this estimate, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
   confirmOperator: "You're viewing this account as an operator, and verifying tax is a paid lookup on the builder's account. Confirm to go ahead (confirmVerify).",
-  network: "Couldn't reach the tax service. Try again. The quote keeps its current tax rate.",
-  rateLimited: "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
+  network: "Couldn't reach the tax service. Try again. The estimate keeps its current tax rate.",
+  rateLimited: "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The estimate keeps its current tax rate.",
   // taxSpend.ts verifyWalletRefusal (2026-10-05).
-  funds: "A verified tax lookup costs $0.10 and your wallet has $0.04. Add funds in Settings → Billing. The quote keeps its current tax rate.",
-  resendPdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
-  resendNoEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
-  accepted: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
-  ordered: "This quote already has an order, so its tax can't be changed here.",
-  changed: "This quote changed while you were working on it. Reload it and try again.",
-  repriced: "This quote was just updated. Reload to see the current total, then accept it.",
+  funds: "A verified tax lookup costs $0.10 and your wallet has $0.04. Add funds in Settings → Billing. The estimate keeps its current tax rate.",
+  resendPdf: "The estimate PDF couldn't be rebuilt, so the updated estimate wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
+  resendNoEmail: "The customer has no email address on this estimate, so they haven't been sent the new total. Let them know the total changed.",
+  accepted: "The customer has already accepted this estimate, so its tax can't be changed here. A change to a signed order goes through a change order.",
+  ordered: "This estimate already has an order, so its tax can't be changed here.",
+  changed: "This estimate changed while you were working on it. Reload it and try again.",
+  repriced: "This estimate was just updated. Reload to see the current total, then accept it.",
 };
 // A confirm that claims the quote was emailed, or promises to send it again, says something the
 // server cannot know yet (the quote may have gone out by text or on paper; the send may not land).
@@ -249,7 +249,7 @@ try {
   let t = await cardText();
   ok("A: tax line with rate and amount", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t), t.slice(0, 120));
   ok("A: basis says the location's rate", t.includes("Hwy 65 Display rate"));
-  ok("A: quote total from the design", /Quote total\s*\$9,652\.50/.test(t));
+  ok("A: quote total from the design", /Estimate total\s*\$9,652\.50/.test(t));
   ok("A: location picker shows the stored location", (await card().locator("select").inputValue().catch(() => "")) === "L1");
   ok("A: billed-lookup warning", t.includes("Avalara bills each verification"));
   ok("A: verify button", (await card().getByRole("button", { name: "Verify tax for the delivery address" }).count()) === 1);
@@ -271,16 +271,16 @@ try {
     { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 965250, resent: true, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("C: success message with the totals from the response", await waitText("The quote total changed from $9,652.50 to $9,729.00. The updated quote was emailed to the customer."));
+  ok("C: success message with the totals from the response", await waitText("The estimate total changed from $9,652.50 to $9,729.00. The updated estimate was emailed to the customer."));
   const vc = actionCalls("verify_tax");
   ok("C: two calls, the second with confirmResend", vc.length === 2 && !vc[0].confirmResend && vc[1].confirmResend === true && vc[1].shortCode === SS, JSON.stringify(vc));
   ok("C: second confirm says the customer already has the quote, and that its total will change", dialogs.length === 2
-    && dialogs[1].message.includes("The customer already has quote SST-1041 at $9,652.50.") && /its total will change/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
+    && dialogs[1].message.includes("The customer already has estimate SST-1041 at $9,652.50.") && /its total will change/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
   ok("C: second confirm neither says it was emailed nor promises a re-send", dialogs.length === 2 && !CLAIMS_EMAIL.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
   t = await cardText();
   ok("C: tax line now the verified one", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t), t.slice(0, 120));
   ok("C: basis says verified, with jurisdiction and date", t.includes("Verified for Bibb County, GA on Sep 17, 2026"));
-  ok("C: quote total from the response", /Quote total\s*\$9,729\.00/.test(t));
+  ok("C: quote total from the response", /Estimate total\s*\$9,729\.00/.test(t));
 
   // D
   resetCalls();
@@ -288,7 +288,7 @@ try {
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
   ok("D: the server's sentence is shown", await waitText(SAY.network));
   t = await cardText();
-  ok("D: tax line unchanged", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t) && /Quote total\s*\$9,729\.00/.test(t));
+  ok("D: tax line unchanged", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t) && /Estimate total\s*\$9,729\.00/.test(t));
   ok("D: no ask-an-admin suffix on the refusal", !/ask an owner or admin/.test(t));
 
   // E
@@ -298,7 +298,7 @@ try {
     { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 972900, resent: false, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("E: success after the operator confirm", await waitText("The quote total didn't change."));
+  ok("E: success after the operator confirm", await waitText("The estimate total didn't change."));
   const ec = actionCalls("verify_tax");
   ok("E: second call carries confirmVerify", ec.length === 2 && !ec[0].confirmVerify && ec[1].confirmVerify === true, JSON.stringify(ec));
   ok("E: the operator confirm says AS", dialogs.length === 2 && /You are doing this AS/.test(dialogs[1].message));
@@ -311,14 +311,14 @@ try {
     { status: 200, body: { ok: true, salesLocationId: "L2", tax: TAX_COMPANY, totalCents: 958500, previousTotalCents: 972900, resent: true, resendReason: null, quotePdfUrl: null } },
   ];
   await card().locator("select").selectOption("L2");
-  ok("F: success message", await waitText("Sales location set to North Lot — quote total $9,585.00. The updated quote was emailed to the customer."));
+  ok("F: success message", await waitText("Sales location set to North Lot — estimate total $9,585.00. The updated estimate was emailed to the customer."));
   const fc = actionCalls("set_design_sales_location");
   ok("F: two calls, locationId L2, the second with confirmResend", fc.length === 2 && fc[0].locationId === "L2" && !fc[0].confirmResend && fc[1].confirmResend === true, JSON.stringify(fc));
   ok("F: confirm says the customer already has the quote and names both totals", dialogs.length === 1
-    && dialogs[0].message.includes("The customer already has quote SST-1041.") && dialogs[0].message.includes("its total will change from $9,729.00 to $9,585.00"), dialogs[0] && dialogs[0].message);
+    && dialogs[0].message.includes("The customer already has estimate SST-1041.") && dialogs[0].message.includes("its total will change from $9,729.00 to $9,585.00"), dialogs[0] && dialogs[0].message);
   ok("F: confirm neither says it was emailed nor promises a re-send", dialogs.length === 1 && !CLAIMS_EMAIL.test(dialogs[0].message), dialogs[0] && dialogs[0].message);
   t = await cardText();
-  ok("F: basis and total from the response", t.includes("Company rate") && /Quote total\s*\$9,585\.00/.test(t));
+  ok("F: basis and total from the response", t.includes("Company rate") && /Estimate total\s*\$9,585\.00/.test(t));
   ok("F: picker now on North Lot", (await card().locator("select").inputValue()) === "L2");
 
   // M
@@ -328,7 +328,7 @@ try {
     { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 958500, previousTotalCents: 958500, resent: false, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("M: confirmed re-send, total unchanged: success", await waitText("Verified: 8.1% for Bibb County, GA. The quote total didn't change."));
+  ok("M: confirmed re-send, total unchanged: success", await waitText("Verified: 8.1% for Bibb County, GA. The estimate total didn't change."));
   t = await cardText();
   ok("M: confirmed re-send, total unchanged: nothing said about sending", !/re-sent|emailed|hasn't been sent/i.test(t), t);
   ok("M: that run confirmed the re-send", actionCalls("verify_tax").length === 2 && actionCalls("verify_tax")[1].confirmResend === true);
@@ -339,8 +339,8 @@ try {
     { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 958500, resent: false, resendReason: SAY.resendPdf, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("M: verify with a resendReason shows the server's sentence as written", await waitText(`The quote total changed from $9,585.00 to $9,729.00. ${SAY.resendPdf}`));
-  ok("M: verify: the reason is not wrapped in our own re-send wording", !/NOT re-sent|\(The quote PDF/.test(await cardText()), await cardText());
+  ok("M: verify with a resendReason shows the server's sentence as written", await waitText(`The estimate total changed from $9,585.00 to $9,729.00. ${SAY.resendPdf}`));
+  ok("M: verify: the reason is not wrapped in our own re-send wording", !/NOT re-sent|\(The estimate PDF/.test(await cardText()), await cardText());
 
   resetCalls();
   S.locationReplies = [
@@ -348,7 +348,7 @@ try {
     { status: 200, body: { ok: true, salesLocationId: "L1", tax: TAX_LOCATION, totalCents: 965250, previousTotalCents: 972900, resent: false, resendReason: SAY.resendNoEmail, quotePdfUrl: null } },
   ];
   await card().locator("select").selectOption("L1");
-  ok("M: location change with a resendReason shows the server's sentence as written", await waitText(`Sales location set to Hwy 65 Display — quote total $9,652.50. ${SAY.resendNoEmail}`));
+  ok("M: location change with a resendReason shows the server's sentence as written", await waitText(`Sales location set to Hwy 65 Display — estimate total $9,652.50. ${SAY.resendNoEmail}`));
 
   // P
   resetCalls();
@@ -359,7 +359,7 @@ try {
   t = await cardText();
   ok("P: one call, no retry", actionCalls("verify_tax").length === 1, JSON.stringify(actionCalls("verify_tax")));
   ok("P: not treated as a stale row (no re-read)", !restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`)), restReads.join(" | "));
-  ok("P: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Quote total\s*\$9,652\.50/.test(t), t);
+  ok("P: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Estimate total\s*\$9,652\.50/.test(t), t);
   ok("P: no ask-an-admin suffix", !/ask an owner or admin/.test(t));
   ok("P: the button is offered again", await card().getByRole("button", { name: "Verify tax for the delivery address" }).isEnabled());
 
@@ -379,7 +379,7 @@ try {
   ok("N: accepted: the server's sentence is shown", await waitText(SAY.accepted));
   ok("N: accepted: the reload locks the card", await page.waitForFunction(() => {
     const el = document.querySelector("[data-quote-sales-tax]");
-    return !!el && el.innerText.includes("Accepted — this quote keeps the tax the customer agreed to.") && !el.querySelector("select") && !el.innerText.includes("Verify tax");
+    return !!el && el.innerText.includes("Accepted — this estimate keeps the tax the customer agreed to.") && !el.querySelector("select") && !el.innerText.includes("Verify tax");
   }, null, { timeout: 10000 }).then(() => true, () => false), await cardText());
   ok("N: accepted: one location call, no retry", actionCalls("set_design_sales_location").length === 1);
   S.designs[SS] = design(SS);
@@ -392,7 +392,7 @@ try {
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
   t = await cardText();
-  ok("G: card still renders", t.includes("Quote total"));
+  ok("G: card still renders", t.includes("Estimate total"));
   ok("G: lookups off: no warning, no button", !t.includes("Avalara bills") && !t.includes("Verify tax"), t);
   S.lookupEnabled = true;
 
@@ -404,7 +404,7 @@ try {
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
   t = await cardText();
-  ok("O: card still renders, picker still offered", t.includes("Quote total") && (await card().locator("select").count()) === 1);
+  ok("O: card still renders, picker still offered", t.includes("Estimate total") && (await card().locator("select").count()) === 1);
   ok("O: no credentials: no warning, no button", !t.includes("Avalara bills") && !t.includes("Verify tax"), t);
   S.configured = true;
 
@@ -434,7 +434,7 @@ try {
   ok("Q: one call, no retry", actionCalls("verify_tax").length === 1, JSON.stringify(actionCalls("verify_tax")));
   ok("Q: the press carries the price its confirm stated", actionCalls("verify_tax")[0]?.quotedPriceCents === 10, JSON.stringify(actionCalls("verify_tax")));
   ok("Q: not treated as a stale row (no re-read)", !restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`)), restReads.join(" | "));
-  ok("Q: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Quote total\s*\$9,652\.50/.test(t), t);
+  ok("Q: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Estimate total\s*\$9,652\.50/.test(t), t);
   ok("Q: no ask-an-admin suffix", !/ask an owner or admin/.test(t));
   ok("Q: the button is offered again", await card().getByRole("button", { name: "Verify tax for the delivery address" }).isEnabled());
   S.lookupPriceCents = null;
@@ -445,7 +445,7 @@ try {
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
-  const SAY_PRICE = "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.";
+  const SAY_PRICE = "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the estimate keeps its current tax rate. Reload the page to verify at that price.";
   resetCalls();
   S.verifyReplies = [{ status: 409, body: { error: SAY_PRICE, reason: "price_changed", priceCents: 10 } }];
   dialogAnswers = [true, false];
@@ -471,7 +471,7 @@ try {
     { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 972900, resent: false, resendReason: null, quotePdfUrl: null, charged: true } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("R: confirmed at the named price: success", await waitText("The quote total didn't change."));
+  ok("R: confirmed at the named price: success", await waitText("The estimate total didn't change."));
   rc = actionCalls("verify_tax");
   ok("R: two calls, the repeat carrying the named price", rc.length === 2 && rc[0].quotedPriceCents === null && rc[1].quotedPriceCents === 10, JSON.stringify(rc));
   ok("R: the price was asked about, once", dialogs.length === 2 && dialogs.filter((d) => /costs \$0\.10 from your wallet/.test(d.message)).length === 1,
@@ -503,7 +503,7 @@ try {
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(1200);
   t = await cardText();
-  ok("I: accepted quote says it keeps the agreed tax", t.includes("Accepted — this quote keeps the tax the customer agreed to."));
+  ok("I: accepted quote says it keeps the agreed tax", t.includes("Accepted — this estimate keeps the tax the customer agreed to."));
   ok("I: no picker, no verify", (await card().locator("select").count()) === 0 && !t.includes("Verify tax"));
 
   // J
@@ -553,14 +553,14 @@ try {
     await page.getByRole("button", { name: "Review & Accept" }).click();
     await page.locator(".sign-panel input[type=text]").fill("Pat Tester");
     await page.locator(".sign-panel input[type=checkbox]").check();
-    await page.getByRole("button", { name: "Accept Quote" }).click();
+    await page.getByRole("button", { name: "Accept Estimate" }).click();
   };
   await acceptOnce();
   ok("L: the server's sentence is shown", await waitText(SAY.repriced));
   const ac = calls.filter((c) => c.fn === "customer-accept").map((c) => c.body);
   ok("L: accept sent the total it displayed", ac.length === 1 && ac[0].expectedTotalCents === 965250 && ac[0].action === "accept_quote", JSON.stringify(ac));
   ok("L: still signed in (not bounced to the phone screen)", await signedIn());
-  ok("L: Accept stays disabled", await page.getByRole("button", { name: "Accept Quote" }).isDisabled());
+  ok("L: Accept stays disabled", await page.getByRole("button", { name: "Accept Estimate" }).isDisabled());
   ok("L: a Reload control is offered", (await page.getByRole("button", { name: "Reload", exact: true }).count()) === 1);
   const listsBefore = calls.filter((c) => c.fn === "customer-quotes").length;
   await page.getByRole("button", { name: "Reload", exact: true }).click();

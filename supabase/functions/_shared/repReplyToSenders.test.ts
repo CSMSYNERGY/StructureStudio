@@ -202,5 +202,5 @@ Deno.test("the My Profile box checks addresses with the senders' own rule, and s
   assert(/const looksLikeEmail = \(v\) => v\.length <= 320 && REPLY_ADDRESS_RE\.test\(v\);/.test(PROFILE), "the reply-to box must use it");
   assert(!/DOES NOT WORK YET|HANDOFF-reply-to-prefs/.test(PROFILE), "the stale 'does not work yet' notes must be gone");
   const card = PROFILE.slice(PROFILE.indexOf("Where replies to your emails go"), PROFILE.indexOf("Where replies to your emails go") + 900);
-  assert(/quote/.test(card) && /invoice/.test(card), "the card must say it covers quotes and invoices");
+  assert(/estimate/.test(card) && /invoice/.test(card), "the card must say it covers estimates and invoices");
 });

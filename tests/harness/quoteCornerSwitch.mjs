@@ -44,10 +44,10 @@ const OWNER_ACCESS = Object.fromEntries(["designer", "designs", "contacts", "inv
   "change_order_approve", "build_schedule", "delivery_schedule", "repairs", "commissions", "reports", "phone",
   "settings_structures", "settings_options", "settings_branding", "settings_crm", "settings_quickbooks",
   "settings_email", "settings_team", "settings_billing"].map((k) => [k, "edit"]));
-const LABEL = "Show the building from all four corners on page 2 of my quotes";
-const HINT = "Page 2 of your quotes shows four 3D pictures of the building, one from each corner, in place of the single 3D view.";
+const LABEL = "Show the building from all four corners on page 2 of my estimates";
+const HINT = "Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view.";
 const REFUSED = "The four-corner page setting has to be on or off.";
-const TERMS_LABEL = "quote terms (printed on every estimate)";
+const TERMS_LABEL = "estimate terms";
 
 const { ok, failed } = reporter();
 const shots = shotsDir("quote-corner-switch");
@@ -149,7 +149,7 @@ try {
       const sw = document.querySelector("input[data-ss-quote-corners]");
       return days && sw ? Boolean(days.compareDocumentPosition(sw) & Node.DOCUMENT_POSITION_FOLLOWING) : null;
     });
-    ok("A3 it sits under 'Quotes are good for'", order === true, String(order));
+    ok("A3 it sits under 'Estimates are good for'", order === true, String(order));
     await box(s.page).scrollIntoViewIfNeeded().catch(() => {});
     await s.page.screenshot({ path: join(shots, "A-company-card.png") }).catch(() => {});
 

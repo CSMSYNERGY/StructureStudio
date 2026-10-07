@@ -137,7 +137,7 @@ const boot = async (shape) => {
 // The label is uppercased by CSS, and innerText reports what is rendered.
 const openCrm = async () => {
   await page.getByText("CRM Connection", { exact: true }).last().click();
-  await waitText(S.allowed ? "Quote and invoice through my CRM" : "SALES TAX RATE (%)");
+  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "SALES TAX RATE (%)");
 };
 const openLocations = async () => {
   await page.getByText("Company", { exact: true }).last().click();
@@ -208,7 +208,7 @@ try {
   await boot({ invoiceInGhl: false, allowed: true, taxMode: "ok" });
   await openCrm();
   ok("F: capable saved-SS tenant sees the box", await waitText("Verified lookups:"));
-  await page.getByText("Quote and invoice through my CRM", { exact: true }).click();
+  await page.getByText("Estimates and invoices through my CRM", { exact: true }).click();
   await page.waitForTimeout(500);
   ok("F: an unsaved switch to CRM invoicing hides the box", !/Verified lookups/.test(await text()));
 

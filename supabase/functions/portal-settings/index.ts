@@ -1886,7 +1886,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("quoteValidDays" in payload) {
       const days = parseQuoteValidDays(payload.quoteValidDays);
       if (days == null) {
-        return json({ error: `Quotes have to stay good for a whole number of days, from ${QUOTE_VALID_DAYS_MIN} to ${QUOTE_VALID_DAYS_MAX}.` }, 400);
+        return json({ error: `Estimates have to stay good for a whole number of days, from ${QUOTE_VALID_DAYS_MIN} to ${QUOTE_VALID_DAYS_MAX}.` }, 400);
       }
       updates.quote_valid_days = days;
     }
@@ -1917,7 +1917,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       else {
         const n = Number(raw);
         if (!Number.isInteger(n) || n < 1 || n > 2_000_000_000) {
-          return json({ error: "The starting quote number must be a whole number, 1 or higher." }, 400);
+          return json({ error: "The starting estimate number must be a whole number, 1 or higher." }, 400);
         }
         updates.ss_quote_next = n;
       }
@@ -1928,7 +1928,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("ssQuotePrefix" in payload) {
       const p = String(payload.ssQuotePrefix ?? "").trim().slice(0, 12);
       if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
-        return json({ error: "The quote prefix can only use letters, numbers and dashes — for example INV or JB-." }, 400);
+        return json({ error: "The estimate prefix can only use letters, numbers and dashes — for example INV or JB-." }, 400);
       }
       updates.ss_quote_prefix = p;
     }
@@ -2051,7 +2051,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //    fee line on, so the money would simply never be charged.
       if (nextFee > 0 && nextInGhl) {
         return json({
-          error: "A change order fee can only be charged on paperwork StructureStudio issues. Your quotes and invoices are created in your CRM right now, so there is nothing here for the fee to appear on — switch that off above first, or leave the fee at 0.",
+          error: "A change order fee can only be charged on paperwork StructureStudio issues. Your estimates and invoices are created in your CRM right now, so there is nothing here for the fee to appear on — switch that off above first, or leave the fee at 0.",
         }, 400);
       }
       // 2. THE FEE RIDES THE UNLOCK. order_amendment_gate only quotes a fee on the 'unlock'
@@ -2121,7 +2121,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // "unanswered" is not (Carolyn 2026-08-26).
       if (!nextInGhl && nextTaxRate == null) {
         return json({
-          error: "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.",
+          error: "StructureStudio needs a sales tax rate before it can issue your invoices — set one so estimates can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.",
         }, 400);
       }
 
@@ -2187,10 +2187,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const prefix = String(("ssQuotePrefix" in payload ? updates.ss_quote_prefix : curInv?.ss_quote_prefix) ?? "");
         let issued: number | null = null;
         try { issued = await highestIssued("designs", "ss_quote_number", "created_at", prefix); }
-        catch (e) { return dbFail(req, clientId, "check your quote numbering", e); }
+        catch (e) { return dbFail(req, clientId, "check your estimate numbering", e); }
         if (issued != null && (updates.ss_quote_next as number) <= issued) {
           return json({
-            error: `You have already issued quote ${prefix}${issued}. The next quote number has to be higher than that, or two quotes would carry the same number — try ${prefix}${issued + 1}.`,
+            error: `You have already issued estimate ${prefix}${issued}. The next estimate number has to be higher than that, or two estimates would carry the same number — try ${prefix}${issued + 1}.`,
           }, 409);
         }
       }
@@ -11219,7 +11219,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // active style has a photo ticked at all). Two different fixes, so two different sentences.
   if (action === "email_preview_template") {
     const kind = String(payload?.kind ?? "");
-    if (!(TEMPLATE_KINDS as readonly string[]).includes(kind)) return json({ error: "Pick Estimate, Quote or Invoice to preview." }, 400);
+    if (!(TEMPLATE_KINDS as readonly string[]).includes(kind)) return json({ error: "Pick an email to preview." }, 400);
     const k = kind as typeof TEMPLATE_KINDS[number];
     const cleaned = cleanTemplateCopy({ [k]: payload?.copy ?? {} });
     if ("error" in cleaned) return json({ error: cleaned.error }, 400);
@@ -11851,7 +11851,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (dErr) return { refused: dbFail(req, clientId, "find that design", dErr) };
     if (!d) return { refused: json({ error: "Design not found." }, 404) };
-    if (!d.ss_quote_number) return { refused: json({ error: "This design has no StructureStudio quote yet — submit it from the designer first." }, 400) };
+    if (!d.ss_quote_number) return { refused: json({ error: "This design has no StructureStudio estimate yet — submit it from the designer first." }, 400) };
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
@@ -11859,7 +11859,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
-      return { refused: json({ error: "This account quotes through the CRM — re-send it from there." }, 400) };
+      return { refused: json({ error: "This account sends estimates through the CRM — re-send it from there." }, 400) };
     }
 
     const to = String(d?.contact?.email || "").trim();
@@ -11941,7 +11941,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // customer-accept's compare-and-swap promote, which refuses the customer and withdraws the
   // acceptance when a re-price lands first.
   const agreedRefusal = () => json({
-    error: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
+    error: "The customer has already accepted this estimate, so its tax can't be changed here. A change to a signed order goes through a change order.",
     reason: "accepted",
   }, 409);
   // deno-lint-ignore no-explicit-any
@@ -11949,14 +11949,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (isAgreedDesign(d)) return agreedRefusal();
     const { data: acc, error: accErr } = await admin.from("design_acceptances").select("id")
       .eq("client_id", clientId).eq("short_code", String(d.short_code)).eq("subject", "quote").limit(1);
-    if (accErr) return dbFail(req, clientId, "check whether this quote has been accepted", accErr);
+    if (accErr) return dbFail(req, clientId, "check whether this estimate has been accepted", accErr);
     if ((acc ?? []).length) return agreedRefusal();
     const { data: ord, error: ordErr } = await admin.from("orders").select("id")
       .eq("client_id", clientId).eq("short_code", String(d.short_code)).limit(1);
-    if (ordErr) return dbFail(req, clientId, "check whether this quote has an order", ordErr);
+    if (ordErr) return dbFail(req, clientId, "check whether this estimate has an order", ordErr);
     if ((ord ?? []).length) {
       return json({
-        error: "This quote already has an order, so its tax can't be changed here.",
+        error: "This estimate already has an order, so its tax can't be changed here.",
         reason: "ordered",
       }, 409);
     }
@@ -12043,7 +12043,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (agreed) return { ok: false, response: agreed };
 
     const changedUnderneath = () => json({
-      error: "This quote changed while you were working on it. Reload it and try again.",
+      error: "This estimate changed while you were working on it. Reload it and try again.",
       reason: "changed",
     }, 409);
     // jsonb comes back key-normalised, so two reads of the same stored value stringify alike.
@@ -12058,13 +12058,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (plan.reason === "no_quote") {
         return {
           ok: false,
-          response: json({ error: "This design has no quote yet — issue the quote first.", reason: "no_quote" }, 409),
+          response: json({ error: "This design has no estimate yet — issue the estimate first.", reason: "no_quote" }, 409),
         };
       }
       return {
         ok: false,
         response: json({
-          error: "The customer already has this quote, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
+          error: "The customer already has this estimate, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
           reason: "quote_sent",
           quoteNumber: fresh.ss_quote_number ?? null,
           totalCents: plan.previousTotalCents,
@@ -12187,9 +12187,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .update({ sales_location_id: locationId, updated_at: new Date().toISOString() })
         .eq("client_id", clientId).eq("short_code", shortCode).is("accepted_at", null)
         .select("short_code");
-      if (wErr) return dbFail(req, clientId, "set this quote's sales location", wErr);
+      if (wErr) return dbFail(req, clientId, "set this estimate's sales location", wErr);
       if (!Array.isArray(wrote) || wrote.length !== 1) {
-        return json({ error: "This quote changed while you were working on it. Reload it and try again.", reason: "changed" }, 409);
+        return json({ error: "This estimate changed while you were working on it. Reload it and try again.", reason: "changed" }, 409);
       }
       await audit("portal_set_design_sales_location", 1, `design=${shortCode} location=${locationId ?? "none"} repriced=no`);
       return json({
@@ -12204,7 +12204,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
     if (!choice) {
       return json({
-        error: "This account has no sales tax rate set, so this quote can't be re-priced. Add a rate to the location, or a company rate in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+        error: "This account has no sales tax rate set, so this estimate can't be re-priced. Add a rate to the location, or a company rate in Settings → CRM Connection → Estimates & Invoices (enter 0% if you don't collect sales tax).",
         reason: "no_tax_rate",
       }, 400);
     }
@@ -12214,7 +12214,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const tax = stampTax({ pools: pools!, resolved, choice, address: addr });
 
     const out = await restampQuoteTax(d, tax, {
-      confirmResend, alsoSet: { sales_location_id: locationId }, where: "set this quote's sales location",
+      confirmResend, alsoSet: { sales_location_id: locationId }, where: "set this estimate's sales location",
       sender: signedIn,
     });
     if (!out.ok) return out.response;
@@ -12354,7 +12354,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const tax = verifiedTax({ snap: d.estimate_lines, lookup, companyLabel: cs?.ss_tax_label, address });
     // verifyQuoteRefusal already refused a snapshot with no pools; this is the type's null.
-    if (!tax) return json({ error: "This design has no quote yet — issue the quote first, then verify its tax.", reason: "no_quote" }, 409);
+    if (!tax) return json({ error: "This design has no estimate yet — issue the estimate first, then verify its tax.", reason: "no_quote" }, 409);
 
     let charge: Awaited<ReturnType<typeof chargeLookup>> = { charged: false, reason: "no_rate" };
     const out = await restampQuoteTax(d, tax, {
@@ -12663,7 +12663,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (!d) return json({ error: "Design not found." }, 404);
-    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio estimate yet." }, 400);
 
     const { data: existing } = await admin.from("change_orders")
       .select("id, co_no, status, fee_cents, fee_tax_cents, raised_under")
@@ -12792,7 +12792,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: sent, error: updErr } = await admin.from("change_orders")
       .update({
         status: "pending_ack",
-        description: description ?? `Change to quote ${d.ss_quote_number ?? co.short_code}`,
+        description: description ?? `Change to estimate ${d.ss_quote_number ?? co.short_code}`,
         total_before_cents: totalBefore == null ? null : Math.round(totalBefore * 100),
         total_after_cents: totalAfter == null ? null : Math.round(totalAfter * 100),
         version_after: versionAfter,
@@ -12921,7 +12921,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // that sentence is the difference between a record and a forged signature.
     const consentText =
       `${recordedByName} recorded ${String((d.contact as { name?: unknown } | null)?.name ?? "").trim() || "the customer"}'s approval of change order ` +
-      `${coLabel} to quote ${quoteNo}, given on ${conversationDate}` +
+      `${coLabel} to estimate ${quoteNo}, given on ${conversationDate}` +
       (newTotal == null ? "" : `, for a revised order total of ${usd(newTotal)}`) +
       (feeCents > 0 ? `, which includes a change order fee of ${usd((feeCents + feeTaxCents) / 100)}` : "") +
       (refundCents > 0 ? `. The revised total is below what has already been paid, leaving ${usd(refundCents / 100)} to be refunded` : "") +
@@ -13409,7 +13409,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return dbFail(req, clientId, "read your settings", csErr);
     if (!cs || cs.invoice_in_ghl !== false) {
-      return json({ error: "This account quotes through the CRM — the order document is for StructureStudio-issued paperwork." }, 400);
+      return json({ error: "This account sends estimates through the CRM — the order document is for StructureStudio-issued paperwork." }, 400);
     }
     const [colRes, invRes] = await Promise.all([
       admin.from("colors")
@@ -13502,7 +13502,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (dErr) return dbFail(req, clientId, "find that design", dErr);
     if (!d) return json({ error: "Design not found." }, 404);
-    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio estimate yet." }, 400);
     const dStatus = String(d.status || "");
     // WAS: a flat refusal on invoiced/delivered -- "its paperwork is frozen. Raise a manual
     // change order instead." That single line is what made Carolyn's requirement false:
@@ -13734,7 +13734,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!choiceCo) {
           return json({
-            error: "This account has no sales tax rate set, so this change can't be priced. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+            error: "This account has no sales tax rate set, so this change can't be priced. Add one in Settings → CRM Connection → Estimates & Invoices (enter 0% if you don't collect sales tax).",
             reason: "no_tax_rate",
           }, 400);
         }
@@ -14185,7 +14185,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // Only the FIRST number is guarded here (once one is issued the counter is set). A company
         // connected after invoices 1000-1004 went out is covered where the adoption happens:
         // pushQboInvoice adopts an existing DocNumber only for the same customer.
-        const QBO_NEEDS_START = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Quotes & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
+        const QBO_NEEDS_START = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Estimates & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
         const qboBlankStart = async (): Promise<"ok" | "needs_start" | { unreadable: unknown }> => {
           if (cur0?.ss_invoice_next != null) return "ok";
           if (!cur0?.qbo_realm_id || !cur0?.qbo_connected_at || cur0?.qbo_refresh_error) return "ok";
@@ -14210,7 +14210,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
-        if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+        if (!d.ss_quote_number) return json({ error: "This design has no estimate yet — submit it from the designer first." }, 400);
 
         // The order this invoice belongs to, for the caller to navigate to. The portal's
         // order deep link is /portal/orders/o-<orders.id>, keyed on the UUID and not on
@@ -14481,9 +14481,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
           };
           const consentText =
-            `${recordedByName} issued invoice for quote ${d.ss_quote_number}` +
+            `${recordedByName} issued invoice for estimate ${d.ss_quote_number}` +
             (attestedTotal != null ? ` for ${money(attestedTotal)}` : "") +
-            ` on the customer's behalf. The customer did not accept this quote electronically;` +
+            ` on the customer's behalf. The customer did not accept this estimate electronically;` +
             ` their agreement is recorded when they sign the invoice.`;
 
           // Named, so a promote that loses the race below can withdraw exactly this row.
@@ -14596,14 +14596,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 if (miss?.kind === "repriced") {
                   const cents = miss.body.totalCents;
                   missRefusal = json({
-                    error: `This quote's total changed${cents == null ? "" : ` to ${money(cents / 100)}`} while the invoice was being issued, so nothing was issued. Check the quote, then push it to an invoice again.`,
+                    error: `This estimate's total changed${cents == null ? "" : ` to ${money(cents / 100)}`} while the invoice was being issued, so nothing was issued. Check the estimate, then push it to an invoice again.`,
                     reason: "repriced",
                     totalCents: cents,
                   }, 409);
                   audit("push_to_invoice_repriced", null, `short_code=${shortCode}`);
                 } else {
                   missRefusal = json({
-                    error: "This quote changed while the invoice was being issued, so nothing was issued. Reload it and try again.",
+                    error: "This estimate changed while the invoice was being issued, so nothing was issued. Reload it and try again.",
                     reason: "changed",
                   }, 409);
                   const why = nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "stop" ? miss.why : "the design kept changing";
@@ -14650,7 +14650,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
 
         if (dStatus !== "accepted" && !d.accepted_at) {
-          return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept it from their quote page, then you invoice them and they sign that.` }, 400);
+          return json({ error: `The customer hasn't accepted this estimate yet (status: ${dStatus || "sent"}). They accept it from their estimate page, then you invoice them and they sign that.` }, 400);
         }
 
         // Pending change order blocks invoicing (Carolyn 2026-08-23). 42P01 = the
@@ -14766,7 +14766,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // settings row vanished, or 125's allocator is still the live one.
           if (!invNumber) {
             await setClaim({ status: "failed", error: "no invoice starting number" });
-            return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Quotes & Invoices." }, 400);
+            return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Estimates & Invoices." }, 400);
           }
         }
 
@@ -14869,7 +14869,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           }).catch(() => {});
           return json({
             error: collision
-              ? `Invoice number ${invNumber} has already been used on another invoice for this account, so nothing was sent. Raise the starting invoice number in Settings → CRM Connection → Quotes & Invoices, then send it again.`
+              ? `Invoice number ${invNumber} has already been used on another invoice for this account, so nothing was sent. Raise the starting invoice number in Settings → CRM Connection → Estimates & Invoices, then send it again.`
               : "The invoice couldn't be recorded, so nothing was sent to your customer. Try again — if it keeps happening, tell CSM Synergy.",
             invoiceNumber: invNumber, invoicePdfUrl, sent: false,
           }, collision ? 409 : 502);

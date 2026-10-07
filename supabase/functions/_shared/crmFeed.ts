@@ -307,11 +307,11 @@ export async function buildCrmFeed(
     const sel = d.selections || {};
     const what = [sel.style, sel.size].filter(Boolean).join(" ") || "a design";
     push({ id: `d:${d.short_code}`, type: "design_created", at: iso(d.created_at), title: `Design started — ${what}`, code: d.short_code, icon: "design" });
-    if (d.ss_quote_sent_at) push({ id: `qs:${d.short_code}`, type: "email", at: iso(d.ss_quote_sent_at), title: `Quote ${d.ss_quote_number || ""} sent`.trim(), code: d.short_code, icon: "email" });
-    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Quote accepted", code: d.short_code, icon: "accept" });
+    if (d.ss_quote_sent_at) push({ id: `qs:${d.short_code}`, type: "email", at: iso(d.ss_quote_sent_at), title: `Estimate ${d.ss_quote_number || ""} sent`.trim(), code: d.short_code, icon: "email" });
+    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Estimate accepted", code: d.short_code, icon: "accept" });
     // The customer OPENED the estimate. The one genuinely GHL-only signal, and it is here
     // as a stamped column rather than a live API call.
-    if (d.ghl_last_visited_at) push({ id: `ov:${d.short_code}`, type: "quote_opened", at: iso(d.ghl_last_visited_at), title: "Customer opened the quote", code: d.short_code, icon: "eye" });
+    if (d.ghl_last_visited_at) push({ id: `ov:${d.short_code}`, type: "quote_opened", at: iso(d.ghl_last_visited_at), title: "Customer opened the estimate", code: d.short_code, icon: "eye" });
 
     // THE DOCUMENTS THEMSELVES, as history rather than as a separate tab (Carolyn
     // 2026-08-26 24:01). These two used to be a list at the TOP of the record page, which
@@ -324,7 +324,7 @@ export async function buildCrmFeed(
     if (d.ss_quote_pdf_url) {
       push({
         id: `qp:${d.short_code}`, type: "quote_pdf", at: iso(d.ss_quote_sent_at || d.created_at),
-        title: `Quote ${d.ss_quote_number || ""}`.trim() + ` — ${what}`,
+        title: `Estimate ${d.ss_quote_number || ""}`.trim() + ` — ${what}`,
         code: d.short_code, icon: "doc", url: d.ss_quote_pdf_url,
       });
     }
@@ -403,7 +403,7 @@ export async function buildCrmFeed(
       : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
   }
   for (const a of accepts as any[]) {
-    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
+    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Estimate"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Estimate ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
   }
   for (const c of changeOrders as any[]) {
     const delta = (Number(c.total_after_cents || 0) - Number(c.total_before_cents || 0)) / 100;
@@ -786,7 +786,7 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
 }
 
 function labelKind(k: string): string {
-  return k === "estimate" ? "Quote" : k === "invoice" ? "Invoice"
+  return k === "estimate" ? "Estimate" : k === "invoice" ? "Invoice"
     : k === "acceptance" ? "Acceptance receipt" : k === "change_order" ? "Change order"
     : k === "test" ? "Test email" : "Email";
 }

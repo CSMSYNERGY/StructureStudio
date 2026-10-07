@@ -157,13 +157,13 @@ try {
     const rendered = ok("A0 the card rendered on My Profile", (await card(s.page).count()) > 0 && (await box(s.page).count()) === 1);
     if (!rendered) throw new Error("My Profile never rendered the reply card; refusing to report the rest as passes");
     const t = await cardText(s.page);
-    ok("A1 the card says it covers messages, quotes, invoices and change orders",
-      /a message, a quote, an invoice or a change order/.test(t) && /their reply comes to your own inbox too/.test(t), t.slice(0, 400));
+    ok("A1 the card says it covers messages, estimates, invoices and change orders",
+      /a message, an estimate, an invoice or a change order/.test(t) && /their reply comes to your own inbox too/.test(t), t.slice(0, 400));
     ok("A2 and where a reply to a confirmation the customer set off goes",
-      /reply to the confirmation they get after accepting a\s+quote or signing an\s+invoice goes to the person that customer is assigned to, if they have\s+one/.test(t), t.slice(0, 700));
+      /reply to the confirmation they get after accepting an\s+estimate or signing an\s+invoice goes to the person that customer is assigned to, if they have\s+one/.test(t), t.slice(0, 700));
     ok("A4 it promises the record only once replies are set up, and nothing for the CRM's own email",
       /lands on the customer's record here once your company has set up replies under\s+Settings → Email Settings/.test(t)
-        && /A quote or invoice your CRM sends for you follows\s+the CRM's own settings/.test(t), t.slice(0, 700));
+        && /An estimate or invoice your CRM sends for you follows\s+the CRM's own settings/.test(t), t.slice(0, 700));
     await card(s.page).scrollIntoViewIfNeeded().catch(() => {});
     await card(s.page).screenshot({ path: join(shots, "A-card.png") }).catch(() => {});
 

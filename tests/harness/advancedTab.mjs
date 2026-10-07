@@ -580,8 +580,8 @@ try {
       return { text: root.innerText, addLabel: [...root.querySelectorAll("span")].some((s) => s.textContent === "Add") };
     });
     ok("D: …without the quote's controls (Add, Items, Use this view in my quote)",
-      !/Use this view in my quote/.test(vw.text) && !/Items/.test(vw.text) && !vw.addLabel && /Views/.test(vw.text) && /Look inside/.test(vw.text),
-      vw.text.split("\n").filter((l) => /Items|quote|Add|Views|Look inside/i.test(l)).join(" | ").slice(0, 200));
+      !/Use this view in my (quote|estimate)/.test(vw.text) && !/Items/.test(vw.text) && !vw.addLabel && /Views/.test(vw.text) && /Look inside/.test(vw.text),
+      vw.text.split("\n").filter((l) => /Items|quote|estimate|Add|Views|Look inside/i.test(l)).join(" | ").slice(0, 200));
     await page.screenshot({ path: join(SHOTS, "advpage-phone-preview.png") });
     ok("D: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();

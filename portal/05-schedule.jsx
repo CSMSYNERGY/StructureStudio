@@ -4180,7 +4180,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
     const rate = saved ? saved.taxRatePct : (raw ? Number(raw) : null);
     setTaxMsg({ id: target.id, ok: rate != null
       ? `Saved — your local rate for ${target.name} is ${pctText(rate)}%.`
-      : `Removed — ${target.name} has no local rate, so its quotes use your company rate.` });
+      : `Removed — ${target.name} has no local rate, so its estimates use your company rate.` });
   };
   const F = form || {};
   // CRM-mode tenants never see the tax half at all — see the note above the component.
@@ -4197,7 +4197,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
         The lots where your buildings sit on display. Every inventory building is tracked to one of these.
         {showTax && <>
-          {" "}A location can also carry your local sales tax rate: a quote made for that location charges it
+          {" "}A location can also carry your local sales tax rate: an estimate made for that location charges it
           instead of your company rate{tax.companyRatePct != null ? ` (${pctText(tax.companyRatePct)}%)` : ""}.
           {/* Said up front rather than left to a missing button: a reader who can see the
               rates but not change them should know who can, not wonder where the control went. */}
@@ -4240,7 +4240,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
                   <span style={{ color: "#64748B" }}> your local rate{t.taxLabel ? ` · shows as “${t.taxLabel}”` : ""}</span>
                 </span>
               ) : (
-                <span style={{ color: "#64748B" }}>No local rate — quotes for this location use your company rate</span>
+                <span style={{ color: "#64748B" }}>No local rate — estimates for this location use your company rate</span>
               )}
               {!t.taxReady && <span style={{ color: "#B45309", fontWeight: 600 }}>Add the state and ZIP to set a tax rate</span>}
               {canEditTax && t.taxReady && !editingTax && (
@@ -4267,7 +4267,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
                 <div><span style={S.lbl}>Tax label (optional)</span>
                   <input style={S.input} value={taxForm.label} maxLength={40} placeholder={tax.companyLabel || "Sales tax"}
                     onChange={(e) => { const v = e.target.value; setTaxForm((f) => ({ ...f, label: v })); }} />
-                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on this location's quotes. Blank uses your company label.</div></div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on this location's estimates. Blank uses your company label.</div></div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button type="button" onClick={() => saveTax(taxForm)} disabled={!!taxBusy} style={S.btn(ACCENT, "#FFF")}>{taxBusy ? "Saving…" : "Save rate"}</button>

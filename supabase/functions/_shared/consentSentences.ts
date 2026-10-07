@@ -19,14 +19,14 @@
 
 /** Signing the QUOTE (the drawn/typed signature path, migration 124). */
 export function consentSentence(quoteNumber: string, totalDisplay: string | null): string {
-  return `I agree that my electronic signature is as binding as a handwritten one, and I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
+  return `I agree that my electronic signature is as binding as a handwritten one, and I accept estimate ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
 }
 
 /** Accepting a quote is not signing for it. The sentence says what the customer is actually
  *  agreeing to — that they want to go ahead, and that the binding document arrives next —
  *  so nobody can later claim a click was presented to them as a signature. */
 export function consentSentenceClick(quoteNumber: string, totalDisplay: string | null): string {
-  return `I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""} and understand that my builder will send me an invoice to sign.`;
+  return `I accept estimate ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""} and understand that my builder will send me an invoice to sign.`;
 }
 
 /** The invoice is the binding document now, so this is the sentence that carries the weight
@@ -57,7 +57,7 @@ export function consentSentenceChangeOrder(p: {
 }): string {
   const docName = String(p.invoiceNumber ?? "").trim() || p.quoteNumber;
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept the revised ` +
-    `${p.invoiceNumber ? "invoice" : "quote"} ${docName} (revision ${p.coNo})` +
+    `${p.invoiceNumber ? "invoice" : "estimate"} ${docName} (revision ${p.coNo})` +
     (p.newTotal == null ? "" : ` for ${fmtMoney(p.newTotal)}`) +
     `, which includes change order CO-${p.coNo}` +
     (p.feeCents > 0 ? ` and a change order fee of ${fmtMoney((p.feeCents + p.feeTaxCents) / 100)}` : "") +

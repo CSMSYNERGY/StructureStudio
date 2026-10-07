@@ -220,7 +220,7 @@ try {
     // older artifact reports every check below as the failure it is rather than stopping here.
     const rendered = ok("A0 the Your wording section rendered on Email Settings", /YOUR WORDING|Your wording/.test(await s.page.locator("body").innerText()));
     if (!rendered) throw new Error("the Email Settings screen never rendered; refusing to report the rest as passes");
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await s.page.waitForTimeout(200);
     const have = {};
     for (const f of ["subject", "intro", "closing", "button", "picture"]) have[f] = await field(s.page, f).count();
@@ -239,7 +239,7 @@ try {
     ok("B3 the saved invoice opening line is in its box", (await val(field(s.page, "intro"))) === "Thanks for your order, {customer}!");
 
     // ── C. Preview the quote, typed and unsaved ──
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await s.page.waitForTimeout(200);
     await fill(field(s.page, "subject"), "Your shed quote {number} from {business}");
     await fill(field(s.page, "intro"), "Hi {customer}, thanks for designing your {building} with us!");
@@ -296,7 +296,7 @@ try {
     ok("D2 the button's words are still there", /View Shed Quote/.test(await inner.locator("body").innerText().catch(() => "")));
 
     // ── E. Another tab hides this tab's preview ──
-    await tap(kindTab(s.page, "Estimate"));
+    await tap(kindTab(s.page, "CRM estimate"));
     await s.page.waitForTimeout(200);
     ok("E1 switching tab hides the quote's preview", (await s.page.locator("[data-ss-email-preview]").count()) === 0);
     await tap(kindTab(s.page, "Invoice"));
@@ -321,7 +321,7 @@ try {
     await fill(field(s.page, "closing"), "Thank you,\nThe Acme Sheds team");
 
     // ── F. Save ──
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await fill(field(s.page, "button"), "  View   Shed Quote  ");
     await tap(btn(s.page, "Save wording"));
     await s.page.waitForTimeout(700);
@@ -342,7 +342,7 @@ try {
   // ── D3. No style photo switched on for quotes ─────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "no-photo", photo: false, saved: null });
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await tap(btn(s.page, "Preview"));
     await s.page.waitForTimeout(800);
     const t = await s.page.locator("[data-ss-email-preview]").innerText().catch(() => "");
@@ -355,7 +355,7 @@ try {
   // ── D4. Ticked style photos, all copied from another account ─────────────────────────────────
   {
     const s = await scenario(browser, { name: "not-own-photo", photo: "not_own", saved: null });
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await tap(btn(s.page, "Preview"));
     await s.page.waitForTimeout(800);
     const t = await s.page.locator("[data-ss-email-preview]").innerText().catch(() => "");
@@ -368,7 +368,7 @@ try {
   // ── G. An older server's save drops the new fields and still says ok ──────────────────────────
   {
     const s = await scenario(browser, { name: "old-save", server: "old-save", saved: null });
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await fill(field(s.page, "subject"), "Your quote {number}");
     await fill(field(s.page, "closing"), "See you soon.");
     await fill(field(s.page, "button"), "View Shed Quote");
@@ -397,7 +397,7 @@ try {
   {
     const s = await scenario(browser, { name: "narrow", viewport: { width: 390, height: 844 } });
     const before = await s.page.evaluate(() => document.documentElement.scrollWidth);
-    await tap(kindTab(s.page, "Quote"));
+    await tap(kindTab(s.page, "Estimate"));
     await setCheck(field(s.page, "picture"), true);
     await tap(btn(s.page, "Preview"));
     await s.page.locator("[data-ss-email-preview] iframe").waitFor({ timeout: 8000 }).catch(() => {});

@@ -47,9 +47,9 @@ const OWNER_ACCESS = Object.fromEntries(["designer", "designs", "contacts", "inv
   "change_order_approve", "build_schedule", "delivery_schedule", "repairs", "commissions", "reports", "phone",
   "settings_structures", "settings_options", "settings_branding", "settings_crm", "settings_quickbooks",
   "settings_email", "settings_team", "settings_billing"].map((k) => [k, "edit"]));
-const REFUSED = "Quotes have to stay good for a whole number of days, from 1 to 365.";
-const LOGO_HINT = "A PNG or JPG you upload here also prints at the top of your quote PDFs.";
-const TERMS_LABEL = "quote terms (printed on every estimate)";
+const REFUSED = "Estimates have to stay good for a whole number of days, from 1 to 365.";
+const LOGO_HINT = "A PNG or JPG you upload here also prints at the top of your estimate PDFs.";
+const TERMS_LABEL = "estimate terms";
 
 const { ok, failed } = reporter();
 const shots = shotsDir("quote-valid-days");
@@ -154,9 +154,9 @@ try {
     const t = await bodyText(s.page);
     const label = await s.page.locator('label[for="ss-quote-valid-days"]').textContent({ timeout: 3000 }).catch(() => "");
     const unit = await box(s.page).locator("xpath=following-sibling::span[1]").textContent({ timeout: 3000 }).catch(() => "");
-    ok("A2 it is labelled in plain words, with 'days' beside the box", label === "Quotes are good for" && unit === "days", `${label} / ${unit}`);
-    ok("A3 it says what the number does", t.includes("Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days."));
-    ok("A4 the logo box says an uploaded PNG or JPG prints on the quote PDFs", t.includes(LOGO_HINT));
+    ok("A2 it is labelled in plain words, with 'days' beside the box", label === "Estimates are good for" && unit === "days", `${label} / ${unit}`);
+    ok("A3 it says what the number does", t.includes("Your estimates show a “Valid until” date this many days after the estimate date. Anywhere from 1 to 365 days."));
+    ok("A4 the logo box says an uploaded PNG or JPG prints on the estimate PDFs", t.includes(LOGO_HINT));
     await s.page.locator("#ss-quote-valid-days").scrollIntoViewIfNeeded().catch(() => {});
     await s.page.screenshot({ path: join(shots, "A-company-card.png") }).catch(() => {});
 

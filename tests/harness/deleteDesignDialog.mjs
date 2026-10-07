@@ -216,8 +216,8 @@ try {
     // ── A. An uninvoiced StructureStudio quote ──
     let t = await openDelete(s.page, "Avery Quote");
     ok("A1 the dialog names the quote beside the customer", /Avery Quote\s*·\s*SST-1001\s*·\s*Sent/.test(t), t.slice(0, 200));
-    ok("A2 it says the quote and its PDF are also deleted", t.includes("Quote SST-1001 and its PDF are also deleted."), t);
-    ok("A3 and that the customer's emailed link stops working", /The link in the customer's\s+quote email will stop working\./.test(t), t);
+    ok("A2 it says the quote and its PDF are also deleted", t.includes("Estimate SST-1001 and its PDF are also deleted."), t);
+    ok("A3 and that the customer's emailed link stops working", /The link in the customer's\s+estimate email will stop working\./.test(t), t);
     ok("A4 it no longer says no estimate exists", !t.includes(OLD_CRM_NONE), t);
     ok("A5 the general line promises the PDFs and pictures", t.includes("and the saved PDFs and pictures. This cannot be undone."), t);
     await dialog(s.page).screenshot({ path: join(shots, "A-uninvoiced-quote.png") }).catch(() => {});
@@ -226,7 +226,7 @@ try {
     // ── B. A StructureStudio invoice sent, the design still 'accepted' ──
     t = await openDelete(s.page, "Blake Invoiced");
     ok("B1 the quote and its PDF are kept, and the invoice stays",
-      /Quote SST-1002 and its PDF are kept, because an invoice was made from it\.\s*The invoice stays too\./.test(t), t);
+      /Estimate SST-1002 and its PDF are kept, because an invoice was made from it\.\s*The invoice stays too\./.test(t), t);
     ok("B2 it does not promise the saved PDFs go", !t.includes("the saved PDFs") && t.includes("its floor plans and pictures. This cannot be undone."), t);
     ok("B3 the typed confirmation is unchanged (the short code, no CRM number)", /Type SS-QTEBBB22 to confirm/i.test(t), t);
     await dialog(s.page).screenshot({ path: join(shots, "B-ss-invoice-sent.png") }).catch(() => {});
@@ -234,19 +234,19 @@ try {
 
     // ── C. Invoiced ──
     t = await openDelete(s.page, "Casey Delivered");
-    ok("C1 an invoiced quote is kept the same way", t.includes("Quote SST-1003 and its PDF are kept, because an invoice was made from it."), t);
+    ok("C1 an invoiced quote is kept the same way", t.includes("Estimate SST-1003 and its PDF are kept, because an invoice was made from it."), t);
     await closeDialog(s.page);
 
     // ── D. A CRM estimate, as before ──
     t = await openDelete(s.page, "Dana Crm");
     ok("D1 the CRM sentence is exactly as before",
       /EST-5012 is also deleted from your CRM\. The customer and their\s+opportunity stay — only the estimate goes\./.test(t), t);
-    ok("D2 and no quote sentence", !/Quote .* and its PDF/.test(t), t);
+    ok("D2 and no quote sentence", !/Estimate .* and its PDF/.test(t), t);
     await closeDialog(s.page);
 
     // ── E. Neither ──
     t = await openDelete(s.page, "Emery Draft");
-    ok("E1 a design with neither says so plainly", t.includes("No quote or estimate has been made for this design yet."), t);
+    ok("E1 a design with neither says so plainly", t.includes("No estimate has been made for this design yet."), t);
     ok("E2 and not the old CRM-only wording", !t.includes(OLD_CRM_NONE), t);
     await closeDialog(s.page);
 
@@ -254,7 +254,7 @@ try {
     s.calls.length = 0;
     await openDelete(s.page, "Avery Quote");
     await pressDelete(s.page);
-    const saidA = await waitText(s.page, "Deleted design SS-QTEAAA22. Quote SST-1001 and its PDF were deleted too.");
+    const saidA = await waitText(s.page, "Deleted design SS-QTEAAA22. Estimate SST-1001 and its PDF were deleted too.");
     const delA = s.calls.filter((c) => c.action === "delete_design");
     ok("G1 Delete sends the same body as before for a Sent design",
       delA.length === 1 && delA[0].shortCode === "SS-QTEAAA22" && delA[0].deleteEstimate === true && !("confirmToken" in delA[0]), JSON.stringify(delA));
@@ -270,7 +270,7 @@ try {
     await openDelete(s.page, "Blake Invoiced");
     await dialog(s.page).locator("input").fill("SS-QTEBBB22");
     await pressDelete(s.page);
-    const saidB = await waitText(s.page, "Deleted design SS-QTEBBB22. Quote SST-1002 and its PDF were kept, because an invoice was made from it.");
+    const saidB = await waitText(s.page, "Deleted design SS-QTEBBB22. Estimate SST-1002 and its PDF were kept, because an invoice was made from it.");
     const delB = s.calls.filter((c) => c.action === "delete_design");
     ok("G2 a typed confirmation sends the short code as the token", delB.length === 1 && delB[0].confirmToken === "SS-QTEBBB22" && delB[0].deleteEstimate === true, JSON.stringify(delB));
     ok("H2 the message says the quote was kept", saidB);
@@ -288,11 +288,11 @@ try {
     t = await openDelete(s.page, "Kit Both");
     ok("K1 the CRM estimate is still deleted (a StructureStudio invoice was not made from it)",
       /EST-5013 is also deleted from your CRM\./.test(t) && !t.includes("EST-5013 is kept"), t);
-    ok("K2 and the quote is kept", t.includes("Quote SST-1004 and its PDF are kept, because an invoice was made from it."), t);
+    ok("K2 and the quote is kept", t.includes("Estimate SST-1004 and its PDF are kept, because an invoice was made from it."), t);
     await dialog(s.page).screenshot({ path: join(shots, "K-crm-estimate-and-ss-invoice.png") }).catch(() => {});
     await dialog(s.page).locator("input").fill("5013");
     await pressDelete(s.page);
-    const saidK = await waitText(s.page, "Deleted design SS-BOTHKK22, along with EST-5013 in your CRM. Quote SST-1004 and its PDF were kept, because an invoice was made from it.");
+    const saidK = await waitText(s.page, "Deleted design SS-BOTHKK22, along with EST-5013 in your CRM. Estimate SST-1004 and its PDF were kept, because an invoice was made from it.");
     ok("K3 the message names both halves", saidK);
     ok("K4 the server did what the dialog said: the estimate went, the quote PDF stayed",
       CASES.K.crm === "deleted" && CASES.K.outcome === "kept" && bucket.has(`${CLIENT}/SS-BOTHKK22-quote.pdf`), `${CASES.K.crm} / ${CASES.K.outcome}`);
@@ -301,7 +301,7 @@ try {
     s.calls.length = 0;
     await openDelete(s.page, "Lou Leftover");
     await pressDelete(s.page);
-    const saidL = await waitText(s.page, "Deleted design SS-FAILLL22. The PDF for Quote SST-1005 could not be removed. Support has a record of it.");
+    const saidL = await waitText(s.page, "Deleted design SS-FAILLL22. The PDF for Estimate SST-1005 could not be removed. Support has a record of it.");
     ok("L1 a failed remove says the quote's PDF is still there", saidL && CASES.L.outcome === "failed", String(CASES.L.outcome));
     await s.page.screenshot({ path: join(shots, "L-remove-failed.png") }).catch(() => {});
 
@@ -320,7 +320,7 @@ try {
     await pressDelete(s.page);
     const said = await waitText(s.page, "Deleted design SS-QTEAAA22.");
     const body = await s.page.evaluate(() => document.body.innerText);
-    ok("H3 an older server's answer reads exactly as before", said && !body.includes("Quote SST-1001 and its PDF were"), body.slice(0, 300));
+    ok("H3 an older server's answer reads exactly as before", said && !body.includes("Estimate SST-1001 and its PDF were"), body.slice(0, 300));
     await s.ctx.close();
   }
 

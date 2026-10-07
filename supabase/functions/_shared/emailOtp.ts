@@ -170,14 +170,14 @@ export function emailOtpBody(brand: string, code: string): { subject: string; ht
   const subject = `${code} is your sign-in code`;
   const text =
     `Your sign-in code is ${code}\n\n` +
-    `Enter it to see your quotes from ${safeBrand}. It expires in 10 minutes.\n\n` +
+    `Enter it to see your estimates from ${safeBrand}. It expires in 10 minutes.\n\n` +
     `If you didn't ask to sign in, you can ignore this email — nobody can use this code without it.`;
   const html =
     `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:420px">` +
     `<p style="font-size:15px;color:#334155;margin:0 0 14px">Your sign-in code is</p>` +
     `<p style="font-size:34px;font-weight:800;letter-spacing:6px;margin:0 0 14px;color:#0F172A">${code}</p>` +
     `<p style="font-size:14px;color:#475569;margin:0 0 14px">` +
-    `Enter it to see your quotes from ${safeBrand}. It expires in 10 minutes.</p>` +
+    `Enter it to see your estimates from ${safeBrand}. It expires in 10 minutes.</p>` +
     `<p style="font-size:12px;color:#94A3B8;margin:0">` +
     `If you didn't ask to sign in, you can ignore this email — nobody can use this code without it.</p>` +
     `</div>`;

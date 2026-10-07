@@ -2,7 +2,7 @@
   "id": "/portal.html",
   "name": "StructureStudio — Business Portal",
   "short_name": "StructureStudio",
-  "description": "Design buildings, build quotes, and manage contacts for your shed business.",
+  "description": "Design buildings, build estimates, and manage contacts for your shed business.",
   "start_url": "/portal?source=pwa",
   "scope": "/",
   "display": "standalone",

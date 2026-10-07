@@ -239,7 +239,7 @@ try {
     ok("D1 both lists hold every card the kind can show, in the saved order",
       same(await listKeys(s.page, "contact"), SAVED_CONTACT) && same(await listKeys(s.page, "design"), SAVED_DESIGN),
       JSON.stringify({ contact: await listKeys(s.page, "contact"), design: await listKeys(s.page, "design") }));
-    ok("D2 Sales tax says when it shows", /Shows for a deal with a StructureStudio quote/.test(await cardText(s.page)));
+    ok("D2 Sales tax says when it shows", /Shows for a deal with a StructureStudio estimate/.test(await cardText(s.page)));
     await orderCard(s.page).scrollIntoViewIfNeeded().catch(() => {});
     await s.page.screenshot({ path: join(shots, "D-profile-1440.png") });
 

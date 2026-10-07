@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <meta name="robots" content="noindex"/>
-<title>Your quotes</title>
+<title>Your estimates</title>
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>
 /* Customer quote portal — deliberately PLAIN JS + inline CSS. No React, no Babel, no
@@ -89,7 +89,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
        customer having to remember which address the builder used. EMAIL is the way back in
        when texting is unavailable — see the email channel note in customer-auth. -->
   <section id="screen-phone" hidden>
-    <h1>View your quotes</h1>
+    <h1>View your estimates</h1>
     <p class="sub" id="signin-sub">Enter the mobile number you gave your builder and we'll text you a sign-in code.</p>
     <div class="card">
       <div class="field">
@@ -107,7 +107,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       <button id="send-btn" class="btn btn-primary" type="button">Text me a code</button>
       <div id="phone-error" class="error" role="alert" hidden></div>
     </div>
-    <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
+    <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your estimates.</p>
     <!-- STARTS hidden; the SERVER un-hides it (plan 3.5, 2026-09-15). It was hidden outright
          after the 2026-09-06 audit: customer-auth used to resolve a proven email to an UNPROVEN
          phone by scanning designs and mint the session on that phone, and save_design is
@@ -143,7 +143,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 
   <!-- Step 3: the quotes -->
   <section id="screen-quotes" hidden>
-    <h1 id="quotes-heading">Your quotes</h1>
+    <h1 id="quotes-heading">Your estimates</h1>
     <p class="sub" id="quotes-sub" hidden></p>
     <p class="status-line" id="quotes-status" hidden></p>
     <div id="quotes-error" class="error" role="alert" hidden></div>
@@ -289,7 +289,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var h = $("biz-header");
     h.textContent = name;      // textContent — server-supplied strings are never innerHTML'd
     h.hidden = false;
-    document.title = name + " · Your quotes";
+    document.title = name + " · Your estimates";
     lsSet(bizKey, name);
   }
 
@@ -350,11 +350,11 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     $("field-phone").hidden = email;
     $("field-email").hidden = !email;
     $("signin-sub").textContent = email
-      ? "Enter the email address your quote was sent to and we'll email you a sign-in code."
+      ? "Enter the email address your estimate was sent to and we'll email you a sign-in code."
       : "Enter the mobile number you gave your builder and we'll text you a sign-in code.";
     $("signin-hint").textContent = email
-      ? "We only use your email to show you your quotes."
-      : "Standard message rates may apply. We only use your number to show you your quotes.";
+      ? "We only use your email to show you your estimates."
+      : "Standard message rates may apply. We only use your number to show you your estimates.";
     $("send-btn").textContent = email ? "Email me a code" : "Text me a code";
     $("use-email-btn").textContent = email ? "Use my phone number instead" : "Use my email instead";
     // The step-2 back link too — it read "Use a different number" on the email route, which is
@@ -384,7 +384,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     setError(errEl, "");
     if (channel === "email") {
       if (!isEmailish(custEmail)) {
-        setError($("phone-error"), "Enter the email address your quote was sent to.");
+        setError($("phone-error"), "Enter the email address your estimate was sent to.");
         show("phone");
         $("email-input").focus();
         return;
@@ -500,7 +500,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           // answers identically for every address, so this cannot be used to probe. Offer the
           // phone route, which is the one that will work for them.
           setError($("code-error"), r.data.error ||
-            "That email is confirmed, but we don't have any quotes filed under it.");
+            "That email is confirmed, but we don't have any estimates filed under it.");
           setChannel("sms");
           show("phone");
         } else {
@@ -629,7 +629,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     setError($("quotes-error"), "");
     $("quotes-list").textContent = "";
     var st = $("quotes-status");
-    st.textContent = "Loading your quotes…";
+    st.textContent = "Loading your estimates…";
     st.hidden = false;
     callFn("customer-quotes", { action: "list", token: token })
       .then(function (r) {
@@ -642,7 +642,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           return;
         }
         if (!r.ok || !r.data || r.data.error) {
-          renderQuotesError(errText(r, "Couldn't load your quotes. Please try again."));
+          renderQuotesError(errText(r, "Couldn't load your estimates. Please try again."));
           return;
         }
         // ASSUMPTION: the list payload is { quotes: [...], businessName, name? }. Accept
@@ -675,9 +675,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 
   function renderQuotes(quotes) {
     var fn = firstName(custName);
-    $("quotes-heading").textContent = fn ? "Hi " + fn + "," : "Your quotes";
+    $("quotes-heading").textContent = fn ? "Hi " + fn + "," : "Your estimates";
     var sub = $("quotes-sub");
-    sub.textContent = fn ? "Here are the quotes we have for your number." : "";
+    sub.textContent = fn ? "Here are the estimates we have for your number." : "";
     sub.hidden = !fn;
 
     var list = $("quotes-list");
@@ -689,7 +689,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       empty.style.textAlign = "center";
       empty.style.color = "#475569";
       empty.style.fontSize = "14px";
-      empty.textContent = "No quotes yet for this number.";
+      empty.textContent = "No estimates yet for this number.";
       list.appendChild(empty);
       return;
     }
@@ -747,7 +747,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // render exactly as it reads on the PDF — "EST-JB-1041" is a support call.
       num.textContent = /^\d+$/.test(s) ? "EST-" + s : s;
     } else {
-      num.textContent = "Quote";
+      num.textContent = "Estimate";
     }
     top.appendChild(num);
     var statusKey = String(q.status || "").toLowerCase();
@@ -932,7 +932,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         pdf.rel = "noopener";
         // The SS quote PDF is the whole document (price + plan + 3D); the GHL-mode link
         // is just the floor plan. Label accordingly.
-        pdf.textContent = q.ssQuote ? "Quote (PDF)" : "Floor plan (PDF)";
+        pdf.textContent = q.ssQuote ? "Estimate (PDF)" : "Floor plan (PDF)";
         actions.appendChild(pdf);
       }
       card.appendChild(actions);
@@ -1525,18 +1525,25 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     nameField.appendChild(nameInput);
     panel.appendChild(nameField);
 
-    // Must stay byte-identical to consentSentenceClick() in customer-accept — the server
-    // stores ITS composition verbatim as the evidence, so any drift means the customer
-    // agreed to one sentence and the record shows another.
-    var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your quote";
-    var totalText = fmtMoney(q.total);
+    // The server stores ITS composition verbatim as the evidence (consentSentenceClick in
+    // _shared/consentSentences.ts), so any drift means the customer agreed to one sentence and
+    // the record shows another. customer-quotes sends that exact sentence as acceptConsentText
+    // and this panel prints it, the way the designer's account panel does — so the sentence on
+    // screen and the stored one always come from the same server build. The local composition
+    // below is only the fallback for a customer-quotes that sent no sentence.
     var consentRow = document.createElement("label");
     consentRow.className = "consent-row";
     var consentBox = document.createElement("input");
     consentBox.type = "checkbox";
     var consentSpan = document.createElement("span");
-    consentSpan.textContent = "I accept quote " + numText + (totalText ? " for " + totalText : "") +
-      " and understand that my builder will send me an invoice to sign.";
+    if (typeof q.acceptConsentText === "string" && q.acceptConsentText.trim()) {
+      consentSpan.textContent = q.acceptConsentText;
+    } else {
+      var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your estimate";
+      var totalText = fmtMoney(q.total);
+      consentSpan.textContent = "I accept estimate " + numText + (totalText ? " for " + totalText : "") +
+        " and understand that my builder will send me an invoice to sign.";
+    }
     consentRow.appendChild(consentBox);
     consentRow.appendChild(consentSpan);
     panel.appendChild(consentRow);
@@ -1549,7 +1556,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var submit = document.createElement("button");
     submit.type = "button";
     submit.className = "btn btn-primary";
-    submit.textContent = "Accept Quote";
+    submit.textContent = "Accept Estimate";
     submit.style.marginTop = "4px";
     panel.appendChild(submit);
 
@@ -1581,8 +1588,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           // reworded to stay clear of that test; these two guards keep that from being the only
           // thing standing between the customer and a sign-out.
           if (r.status === 409 && r.data && r.data.reason === "repriced") {
-            setError(errEl, errText(r, "This quote was just updated. Reload to see the current total, then accept it."));
-            submit.textContent = "Accept Quote";
+            setError(errEl, errText(r, "This estimate was just updated. Reload to see the current total, then accept it."));
+            submit.textContent = "Accept Estimate";
             if (!panel.querySelector("[data-reload-quotes]")) {
               var reloadBtn = document.createElement("button");
               reloadBtn.type = "button";
@@ -1607,13 +1614,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           } else {
             setError(errEl, errText(r, "Couldn't record your acceptance. Please try again."));
             submit.disabled = false;
-            submit.textContent = "Accept Quote";
+            submit.textContent = "Accept Estimate";
           }
         })
         .catch(function () {
           setError(errEl, "Couldn't reach the server. Check your connection and try again.");
           submit.disabled = false;
-          submit.textContent = "Accept Quote";
+          submit.textContent = "Accept Estimate";
         });
     });
 
@@ -1746,7 +1753,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     panel.appendChild(nameField);
 
     // The consent sentence — composed the same way the server composes (and stores) it.
-    var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your quote";
+    var numText = q.estimateNumber != null ? String(q.estimateNumber) : "your estimate";
     var consentRow = document.createElement("label");
     consentRow.className = "consent-row";
     var consentBox = document.createElement("input");
@@ -1762,7 +1769,12 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // A customer-quotes from before consentText shipped: the old local composition.
       var afterText = fmtMoney(co.totalAfter);
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I approve change order CO-" +
-        (co.coNo != null ? co.coNo : "?") + " to quote " + numText + (afterText ? " for a new total of " + afterText : "") + ".";
+        (co.coNo != null ? co.coNo : "?") + " to estimate " + numText + (afterText ? " for a new total of " + afterText : "") + ".";
+    } else if (inv && typeof q.signConsentText === "string" && q.signConsentText.trim()) {
+      // The exact sentence sign_invoice will store (customer-quotes' signConsentText, composed by
+      // consentSentenceInvoice), printed the way the designer prints it. The composition below is
+      // only the fallback for a customer-quotes that sent no sentence.
+      consentSpan.textContent = q.signConsentText;
     } else if (inv) {
       // Mirrors consentSentenceInvoice() in customer-accept — see the note in
       // toggleAcceptPanel about why these two compositions must not drift.
@@ -1774,7 +1786,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         invNumText + (invTotalText ? " for " + invTotalText : "") + ".";
     } else {
       var totalText = fmtMoney(q.total);
-      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept quote " +
+      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept estimate " +
         numText + (totalText ? " for " + totalText : "") + ".";
     }
     consentRow.appendChild(consentBox);

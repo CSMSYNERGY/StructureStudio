@@ -2704,7 +2704,7 @@ function ssDeliveryReason(r) {
     rule_incomplete: "the builder's delivery rule is incomplete",
     no_origin: "the builder has no origin address on file",
     distance_not_configured: "distance lookups aren't available right now",
-  })[r] || "it will be worked out when your quote is issued";
+  })[r] || "it will be worked out when your estimate is issued";
 }
 
 // ── Electrical ───────────────────────────────────────────────────────────────
@@ -17735,8 +17735,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {!draftOnly && (
         <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {quoteCorners
-            ? (shotTaken ? "✓ Picture saved — retake?" : "📸 Use this view as my quote's picture")
-            : (shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote")}
+            ? (shotTaken ? "✓ Picture saved — retake?" : "📸 Use this view as my estimate's picture")
+            : (shotTaken ? "✓ Added to estimate — retake?" : "📸 Use this view in my estimate")}
         </button>
         )}
         </div>
@@ -20027,7 +20027,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   const offerChoice = Array.isArray(channels) && channels.includes("sms") && channels.includes("email");
   const title = step === "code" ? "Enter your code"
     : step === "unavailable" ? "Keep designing"
-    : (mode === "gate" ? "Log in to design your building" : mode === "account" ? "Log in to see your quotes and invoices" : "Log in");
+    : (mode === "gate" ? "Log in to design your building" : mode === "account" ? "Log in to see your estimates and invoices" : "Log in");
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.42)", backdropFilter: "blur(2.5px)", WebkitBackdropFilter: "blur(2.5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -20048,7 +20048,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
             <div style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>
               {mode === "gate"
                 ? (channel === "email" ? "We'll email you a code — keep designing while it arrives." : "We'll text you a code — keep designing while it arrives.")
-                : (channel === "email" ? "We'll email you a code to open your quotes and invoices." : "We'll text you a code to open your quotes and invoices.")}
+                : (channel === "email" ? "We'll email you a code to open your estimates and invoices." : "We'll text you a code to open your estimates and invoices.")}
             </div>
             {notice && (
               <div role="status" style={{ background: "#FEF3C7", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, fontWeight: 600, marginBottom: 14 }}>{notice}</div>
@@ -20140,11 +20140,11 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
             <div style={{ fontSize: 14, color: "#334155", lineHeight: 1.5, margin: "6px 0 18px" }}>
               {mode === "account"
                 ? (byEmail
-                  ? "We couldn't email you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes."
-                  : "We couldn't text you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes.")
+                  ? "We couldn't email you a code right now, so your estimates and invoices can't open yet. Please try again in a few minutes."
+                  : "We couldn't text you a code right now, so your estimates and invoices can't open yet. Please try again in a few minutes.")
                 : byEmail
-                  ? "We couldn't email you a code right now — you can keep designing and still get your quote."
-                  : "We couldn't text you a code right now — you can keep designing and still get your quote."}
+                  ? "We couldn't email you a code right now — you can keep designing and still get your estimate."
+                  : "We couldn't text you a code right now — you can keep designing and still get your estimate."}
             </div>
             <button type="button" onClick={onClose} style={primaryBtn(true)}>Keep designing →</button>
           </>
@@ -20217,8 +20217,8 @@ function ssDesignerAccountLink(clientId, ref, view) {
 // refusals. not_first_issue is never shown — a resubmit not texting again is not news.
 function ssQuoteTextReasonText(reason) {
   switch (reason) {
-    case "test_mode": return "beta mode is on, so quotes go to your test inbox instead";
-    case "no_phone": return "there's no phone number on this quote";
+    case "test_mode": return "beta mode is on, so estimates go to your test inbox instead";
+    case "no_phone": return "there's no phone number on this estimate";
     case "timeout": return "the text service didn't answer in time, so it may still arrive";
     case "not_active": return "texting isn't switched on for your business yet";
     case "no_consent": return "the customer hasn't agreed to texts";
@@ -20246,7 +20246,7 @@ function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
   if (!sentence) {
     return (
       <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
-        Review and accept this quote on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+        Review and accept this estimate on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your estimates page ↗</a>
       </div>
     );
   }
@@ -20275,7 +20275,7 @@ function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
       {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
       <button type="button" disabled={busy} onClick={submit}
         style={{ ...SS_ACCT_BTN, background: accent, color: ssOnFill(accent), opacity: busy ? 0.6 : 1 }}>
-        {busy ? "Accepting…" : "Accept Quote"}
+        {busy ? "Accepting…" : "Accept Estimate"}
       </button>
     </div>
   );
@@ -20313,7 +20313,7 @@ function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
   if (!sentence) {
     return (
       <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
-        Sign this invoice on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+        Sign this invoice on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your estimates page ↗</a>
       </div>
     );
   }
@@ -20407,7 +20407,7 @@ function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, hig
   const chip = SS_ACCT_STATUS[statusKey];
   const rawNum = q.estimateNumber != null ? String(q.estimateNumber).trim() : "";
   // EST- belongs on BARE GHL numbers only; an SS number carries the builder's own prefix.
-  const numText = rawNum ? (/^\d+$/.test(rawNum) ? "EST-" + rawNum : rawNum) : "Quote";
+  const numText = rawNum ? (/^\d+$/.test(rawNum) ? "EST-" + rawNum : rawNum) : "Estimate";
   const thumb = !thumbBroken && ssSafeUrl(q.view3dImageUrl);
   const hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;
   const dateStr = ssAcctDate(q.createdAt);
@@ -20556,7 +20556,7 @@ function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, hig
           ) : null}
           {pdfUrl && (
             <a href={pdfUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
-              {q.ssQuote ? "Quote (PDF)" : "Floor plan (PDF)"}
+              {q.ssQuote ? "Estimate (PDF)" : "Floor plan (PDF)"}
             </a>
           )}
           {ref && onOpenDesign && (
@@ -20606,7 +20606,7 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
       if (!live) return;
       if (r.status === 401) return;       // signed out by call(); this panel is unmounting
       if (!r.ok || !r.data || r.data.error) {
-        setState((s) => ({ loading: false, error: ssCustErrText(r, "Couldn't load your quotes. Please try again."), data: s.data }));
+        setState((s) => ({ loading: false, error: ssCustErrText(r, "Couldn't load your estimates. Please try again."), data: s.data }));
         return;
       }
       setState({ loading: false, error: "", data: r.data });
@@ -20665,12 +20665,12 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
   if (inline) {
     const q = quotes.find((x) => x.quoteRef === focusRef);
     return (
-      <div ref={rootRef} role="region" aria-label="Your quote" style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "left" }}>
+      <div ref={rootRef} role="region" aria-label="Your estimate" style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "left" }}>
         {q ? card(q, 0) : (
           <div style={{ background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, fontSize: 13, color: state.error ? "#B91C1C" : "#475569" }}>
-            {state.loading ? "Loading your quote…"
+            {state.loading ? "Loading your estimate…"
               : state.error ? <>{state.error} <button type="button" onClick={refresh} style={{ background: "none", border: "none", color: accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Try again</button></>
-              : "This quote isn't showing under your login yet — you'll find it under Quotes once it's ready."}
+              : "This estimate isn't showing under your login yet — you'll find it under Estimates once it's ready."}
           </div>
         )}
       </div>
@@ -20697,11 +20697,11 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
     if (!r.ok) { setSaved(before); setSavedErr(ssCustErrText(r, "Couldn't remove that design. Please try again.")); }
   };
   return (
-    <div ref={rootRef} role="region" aria-label={view === "invoices" ? "Your invoices" : "Your quotes"}
+    <div ref={rootRef} role="region" aria-label={view === "invoices" ? "Your invoices" : "Your estimates"}
       style={{ background: "#F8FAFC", borderBottom: "1px solid #E2E8F0", padding: "14px 20px 18px" }}>
       <div style={{ maxWidth: 1100, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-          {tabBtn("quotes", "Quotes", nQuotes)}
+          {tabBtn("quotes", "Estimates", nQuotes)}
           {tabBtn("invoices", "Invoices", nInvoices)}
           {state.loading && state.data && <span style={{ fontSize: 12, color: "#94A3B8" }}>Updating…</span>}
           <button type="button" onClick={onClose} aria-label="Close" title="Close"
@@ -20713,12 +20713,12 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
           </div>
         )}
         {state.loading && !state.data ? (
-          <div style={{ fontSize: 13, color: "#64748B" }}>Loading your {view === "invoices" ? "invoices" : "quotes"}…</div>
+          <div style={{ fontSize: 13, color: "#64748B" }}>Loading your {view === "invoices" ? "invoices" : "estimates"}…</div>
         ) : state.data && inTab.length === 0 ? (
           <div style={{ fontSize: 13, color: "#64748B", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
             {view === "invoices"
-              ? (ssMode ? "No invoices yet. When you accept a quote, your invoice appears here for you to sign." : "Your builder sends invoices by email.")
-              : "No quotes yet — press Get Quote when your design is ready."}
+              ? (ssMode ? "No invoices yet. When you accept an estimate, your invoice appears here for you to sign." : "Your builder sends invoices by email.")
+              : "No estimates yet — press Get Estimate when your design is ready."}
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 300px), 1fr))", gap: 12, alignItems: "start" }}>
@@ -22946,7 +22946,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setAmendMsg({ ok: `Recorded — CO-${(att && att.coNo) || (fin && fin.changeOrder && fin.changeOrder.co_no) || ""} is approved and the order is updated.${att && att.refundCents > 0 ? ` The revised total is below what has been paid: $${(att.refundCents / 100).toFixed(2)} is owed back.` : ""}` });
       } else {
         setAmendMsg({ ok: fin && fin.sent
-          ? "Sent — the customer has it and can sign it from their quote page."
+          ? "Sent — the customer has it and can sign it from their estimate page."
           : `Ready to sign${fin && fin.sendReason ? ` — not emailed (${fin.sendReason})` : ""}. Copy the customer link above and send it yourself.` });
       }
       setAmendment(null);
@@ -28867,7 +28867,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // unit list/serial would point at a customer's quote. Quoting an inventory building
     // goes through the Inventory tab's "Send estimate", which loads it as a fresh design.
     if (inventoryMaster && currentDesignIdRef.current === inventoryMaster.code) {
-      setSubmitError("This is an inventory building. Use “Send estimate” on the Inventory tab to quote it to a customer, or “Update Inventory Building” to save design changes.");
+      setSubmitError("This is an inventory building. Use “Send estimate” on the Inventory tab to send it to a customer as an estimate, or “Update Inventory Building” to save design changes.");
       return;
     }
     // Validate every contact field that's enabled in the config. Address fields
@@ -28896,7 +28896,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return o && o.charged && foundationNeedsQty(String(o.basis)) && foundationQtyOf(String(o.basis), f.qty, bldgW, bldgH) <= 0;
       });
       if (fdMissing.length) {
-        setSubmitError(`Enter the quantity for ${fdMissing.map((f) => foundationLabelOf(resolveFoundation(C, f.id))).join(", ")} before requesting your quote.`);
+        setSubmitError(`Enter the quantity for ${fdMissing.map((f) => foundationLabelOf(resolveFoundation(C, f.id))).join(", ")} before requesting your estimate.`);
         return;
       }
     }
@@ -29525,7 +29525,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         try { onSaved({ code: shortCode, clientId: C.clientId, viewUrl, imageUrl, estimateNumber: result.estimateNumber || null, updated: !!result.updated }); } catch (_e) {}
       }
     } catch (err) {
-      setSubmitError(err.message || "Something went wrong submitting your quote. Please try again.");
+      setSubmitError(err.message || "Something went wrong submitting your estimate. Please try again.");
       console.error("Submit error:", err);
       // A REFUSAL IS NOT A FAULT (2026-09-15). This is the same rule portal/01-core.jsx's invoke
       // wrapper uses: a 4xx from submit-estimate, or save_design's lock, is the product declining
@@ -34121,7 +34121,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ["options", "Options, openings & layout", "Options & layout", "Options"],
     !submitted && ["customer", "Customer information", "Customer information", "Customer"],
     !submitted && ["details", "Details & charges", "Details", "Details"],
-    ["quote", "Get quote", "", "Quote"],
+    ["quote", "Get estimate", "", "Estimate"],
   ].filter(Boolean).map(([key, label, title, short], i) => ({ key, label, title, short, n: i + 1, done: submitted || ssDoneOf[key] }));
   const ssStepIds = ssSteps.map((s) => s.key);
   const ssCur = ssStepIds.includes(ssStepCur) ? ssStepCur : (ssSteps.find((s) => !s.done) || ssSteps[ssSteps.length - 1]).key;
@@ -34216,7 +34216,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             : <div className="ssd-hd-initials">{initials}</div>}
           <div className="ssd-hd-titles">
             <div className="ssd-hd-name">{C.branding.companyName || "Design Studio"}</div>
-            <div className="ssd-hd-tag">{C.branding.tagline || "Design & Quote"}</div>
+            <div className="ssd-hd-tag">{C.branding.tagline || "Design & Estimate"}</div>
           </div>
         </div>
         {/* The account corner (Carolyn 2026-09-14, drawn in red across this header): signed
@@ -34232,7 +34232,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : custIdentity && custIdentity.email ? `Signed in as ${custIdentity.email}`
                     : "Signed in"}
                 </span>
-                {[["quotes", "Quotes"], ["invoices", "Invoices"]].map(([v, label]) => (
+                {[["quotes", "Estimates"], ["invoices", "Invoices"]].map(([v, label]) => (
                   <button key={v} type="button" className="ssd-hd-btn" aria-pressed={accountView === v}
                     onClick={() => setAccountView((cur) => (cur === v ? null : v))}>
                     {label}
@@ -34356,7 +34356,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </span>
           {embedded && (
             <button type="button" onClick={() => {
-              if (!window.confirm("Design a brand-new building for this customer instead?\n\nThe plan unlocks so you can change anything. Submitting saves it as another version of this quote, no longer tied to the inventory building.")) return;
+              if (!window.confirm("Design a brand-new building for this customer instead?\n\nThe plan unlocks so you can change anything. Submitting saves it as another version of this estimate, no longer tied to the inventory building.")) return;
               setNewBuildMode(true);
               inventoryUnitRef.current = null;
             }} style={{ marginLeft: "auto", background: "#FFF", color: "#1D4ED8", border: "1.5px solid #93C5FD", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -34876,7 +34876,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div className="ssd-dlv-line"><span className="ssd-dlv-t">To be confirmed — {ssDeliveryReason(dv.pending.reason)}</span></div>
               ) : (dlvAuto && !embedded) ? (
                 <div className="ssd-dlv-line">
-                  <span className="ssd-dlv-t">{dlvAddrReady ? "Delivery will be priced on your quote" : "Priced from your delivery address"}</span>
+                  <span className="ssd-dlv-t">{dlvAddrReady ? "Delivery will be priced on your estimate" : "Priced from your delivery address"}</span>
                   {!dlvAddrReady && ssSteps.some((s) => s.key === "customer") && <button type="button" className="ssd-dlv-go" onClick={() => ssGo("customer")}>Add your address</button>}
                 </div>
               ) : null}
@@ -35901,7 +35901,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             {!detailsLocked && (!customerFacing || additionalOpen) && (
               <button type="button" className="ssd-dt-tog" aria-expanded={additionalOpen}
                 onClick={(e) => { e.stopPropagation(); ssToggleDetails(); }}>
-                {customerFacing ? "Hide quote details ▴" : (additionalOpen ? "Hide details ▴" : "Show details ▾")}
+                {customerFacing ? "Hide estimate details ▴" : (additionalOpen ? "Hide details ▴" : "Show details ▾")}
               </button>
             )}
           </div>
@@ -35911,12 +35911,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               now. Unlocked and closed: the "see your price" bar, a real call to action in the builder's CTA
               colour; its text colour comes from the palette (onCta), so it reads on a light or a dark brand. */}
           {detailsLocked && (
-            <div className="ssd-dt-lock"><span>🔒 Enter all your contact information to see the quote details.</span></div>
+            <div className="ssd-dt-lock"><span>🔒 Enter all your contact information to see the estimate details.</span></div>
           )}
           {customerFacing && !detailsLocked && !additionalOpen && (
             <button type="button" className="ssd-dt-cta" onClick={ssToggleDetails}>
               <span className="ssd-dt-cta-t">Details</span>
-              <span className="ssd-dt-cta-s">See your quote details ▸</span>
+              <span className="ssd-dt-cta-s">See your estimate details ▸</span>
             </button>
           )}
           {additionalOpen && !detailsLocked && (() => {
@@ -36041,14 +36041,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             };
             const droppedNote = (key, v, style) => (
               <div className="ssd-dt-d" data-ss-price-dropped={key} style={style}>
-                {`Someone who can change prices set this to ${fmtMoney2(v)}. You can't change prices, so sending the quote from here uses the list price.`}
+                {`Someone who can change prices set this to ${fmtMoney2(v)}. You can't change prices, so sending the estimate from here uses the list price.`}
               </div>
             );
             const taxBtn = (taxable, onToggle) => (
               <button type="button" onClick={onToggle}
                 title={taxable
                   ? "Sales tax is charged on this line. Click to make it non-taxable."
-                  : "NOT taxed — this line sits under the non-taxable subtotal on the quote and invoice. Click to tax it."}
+                  : "NOT taxed — this line sits under the non-taxable subtotal on the estimate and invoice. Click to tax it."}
                 className={"ssd-dt-tax" + (taxable ? "" : " is-off")}>{taxable ? "TAX" : "NO"}</button>
             );
 
@@ -36100,7 +36100,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // Only on lines that carry money: a $0 or "included" line is taxed at nothing
             // either way, and marking it is noise. Hidden-pricing tenants see nothing.
             const noTaxPill = (r) => (C.showPricing && Number(r.total) > 0 && rowExempt(r)) ? (
-              <span title="Not taxed — this line sits under the non-taxable subtotal on the quote and invoice."
+              <span title="Not taxed — this line sits under the non-taxable subtotal on the estimate and invoice."
                 style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase",
                          background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A",
                          borderRadius: 3, padding: "1px 5px", whiteSpace: "nowrap", verticalAlign: "middle" }}>no tax</span>
@@ -36407,7 +36407,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {embedded && <button type="button" className="ssd-dt-addb" onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))}>+ Add discount</button>}
               {embedded && !showDelivery && <button type="button" className="ssd-dt-addb" onClick={openDeliveryTab}>+ Add delivery fee{dlvView.suggest != null ? ` · ${fmtMoney2(dlvView.suggest)} suggested` : ""}</button>}
               <div className="ssd-dt-note">
-                Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
+                Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the estimate is issued, so it is not in the subtotal above.
               </div>
             </div>
           </div></div>
@@ -36434,7 +36434,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {invDialog.done.updated
                     ? <>Find it on your portal's Inventory tab.</>
                     : <>Find it on your portal's Inventory tab, and put it on the <strong>Build Schedule</strong> when
-                       you're ready to make it. You can quote it to a customer at any time — a building can be
+                       you're ready to make it. You can send it to a customer as an estimate at any time — a building can be
                        sold before it's built.</>}
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -36464,7 +36464,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   disabled={invDialog.busy}
                   style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 4, padding: "9px 10px", fontSize: 13.5, background: "#FFF", color: "#1E293B" }} />
                 <div style={{ fontSize: 11, color: "#94A3B8", margin: "5px 0 14px" }}>
-                  Starts at this design's quoted price — a markdown here never changes your catalog.
+                  Starts at this design's estimated price — a markdown here never changes your catalog.
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                   {/* Never disabled: a stalled edge call must not trap the builder behind a
@@ -36501,8 +36501,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
                   : <>Design the building and pick where it will sit, then click <strong>Request this build</strong>. It lands on your Inventory list as a request — put it on the Build Schedule when you're ready to make it.</>)
                 : hasExistingEstimate
-                ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
-                : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
+                ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your estimate.</>
+                : <>Place your options on the layout above, then click <strong>Get Estimate</strong> to receive a detailed estimate.</>}
             </p>
             <div className="ssd-ft-btns">
               {/* Business users can send this design to the lot instead of a customer.
@@ -36549,7 +36549,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {submitting
                     ? (amendment ? "Saving..." : "Submitting...")
                     : amendment ? "Save the change"
-                      : hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote"}
+                      : hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Estimate"}
                 </button>
               )}
             </div>
@@ -36574,16 +36574,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>
             {savedDesign && savedDesign.ssQuote
-              ? (savedDesign.updated ? "Quote Updated!" : "Quote Created!")
-              : (savedDesign && savedDesign.updated ? "Estimate Updated!" : "Quote Request Submitted!")}
+              ? (savedDesign.updated ? "Estimate Updated!" : "Estimate Created!")
+              : (savedDesign && savedDesign.updated ? "Estimate Updated!" : "Estimate Request Submitted!")}
           </h3>
           <p style={{ margin: 0, fontSize: 14, color: "#15803D", maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
             {savedDesign && savedDesign.ssQuote
               ? (savedDesign.quoteEmailed
                 /* "accept", not "sign" (Carolyn 2026-09-14): the signature moved to the invoice
                    on 08-26, and the quote email's button now reads View & Accept. */
-                ? `Thank you, ${contact.name || ""}! The quote has been emailed with a link to view and accept it.`
-                : `Thank you, ${contact.name || ""}! The quote is ready — print it or share the link below.`)
+                ? `Thank you, ${contact.name || ""}! The estimate has been emailed with a link to view and accept it.`
+                : `Thank you, ${contact.name || ""}! The estimate is ready — print it or share the link below.`)
               : (savedDesign && savedDesign.updated
                 ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
                 : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
@@ -36602,7 +36602,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
               This changes an order the customer already signed — change order
               {savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} needs their
-              approval (they sign from their quote page, or record their verbal OK on the order). Invoicing
+              approval (they sign from their estimate page, or record their verbal OK on the order). Invoicing
               waits until it's acknowledged.
             </div>
           )}
@@ -36650,7 +36650,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             /* The quote exists but no email went out (no address on file, or the tenant's
                sending domain isn't live). Silence here reads as "the customer got it". */
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
-              Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
+              Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the estimate or copy the customer link below and send it yourself.
             </div>
           )}
           {/* THE LOGIN TEXT (plan 3.7, Ahsan 2026-09-15: "only when the builder can text").
@@ -36672,7 +36672,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           )}
           {savedDesign && savedDesign.deliveryUnpriced && (
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: 12, fontSize: 12.5 }}>
-              Delivery isn&rsquo;t on this quote yet{savedDesign.deliveryUnpriced.miles != null ? ` (${savedDesign.deliveryUnpriced.miles} miles${savedDesign.deliveryUnpriced.originName ? " from " + savedDesign.deliveryUnpriced.originName : ""})` : ""} &mdash; it will be confirmed separately.
+              Delivery isn&rsquo;t on this estimate yet{savedDesign.deliveryUnpriced.miles != null ? ` (${savedDesign.deliveryUnpriced.miles} miles${savedDesign.deliveryUnpriced.originName ? " from " + savedDesign.deliveryUnpriced.originName : ""})` : ""} &mdash; it will be confirmed separately.
             </div>
           )}
           {savedDesign && (
@@ -36683,7 +36683,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               {savedDesign.estimateNumber && (
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>{savedDesign.ssQuote ? "Quote #" : "Estimate #"}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>Estimate #</span>
                   {/* SS numbers carry the builder's own prefix and render verbatim; EST- is GHL's. */}
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", fontFamily: "monospace" }}>{savedDesign.ssQuote ? savedDesign.estimateNumber : `EST-${savedDesign.estimateNumber}`}</span>
                 </div>
@@ -36693,7 +36693,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {savedDesign.quotePdfUrl && (
                     <a href={savedDesign.quotePdfUrl} target="_blank" rel="noopener"
                       style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "17px", textDecoration: "none" }}>
-                      Print quote (PDF)
+                      Print estimate (PDF)
                     </a>
                   )}
                   {/* The PORTAL keeps Copy customer link (a rep sends it on). The public page
@@ -36731,9 +36731,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         // customer is emailed a bill — so the confirm names both, plus the
                         // acceptance the rep is about to record on the customer's behalf.
                         const ok = window.confirm(
-                          "Push this quote to an invoice?\n\n" +
+                          "Push this estimate to an invoice?\n\n" +
                           "This issues the invoice from StructureStudio (its own invoice number and PDF) and emails it to the customer immediately.\n\n" +
-                          "The customer has not accepted the quote yet, so this records that you authorised the invoice on their behalf. They still sign the invoice.",
+                          "The customer has not accepted the estimate yet, so this records that you authorised the invoice on their behalf. They still sign the invoice.",
                         );
                         if (!ok) return;
                         setPushBusy(true); setPushErr("");
@@ -36825,10 +36825,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 onExpired={expireCustSession} />
             ) : (
               <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 4, padding: 14, textAlign: "left" }}>
-                <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this quote right here.</div>
+                <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this estimate right here.</div>
                 <button type="button" onClick={() => openLoginSheet()}
                   style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px" }}>
-                  Verify your phone to accept this quote
+                  Verify your phone to accept this estimate
                 </button>
               </div>
             )
@@ -36876,8 +36876,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   try { localStorage.removeItem(draftKey); } catch (_e) {}
                   if (madeQuote) {
                     flashCustNotice(custToken
-                      ? `Your quote ${savedDesign.estimateNumber} is saved under Quotes.`
-                      : `Your quote ${savedDesign.estimateNumber} is saved. Log in any time to find it under Quotes.`);
+                      ? `Your estimate ${savedDesign.estimateNumber} is saved under Estimates.`
+                      : `Your estimate ${savedDesign.estimateNumber} is saved. Log in any time to find it under Estimates.`);
                   }
                 }
                 ghlContactIdRef.current = null;
@@ -36907,7 +36907,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               }}
               style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "10px 24px", fontFamily: "inherit", fontSize: 14, lineHeight: "16px" }}
             >
-              Start New Quote
+              Start New Estimate
             </button>
           </div>
         </div>

@@ -204,7 +204,7 @@ Deno.test("verifyQuoteRefusal: nothing issued is no_quote (409) — issue the qu
   for (const snap of [null, undefined, {}, { lines: LINES }, { lines: LINES, tax: null }, { lines: LINES, tax: 0.0725 }, { tax: storedTax() }]) {
     const r = verifyQuoteRefusal({ snap, address: ADDR, operator: false, confirmVerify: false });
     assertEquals([r?.status, r?.body.reason], [409, "no_quote"], JSON.stringify(snap));
-    assert(/issue the quote first/.test(String(r?.body.error)));
+    assert(/issue the estimate first/.test(String(r?.body.error)));
   }
 });
 
@@ -242,7 +242,7 @@ Deno.test("quoteSentRefusal: a quote the customer holds needs confirmResend befo
 Deno.test("quoteSentRefusal: the sentence never claims the quote was emailed — it may have been texted or printed", () => {
   const r = quoteSentRefusal({ inCustomerHands: true, confirmResend: false, quoteNumber: "Q-104", totalCents: 1122500 })!;
   assert(!/emailed to the customer|been emailed/i.test(r.body.error), r.body.error);
-  assert(/already has this quote/.test(r.body.error), r.body.error);
+  assert(/already has this estimate/.test(r.body.error), r.body.error);
   assert(/let them know/.test(r.body.error), "the rep is told they may have to tell the customer themselves");
 });
 
@@ -503,11 +503,11 @@ Deno.test("verifyWalletRefusal: less than the price available is 402 insufficien
   const r = verifyWalletRefusal(W({ balanceCents: 9 }))!;
   assertEquals([r.status, r.body.reason, r.body.code, r.body.priceCents, r.body.balanceCents], [402, "insufficient_funds", "insufficient_funds", 10, 9]);
   assertEquals(r.body.error,
-    "A verified tax lookup costs $0.10 and your wallet has $0.09. Add funds in Settings → Billing. The quote keeps its current tax rate.");
+    "A verified tax lookup costs $0.10 and your wallet has $0.09. Add funds in Settings → Billing. The estimate keeps its current tax rate.");
   assertEquals(verifyWalletRefusal(EMPTY)!.body.error,
-    "A verified tax lookup costs $0.10 and your wallet has $0.00. Add funds in Settings → Billing. The quote keeps its current tax rate.");
+    "A verified tax lookup costs $0.10 and your wallet has $0.00. Add funds in Settings → Billing. The estimate keeps its current tax rate.");
   assertEquals(verifyWalletRefusal(W({ balanceCents: -30 }))!.body.error,
-    "A verified tax lookup costs $0.10 and your wallet has -$0.30. Add funds in Settings → Billing. The quote keeps its current tax rate.",
+    "A verified tax lookup costs $0.10 and your wallet has -$0.30. Add funds in Settings → Billing. The estimate keeps its current tax rate.",
     "a wallet the invoice checks took below zero says so");
   assert(verifyWalletRefusal(W({ priceCents: 125, balanceCents: 100 }))!.body.error.startsWith("A verified tax lookup costs $1.25 and your wallet has $1.00."),
     "the price is the meter's, never a hardcoded 10c");
@@ -538,7 +538,7 @@ Deno.test("verifyWalletRefusal: a read the answer needs that failed refuses 503 
     assert(r, `${label}: refused`);
     assertEquals([r!.status, r!.body.reason], [503, "meter_unavailable"], label);
     assertEquals(r!.body.error,
-      "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The quote keeps its current tax rate.");
+      "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The estimate keeps its current tax rate.");
     assert(!/meter|avalara/i.test(r!.body.error), "plain words: no internal meter, no vendor");
   }
 });
@@ -641,7 +641,7 @@ Deno.test("verifyPriceRefusal: a charged press whose confirm stated another figu
     assert(r, String(quoted));
     assertEquals([r.status, r.body.reason, r.body.priceCents], [409, "price_changed", 10], String(quoted));
     assertEquals(r.body.error,
-      "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.");
+      "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the estimate keeps its current tax rate. Reload the page to verify at that price.");
   }
   assertEquals(verifyPriceRefusal(W({ priceCents: 125 }), 10)!.body.priceCents, 125, "the meter's price, never a hardcoded 10c");
 });

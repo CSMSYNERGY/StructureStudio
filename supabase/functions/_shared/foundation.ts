@@ -146,6 +146,6 @@ export function foundationDesc(basis: BosBasis, qty: number, rate: number): stri
     case "sqft_building": return `${qty} sq ft of building at $${r} per sq ft`;
     case "perimeter_building": return `${qty} ft of perimeter at $${r} per foot`;
     case "pct_building_price": return `${rate}% of the building price`;
-    case "pct_estimate_total": return `${rate}% of the rest of this quote`;
+    case "pct_estimate_total": return `${rate}% of the rest of this estimate`;
   }
 }

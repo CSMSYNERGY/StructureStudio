@@ -100,11 +100,11 @@ export function submitPersistMiss(input: {
  *  no document was replaced, and each says so, so pressing the button again is plainly safe. */
 export const SUBMIT_RACE_REFUSAL = {
   retaxed: {
-    error: "This quote was updated while it was being submitted, so nothing was sent. Submit it again to send the updated quote.",
+    error: "This estimate was updated while it was being submitted, so nothing was sent. Submit it again to send the updated estimate.",
     reason: "changed",
   },
   accepted: {
-    error: "This quote was accepted while it was being submitted, so these changes weren't saved and nothing was sent. Reopen the design: a change to an accepted quote is sent as a change order.",
+    error: "This estimate was accepted while it was being submitted, so these changes weren't saved and nothing was sent. Reopen the design: a change to an accepted estimate is sent as a change order.",
     reason: "accepted",
   },
 } as const;

@@ -133,7 +133,7 @@ const RVE: Level[] = ["none", "view", "edit"];
 
 export const AREAS: Area[] = [
   // ── Workspace ────────────────────────────────────────────────────────────
-  { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
+  { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and estimates",            levels: RVE },
   // CHANGING A LINE'S PRICE IN THE DESIGNER (a builder's request, migration 277,
   // 2026-10-05). The builder's ask: "a sales person with the right permission can change the charge
   // on any line item right in the Designer" — raise it for an extra-large rough opening, lower it to
@@ -152,7 +152,7 @@ export const AREAS: Area[] = [
   // ⚠️ access.ts is bundled per function: every function that bundles it must be redeployed with
   // this change, or its copy drops `price_override` from a saved Team grant as an unknown key.
   { key: "price_override",    label: "Override prices",    group: "workspace", hint: "Change a line's price in the Designer", levels: ["none", "edit"] },
-  { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
+  { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and estimates",         levels: RVE },
   // 'own' = see only the customers you are ASSIGNED TO or FOLLOWING — and, because a quote
   // belongs to a customer and not to a rep, only those customers' designs and browsing leads.
   //
@@ -214,7 +214,7 @@ export const AREAS: Area[] = [
   { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired — 'Own' limits them to their own customers; choose View or Edit for what they can do with them",
     levels: ["none", "own_view", "own", "view", "edit"], ownWrites: true },
   { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
-  { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
+  { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted estimates through delivery",    levels: RVE },
   // Amending a SIGNED order. Split out of `orders` (Carolyn, 2026-09-01: "Change Orders is
   // the only feature they shouldn't have unless given permission in the team settings") when
   // reps gained orders:edit so they could finalize an order, take payment and collect the
@@ -336,9 +336,9 @@ const AREA_BY_KEY = new Map(AREAS.map((a) => [a.key, a]));
 export const TITLES: { key: Title; label: string; blurb: string }[] = [
   { key: "owner",         label: "Owner",         blurb: "Everything, always — cannot be reduced" },
   { key: "admin",         label: "Admin",         blurb: "Runs the business day to day; an owner can grant Billing" },
-  { key: "office_staff",  label: "Office Staff",  blurb: "Quotes, orders and paperwork; keeps business details current" },
+  { key: "office_staff",  label: "Office Staff",  blurb: "Estimates, orders and paperwork; keeps business details current" },
   { key: "sales_manager", label: "Sales Manager", blurb: "Runs the sales team and sees everyone's numbers" },
-  { key: "sales_rep",     label: "Sales Rep",     blurb: "Sells: designs, quotes, contacts, own commission" },
+  { key: "sales_rep",     label: "Sales Rep",     blurb: "Sells: designs, estimates, contacts, own commission" },
   { key: "dealer",        label: "Dealer",        blurb: "Sells their own customers only — sees nobody else's" },
   { key: "scheduler",     label: "Scheduler",     blurb: "Plans builds, deliveries and repairs" },
   { key: "crew_leader",   label: "Crew Leader",   blurb: "Runs builds and repairs" },

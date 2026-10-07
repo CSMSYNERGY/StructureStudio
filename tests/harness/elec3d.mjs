@@ -948,7 +948,7 @@ async function parityRun(ctx, mode, shots) {
     out.rows = await elecRows(page);
     await page.screenshot({ path: `${shots}/11-parity-${mode}-details.png`, fullPage: false });
     const before = calls.length;
-    const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+    const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit Quote|Resubmit)$/ }).last();
     if (await submit.count()) {
       await submit.click().catch(() => {});
       for (let i = 0; i < 80 && !out.payload; i++) {

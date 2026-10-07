@@ -120,7 +120,7 @@ Deno.test("foundationDesc: the exact sentence the customer reads, per basis", ()
   assertStrictEquals(foundationDesc("perimeter_building", 72, 8), "72 ft of perimeter at $8.00 per foot");
   // Percent rates print as typed — "10%", never "10.00%".
   assertStrictEquals(foundationDesc("pct_building_price", 1, 10), "10% of the building price");
-  assertStrictEquals(foundationDesc("pct_estimate_total", 1, 7.5), "7.5% of the rest of this quote");
+  assertStrictEquals(foundationDesc("pct_estimate_total", 1, 7.5), "7.5% of the rest of this estimate");
   // A dollar rate always shows cents, even when typed as a whole number.
   assertStrictEquals(foundationDesc("each", 1, 1.5), "1 at $1.50 each");
   // qty is printed as-is: a fractional measurement is not rounded away in the description.

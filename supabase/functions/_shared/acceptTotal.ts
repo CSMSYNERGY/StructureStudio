@@ -45,7 +45,7 @@ const centsOf = (totalDollars: number | null): number | null =>
  * matched it (review, 2026-09-17). Refused over a re-price, a customer was logged out instead of
  * being shown the new total. The test file pins the sentence against that pattern.
  */
-export const REPRICED_SENTENCE = "This quote was just updated. Reload to see the current total, then accept it.";
+export const REPRICED_SENTENCE = "This estimate was just updated. Reload to see the current total, then accept it.";
 
 /** The one refusal both halves of the race answer with, so the page handles a single shape. */
 const repriced = (totalDollars: number | null): { status: 409; body: RepricedBody } => ({

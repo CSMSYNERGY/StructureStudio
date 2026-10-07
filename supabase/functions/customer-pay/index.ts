@@ -129,7 +129,7 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   }
 
   const code = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
-  if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid quote reference." }, 400);
+  if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid estimate reference." }, 400);
 
   const { data: settings, error: sErr } = await admin.from("client_settings")
     .select("invoice_in_ghl, payments_online_enabled, cardpointe_merchid, business_name")

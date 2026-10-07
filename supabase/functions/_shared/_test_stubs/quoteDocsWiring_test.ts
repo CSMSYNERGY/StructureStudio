@@ -257,7 +257,7 @@ Deno.test("save refuses anything but a whole number of days from 1 to 365, with 
   for (const sent of [0, 366, -3, 7.5, "7.5", "two weeks", true]) {
     const { status, body, trace } = await drive({ action: "save", quoteValidDays: sent });
     assertEquals(status, 400, `${JSON.stringify(sent)}: ${JSON.stringify(body)}`);
-    assertEquals(body.error, "Quotes have to stay good for a whole number of days, from 1 to 365.");
+    assertEquals(body.error, "Estimates have to stay good for a whole number of days, from 1 to 365.");
     assertEquals(trace.upserts.length, 0, `${JSON.stringify(sent)} wrote nothing`);
   }
 });

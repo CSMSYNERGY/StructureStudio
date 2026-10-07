@@ -61,7 +61,7 @@ Deno.test("crmFeed: a conversation email reads as its words; a failed one still 
   assertEquals([byId("e2").title, byId("e2").body], ["Delivery (failed)", "Tuesday works."],
     "with the words in the body, the failure moves to the title rather than vanishing");
   assertEquals([byId("e3").title, byId("e3").body], ["Before 261", "Emailed to cam@example.test (failed)"]);
-  assertEquals([byId("e4").title, byId("e4").body], ["Quote emailed to cam@example.test", "Your quote"], "document mail is unchanged");
+  assertEquals([byId("e4").title, byId("e4").body], ["Estimate emailed to cam@example.test", "Your quote"], "document mail is unchanged");
 });
 
 Deno.test("crmFeed before migration 261: no body_text column still shows every sent email", async () => {
@@ -94,7 +94,7 @@ Deno.test("crmFeed before migration 261: no body_text column still shows every s
   assert(!/\bbody_text\b/.test(asked[2]), `the last retry leaves body_text out: ${asked[2]}`);
   const byId = (id: string) => feed.find((e) => e.id === `e:${id}`);
   assertEquals([byId("e1")?.title, byId("e1")?.body], ["Your shed", "Emailed to cam@example.test"], "an email with no words keeps its old line");
-  assertEquals(byId("e2")?.title, "Quote emailed to cam@example.test", "document mail is still there");
+  assertEquals(byId("e2")?.title, "Estimate emailed to cam@example.test", "document mail is still there");
 });
 
 Deno.test("senderVerifiedFrom: pass on every reported check, a failure, or nothing we can read", () => {

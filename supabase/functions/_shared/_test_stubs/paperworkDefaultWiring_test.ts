@@ -228,7 +228,7 @@ Deno.test("blank starting numbers save as not chosen (1000 on first use, 283); t
       const { status, body, trace } = await save(card(over), row);
       assertEquals(status, 400, `${label} ${JSON.stringify(over)}: ${JSON.stringify(body)}`);
       assert(/needs a sales tax rate/.test(String(body.error)), String(body.error));
-      assertFalse(/starting (quote|invoice) number/.test(String(body.error)), "no numbering sentence is left");
+      assertFalse(/starting (quote|estimate|invoice) number/.test(String(body.error)), "no numbering sentence is left");
       assertEquals(trace.upserts.length, 0, `${label} ${JSON.stringify(over)} wrote nothing`);
     }
   }
@@ -446,7 +446,7 @@ Deno.test("a row created under 280's default with no rate: no_tax_rate, names th
   const { status, body, trace } = await submit(NEW_DEFAULT, { quoteNumber: "1000" });
   assertEquals(status, 400, JSON.stringify(body));
   assertEquals(body.reason, "no_tax_rate");
-  assert(/Settings → CRM Connection → Quotes & Invoices/.test(String(body.error)), String(body.error));
+  assert(/Settings → CRM Connection → Estimates & Invoices/.test(String(body.error)), String(body.error));
   assertEquals(trace.rpcs.filter((f) => f === "allocate_ss_quote_number").length, 0, "the allocator was never asked");
   assertFalse(trace.writes.some((w) => w.table === "designs"), "nothing was written to the design");
   assertEquals(trace.ghl.length, 0, "no CRM is connected, so nothing went to one");
@@ -467,7 +467,7 @@ Deno.test("the same row with a rate and blank numbers: asked once, and 1000 is t
 Deno.test("defensive: an allocator that still answers NULL (123 live, 283 not applied) refuses without inventing a number", async () => {
   const { status, body, trace } = await submit(NEW_DEFAULT_TAXED, { quoteNumber: null });
   assertEquals(status, 400, JSON.stringify(body));
-  assert(/couldn't issue a quote number/.test(String(body.error)), String(body.error));
+  assert(/couldn't issue an estimate number/.test(String(body.error)), String(body.error));
   assertEquals(trace.rpcs.filter((f) => f === "allocate_ss_quote_number").length, 1);
   assertFalse(trace.writes.some((w) => w.table === "designs"), "nothing was written to the design");
 });
@@ -475,7 +475,7 @@ Deno.test("defensive: an allocator that still answers NULL (123 live, 283 not ap
 Deno.test("a grandfathered row with no CRM (today's blocked shape) is refused exactly as before", async () => {
   const { status, body, trace } = await submit(GRANDFATHERED_NO_CRM);
   assertEquals(status, 400, JSON.stringify(body));
-  assertEquals(body.error, `${T} isn't set up to send quotes yet. (For the business: connect your CRM, or switch quotes to Structure Studio paperwork, under Settings → CRM Connection.)`);
+  assertEquals(body.error, `${T} isn't set up to send estimates yet. (For the business: connect your CRM, or switch estimates to Structure Studio paperwork, under Settings → CRM Connection.)`);
   assertEquals(trace.rpcs.length, 0);
   assertEquals(trace.ghl.length, 0);
 });
@@ -490,7 +490,7 @@ Deno.test("NO read-time override: a grandfathered row with a CRM keeps issuing t
 Deno.test("no settings row at all: refused as before (the first save creates the row)", async () => {
   const { status, body, trace } = await submit(null);
   assertEquals(status, 400, JSON.stringify(body));
-  assertEquals(body.error, `${T} hasn't finished setting up quotes yet — please try again later, or contact them directly.`);
+  assertEquals(body.error, `${T} hasn't finished setting up estimates yet — please try again later, or contact them directly.`);
   assertEquals(trace.rpcs.length, 0);
   assertEquals(trace.ghl.length, 0);
 });
@@ -506,7 +506,7 @@ Deno.test("no settings row at all: refused as before (the first save creates the
 // Driven through the real handler as the owner, on an accepted design with its quote issued, as far
 // as the number: the allocator answers NULL here (nothing past the number is under test), so a run
 // that reaches it ends on the defensive refusal and is told apart from the QuickBooks one by text.
-const QBO_SENTENCE = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Quotes & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
+const QBO_SENTENCE = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Estimates & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
 const INVOICE_CODE = "SS-PDMINV00001";
 const ACCEPTED_DESIGN = {
   client_id: T, short_code: INVOICE_CODE, status: "accepted", accepted_at: "2026-10-01T15:00:00Z", updated_at: "2026-10-01T15:00:00Z",

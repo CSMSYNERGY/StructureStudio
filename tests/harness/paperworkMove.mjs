@@ -62,7 +62,7 @@ let statusReads = 0;
 // portal-settings' one Quotes & Invoices refusal left since migration 283, word for word
 // (supabase/functions/portal-settings/index.ts, the `save` action's guard). The two numbering
 // refusals are gone: a blank start is stored NULL and allocated as 1000.
-const NEED_TAX = "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.";
+const NEED_TAX = "StructureStudio needs a sales tax rate before it can issue your invoices — set one so estimates can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.";
 
 const { ok, failed, results } = reporter();
 const { browser, ctx } = await launch({ width: 1400, height: 1000 });
@@ -133,8 +133,8 @@ if (process.env.SS_PORTAL_ARTIFACT) {
 
 const text = () => page.evaluate(() => document.body.innerText);
 const waitText = (s, timeout = 20000) => page.waitForFunction((x) => document.body.innerText.includes(x), s, { timeout }).then(() => true, () => false);
-const CHECKBOX = "Quote and invoice through my CRM";
-const SAVE = "Save Quote & Invoice Settings";
+const CHECKBOX = "Estimates and invoices through my CRM";
+const SAVE = "Save Estimate & Invoice Settings";
 const boot = async (shape) => {
   Object.assign(S, { invoiceInGhl: true, allowed: false, crm: true, noRow: false, quoteNext: null, invoiceNext: null, taxPct: null, qbo: false }, shape);
   saves.length = 0;
@@ -158,8 +158,8 @@ const fill = async ({ quote, invoice, tax }) => {
   if (tax != null) await box("e.g. 7.25").fill(tax);
 };
 const BANNER_TAX = "Before saving, set your sales tax rate (0 counts).";
-const QUOTE_HELP = "Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last quote). Counts up by one per quote.";
-const INVOICE_HELP = "Invoices number separately from quotes. Leave blank to start at 1000 (or carry on after your last invoice).";
+const QUOTE_HELP = "Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last estimate). Counts up by one per estimate.";
+const INVOICE_HELP = "Invoices number separately from estimates. Leave blank to start at 1000 (or carry on after your last invoice).";
 const QBO_HELP = "Connected to QuickBooks? Enter your next QuickBooks invoice number.";
 const press = async () => {
   const before = statusReads;
@@ -168,15 +168,15 @@ const press = async () => {
   await page.waitForTimeout(600);
   return statusReads - before;
 };
-const SAVED_SS = "Saved — StructureStudio now issues your quotes and invoices.";
-const SAVED_CRM = "Saved — your quotes and invoices are created in your CRM, exactly as before.";
+const SAVED_SS = "Saved — StructureStudio now issues your estimates and invoices.";
+const SAVED_CRM = "Saved — your estimates and invoices are created in your CRM, exactly as before.";
 
 try {
   // A — grandfathered, CRM-connected, no capability, no numbering
   await boot({ invoiceInGhl: true, allowed: false, crm: true });
   let t = await text();
   ok("A: no \"through my CRM\" checkbox for a tenant without the capability", !t.includes(CHECKBOX));
-  ok("A: the card says StructureStudio issues the paperwork", t.includes("StructureStudio issues your quotes and invoices."));
+  ok("A: the card says StructureStudio issues the paperwork", t.includes("StructureStudio issues your estimates and invoices."));
   ok("A: the numbering boxes (placeholder 1000) and the tax rate are in front of them", (await numberBoxes().count()) === 2 && (await box("e.g. 7.25").count()) === 1);
   ok("A: the banner asks for the tax rate only", t.includes(BANNER_TAX), (t.match(/Before saving[^\n]*/) || [""])[0]);
   ok("A: and no longer for numbers, nor warns about restarting at 1", !/Before saving, set a starting/.test(t) && !/restarted at 1/.test(t));

@@ -202,7 +202,7 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       // and matching on it would refuse a real recovery. Recorded as `rejected:` (a retry fails the
       // same way until the numbering moves), so the invoice is listed under Retry.
       if (existing?.Id && String(existing.CustomerRef?.value ?? "") !== String(customerId)) {
-        await fail(`rejected: QuickBooks already has an invoice numbered ${docNumber} for a different customer, so this one was not added to your books. Add it in QuickBooks by hand, and set your next invoice number past QuickBooks' own under Settings → CRM Connection → Quotes & Invoices`);
+        await fail(`rejected: QuickBooks already has an invoice numbered ${docNumber} for a different customer, so this one was not added to your books. Add it in QuickBooks by hand, and set your next invoice number past QuickBooks' own under Settings → CRM Connection → Estimates & Invoices`);
         return;
       }
       if (existing?.Id) {

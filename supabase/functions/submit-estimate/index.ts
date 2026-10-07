@@ -211,7 +211,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (settingsErr || !settings) {
     // No settings row at all: the owner has not opened Settings yet, so there is neither a CRM
     // nor a paperwork mode to issue the quote through. Shopper-facing wording, not an admin's.
-    return json({ error: `${clientId} hasn't finished setting up quotes yet — please try again later, or contact them directly.` }, 400);
+    return json({ error: `${clientId} hasn't finished setting up estimates yet — please try again later, or contact them directly.` }, 400);
   }
   // A CRM is OPTIONAL (Carolyn 2026-09-02: "a new builder that will not use GHL ... we just save
   // the contact in our database"). The contact is already in crm_contacts before we run —
@@ -222,7 +222,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const crmConnected: boolean = Boolean(settings.ghl_location_id && settings.ghl_api_key);
   if (!crmConnected && settings.invoice_in_ghl !== false) {
     return json({
-      error: `${clientId} isn't set up to send quotes yet. (For the business: connect your CRM, or switch quotes to Structure Studio paperwork, under Settings → CRM Connection.)`,
+      error: `${clientId} isn't set up to send estimates yet. (For the business: connect your CRM, or switch estimates to Structure Studio paperwork, under Settings → CRM Connection.)`,
     }, 400);
   }
   const locationId: string = settings.ghl_location_id || "";
@@ -512,7 +512,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           });
         }
         return json({
-          error: `${businessName} is receiving a lot of quote requests right now. Nothing was submitted - please wait a minute and send yours again.`,
+          error: `${businessName} is receiving a lot of estimate requests right now. Nothing was submitted - please wait a minute and send yours again.`,
           retryAfterSeconds: Math.ceil(RATE_WINDOW_MS / 1000),
         }, 429);
       }
@@ -683,7 +683,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       });
       if (credentialRefused) {
         return json({
-          error: `${businessName} can't send quotes online right now. Your design is saved, so please contact them directly. (For the business: re-check your CRM connection under Settings → CRM Connection.)`,
+          error: `${businessName} can't send estimates online right now. Your design is saved, so please contact them directly. (For the business: re-check your CRM connection under Settings → CRM Connection.)`,
         }, 400);
       }
       return json({ error: "We couldn't save your details with this business's CRM just now. Please try again in a moment." }, 502);
@@ -1053,7 +1053,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       return json({ error: "The electrical package isn't switched on for this account. Turn it on in the portal under Settings → Options → Electrical, then resubmit." }, 400);
     }
     if (es.package_price == null) {
-      return json({ error: "The electrical package has no price set, so it can't be quoted. Set it in the portal under Settings → Options → Electrical." }, 400);
+      return json({ error: "The electrical package has no price set, so it can't be priced. Set it in the portal under Settings → Options → Electrical." }, 400);
     }
     const outletSp = Number(es.outlet_spacing_ft) > 0 ? Number(es.outlet_spacing_ft) : 6;
     const lightSp = Number(es.light_spacing_ft) > 0 ? Number(es.light_spacing_ft) : 10;
@@ -1213,7 +1213,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         : bosBasis === "perimeter_building" ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
         : bosBasis === "lineal_ft"        ? `${buildingPerimeter} ft of wall at $${bosRate.toFixed(2)} per foot`
         : bosBasis === "pct_building_price" ? `${bosRate}% of the building price`
-        : bosBasis === "pct_estimate_total" ? `${bosRate}% of the rest of this quote`
+        : bosBasis === "pct_estimate_total" ? `${bosRate}% of the rest of this estimate`
         : "Crew and equipment to build on your site";
       if (bosCharges(wh.build_on_site, wh.bos_fee_rate, bosQty)) {
         const bosLine = tagLine({
@@ -1318,7 +1318,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           type: "one_time",
           description:
             basis === "pct_building_price" ? `${cladRate}% of the building price`
-            : basis === "pct_estimate_total" ? `${cladRate}% of the rest of this quote`
+            : basis === "pct_estimate_total" ? `${cladRate}% of the rest of this estimate`
             : cladShape.unit
               ? `${cladShape.qty} ${cladShape.unit} at $${cladRate.toFixed(2)} each`
               : `${cladName} for this building`,
@@ -2886,7 +2886,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           message: `sales location read failed: ${(e as { message?: string })?.message ?? String(e)}`,
           context: { designId: String(designId) },
         });
-        return json({ error: "We couldn't work out the sales tax for this quote just now. Please try again in a moment." }, 502);
+        return json({ error: "We couldn't work out the sales tax for this estimate just now. Please try again in a moment." }, 502);
       }
       taxDefault = chooseDefaultRate({ salesLocationId, location, homeLot, companyRate: ssTaxRate, companyLabel: ssTaxLabel });
       // No link has a rate. portal-settings refuses to turn invoice_in_ghl off without a company
@@ -2896,7 +2896,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // lives on that card. Refused BEFORE the number is allocated below, so it costs nothing.
       if (!taxDefault) {
         return json({
-          error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+          error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Estimates & Invoices (enter 0% if you don't collect sales tax).",
           reason: "no_tax_rate",
         }, 400);
       }
@@ -2926,7 +2926,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           message: `allocate_ss_quote_number failed: ${allocErr.message}`,
           context: { designId: String(designId) },
         });
-        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
+        return json({ error: "We couldn't issue an estimate number for this business just now. Please try again in a moment." }, 502);
       }
       ssQuoteNumber = allocated ? String(allocated) : null;
     }
@@ -2936,7 +2936,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // here, which could collide with paperwork the builder already has out.
     if (!ssQuoteNumber) {
       return json({
-        error: "We couldn't issue a quote number for this business. Please try again later, or contact them directly. (For the business: check your numbering under Settings → CRM Connection → Quotes & Invoices.)",
+        error: "We couldn't issue an estimate number for this business. Please try again later, or contact them directly. (For the business: check your numbering under Settings → CRM Connection → Estimates & Invoices.)",
       }, 400);
     }
     // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
@@ -3589,7 +3589,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // The registered business name, as text_sign_link uses it — never the tenant slug the email
       // falls back to, which is not a name a customer would recognise as the sender.
       const who = String(settings.business_name || "").trim();
-      const body = `${who ? who + ": " : ""}your quote ${ssQuoteNumber} is ready. `
+      const body = `${who ? who + ": " : ""}your estimate ${ssQuoteNumber} is ready. `
         + `View and accept it here: ${link} Reply STOP to opt out.`;
       const secret = Deno.env.get("SMS_INBOUND_SECRET") ?? "";
       const statusCallback = secret
@@ -3628,7 +3628,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       issuedBy: "structurestudio",
       ...(deliveryUnpriced ? { deliveryUnpriced } : {}),
       ...(persistErr
-        ? { warning: "The quote was issued, but saving it to the design failed — the stored record may be out of date. The error was logged for support." }
+        ? { warning: "The estimate was issued, but saving it to the design failed — the stored record may be out of date. The error was logged for support." }
         : {}),
       contactId,
       opportunityId: opportunityId || existingDesign.ghl_opportunity_id || null,
@@ -3722,7 +3722,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         });
         return json({
           error: "This customer has already accepted this estimate, so it can't be changed or re-sent. " +
-            "Start a new quote for the revised design, or amend the accepted one in your CRM.",
+            "Start a new estimate for the revised design, or amend the accepted one in your CRM.",
           alreadyAccepted: true,
         }, 409);
       }

@@ -147,7 +147,7 @@ export function parseSetSalesLocation(payload: unknown): Parsed<{ shortCode: str
   const p = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
   const shortCode = text(p.shortCode)?.slice(0, 64) ?? null;
   if (!shortCode) return refuse(400, "bad_request", "shortCode is required.");
-  if (!("locationId" in p)) return refuse(400, "bad_request", "locationId is required — send null to clear the quote's location.");
+  if (!("locationId" in p)) return refuse(400, "bad_request", "locationId is required — send null to clear the estimate's location.");
   const locationId = text(p.locationId);
   if (locationId && !UUID.test(locationId)) return refuse(404, "location_not_found", "Location not found.");
   return { ok: true, value: { shortCode, locationId, confirmResend: p.confirmResend === true } };
@@ -229,11 +229,11 @@ export function restampPlan(input: {
  *  Every one says the customer has not been sent the new total, because the rep may otherwise
  *  assume the quote went back out as it does when the send lands. */
 export const RESEND_NOT_SENT = {
-  noNumber: "This quote couldn't be emailed from here, so the customer hasn't been sent the new total. Let them know the total changed.",
-  pdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
-  noEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
-  failed: "The updated quote couldn't be emailed, so the customer hasn't been sent the new total. Resend it, or let them know the total changed.",
-  moved: "The quote changed again while it was being updated, so it wasn't emailed from here and the customer hasn't been sent the new total. Reload it to see the current total before telling them.",
+  noNumber: "This estimate couldn't be emailed from here, so the customer hasn't been sent the new total. Let them know the total changed.",
+  pdf: "The estimate PDF couldn't be rebuilt, so the updated estimate wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
+  noEmail: "The customer has no email address on this estimate, so they haven't been sent the new total. Let them know the total changed.",
+  failed: "The updated estimate couldn't be emailed, so the customer hasn't been sent the new total. Resend it, or let them know the total changed.",
+  moved: "The estimate changed again while it was being updated, so it wasn't emailed from here and the customer hasn't been sent the new total. Reload it to see the current total before telling them.",
 } as const;
 
 /**
