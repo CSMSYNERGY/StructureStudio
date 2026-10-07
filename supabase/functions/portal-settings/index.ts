@@ -129,7 +129,7 @@ import { measuredPitchLock } from "../_shared/styleD3.ts";
 // ...and so is an overhang the close-ups measured (2026-09-29).
 import { measuredOverhangLock } from "../_shared/styleD3.ts";
 // ...and a recessed porch's depth the reads' points measured (2026-10-07).
-import { measuredPorchLock, porchPointsApply } from "../_shared/styleD3.ts";
+import { measuredPorchLock } from "../_shared/styleD3.ts";
 // A read the API could not serve is sent again, the five reads' first sends are staggered, and an
 // upstream failure is told to the builder in a plain sentence (2026-09-26).
 import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
@@ -5499,25 +5499,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Live, a draft whose reads measured a 0.41 gable from their own points came out at 0.415, and
     // round 0 of this check then moved it to 0.7 by eye. So a pitch at least two reads MEASURED is
     // treated like a builder-measured eave: the prompt says it is not the check's to change and
-    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW (draft_tokens.samples
-    // and the first draft, `drafted`), so it holds for every round of this generation. v2 only:
-    // the legacy check is d3ab404's, rules and prompt alike.
-    // ...and only while the spec this round judges is still a gable: a round that follows one which
-    // turned the roof into a shed is not told its pitch was measured.
-    const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW: its draft_tokens.samples
+    // and the spec THIS ROUND JUDGES (draftRead: the last round's answer, or the first draft on round
+    // 0), never the request. v2 only: the legacy check is d3ab404's, rules and prompt alike.
+    // The judged spec, not `drafted` (review, 2026-10-07): while the lock holds that spec's pitch IS
+    // the draft's, so it holds for every later round; but a round that follows one which turned the
+    // roof into a shed or a gambrel is not locked, and nor is a later round judging the gable an
+    // earlier one brought back at a pitch set by eye, which no read measured.
+    const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, draftRead.d3);
     // ── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED THE SAME WAY (2026-09-29, measuredOverhangLock) ──
     // The draft measured the gable's overhang from enlarged close-ups of its corners, and step 2 of
     // the check would judge it again by eye in a whole frame, the reading the close-ups replaced. So
     // it is the builder-measured eave's posture again: the prompt says it is not the check's to change,
-    // and applySelfCheck drops a correction to it. Off the ROW, v2 only, and only while the spec this
-    // round judges is still a gable. A builder who typed the overhang keeps their own path (dims).
-    const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);
+    // and applySelfCheck drops a correction to it. Off the ROW's draft_tokens and the spec this round
+    // judges, as the pitch's: v2 only, only while that spec is still a gable, and only while its
+    // overhang is still the close-ups' own. A builder who typed the overhang keeps their own path (dims).
+    const overhangLocked = v2Check && measuredOverhangLock(claimed.draft_tokens, draftRead.d3);
     // ── A RECESSED PORCH'S DEPTH THE READS' POINTS MEASURED IS LOCKED TOO (2026-10-07, measuredPorchLock) ──
     // The reads measured the depth from points where by eye they gave 8 ft for a 6 ft porch, and step 3
     // of the check would judge it again by eye. So it is the measured pitch's posture: the prompt says it
-    // is not the check's to change, and applySelfCheck drops a correction to it. Off the ROW, v2 only,
-    // and only while the spec this round judges still has the porch the points measure (porchPointsApply).
-    const porchLocked = v2Check && porchPointsApply(draftRead.d3.roof) && measuredPorchLock(claimed.draft_tokens, claimed.drafted);
+    // is not the check's to change, and applySelfCheck drops a correction to it. Off the ROW's
+    // draft_tokens and the spec this round judges, as the pitch's: v2 only, only while that spec still
+    // has the porch the points measure (porchPointsApply), and only while its depth is within half a
+    // foot of a measured one. A porch an earlier round made projecting and the next put back at a depth
+    // judged by eye is not locked on that depth (review, 2026-10-07).
+    const porchLocked = v2Check && measuredPorchLock(claimed.draft_tokens, draftRead.d3);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line

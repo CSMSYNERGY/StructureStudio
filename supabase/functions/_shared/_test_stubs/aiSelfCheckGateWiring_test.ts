@@ -81,11 +81,12 @@ Deno.test("every gate is handed the mode, and the fetch sends the one request bu
   assert(body.includes("applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked, porchLocked)"), "the allow-list and the cap");
   // The measured-pitch lock is v2's alone (aiSelfCheckPitchLockWiring_test runs it): a legacy check
   // keeps d3ab404's rules.
-  assert(body.includes('const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);'), "the lock is v2's");
+  // Each lock reads the spec the round judges, not the first draft (review, 2026-10-07).
+  assert(body.includes("const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, draftRead.d3);"), "the lock is v2's");
   // ...and so is the measured-overhang lock (2026-09-29, aiSelfCheckOverhangLockWiring_test runs it).
-  assert(body.includes('const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);'), "the overhang lock is v2's");
+  assert(body.includes("const overhangLocked = v2Check && measuredOverhangLock(claimed.draft_tokens, draftRead.d3);"), "the overhang lock is v2's");
   // ...and so is the measured porch depth's (2026-10-07, aiSelfCheckPorchLockWiring_test runs it).
-  assert(body.includes("const porchLocked = v2Check && porchPointsApply(draftRead.d3.roof) && measuredPorchLock(claimed.draft_tokens, claimed.drafted);"), "the porch lock is v2's");
+  assert(body.includes("const porchLocked = v2Check && measuredPorchLock(claimed.draft_tokens, draftRead.d3);"), "the porch lock is v2's");
   assert(body.includes("selfCheckRequest({\n      mode: checkMode, dims, draft: draftRead.d3, pairs,"), "the prompt, the labels and the budget");
   assert(body.includes("const checkSignal = AbortSignal.timeout(plan.abortMs);"), "the abort is the mode's");
   assert(body.includes("body: JSON.stringify(plan.body),"), "and the body is exactly what was built");

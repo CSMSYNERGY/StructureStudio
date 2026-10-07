@@ -9,14 +9,16 @@
 // decides it off the ROW, the v2 prompt says so, and applySelfCheck drops a correction to
 // roof.porchDepthFt. What only the handler can get wrong:
 //
-//   1. the lock is worked out once, from the claimed row's draft_tokens and first draft, never from
-//      the request, and only while the spec the round judges still has the porch the points measure;
+//   1. the lock is worked out once, from the claimed row's draft_tokens and the spec the round judges
+//      (the last round's answer, or the first draft), never from the request: only while that spec
+//      still has the porch the points measure, at a depth within half a foot of a measured one;
 //   2. a locked row's depth correction is dropped (and logged, with the reason) while another field's
 //      correction on the same answer lands, and the prompt sent says the depth was measured;
 //   3. a row with too few measured reads, or a consensus on a judged number, lets it through with the
 //      prompt every check sent before this;
-//   4. the lock holds on a later round, and lets go on a round judging a porch an earlier round made
-//      projecting; a legacy check is untouched;
+//   4. the lock holds on a later round, lets go on a round judging a porch an earlier round made
+//      projecting, and stays off on the round after that if it put the recess back at a depth judged
+//      by eye; a legacy check is untouched;
 //   5. the designer's merge of the answer (calDraftRoof, lifted from both twins) keeps the measured
 //      depth: the browser applies the server's spec and re-applies no check depth of its own.
 //
@@ -26,7 +28,7 @@
 
 import {
   applySelfCheck, measuredOverhangLock, measuredPitchLock, measuredPorchLock, modelReplyText, parseKnownDims, parseSelfCheck,
-  porchPointsApply, sanitizeD3Spec, selfCheckChangedFields, selfCheckPrompt, selfCheckReverted, selfCheckRequest,
+  sanitizeD3Spec, selfCheckChangedFields, selfCheckPrompt, selfCheckReverted, selfCheckRequest,
   selfCheckTotalChanges, legacySelfCheckPrompt, SELF_CHECK_CLAIM_WINDOW_MS, SELF_CHECK_MAX_ROUNDS,
 } from "../styleD3.ts";
 import type { D3Spec, KnownDims, SelfCheckPair } from "../styleD3.ts";
@@ -70,7 +72,7 @@ for (const [ts, js] of [["let checkRes: Response;", "let checkRes;"], ["let chec
 }
 for (const must of [
   '.select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens")',
-  "const porchLocked = v2Check && porchPointsApply(draftRead.d3.roof) && measuredPorchLock(claimed.draft_tokens, claimed.drafted);",
+  "const porchLocked = v2Check && measuredPorchLock(claimed.draft_tokens, draftRead.d3);",
   "round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked, porchLocked,",
   "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked, porchLocked);",
   "...(porchLocked ? { porchLocked } : {})",
@@ -165,7 +167,7 @@ const PARAMS = [
   "skipped", "roundsBefore", "parseKnownDims", "sanitizeD3Spec", "appendRound", "recordSelfCheck", "v2Check",
   "measuredPitchLock", "selfCheckRequest", "checkMode", "pairs", "selfCheckChangedFields", "AbortSignal", "fetch",
   "apiKey", "failedCheck", "t0", "modelReplyText", "parseSelfCheck", "applySelfCheck", "selfCheckTotalChanges",
-  "selfCheckReverted", "SELF_CHECK_MAX_ROUNDS", "measuredOverhangLock", "measuredPorchLock", "porchPointsApply",
+  "selfCheckReverted", "SELF_CHECK_MAX_ROUNDS", "measuredOverhangLock", "measuredPorchLock",
 ];
 const RUN = new AsyncFunction(...PARAMS, `${BLOCK}\n  return { fellThrough: true };`);
 
@@ -195,7 +197,7 @@ async function runCheck(opts: { row: Row; round?: number; mode?: "v2" | "legacy"
     // deno-lint-ignore require-await
     async (code: string) => ({ failed: code }),
     Date.now(), modelReplyText, parseSelfCheck, applySelfCheck, selfCheckTotalChanges, selfCheckReverted,
-    SELF_CHECK_MAX_ROUNDS, measuredOverhangLock, measuredPorchLock, porchPointsApply,
+    SELF_CHECK_MAX_ROUNDS, measuredOverhangLock, measuredPorchLock,
   );
   assert(out && out.body && out.status === 200, `the check answered: ${JSON.stringify(out)}`);
   assertEquals(sent.length, 1, "one model call");
@@ -278,6 +280,21 @@ Deno.test("⚠️ the lock holds on a LATER round, and lets go on a round judgin
   const swapped = await runCheck({ row: later(projecting, [{ field: "roof.porchOutFt", from: null, to: 6, why: "it stands out" }]), round: 1, reply: back });
   assertEquals([swapped.reply.d3.roof.porchDepthFt, swapped.reply.d3.roof.porchOutFt], [8, undefined], "the recess comes back as the check asked");
   assert(!swapped.prompt.includes("WAS MEASURED"), "nothing said about a measured depth");
+  // Round 2 judges that recess at 8, judged by eye. Off the first draft (6) the row read as locked
+  // again, said the 8 was MEASURED and dropped a correction back to 6 (review, 2026-10-07). Off the
+  // spec it judges, it is not locked: no read measured 8.
+  const recessed8 = spec({ ...DRAFTED, roof: { ...DRAFTED.roof, porchDepthFt: 8 } });
+  assert(measuredPorchLock(MEASURED, DRAFTED) && !measuredPorchLock(MEASURED, recessed8), "the first draft locks, the judged spec does not");
+  const round2 = freshRow({
+    draft_tokens: MEASURED, self_check_at: new Date().toISOString(), self_check_round: 2,
+    self_check_verdict: "corrections", self_check_after: recessed8,
+    self_check_changed: [{ field: "roof.porchDepthFt", from: 6, to: 8, why: "by eye" }],
+  });
+  const six = { ...REPLY, corrections: { roof: { porchDepthFt: 6 } }, changed: [{ ...REPLY.changed[0], from: 8, to: 6 }] };
+  const third = await runCheck({ row: round2, round: 2, reply: six });
+  assertEquals(third.reply.d3.roof.porchDepthFt, 6, "the correction back to the measured 6 lands");
+  assertEquals(dropped(third.logged), undefined, "nothing dropped");
+  assert(third.prompt.includes("THIS IS CHECK ROUND 3 OF") && !third.prompt.includes("WAS MEASURED"), "and the 8 is not called measured");
 });
 
 Deno.test("⛔ a legacy check is untouched: d3ab404's prompt, and its rules let the depth through", async () => {

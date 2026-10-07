@@ -1901,7 +1901,7 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },\n' +
     '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n' +
     '    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] },\n' +
-    '    "porch": { "frame": <1-based index of the image you marked the recessed porch in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "porchBase": [<x>, <y>], "frontBase": [<x>, <y>], "porchFascia": [<x>, <y>], "frontFascia": [<x>, <y>] }\n' +
+    '    "porch": { "frame": <1-based index of the image you marked the recessed porch in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "porchBase": [<x>, <y>], "frontBase": [<x>, <y>], "backEave": [<x>, <y>], "frontEave": [<x>, <y>] }\n' +
     '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
@@ -6597,6 +6597,24 @@ Deno.test("applySelfCheck: the lock lets go when the same answer turns the gable
   assert(s.ok, "buildable");
   if (!s.ok) return;
   assertEquals([s.d3.roof.pitch, s.dropped], [0.25, []], "a shed's pitch is the check's to change");
+});
+
+Deno.test("applySelfCheck: a roof type nobody draws turns nothing, and lets go of nothing", () => {
+  // It is dropped before the merge, so the roof stays the gable whose pitch was measured (review,
+  // 2026-10-07: read off the declared key, it let go of the lock and the same answer's pitch landed).
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { type: "hip", pitch: 0.7 } },
+    changed: [change("roof.type"), change("roof.pitch")],
+    checked: {}, note: "",
+  });
+  const r = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", true);
+  assert(r.ok, "buildable");
+  if (!r.ok) return;
+  assertEquals([r.d3.roof.type, r.d3.roof.pitch, r.changed], [LOCK_GABLE.roof.type, LOCK_GABLE.roof.pitch, []], "the measured gable stands");
+  assertEquals([...r.dropped].sort(), ["roof.pitch", "roof.type"]);
+  const open = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2");
+  assert(open.ok && open.d3.roof.pitch === 0.7, "unlocked, the pitch lands as it always did");
 });
 
 Deno.test("⚠️ applySelfCheck with the lock drops a pitch correction and keeps every other one", () => {

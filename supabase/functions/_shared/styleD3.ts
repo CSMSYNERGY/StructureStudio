@@ -1216,8 +1216,9 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // hit too, and a side seen at an angle is the likely trap: read as a plain share of the side, a 6 ft
 // porch on a 40 ft building comes out 3.4 to 10 ft in the tests' camera simulation from 15 to 35
 // degrees off square, deep whenever the front end stood nearer the camera. So the PORCH paragraph
-// now ends by asking for `measure.porch`, five points in one side frame, only beside a porchDepthFt
-// on a gable-end front, and the server works the depth out by the step's cross-ratio
+// now ends by asking for `measure.porch`, five points in one side frame (three on the floor line, and
+// two on whichever roof edge along that side shows crisply, as far apart as it runs), only beside a
+// porchDepthFt on a gable-end front, and the server works the depth out by the step's cross-ratio
 // (porchDepthFromMeasure, below). Its example is generic (a 5 ft porch on a 28 ft deep building).
 //
 // ⚠️ THE TESTS PIN, ACROSS BOTH PROMPTS: the schema lines for pitch, overhangIn and the three
@@ -1235,7 +1236,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "pitch": { "frame": <1-based index of the image you read the gable's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },
     "wing": { "frame": <1-based index of the image you read the wing roofs' slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },
     "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image's width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] },
-    "porch": { "frame": <1-based index of the image you marked the recessed porch in>, "size": [<that image's width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "porchBase": [<x>, <y>], "frontBase": [<x>, <y>], "porchFascia": [<x>, <y>], "frontFascia": [<x>, <y>] }
+    "porch": { "frame": <1-based index of the image you marked the recessed porch in>, "size": [<that image's width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "porchBase": [<x>, <y>], "frontBase": [<x>, <y>], "backEave": [<x>, <y>], "frontEave": [<x>, <y>] }
   },
   "roof": {
     "type": "shed" | "gable" | "gambrel",
@@ -1337,7 +1338,7 @@ PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the
 
 PORCH GABLE: with a RECESSED porch at a gable end, look at that same triangle above the porch beam once more, from below and from the side as well as head-on. If there is no siding in it -- you can see the porch's ceiling, usually boards following the two roof slopes back to the wall with the door, or sky, through the beams -- set porchGable "open". The building's own front gable then stands back on that wall, sided, behind the porch. A triangle filled with siding over the porch, with or without a truss fixed on it, is the common case: leave porchGable out. A projecting porch, or no porch, never has it.
 
-PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. A deck with posts along its outer edge, standing in front of a wall that runs full height with the door in it, is PROJECTING, never recessed, however low its roof and however open its sides: recessed means the WALL itself stands back under the main roof. Omit both keys if the building has no porch. PORCH POINTS, measure.porch, only when you give porchDepthFt on a building whose front is a gable end: we work the porch's depth out from these points, so mark them rather than judge it. Use ONE frame that shows a whole long side, from its back corner to its front corner, with the porch's open side in view; the more square-on to that side the better. Give that image's own size as size, [width, height], and five points in pixels, x to the RIGHT and y DOWN from the top-left corner: backBase, the foot of that side wall at the BACK corner, where the siding meets the floor band or the foundation; porchBase, the foot of the same side wall where it ENDS at the porch, the corner where it meets the recessed front wall, at the last of the siding before the open side of the porch; frontBase, the foot of the porch's front corner post on that side, on the same floor line as the other two; porchFascia, the bottom edge of the fascia straight above porchBase; and frontFascia, the bottom edge of the fascia straight above frontBase. When the roof steps, put both fascia points on the FRONT section's fascia. For example, a side in a 1600 by 900 image might read backBase [1190, 598], porchBase [530, 578], frontBase [410, 574], porchFascia [523, 371], frontFascia [400, 373].
+PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. A deck with posts along its outer edge, standing in front of a wall that runs full height with the door in it, is PROJECTING, never recessed, however low its roof and however open its sides: recessed means the WALL itself stands back under the main roof. Omit both keys if the building has no porch. PORCH POINTS, measure.porch, only when you give porchDepthFt on a building whose front is a gable end: we work the porch's depth out from these points, so mark them rather than judge it. Use ONE frame that shows a whole long side, from its back corner to its front corner, with the porch's open side in view; the more square-on to that side the better. Give that image's own size as size, [width, height], and five points in pixels, x to the RIGHT and y DOWN from the top-left corner: backBase, the foot of that side wall at the BACK corner, where the siding meets the floor band or the foundation; porchBase, the foot of the same side wall where it ENDS at the porch, the corner where it meets the recessed front wall, at the last of the siding before the open side of the porch; frontBase, the foot of the porch's front corner post on that side, on the same floor line as the other two; and two points on ONE straight edge of the roof along that side, whichever edge shows crisply all the way along, usually the roof's own lower edge against the fascia below it: frontEave, on that edge above the front corner post, and backEave, on the same edge as far back as it runs, above backBase, or just in front of the step when the roof steps (both on the FRONT section's edge then). Only that edge's direction is used, so put its two points as far apart as it goes; neither has to be above porchBase. For example, a side in a 1600 by 900 image might read backBase [1190, 598], porchBase [530, 578], frontBase [410, 574], backEave [1204, 343], frontEave [400, 360].
 
 PROJECTING PORCH: a porch built IN FRONT of the front wall instead of cut into it. The wall runs full height behind it, with the door in it, and the main roof stops at that wall exactly as it would with no porch. In front of the wall stands a deck at floor level with posts along its outer edge, covered by its own separate roof: a low, nearly flat slope that starts on the wall and falls away over the posts. From the front you see TWO roof edges, the main roof's and the porch's lower one below it. Three things settle it from the ground, and all three survive a walk-around: the wall runs UNBROKEN from the floor up behind the porch roof, with nothing cut out of it; the porch ceiling is nearly level while the main roof above it is a separate plane; and from the side the porch sticks out PAST the front of the building instead of sitting inside it. Give porchOutFt as how far the posts stand out from the wall, in feet, typically 4 to 8; a porch never changes the building's size. A porch is one kind or the other: if you give porchOutFt, leave porchDepthFt and porchTruss out.
 
@@ -2514,24 +2515,38 @@ export function stepFromMeasure(block: unknown, lengthFt: unknown, wallFt: unkno
 // roof step's place and the gable's pitch hit on the same pipeline, and pixel points fixed both. So
 // the PORCH paragraph now asks for `measure.porch` (its PORCH POINTS sentences): five points in ONE
 // frame of a long side, the foot of that side wall at the back corner (backBase), at the corner where
-// it ends at the porch (porchBase) and at the porch's front corner post (frontBase), and the fascia's
-// bottom edge above the last two (porchFascia, frontFascia).
+// it ends at the porch (porchBase) and at the porch's front corner post (frontBase), and two points
+// on one straight edge of the roof along that side, above the front post (frontEave) and as far back
+// as that edge runs (backEave).
 //
 // THE DEPTH is stepFromMeasure's cross-ratio, with the porch corner where the joint was. The base line
-// (backBase to frontBase) and the fascia's line (porchFascia to frontFascia) are parallel on the
-// building, so in the frame they meet at the side's vanishing point, u_v along the base line. With the
-// back corner at u = 0, the front corner post at u1 and the porch corner at uP, on a building L ft
-// deep, the porch corner stands S ft from the back where
+// (backBase to frontBase) and the eave's edge (backEave to frontEave) are parallel on the building, so
+// in the frame they meet at the side's vanishing point, u_v along the base line. With the back corner
+// at u = 0, the front corner post at u1 and the porch corner at uP, on a building L ft deep, the porch
+// corner stands S ft from the back where
 //     L / (L - S) = (u1 (u_v - uP)) / ((u1 - uP) u_v)
 // and the depth is L - S. Lines that do not meet (a square-on frame) are the limit u_v -> infinity, a
-// plain share: depth = L (1 - uP / u1). It is rounded to half a foot. The fascia stands out from the
-// wall by the overhang, which moves its line in the frame but not its direction, so it meets the base
-// line at the same vanishing point.
+// plain share: depth = L (1 - uP / u1). It is rounded to half a foot. The eave stands out from the
+// wall by the overhang and up from it by the fascia, which move its line in the frame but not its
+// direction, so it meets the base line at the same vanishing point.
 //
-// ONLY WHERE THE FASCIA RUNS LEVEL ALONG THAT SIDE (porchPointsApply): a recessed porch at the front of
+// ONLY THE EAVE'S DIRECTION IS USED, so its two points go as far apart as the edge runs (review,
+// 2026-10-07). The first paragraph asked for the fascia's bottom edge straight above porchBase and
+// frontBase: points only the porch's width apart (182 and 206 px in two live frames of a 40 ft side),
+// on an edge that on a dark fascia over dark siding does not show, so three stand-in reads each had
+// to guess it. One pixel on either moved the depth about 0.15 ft (a base point 0.01 to 0.04), 2 px on
+// the two came to as much as 1.25 ft in the tests' camera simulation, and the three reads spread from
+// 5.5 to 6.5 for a 6. The same 2 px on an edge the whole side long is 0.2 ft, and the stand-ins' own
+// base points with the roof's crisp lower edge, along the front section to its step, read 5.86 to
+// 5.96. So the paragraph asks for whichever edge shows crisply, usually the roof's lower edge, as far
+// along as it runs; porchDepthPoints.test.ts jitters both points and pins the live frames.
+//
+// ONLY WHERE THE EAVE RUNS LEVEL ALONG THAT SIDE (porchPointsApply): a recessed porch at the front of
 // a two-slope roof whose front is a gable end, with no wings. Along a rake, or a shed's sloping edge,
-// the fascia is not parallel to the floor and meets it nowhere useful; and beside wings the side seen
+// the edge is not parallel to the floor and meets it nowhere useful; and beside wings the side seen
 // is a wing's wall, which never ends at the porch (nor does the renderer draw a recessed porch there).
+// Where the roof steps, both eave points are on the FRONT section's edge: the rear section's edge is
+// parallel to it but not on its line.
 //
 // NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: the depth is null ("keep the model's own") unless
 // every check holds, and `refused` names the first that failed (the probe prints it):
@@ -2541,9 +2556,15 @@ export function stepFromMeasure(block: unknown, lengthFt: unknown, wallFt: unkno
 //              width when `size` is given (stepFromMeasure's rule)
 //   across     ...and runs ACROSS the frame, no steeper than 45 degrees, as a side seen square-on to it does
 //   between    porchBase lies strictly between the two corners along it
-//   fascia     both fascia points stand above the base line, porchFascia above porchBase
-//   lean       porchBase lies within MEASURE_PORCH_MAX_LEAN of the wall's height in the frame (porchBase
-//              up to porchFascia) off the base line
+//   eave       both eave points stand above the base line
+//   run        backEave lies behind frontEave along the base line by at least MEASURE_PORCH_MIN_EAVE_RUN
+//              of it: over a shorter run a pixel or two of placement is the direction. In the camera
+//              simulation 2 px on each of the two points is at most about 0.4 ft from a 0.3 run, 1.25 ft
+//              from the porch's own width; and two points the porch's width apart, as the first
+//              paragraph asked, ran 0.17 and 0.24 of the base line in the live frames and are refused.
+//              A roof step nearer the front than that leaves too short an edge, and keeps the model's own.
+//   lean       porchBase lies within MEASURE_PORCH_MAX_LEAN of the wall's height in the frame at the
+//              front post (frontEave's height above the base line) off the base line
 //   vanishing  the two lines, when they meet, meet OUTSIDE the corners: between them is no camera's
 //   front      the porch corner is nearer the front corner than the back, IN FEET (the share with the
 //              perspective undone, not the frame's): a porch takes less than half the building, and a
@@ -2554,17 +2575,18 @@ export function stepFromMeasure(block: unknown, lengthFt: unknown, wallFt: unkno
 //              clamp (d3RecessedPorch, and roofStepAtSize's porchIn here)
 export const MEASURE_PORCH_MIN_SPAN = 0.25;
 export const MEASURE_PORCH_MAX_LEAN = 0.25;
+export const MEASURE_PORCH_MIN_EAVE_RUN = 0.3;
 export const MEASURE_PORCH_MIN_DEPTH_FT = 1;
 export const MEASURE_PORCH_ROOM_FT = 4;
-export type PorchRefusal = "points" | "length" | "span" | "across" | "between" | "fascia" | "lean" | "vanishing" | "front" | "shallow" | "deep" | "room";
+export type PorchRefusal = "points" | "length" | "span" | "across" | "between" | "eave" | "run" | "lean" | "vanishing" | "front" | "shallow" | "deep" | "room";
 // `share` is the porch corner's share of the way from the back corner to the front one, perspective
 // undone, and `rawDepthFt` the depth before rounding: there once the arithmetic got that far.
 export type PorchDepthReading = { depthFt: number | null; refused: PorchRefusal | null; share?: number; rawDepthFt?: number };
 export function porchDepthReading(block: unknown, lengthFt: unknown): PorchDepthReading {
   const no = (refused: PorchRefusal, more: Partial<PorchDepthReading> = {}): PorchDepthReading => ({ depthFt: null, refused, ...more });
-  const m = measurePoints(block, ["backBase", "porchBase", "frontBase", "porchFascia", "frontFascia"]);
+  const m = measurePoints(block, ["backBase", "porchBase", "frontBase", "backEave", "frontEave"]);
   if (!m) return no("points");
-  const [b0, bP, b1, fP, fF] = m.pts;
+  const [b0, bP, b1, eB, eF] = m.pts;
   const L = num(lengthFt);
   if (L === null || !(L > 0)) return no("length");
   const dx = b1[0] - b0[0], dy = b1[1] - b0[1];
@@ -2578,17 +2600,19 @@ export function porchDepthReading(block: unknown, lengthFt: unknown): PorchDepth
   const off = (p: MeasureXY) => ((p[1] - b0[1]) * ux - (p[0] - b0[0]) * uy) * Math.sign(ux);
   const uP = along(bP), u1 = span;
   if (!(uP > 0 && uP < u1)) return no("between");
-  const wallPx = bP[1] - fP[1];
-  const ex = fF[0] - fP[0], ey = fF[1] - fP[1];
-  if (!(off(fP) < 0 && off(fF) < 0 && wallPx > 0 && Math.hypot(ex, ey) > 0)) return no("fascia");
+  // The wall's height in the frame at the front post: frontEave's height above the base line.
+  const wallPx = -off(eF);
+  if (!(wallPx > 0 && off(eB) < 0)) return no("eave");
+  if (!(along(eF) - along(eB) >= MEASURE_PORCH_MIN_EAVE_RUN * u1)) return no("run");
   if (Math.abs(off(bP)) > MEASURE_PORCH_MAX_LEAN * wallPx) return no("lean");
-  // Where the fascia's line crosses the base line, as u along it: the vanishing point.
+  // Where the eave's line crosses the base line, as u along it: the vanishing point.
+  const ex = eF[0] - eB[0], ey = eF[1] - eB[1];
   const denom = ux * ey - uy * ex;
   let share: number;
   if (Math.abs(denom) < 1e-9 * Math.hypot(ex, ey)) {
     share = uP / u1;
   } else {
-    const uv = ((fP[0] - b0[0]) * ey - (fP[1] - b0[1]) * ex) / denom;
+    const uv = ((eB[0] - b0[0]) * ey - (eB[1] - b0[1]) * ex) / denom;
     if (!(uv < 0 || uv > u1)) return no("vanishing");
     const R = (u1 * (uv - uP)) / ((u1 - uP) * uv);
     if (!(Number.isFinite(R) && R > 1)) return no("vanishing");
@@ -2736,12 +2760,15 @@ export function applyMeasuredPitches(d3: D3Spec, text: string, lengthFt?: number
 // So a pitch the reads MEASURED is treated like a builder-measured eave: selfCheckPrompt says it is
 // not the check's to change, and applySelfCheck drops a correction to it.
 //
-// True only when all of these hold, read off the ledger row (draft_tokens and drafted), so the
-// answer is the same for every round of one generation:
+// True only when all of these hold, read off the ledger row's draft_tokens and the spec the round
+// judges (`drafted`: the handler passes the last round's answer, or the first draft on round 0). While
+// the lock holds that spec's pitch is the draft's, so the answer is the same for every later round; a
+// round judging a gable an earlier round brought back from another roof at a pitch set by eye is
+// judged on that pitch, and is not locked on it (review, 2026-10-07: off the first draft, it was):
 //   * draft_tokens.samples has at least MEASURED_PITCH_LOCK_MIN_READS gable reads whose pitch came
 //     from their points (pitchSource "points", a finite pitch). One read is one set of points, and
 //     one set can be a lucky frame.
-//   * the drafted spec is a gable with a finite pitch;
+//   * the judged spec is a gable with a finite pitch;
 //   * and that pitch is within MEASURED_PITCH_LOCK_TOLERANCE of at least one of those measured
 //     pitches. A consensus that settled on a judged read's number is not a measured one.
 // Anything else, including anything malformed, is false: the check goes on exactly as before.
@@ -2783,11 +2810,12 @@ export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boole
 // measured is treated like a measured pitch and like the builder's own tape measure: selfCheckPrompt
 // says it is not the check's to change, and applySelfCheck drops a correction to it.
 //
-// True only when both hold, read off the ledger row (draft_tokens and drafted), so the answer is the
-// same for every round of one generation:
+// True only when both hold, read off the ledger row's draft_tokens and the spec the round judges (as
+// measuredPitchLock's, so an overhang an earlier round changed while the roof was something else is not
+// locked when a later round brings the gable back):
 //   * draft_tokens.overhangZoom.after is a number: the close-up ran and gave an overhang (it is null
 //     when too few of its asks held up, and the record is absent when none was tried);
-//   * the drafted spec is a gable whose overhang is that number, within
+//   * the judged spec is a gable whose overhang is that number, within
 //     MEASURED_OVERHANG_LOCK_TOLERANCE for rounding: a draft whose overhang came from anywhere else is
 //     not a measured one.
 // Anything else, anything malformed included, is false, and the check goes on exactly as before. A
@@ -2811,11 +2839,12 @@ export function measuredOverhangLock(draftTokens: unknown, drafted: unknown): bo
 // the same kind of angled frames, so a depth the reads MEASURED is measuredPitchLock's case exactly:
 // selfCheckPrompt says it is not the check's to change, and applySelfCheck drops a correction to it.
 //
-// True only when all of these hold, read off the ledger row (draft_tokens and drafted), so the answer
-// is the same for every round of one generation:
+// True only when all of these hold, read off the ledger row's draft_tokens and the spec the round
+// judges (as measuredPitchLock's: a porch an earlier round made projecting and the next put back at a
+// depth judged by eye is judged on that depth, and was locked on it while this read the first draft):
 //   * draft_tokens.samples has at least MEASURED_PORCH_LOCK_MIN_READS reads whose depth came from their
 //     points (porchSource "points", a finite porchDepthFt, on a porch the points are asked for);
-//   * the drafted spec has a porch the points are asked for (porchPointsApply) with a finite depth;
+//   * the judged spec has a porch the points are asked for (porchPointsApply) with a finite depth;
 //   * and that depth is within MEASURED_PORCH_LOCK_TOLERANCE of at least one of the measured depths:
 //     half a foot, the points' own rounding, so a consensus that settled on a judged read's number is
 //     not a measured one (a 6 measured twice beside three judged 8s drafts at 8, and stays unlocked).
@@ -4094,8 +4123,9 @@ export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCh
 // the pitch lock's terms (below). v2 only, and absent is false.
 //
 // `porchLocked` (2026-10-07) is measuredPorchLock's answer, the same way for roof.porchDepthFt: the
-// reads' points measured a recessed porch's depth, so it comes off the list, and lets go only when
-// this answer leaves no porch the points were marked on (below). v2 only, and absent is false.
+// reads' points measured a recessed porch's depth, so a correction to it is dropped, and the lock lets
+// go only when the spec this answer builds has no porch the points were marked on (below). v2 only,
+// and absent is false.
 export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false, overhangLocked = false, porchLocked = false):
   | { ok: false; error: string }
   | {
@@ -4129,25 +4159,21 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   const typeWanted = declared.includes("roof.type")
     ? ((read.corrections as { roof?: { type?: unknown } }).roof ?? {}).type
     : undefined;
-  const gableStays = roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
+  // A declared type the renderer cannot draw is dropped before the merge (below), so it turns nothing
+  // and lets go of nothing (review, 2026-10-07): the roof stays the gable whose pitch was measured.
+  const typeLands = typeWanted !== undefined && (D3_ROOF_TYPES as readonly string[]).includes(String(typeWanted));
+  const gableStays = roofNow?.type === "gable" && (!typeLands || typeWanted === "gable");
   const lockPitch = pitchLocked && gableStays;
   // The measured overhang's lock holds on the same terms: the close-ups measured a GABLE's eave corners,
   // so an answer that turns the roof into something else was not looking at the building they measured.
   const lockOverhang = overhangLocked === true && gableStays;
-  // The measured porch depth's lock holds while the porch this answer leaves is still the one the
-  // points were marked on (porchPointsApply): recessed, at the front of a gable-end front, no wings.
-  // An answer that makes the porch projecting or takes it off, turns the roof, or adds wings is not
-  // judging the depth of the porch the points measured, so the lock lets go and that answer lands
-  // as it always did, the recess going with it. The test reads the roof as the declared roof keys
-  // would leave it, the way gableStays reads a declared roof.type.
-  const roofAfter: Record<string, unknown> = { ...(base.d3.roof as Record<string, unknown>) };
-  const roofAsked = measureObject((read.corrections as { roof?: unknown }).roof);
-  if (roofAsked) {
-    for (const f of declared) if (f.startsWith("roof.") && f.slice(5) in roofAsked) roofAfter[f.slice(5)] = roofAsked[f.slice(5)];
-  }
-  const lockPorch = porchLocked === true && porchPointsApply(base.d3.roof) && porchPointsApply(roofAfter);
-  const allow = measuredEave || lockPitch || lockOverhang || lockPorch
-    ? rules.allow.filter((f) => !((measuredEave || lockOverhang) && f === "roof.overhang") && !(lockPitch && f === "roof.pitch") && !(lockPorch && f === "roof.porchDepthFt"))
+  // The measured porch depth's lock is decided on the spec this answer BUILDS, after the merge below,
+  // not here: a declared side wall, roof.type or roof.front the gates drop or the destructive pass puts
+  // back leaves the porch exactly as it was, and read off the declared keys each let go of the lock and
+  // landed a judged depth on that unchanged porch (review, 2026-10-07). Here, only whether it can hold.
+  const porchLockable = porchLocked === true && porchPointsApply(base.d3.roof);
+  const allow = measuredEave || lockPitch || lockOverhang
+    ? rules.allow.filter((f) => !((measuredEave || lockOverhang) && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
     : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
@@ -4307,6 +4333,20 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   );
   if (destructive.length) {
     for (const f of destructive) { wanted.delete(f); dropped.push(f); }
+    finalSpec = build();
+    if (!finalSpec.ok) return { ok: false, error: `The corrected spec could not be built: ${finalSpec.error}` };
+  }
+
+  // THE MEASURED PORCH DEPTH'S LOCK, on the spec the answer actually builds. If it still has the porch
+  // the points were marked on (porchPointsApply: recessed, at the front of a gable-end front, no
+  // wings), the depth correction comes back out and the spec is rebuilt once, so the reads' measured
+  // depth stands; nothing else the answer asked for moves. An answer that makes the porch projecting or
+  // takes it off, turns the roof to a shed or the front to the eave wall, or adds wings is not judging
+  // the depth of the porch the points measured: the lock lets go and that answer lands as it always
+  // did, the recess going with it.
+  if (porchLockable && wanted.has("roof.porchDepthFt") && porchPointsApply(finalSpec.d3.roof)) {
+    wanted.delete("roof.porchDepthFt");
+    dropped.push("roof.porchDepthFt");
     finalSpec = build();
     if (!finalSpec.ok) return { ok: false, error: `The corrected spec could not be built: ${finalSpec.error}` };
   }
@@ -5088,6 +5128,17 @@ export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly D
 // that stepped that way give the rise and the joint: a median over both signs of 0.5, 0.6, -0.5 and
 // -0.6 is 0, which the sanitiser drops, and of 0.6 and -0.4 is 0.1, a step no read saw.
 //
+// A RECESSED PORCH'S DEPTH, WHERE READS MEASURED IT (2026-10-07), is the median of the MEASURED reads
+// alone: when the consensus's porch is one the points are for (porchPointsApply's terms, on the answers
+// chosen above) and at least MEASURED_PORCH_LOCK_MIN_READS of the recessed reads took their depth from
+// their points (ConsensusDraft.porchMeasured), the judged reads' depths do not vote; otherwise every
+// recessed read does, as before (review, 2026-10-07). Live, the eye read a 6 ft porch as 8 in 17 reads
+// of 18, and points are refused, or not given, often enough that two measured 6s and three judged 8s is
+// a likely five: over all five its median is 8, a judged number, which measuredPorchLock rightly will
+// not lock and the self-check is then free to keep. Two is the lock's count, for its reason:
+// independent sets of points. The spread still reports every read. The pitch's median still runs over
+// every read; this is the porch depth's alone, where the eye's error is known and one-sided.
+//
 // COLOURS: per key, the median of each channel over the reads that gave the key. An odd count's
 // median is a reading's own value, channel by channel. An even count's is the midpoint of its middle
 // two, and two middles far apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart: the two
@@ -5096,7 +5147,9 @@ export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly D
 // instead.
 //
 // The result goes back through sanitizeD3Spec. One read comes back exactly as it went in.
-export type ConsensusDraft = { d3: D3Spec; observed: ObservedNotes | null; frameMap: FrameMap | null };
+// `porchMeasured` (2026-10-07): true on a read whose recessed porch depth came from its own points
+// (its PitchSources.porchSource is "points"). Absent is false.
+export type ConsensusDraft = { d3: D3Spec; observed: ObservedNotes | null; frameMap: FrameMap | null; porchMeasured?: boolean };
 export type ConsensusReport = {
   n: number;
   // The medoid's position in the drafts given.
@@ -5324,10 +5377,18 @@ export function consensusDrafts(drafts: readonly ConsensusDraft[]): ConsensusRes
   });
 
   const spread: Record<string, [number, number]> = {};
+  // The consensus's porch is one the points are for (porchPointsApply's terms, on the chosen answers).
+  const porchPointsChosen = (chosen.type === "gable" || chosen.type === "gambrel") && chosen.front === "gable"
+    && chosen.porch === "recessed" && (chosen.porchEnd ?? "front") === "front" && chosen.wings !== "yes";
   for (const f of CONSENSUS_NUMBERS) {
-    const values = drafts.filter((d) => f.counts(d.d3, chosen)).map((d) => f.get(d.d3)).filter((v): v is number => v !== null);
+    const counted = drafts.filter((d) => f.counts(d.d3, chosen));
+    const values = counted.map((d) => f.get(d.d3)).filter((v): v is number => v !== null);
     if (!values.length) { f.set(out, null); continue; }
-    const m = consensusMedian(values);
+    // A recessed porch's depth: the measured reads' alone, when there are enough of them (above).
+    const measured = f.name === "porchDepthFt" && porchPointsChosen
+      ? counted.filter((d) => d.porchMeasured === true && porchPointsApply(d.d3.roof)).map((d) => f.get(d.d3)).filter((v): v is number => v !== null)
+      : [];
+    const m = consensusMedian(measured.length >= MEASURED_PORCH_LOCK_MIN_READS ? measured : values);
     f.set(out, f.whole ? Math.round(m) : m);
     const lo = Math.min(...values), hi = Math.max(...values);
     if (lo < hi) spread[f.name] = [lo, hi];
@@ -5375,7 +5436,13 @@ export function consensusOfCalls(
   calls.forEach((c, call) => {
     if (!c.reading || !c.reading.d3) return;
     const text = c.reading.reply.text;
-    usable.push({ call, draft: { d3: c.reading.d3, observed: parseObservedNotes(text), frameMap: parseFrameMap(text, walkFrames) } });
+    usable.push({
+      call,
+      draft: {
+        d3: c.reading.d3, observed: parseObservedNotes(text), frameMap: parseFrameMap(text, walkFrames),
+        ...(c.reading.pitch?.porchSource === "points" ? { porchMeasured: true } : {}),
+      },
+    });
   });
   if (!usable.length) return null;
   const result = consensusDrafts(usable.map((u) => u.draft));
