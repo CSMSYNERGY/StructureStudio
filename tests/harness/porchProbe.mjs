@@ -595,16 +595,16 @@ async function measureSteps(page, W, L, H) {
       frame.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "deckSupport") { const b = boxIn(q, inv); out.deckSupports.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]); } });
       M.roofGroup.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "post") { const b = boxIn(q, inv); out.deckPosts.push([(b.mn[0] + b.mx[0]) / 2, b.mn[2], b.mx[2]]); } });
     }
-    // A recessed porch's posts, in the holder's frame: the eave line's tagged ones, and a gable end's two
-    // corner posts, found by their size (0.32 ft square and the wall's height: nothing else is).
+    // A recessed porch's posts, in the holder's frame, by their tag (userData.ssPorchFrame "post", 2026-10-07):
+    // the porch frame's 4x6s, the corner posts standing in the corner boards' place, and on an eave wall the
+    // posts between them. Every other upright at the corners (a corner board) is no post.
     out.recPosts = [];
     M.roofGroup.traverse((q) => {
       if (!q.isMesh || !q.geometry || q.geometry.type !== "BoxGeometry") return;
-      const g = q.geometry.parameters;
-      const tagged = q.userData && q.userData.ssRecessedEave === "post";
-      if (!tagged && !(Math.abs(g.width - 0.32) < 1e-9 && Math.abs(g.depth - 0.32) < 1e-9 && Math.abs(g.height - H) < 1e-6)) return;
-      const b = boxIn(q, inv);
-      out.recPosts.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]);
+      if (q.userData && q.userData.ssPorchFrame === "post") {
+        const b = boxIn(q, inv);
+        out.recPosts.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]);
+      }
     });
     return out;
   }, { W, L, H });

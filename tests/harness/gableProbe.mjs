@@ -20,6 +20,15 @@
 //       (a saved get_config read — how the real tenant's Cabin was measured on 2026-09-15)
 //   SS_VARIANTS=porch:batten,plain:panel  PROBE_WALL_VENT=1  SS_SHOTS=<dir>
 //
+// THE FRAME CUT TO FIT (2026-10-07). The 2026-10-06 review, on a dark cabin with an 8 ft recessed porch:
+// two posts at each front corner, and the truss not cut to fit. The porch frame is one plane of 4x6
+// timber now, its members found by userData.ssPorchFrame, and frameChecks measures every joint: the
+// chords meet at the apex and sit on the beam, the king post's top meets both chords, each strut's top
+// meets its chord and its foot the beam and the king post, all within 0.01 ft, no member inside another;
+// one upright at each porch corner, a corner board at each inside corner, side beams back to the wall.
+// The "open" variant (roof.porchGable "open", the style's wood colour) checks the same frame with the
+// gable moved to the set-back wall, its vent there, the boarded ceiling and the deck.
+//
 // Exit 0 = every assertion held. PROBE_REPORT_ONLY=1 prints the same checks but always exits 0
 // (the measuring run against the unfixed build, where the assertions are EXPECTED to fail).
 import { pathToFileURL } from "node:url";
@@ -49,6 +58,16 @@ export const CONFIG = {
   options: [], colors: [], claddingOptions: { porch: CLADS, plain: CLADS }, wallHeightOptions: {},
   showPricing: true, view3d: true, layoutItems: {}, layoutPricing: {}, layoutPrices: {},
   electrical: null, electricalItems: [], insulation: [],
+};
+// The OPEN porch gable (roof.porchGable, 2026-10-07): the same Cabin with the gable over its porch open and
+// its timber in a wood colour, so the frame, the deck and the set-back gable are measured too.
+const WOOD = "#9a4530";
+const OPEN_D3 = { ...PORCH_D3, roof: { ...PORCH_D3.roof, porchGable: "open" }, colors: { ...PORCH_D3.colors, wood: WOOD } };
+export const CONFIG_OPEN = {
+  ...CONFIG,
+  buildingStyles: [style("open", "Open Porch Cabin", OPEN_D3)],
+  sizePricing: { open: { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 10000 } } },
+  claddingOptions: { open: CLADS },
 };
 export const FIXTURES = {
   ramp: { mode: "simple", price: 0, method: "each", enabled: false, imageUrl: null, showImage: false },
@@ -101,7 +120,11 @@ export async function openEditor(page) {
 }
 
 // Every mesh in the roof, openings and walls groups: world bbox, the BoxGeometry's own
-// width/height/depth, its rotation about z, colour, and the item group it belongs to.
+// width/height/depth, its rotation about z, colour, and the item group it belongs to. Since the porch
+// frame was cut to fit (2026-10-07) also its tag (userData.ssPorchFrame), and for a member cut to its
+// joints (an ExtrudeGeometry) its outline in the frame's plane, read off its own world vertices (x, y:
+// this probe's footprint is portrait, so the porch end faces +z). A gable prism (two materials) carries
+// the world z of its CAP vertices, because a moved cap no longer bounds the prism (its sides stay put).
 export async function sceneMeshes(page) {
   return page.evaluate(() => {
     const E = window.__ss3dEngine;
@@ -111,10 +134,14 @@ export async function sceneMeshes(page) {
     const r3 = (v) => Math.round(v * 1000) / 1000;
     const out = [];
     window.__probeMesh = [];
-    const groups = { roof: E.model.roofGroup, openings: E.model.openingsGroup, walls: E.model.wallsGroup };
+    const groups = { roof: E.model.roofGroup, openings: E.model.openingsGroup, walls: E.model.wallsGroup, root: E.model.root };
+    const seenMesh = new Set();
     Object.keys(groups).forEach((gname) => {
       groups[gname].traverse((o) => {
-        if (!o.isMesh || !o.geometry || !o.visible) return;
+        if (!o.isMesh || !o.geometry || !o.visible || seenMesh.has(o)) return;
+        // root holds every group: only what is in no other (the floor, the porch deck) is "root".
+        if (gname === "root") { let q = o, inner = false; while (q) { if (q === E.model.roofGroup || q === E.model.openingsGroup || q === E.model.wallsGroup) inner = true; q = q.parent; } if (inner) return; }
+        seenMesh.add(o);
         if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
         const bb = o.geometry.boundingBox;
         const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
@@ -125,9 +152,27 @@ export async function sceneMeshes(page) {
         let q = o, itemId = null, gable = false;
         while (q) { if (q.userData && q.userData.itemId) { itemId = q.userData.itemId; gable = !!q.userData.gable; break; } q = q.parent; }
         const p = o.geometry.parameters || {};
+        const ud = o.userData || {};
+        let poly = null, capZs = null;
+        const pos = o.geometry.attributes.position;
+        if (ud.ssPorchFrame && o.geometry.type === "ExtrudeGeometry" && pos) {
+          const seen = new Map();
+          for (let i = 0; i < pos.count; i++) {
+            const v = new V().fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+            const key = `${Math.round(v.x * 1e4)},${Math.round(v.y * 1e4)}`;
+            if (!seen.has(key)) seen.set(key, [v.x, v.y]);
+          }
+          poly = [...seen.values()];
+        }
+        if (Array.isArray(o.material) && o.geometry.type === "ExtrudeGeometry" && o.geometry.groups && o.geometry.groups[0] && pos) {
+          const g0 = o.geometry.groups[0], zs = new Set();
+          for (let i = g0.start; i < g0.start + g0.count; i++) zs.add(r3(new V().fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).z));
+          capZs = [...zs].sort((a, b) => a - b);
+        }
         window.__probeMesh.push(o);
         out.push({
-          i: out.length, group: gname, itemId, gable, geom: o.geometry.type, color: hexOf(o.material),
+          i: out.length, group: gname, itemId, gable, geom: o.geometry.type, color: hexOf(o.material), multi: Array.isArray(o.material),
+          tag: ud.ssPorchFrame || null, corner: ud.ssPorchCorner || null, poly, capZs,
           box: p.width != null && p.depth != null ? [r3(p.width), r3(p.height), r3(p.depth)] : null,
           rotZ: r3(o.rotation.z), min: mn.map(r3), max: mx.map(r3),
           ctr: mn.map((v, k) => r3((v + mx[k]) / 2)), size: mn.map((v, k) => r3(mx[k] - v)),
@@ -141,25 +186,131 @@ export async function sceneMeshes(page) {
 // Which mesh is which, on one gable end. `sgn` is +1 for the end at world +z (the porch end: the
 // porch takes the FRONT, which is south, which is +z for this portrait footprint), -1 for -z.
 // "out" is the distance from the wall's mid-plane toward the outside, so both ends read the same.
-export function classifyEnd(meshes, sgn, H) {
-  const zMid = sgn * (L / 2);
+// The porch frame's members are found by their tags (2026-10-07), never by size: the truss used to be
+// boxes 0.42 deep, and a member looked up by its size vanishes from the checks the moment it is rebuilt.
+export function classifyEnd(meshes, sgn, H, zAt) {
+  const zMid = zAt != null ? zAt : sgn * (L / 2);
   const outOf = (m) => ({ back: sgn > 0 ? m.min[2] - zMid : zMid - m.max[2], front: sgn > 0 ? m.max[2] - zMid : zMid - m.min[2] });
   const onEnd = meshes.filter((m) => m.group === "roof" && (sgn > 0 ? m.max[2] > zMid - 0.7 && m.min[2] > zMid - 1.2 : m.min[2] < zMid + 0.7 && m.max[2] < zMid + 1.2));
   const withOut = (m) => ({ ...m, ...outOf(m) });
-  const cap = meshes.filter((m) => m.group === "roof" && m.geom === "ExtrudeGeometry").map((m) => ({ ...m, face: sgn > 0 ? m.max[2] - zMid : zMid - m.min[2] }))
-    .sort((a, b) => b.size[0] - a.size[0])[0] || null;
+  // The gable prism: the widest two-material extrusion. Its cap face on this end is the cap vertices'
+  // plane nearest it (capZs), wherever the cap stands.
+  const prism = meshes.filter((m) => m.group === "roof" && m.geom === "ExtrudeGeometry" && m.multi).sort((a, b) => b.size[0] - a.size[0])[0] || null;
+  const capZ = prism && prism.capZs ? (sgn > 0 ? Math.max(...prism.capZs) : Math.min(...prism.capZs)) : null;
+  const cap = prism ? { ...prism, face: capZ == null ? (sgn > 0 ? prism.max[2] - zMid : zMid - prism.min[2]) : sgn * (capZ - zMid) } : null;
   const louvre = onEnd.filter((m) => m.color === VENT_DARK && m.min[1] >= H - 0.01).map(withOut);
-  const vTrim = louvre.length ? onEnd.filter((m) => m.color === TRIM && m.box && !m.rotZ && m.min[1] >= H - 0.05
-    && m.max[1] <= louvre[0].max[1] + 0.2 && m.min[0] >= louvre[0].min[0] - 0.2 && m.max[0] <= louvre[0].max[0] + 0.2
-    && !(near(m.box[2], 0.42) || near(m.box[0], 12, 0.05))).map(withOut) : [];
-  const truss = onEnd.filter((m) => m.color === TRIM && m.box && near(m.box[2], 0.42) && m.min[1] >= H - 0.3).map(withOut);
-  const braces = truss.filter((m) => Math.abs(m.rotZ) > 0.01);
-  const header = onEnd.filter((m) => m.color === TRIM && m.box && near(m.box[0], W, 0.05) && near(m.box[1], 0.5) && near(m.box[2], 0.4)).map(withOut)[0] || null;
-  const strips = onEnd.filter((m) => m.box && !m.rotZ && m.min[1] >= H - 0.01 && m.color !== TRIM && m.color !== VENT_DARK && m.box[0] <= 0.2 && m.box[2] <= 0.11).map(withOut);
+  const vTrim = louvre.length ? onEnd.filter((m) => m.color === TRIM && m.box && !m.rotZ && !m.tag && m.min[1] >= H - 0.05
+    && m.max[1] <= louvre[0].max[1] + 0.2 && m.min[0] >= louvre[0].min[0] - 0.2 && m.max[0] <= louvre[0].max[0] + 0.2).map(withOut) : [];
+  const tagged = (t) => onEnd.filter((m) => m.tag === t).map(withOut);
+  const chords = tagged("chord"), kingPost = tagged("kingPost")[0] || null, struts = tagged("strut");
+  const truss = [...chords, ...(kingPost ? [kingPost] : []), ...struts];
+  const braces = struts;
+  const header = tagged("beam")[0] || null;
+  const posts = tagged("post");
+  const strips = onEnd.filter((m) => m.box && !m.rotZ && !m.tag && m.min[1] >= H - 0.01 && m.color !== TRIM && m.color !== VENT_DARK && m.box[0] <= 0.2 && m.box[2] <= 0.11).map(withOut);
   // A flat trim-coloured board lying within 0.25 ft above the header's top: H1's "extra 2x4".
-  const boardsOnHeader = header ? onEnd.filter((m) => m.color === TRIM && m.box && !m.rotZ && !near(m.box[2], 0.42) && m !== header
+  const boardsOnHeader = header ? onEnd.filter((m) => m.color === TRIM && m.box && !m.rotZ && !m.tag && m !== header
     && m.size[0] > 3 * m.size[1] && m.min[1] >= header.max[1] - 0.02 && m.min[1] <= header.max[1] + 0.25).map(withOut) : [];
-  return { zMid, cap, louvre, vTrim, truss, braces, header, strips, boardsOnHeader, bandMeshes: onEnd.filter((m) => m.max[1] > H - 0.6).map(withOut) };
+  return { zMid, cap, louvre, vTrim, truss, chords, kingPost, struts, braces, header, posts, strips, boardsOnHeader, bandMeshes: onEnd.filter((m) => m.max[1] > H - 0.6).map(withOut) };
+}
+
+// ── THE FRAME'S JOINTS (2026-10-07) ─────────────────────────────────────────────────────────────
+// Every joint of the porch's timber frame measured off the built geometry: a joint "meets" when the
+// vertex that should lie on the other member's face lies within GAP of that member's outline. Outlines
+// are convex (each member is a band cut by straight cuts), so the boundary distance and the inside test
+// below are exact.
+const GAP = 0.01;
+const hull = (pts) => {
+  const c = pts.reduce((a, q) => [a[0] + q[0] / pts.length, a[1] + q[1] / pts.length], [0, 0]);
+  return pts.slice().sort((a, b) => Math.atan2(a[1] - c[1], a[0] - c[0]) - Math.atan2(b[1] - c[1], b[0] - c[0]));
+};
+const segDist = (p, a, b) => {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) : 0;
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+};
+const edgeDist = (p, poly) => { const h = hull(poly); let d = Infinity; h.forEach((a, i) => { d = Math.min(d, segDist(p, a, h[(i + 1) % h.length])); }); return d; };
+// How far p is INSIDE the convex outline (negative: outside).
+const depthIn = (p, poly) => {
+  const h = hull(poly); let d = Infinity;
+  h.forEach((a, i) => {
+    const b = h[(i + 1) % h.length], dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
+    d = Math.min(d, ((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / l * -1);
+  });
+  return d;
+};
+const rectOf = (m) => [[m.min[0], m.min[1]], [m.max[0], m.min[1]], [m.max[0], m.max[1]], [m.min[0], m.max[1]]];
+const f3 = (v) => (v == null ? "?" : Number(v).toFixed(3));
+
+export function frameChecks(ok, tag, e, H, W, { truss = true } = {}) {
+  const beam = e.header;
+  ok(`[${tag}] frame: one tie beam and two posts`, !!beam && e.posts.length === 2, `beam ${!!beam} posts ${e.posts.length}`);
+  if (!beam || e.posts.length !== 2) return;
+  const top = beam.max[1];
+  ok(`[${tag}] frame: the beam's top is the plate (H)`, Math.abs(top - H) <= GAP, f3(top));
+  // ONE PLANE: every member's depth is the beam's.
+  const members = [beam, ...e.posts, ...e.truss];
+  const off = members.filter((m) => Math.abs(m.min[2] - beam.min[2]) > 0.001 || Math.abs(m.max[2] - beam.max[2]) > 0.001);
+  ok(`[${tag}] frame: posts, beam${truss ? ", chords, king post and struts" : ""} share one plane (${members.length} members)`, off.length === 0,
+    off.map((m) => `${m.tag} z ${f3(m.min[2])}..${f3(m.max[2])} vs ${f3(beam.min[2])}..${f3(beam.max[2])}`).join("; "));
+  ok(`[${tag}] frame: 4x6 timber (0.29 deep)`, Math.abs(beam.size[2] - 0.29) <= 0.002 && Math.abs(beam.size[1] - 0.46) <= 0.002, beam.size.join("x"));
+  for (const p of e.posts) {
+    const s = Math.sign(p.ctr[0]);
+    ok(`[${tag}] frame: the ${s > 0 ? "right" : "left"} post stands under the beam's end (top on its underside, outer face on its end)`,
+      Math.abs(p.max[1] - beam.min[1]) <= GAP && Math.abs((s > 0 ? p.max[0] - beam.max[0] : p.min[0] - beam.min[0])) <= GAP,
+      `post top ${f3(p.max[1])} beam bottom ${f3(beam.min[1])}; post outer ${f3(s > 0 ? p.max[0] : p.min[0])} beam end ${f3(s > 0 ? beam.max[0] : beam.min[0])}`);
+    ok(`[${tag}] frame: the ${s > 0 ? "right" : "left"} post is 5.5 in across the front, 3.5 in deep`, Math.abs(p.size[0] - 0.46) <= 0.002 && Math.abs(p.size[2] - 0.29) <= 0.002, p.size.join("x"));
+  }
+  if (!truss) return;
+  ok(`[${tag}] truss: two chords, a king post, two struts`, e.chords.length === 2 && !!e.kingPost && e.struts.length === 2,
+    `chords ${e.chords.length} kp ${!!e.kingPost} struts ${e.struts.length}`);
+  if (e.chords.length !== 2 || !e.kingPost) return;
+  const [cL, cR] = e.chords.slice().sort((a, b) => a.ctr[0] - b.ctr[0]);
+  const kp = e.kingPost;
+  // Chords meet at the apex: the two vertices of each that stand off the beam coincide with the other's.
+  const apexOf = (c) => c.poly.filter((q) => q[1] > top + 0.05);
+  const aL = apexOf(cL), aR = apexOf(cR);
+  const apexGap = aL.length === 2 && aR.length === 2 ? Math.max(...aL.map((q) => Math.min(...aR.map((r) => Math.hypot(q[0] - r[0], q[1] - r[1]))))) : Infinity;
+  ok(`[${tag}] joint: the chords meet at the apex (plumb cut, gap <= ${GAP})`, apexGap <= GAP, `gap ${f3(apexGap)}`);
+  for (const [c, nm] of [[cL, "left"], [cR, "right"]]) {
+    const feet = c.poly.filter((q) => q[1] <= top + 0.05);
+    ok(`[${tag}] joint: the ${nm} chord's foot sits on the beam (level cut, on the beam)`, feet.length === 2 && feet.every((q) => Math.abs(q[1] - top) <= GAP && q[0] >= beam.min[0] - GAP && q[0] <= beam.max[0] + GAP),
+      feet.map((q) => `(${f3(q[0])}, ${f3(q[1])})`).join(" "));
+  }
+  // The king post: its foot on the beam, every top vertex on a chord's underside.
+  const kpFoot = kp.poly.filter((q) => q[1] <= top + 0.05), kpTop = kp.poly.filter((q) => q[1] > top + 0.05);
+  ok(`[${tag}] joint: the king post's foot sits on the beam`, kpFoot.length === 2 && kpFoot.every((q) => Math.abs(q[1] - top) <= GAP), kpFoot.map((q) => f3(q[1])).join(" "));
+  const kpGap = Math.max(...kpTop.map((q) => Math.min(edgeDist(q, cL.poly), edgeDist(q, cR.poly))));
+  ok(`[${tag}] joint: the king post's top meets both chords (cut to both slopes, gap <= ${GAP})`, kpTop.length >= 2 && kpGap <= GAP
+    && kpTop.some((q) => edgeDist(q, cL.poly) <= GAP) && kpTop.some((q) => edgeDist(q, cR.poly) <= GAP), `${kpTop.length} top vertices, worst ${f3(kpGap)}`);
+  const kpXs = kp.poly.map((q) => q[0]), kpL = Math.min(...kpXs), kpR = Math.max(...kpXs);
+  for (const st of e.struts) {
+    const s = Math.sign(st.ctr[0] - (kpL + kpR) / 2), nm = s > 0 ? "right" : "left", ch = s > 0 ? cR : cL;
+    const side = s > 0 ? kpR : kpL;
+    const pts = st.poly.slice();
+    const tops = pts.slice().sort((a, b) => b[1] - a[1]).slice(0, 2);
+    const topGap = Math.max(...tops.map((q) => edgeDist(q, ch.poly)));
+    ok(`[${tag}] joint: the ${nm} strut's top meets its chord (cut to the chord's slope, gap <= ${GAP})`, topGap <= GAP, `worst ${f3(topGap)}`);
+    const feet = pts.filter((q) => q[1] <= top + 0.05);
+    ok(`[${tag}] joint: the ${nm} strut's foot sits on the beam (level cut)`, feet.length === 2 && feet.every((q) => Math.abs(q[1] - top) <= GAP), feet.map((q) => `(${f3(q[0])}, ${f3(q[1])})`).join(" "));
+    const inner = pts.filter((q) => Math.abs(q[0] - side) <= 0.05);
+    ok(`[${tag}] joint: the ${nm} strut's inner end stands plumb against the king post (gap <= ${GAP})`,
+      inner.length === 2 && inner.every((q) => Math.abs(q[0] - side) <= GAP && edgeDist(q, kp.poly) <= GAP), inner.map((q) => `(${f3(q[0])}, ${f3(q[1])})`).join(" "));
+    // At 50 degrees, as the rule always was.
+    // Its lower edge: from the foot's outer corner on the beam to the outermost top corner.
+    const footOut = feet.slice().sort((a, b) => s * (b[0] - a[0]))[0];
+    const topOut = tops.slice().sort((a, b) => s * (b[0] - a[0]))[0];
+    const ang = footOut && topOut ? Math.atan2(topOut[1] - footOut[1], s * (topOut[0] - footOut[0])) * 180 / Math.PI : NaN;
+    ok(`[${tag}] the ${nm} strut rises at 50 degrees`, Math.abs(ang - 50) < 0.5, `${f3(ang)} deg`);
+  }
+  // NO OVERLAPS: no vertex of one member is inside another by more than GAP (the beam a rectangle).
+  const polys = [["beam", rectOf(beam)], ["chord L", cL.poly], ["chord R", cR.poly], ["king post", kp.poly], ...e.struts.map((m, k) => [`strut ${k}`, m.poly])];
+  const clashes = [];
+  polys.forEach(([na, pa], i) => polys.forEach(([nb, pb], j) => {
+    if (i === j) return;
+    pa.forEach((q) => { const d = depthIn(q, pb); if (d > GAP) clashes.push(`${na} vertex (${f3(q[0])}, ${f3(q[1])}) ${f3(d)} inside ${nb}`); });
+  }));
+  ok(`[${tag}] frame: no member overlaps another`, clashes.length === 0, clashes.slice(0, 3).join("; "));
 }
 
 const zr = (m) => `${m.back.toFixed(3)}..${m.front.toFixed(3)}`;
@@ -168,10 +319,93 @@ function printEnd(tag, e, H) {
   if (e.header) lines.push(`    header      y ${e.header.min[1].toFixed(3)}..${e.header.max[1].toFixed(3)} (H+${(e.header.max[1] - H).toFixed(3)} top)  out ${zr(e.header)}`);
   e.louvre.forEach((m) => lines.push(`    vent louvre ${m.size[0].toFixed(2)}x${m.size[1].toFixed(2)} centre y ${m.ctr[1].toFixed(3)}  out ${zr(m)}`));
   e.vTrim.forEach((m) => lines.push(`    vent trim   ${m.box.join("x")} y ${m.min[1].toFixed(3)}..${m.max[1].toFixed(3)} (H+${(m.min[1] - H).toFixed(3)})  out ${zr(m)}`));
-  e.truss.forEach((m) => lines.push(`    truss ${m.rotZ ? "brace" : "post "} ${m.box.join("x")} rotZ ${m.rotZ} y ${m.min[1].toFixed(3)}..${m.max[1].toFixed(3)}  x ${m.min[0].toFixed(2)}..${m.max[0].toFixed(2)}  out ${zr(m)}`));
+  e.posts.forEach((m) => lines.push(`    post        ${m.size.join("x")} y ${m.min[1].toFixed(3)}..${m.max[1].toFixed(3)}  x ${m.min[0].toFixed(2)}..${m.max[0].toFixed(2)}  out ${zr(m)}`));
+  e.truss.forEach((m) => lines.push(`    truss ${m.tag.padEnd(8)} y ${m.min[1].toFixed(3)}..${m.max[1].toFixed(3)}  x ${m.min[0].toFixed(2)}..${m.max[0].toFixed(2)}  out ${zr(m)}  outline ${(m.poly || []).map((q) => `(${q[0].toFixed(3)},${q[1].toFixed(3)})`).join(" ")}`));
   if (e.strips.length) lines.push(`    gable strips x${e.strips.length}  out ${zr(e.strips[0])}`);
   e.boardsOnHeader.forEach((m) => lines.push(`    ⚠ board on header ${m.box.join("x")} y ${m.min[1].toFixed(3)}..${m.max[1].toFixed(3)} x ${m.min[0].toFixed(2)}..${m.max[0].toFixed(2)}`));
   console.log(lines.join("\n"));
+}
+
+// ONE UPRIGHT AT EACH PORCH CORNER (2026-10-07): the posts stand where the footprint corner boards stood, a corner
+// board at each inside corner, and a side beam from each post back to that board, at the beam's height.
+export function porchCornerChecks(ok, tag, meshes, e, H, depth) {
+  const roof = meshes.filter((m) => m.group === "roof" && m.geom === "BoxGeometry");
+  const uprights = roof.filter((m) => m.size[1] > H * 0.8 && m.size[0] < 0.8 && m.size[2] < 0.8 && Math.abs(m.ctr[0]) > W / 2 - 0.8 && m.ctr[2] > L / 2 - 1);
+  for (const s of [-1, 1]) {
+    const here = uprights.filter((m) => Math.sign(m.ctr[0]) === s);
+    ok(`[${tag}] corner: ONE upright at the ${s > 0 ? "right" : "left"} front corner, the porch post`, here.length === 1 && here[0].tag === "post",
+      here.map((m) => `${m.tag || m.color} x ${f3(m.min[0])}..${f3(m.max[0])} z ${f3(m.min[2])}..${f3(m.max[2])}`).join("; "));
+  }
+  const inside = roof.filter((m) => m.corner === "inside");
+  ok(`[${tag}] corner: a corner board at each inside corner, where the set-back wall meets the side wall`,
+    inside.length === 2 && inside.every((m) => Math.abs(Math.abs(m.ctr[0]) - W / 2) < 0.01 && Math.abs(m.ctr[2] - (L / 2 - depth)) < 0.01 && Math.abs(m.max[1] - H) < 0.01),
+    inside.map((m) => `x ${f3(m.ctr[0])} z ${f3(m.ctr[2])} top ${f3(m.max[1])}`).join("; "));
+  const sbs = meshes.filter((m) => m.tag === "sideBeam");
+  const beam = e.header;
+  ok(`[${tag}] side beams: one along each open side`, sbs.length === 2, `${sbs.length}`);
+  if (!beam || sbs.length !== 2) return;
+  for (const sb of sbs) {
+    const s = Math.sign(sb.ctr[0]), post = e.posts.find((p) => Math.sign(p.ctr[0]) === s);
+    const board = inside.find((m) => Math.sign(m.ctr[0]) === s);
+    ok(`[${tag}] side beam ${s > 0 ? "right" : "left"}: from the frame's back face to the inside corner board, at the beam's height, flush with the post`,
+      Math.abs(sb.max[2] - beam.min[2]) <= 0.01 && !!board && Math.abs(sb.min[2] - board.max[2]) <= 0.01
+        && Math.abs(sb.max[1] - beam.max[1]) <= 0.01 && Math.abs(sb.min[1] - beam.min[1]) <= 0.01
+        && !!post && Math.abs((s > 0 ? sb.max[0] - post.max[0] : sb.min[0] - post.min[0])) <= 0.01,
+      `z ${f3(sb.min[2])}..${f3(sb.max[2])} (board front ${board && f3(board.max[2])}, frame back ${f3(beam.min[2])}) y ${f3(sb.min[1])}..${f3(sb.max[1])}`);
+  }
+}
+
+// THE OPEN PORCH GABLE (roof.porchGable "open", 2026-10-07): no cap over the porch, the cap with its siding and
+// vent on the set-back wall, the boarded ceiling from the frame back to it, the deck and the timber in wood.
+export function openGableChecks(ok, tag, meshes, e, sb, H, depth) {
+  ok(`[${tag}] open: no siding over the porch, the cap stands on the set-back wall`, !!e.cap && Math.abs(e.cap.face - (0.15 - depth)) <= 0.011, `cap face out ${e.cap && f3(e.cap.face)}`);
+  ok(`[${tag}] open: the style's vent moved to the set-back gable`, sb.louvre.length === 1 && e.louvre.length === 0, `set-back ${sb.louvre.length}, porch end ${e.louvre.length}`);
+  const ceil = meshes.filter((m) => m.tag === "ceiling");
+  const beam = e.header;
+  ok(`[${tag}] open: a boarded ceiling under both slopes`, ceil.length >= 20 && ceil.some((m) => m.ctr[0] < 0) && ceil.some((m) => m.ctr[0] > 0), `${ceil.length} boards`);
+  if (ceil.length && beam) {
+    const z0 = Math.min(...ceil.map((m) => m.min[2])), z1 = Math.max(...ceil.map((m) => m.max[2]));
+    ok(`[${tag}] open: the ceiling runs from the set-back gable to the frame's back face`, Math.abs(z0 - (L / 2 - depth + 0.15)) <= 0.011 && Math.abs(z1 - beam.min[2]) <= 0.011, `z ${f3(z0)}..${f3(z1)}`);
+    ok(`[${tag}] open: the ceiling is pine`, ceil.every((m) => m.color === "#d89a55"), ceil[0].color);
+  }
+  const frame = meshes.filter((m) => ["post", "beam", "sideBeam", "chord", "kingPost", "strut"].includes(m.tag));
+  ok(`[${tag}] open: every frame member takes the wood colour`, frame.length >= 9 && frame.every((m) => m.color === WOOD), [...new Set(frame.map((m) => m.color))].join(" "));
+  const deck = meshes.filter((m) => m.tag === "deck");
+  ok(`[${tag}] open: the porch floor is decking in the wood colour, set-back wall to the slab's edge`, deck.length > 5 && deck.every((m) => m.color === WOOD)
+    && Math.abs(Math.min(...deck.map((m) => m.min[2])) - (L / 2 - depth + 0.15)) <= 0.05 && Math.abs(Math.max(...deck.map((m) => m.max[2])) - (L / 2 + 0.1)) <= 0.05,
+    `${deck.length} boards z ${deck.length ? f3(Math.min(...deck.map((m) => m.min[2]))) : "?"}..${deck.length ? f3(Math.max(...deck.map((m) => m.max[2]))) : "?"}`);
+  // As on the real cabin (the 2026-10-07 review): the boards run front to back, at right angles to the porch
+  // wall, each the deck's whole depth, side by side across the opening.
+  ok(`[${tag}] open: the deck boards run front to back, at right angles to the porch wall`,
+    deck.length > 5 && deck.every((m) => m.size[0] < 0.5 && Math.abs(m.size[2] - (depth - 0.05)) <= 0.01),
+    deck.slice(0, 2).map((m) => `${f3(m.size[0])} across x ${f3(m.size[2])} deep`).join("; "));
+  // ...and a wood rim board edges its open front and both open sides, over the floor band's edge from its
+  // underside to the deck's top, flush with the posts' front and outer faces, the sides back to the inside
+  // corner boards: no light band of slab under the deck.
+  const rim = meshes.filter((m) => m.tag === "deckRim");
+  const rimF = rim.filter((m) => m.size[0] > W), rimS = rim.filter((m) => m.size[0] < 1);
+  ok(`[${tag}] open: a wood rim board along the deck's front and both open sides`, rim.length === 3 && rimF.length === 1 && rimS.length === 2 && rim.every((m) => m.color === WOOD),
+    rim.map((m) => `${m.color} ${m.size.join("x")}`).join("; "));
+  const floor = meshes.filter((m) => m.group === "root" && m.geom === "BoxGeometry" && m.color === "#b7ac99")
+    .sort((a, b) => b.size[0] * b.size[2] - a.size[0] * a.size[2])[0];
+  const inside = meshes.filter((m) => m.corner === "inside");
+  if (rimF.length === 1 && rimS.length === 2 && floor && deck.length && e.posts.length === 2 && inside.length === 2) {
+    const deckTop = Math.max(...deck.map((m) => m.max[1]));
+    const pF = Math.max(...e.posts.map((m) => m.max[2])), pL = Math.min(...e.posts.map((m) => m.min[0])), pR = Math.max(...e.posts.map((m) => m.max[0]));
+    ok(`[${tag}] open: the rim covers the floor band's edge, from its underside to the deck's top`,
+      rim.every((m) => Math.abs(m.min[1] - floor.min[1]) <= 0.005 && Math.abs(m.max[1] - deckTop) <= 0.005) && Math.abs(rimF[0].min[2] - floor.max[2]) <= 0.005,
+      `rim y ${f3(rimF[0].min[1])}..${f3(rimF[0].max[1])} (floor ${f3(floor.min[1])}, deck top ${f3(deckTop)}), back z ${f3(rimF[0].min[2])} (slab edge ${f3(floor.max[2])})`);
+    ok(`[${tag}] open: the front rim is flush with the posts' front faces, out to their outer side faces`,
+      Math.abs(rimF[0].max[2] - pF) <= 0.01 && Math.abs(rimF[0].min[0] - pL) <= 0.01 && Math.abs(rimF[0].max[0] - pR) <= 0.01,
+      `rim z ..${f3(rimF[0].max[2])} x ${f3(rimF[0].min[0])}..${f3(rimF[0].max[0])}; posts z ..${f3(pF)} x ${f3(pL)}..${f3(pR)}`);
+    for (const r of rimS) {
+      const s = Math.sign(r.ctr[0]), board = inside.find((m) => Math.sign(m.ctr[0]) === s);
+      ok(`[${tag}] open: the ${s > 0 ? "right" : "left"} side rim runs from the inside corner board to the front rim, flush with the post`,
+        !!board && Math.abs(r.min[2] - board.max[2]) <= 0.01 && Math.abs(r.max[2] - rimF[0].min[2]) <= 0.01
+          && Math.abs((s > 0 ? r.max[0] - pR : r.min[0] - pL)) <= 0.01 && Math.abs((s > 0 ? r.min[0] - floor.max[0] : r.max[0] - floor.min[0])) <= 0.01,
+        `z ${f3(r.min[2])}..${f3(r.max[2])} (board front ${board && f3(board.max[2])}) x ${f3(r.min[0])}..${f3(r.max[0])}`);
+    }
+  }
 }
 
 // Aim, render synchronously, screenshot the canvas. `tint` maps mesh index -> hex.
@@ -261,7 +495,17 @@ export async function probeVariant({ ok, shots, config, fixtures, styleLabel, cl
     printEnd("back (-z)", back, H);
     Object.assign(result, { porch, front, back });
 
-    for (const [name, e] of [["front", front], ["back", back]]) {
+    const open = styleLabel === "Open Porch Cabin";
+    const DEPTH = (config.buildingStyles.find((s) => s.label === styleLabel) || {}).d3?.roof?.porchDepthFt || 6;
+    // An open porch gable's cap, and the style vent with it, stand on the set-back wall (2026-10-07).
+    const setBack = open ? classifyEnd(meshes, 1, H, L / 2 - DEPTH) : null;
+    if (open) printEnd("set-back wall (open porch gable)", setBack, H);
+    if (porch) {
+      frameChecks(ok, tag, front, H, W, { truss: true });
+      porchCornerChecks(ok, tag, meshes, front, H, DEPTH);
+      if (open) openGableChecks(ok, tag, meshes, front, setBack, H, DEPTH);
+    }
+    for (const [name, e] of (open ? [["set-back", setBack], ["back", back]] : [["front", front], ["back", back]])) {
       if (!e.louvre.length) { ok(`[${tag}] ${name}: style gable vent drawn`, false, "no louvre mesh"); continue; }
       const lv = e.louvre[0];
       const trimFront = Math.max(...e.vTrim.map((m) => m.front)), trimBack = Math.min(...e.vTrim.map((m) => m.back));
@@ -368,15 +612,16 @@ export async function main() {
   const fixtures = process.env.SS_FIXTURES_FILE ? JSON.parse(readFileSync(process.env.SS_FIXTURES_FILE, "utf8")) : FIXTURES;
   const H = Number(process.env.PROBE_WALL_H) || 7.5;
   // Variants: "<style label or porch|plain>:<cladding id or ''>"
-  const labelOf = (k) => (k === "porch" ? "Porch Cabin" : k === "plain" ? "Gable Cabin" : k);
+  const labelOf = (k) => (k === "porch" ? "Porch Cabin" : k === "plain" ? "Gable Cabin" : k === "open" ? "Open Porch Cabin" : k);
   const spec = process.env.SS_VARIANTS
     || (process.env.SS_CONFIG_FILE ? (process.env.SS_STYLES || "Cabin") + ":"
-      : "porch:panel,porch:batten,porch:lap,plain:panel,plain:batten,plain:lap");
+      : "porch:panel,porch:batten,porch:lap,open:batten,open:panel,plain:panel,plain:batten,plain:lap");
   const results = [];
   for (const v of spec.split(",")) {
     const [st, clad] = v.split(":");
+    const cfg = st === "open" && !process.env.SS_CONFIG_FILE ? CONFIG_OPEN : config;
     const tag = `${st.toLowerCase().replace(/\W+/g, "-")}-${clad || "default"}`;
-    results.push(await probeVariant({ ok, shots, config, fixtures, styleLabel: labelOf(st), cladding: clad || null, tag, H, wallVent: !!process.env.PROBE_WALL_VENT }));
+    results.push(await probeVariant({ ok, shots, config: cfg, fixtures, styleLabel: labelOf(st), cladding: clad || null, tag, H, wallVent: !!process.env.PROBE_WALL_VENT }));
   }
   writeFileSync(`${shots}/probe-results.json`, JSON.stringify(results, null, 1));
   const bad = failed();

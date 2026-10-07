@@ -2102,7 +2102,7 @@ Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser",
     leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left",
     wingSide: "both", wingWidthFt: 6, wingPitch: 0.25, centerEaveFt: 15,
     dormerWidthFt: 4, dormerRiseFt: 2, dormerOffsetU: 0.5,
-    porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchOutFt: 6, porchAttachFt: 8, porchWidthFt: 10,
+    porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchGable: "open", porchOutFt: 6, porchAttachFt: 8, porchWidthFt: 10,
     porchPosts: 3, porchPitch: 0.2, porchSteps: "right",
     rearStepFt: 12, rearEaveRiseFt: 0.42,
   };
@@ -2111,6 +2111,7 @@ Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser",
     const roof: Record<string, unknown> = { type: k === "highSide" ? "shed" : "gable", [k]: SAMPLE[k] };
     if (["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"].includes(k)) roof.porchOutFt = 6;   // projecting porch only
     if (k === "rearStepFt" || k === "rearEaveRiseFt") Object.assign(roof, { rearStepFt: 12, rearEaveRiseFt: 0.42 });   // both or neither
+    if (k === "porchGable") roof.porchDepthFt = 6;                          // a recessed porch only (2026-10-07)
     const r = parseModelSpec(JSON.stringify({ roof }), DIMS);
     assert(r.ok, `a reply carrying ${k} parses`);
     const stored = k === "overhangIn" ? "overhang" : k;                     // inches fold to feet
@@ -3651,14 +3652,14 @@ Deno.test("⚠️ v2: every new ROOF key is correctable, and no new colour is", 
   for (const f of ["roof.front", "roof.highSide", "roof.porchAttachFt", "roof.porchWidthFt",
                    "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
                    "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
-                   "roof.rearStepFt", "roof.rearEaveRiseFt"]) {
+                   "roof.rearStepFt", "roof.rearEaveRiseFt", "roof.porchGable"]) {
     assert(allow.includes(f), `${f} is on the allow-list`);
   }
   for (const f of ["colors.corner", "colors.fascia", "colors", "wallHeightFt"]) {
     assert(!allow.includes(f), `${f} must never be applicable`);
   }
   assert(allow.includes("floorHeightFt") && allow.includes("foundation"), "a raised floor's height and kind are correctable");
-  assertEquals(allow.length, 36, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25), the roof step's two (2026-09-28)");
+  assertEquals(allow.length, 37, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25), the roof step's two (2026-09-28), the porch gable (2026-10-07)");
   assertEquals(new Set(allow).size, allow.length, "and no path is listed twice");
 });
 
@@ -6465,6 +6466,9 @@ const WING_NOW = /the slope of the wing roofs \(roof\.wingPitch, rise over run:\
 const WING_AT_8FE5D30 = "the slope of the wing roofs (roof.wingPitch, rise over run), and";
 // ...and the roof step's bullet (2026-09-28), which 8fe5d30 did not have at all: taken out whole.
 const STEP_NOW = /\n     \* The roof step - currently [\s\S]*?a step the frames do not, set roof\.rearStepFt to 0, which removes it\./;
+// ...and the porch gable's bullet (2026-10-07), which 8fe5d30 did not have either: taken out whole.
+// (In the body the quotes are JSON-escaped, so the regex takes either.)
+const PORCH_GABLE_NOW = /\n     \* roof\.porchGable, recessed porches only, currently [\s\S]*?\\?"sided\\?" puts the siding back\./;
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -6501,11 +6505,12 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       const m = plain.match(/on a (\S+) ft wall is about|times the (\S+) ft wall, to its/);
       const wall = m ? (m[1] ?? m[2]) : "";
       assert(STEP_NOW.test(plain), `${k}: today's roof-step bullet is there to take out`);
+      assert(PORCH_GABLE_NOW.test(plain), `${k}: today's porch-gable bullet is there to take out`);
       if (OVERHANG_NOW.test(plain)) {
-        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
+        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       } else {
-        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
+        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       }
     }
@@ -7879,4 +7884,105 @@ Deno.test("⚠️ ...so the check still corrects the FRAME of a draft whose mode
   const strayShed = cleanSpec({ roof: { type: "shed", highSide: "front", pitch: 0.25, overhang: 1, eave: "fascia", porchEnd: "right" }, siding: "panel", colors: { body: "#555555" }, wallHeightFt: 8 });
   const sh = RS.applySelfCheck(strayShed, checkRead({ roof: { highSide: "back" } }, ["roof.highSide"]), STEP_DIMS, "v2");
   assert(sh.ok && sh.verdict === "corrections" && sh.d3.roof.highSide === "back" && !sh.dropped.length, JSON.stringify(sh));
+});
+
+// ─── THE OPEN PORCH GABLE (roof.porchGable, 2026-10-07) ────────────────────────────────────
+// "open": no siding over a recessed porch, the building's own front gable standing back on the set-back
+// wall and a boarded ceiling under the slopes, seen through the porch frame. Absent is SIDED, which is how
+// every stored style was drawn, so none of them moves.
+import { D3_PORCH_GABLES } from "./styleD3.ts";
+
+Deno.test("roof.porchGable: kept on a recessed porch, dropped on a projecting one or none, junk dropped", () => {
+  assertEquals([...D3_PORCH_GABLES], ["open"]);
+  const rec = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.42, porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchGable: "open" } });
+  assert(rec.ok, "a recessed porch with an open gable parses");
+  if (rec.ok) assertEquals(rec.d3.roof.porchGable, "open");
+  // Without the truss too: the open gable is the gable's, not the truss's.
+  const bare = sanitizeD3Spec({ roof: { type: "gambrel", porchDepthFt: 6, porchGable: "open" } });
+  if (bare.ok) assertEquals(bare.d3.roof.porchGable, "open");
+  // Absent is sided: nothing is filled in.
+  const sided = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.42, porchDepthFt: 6, porchTruss: true } });
+  assert(sided.ok, "usable");
+  if (sided.ok) assert(!("porchGable" in (sided.d3.roof as Record<string, unknown>)), "never defaulted");
+  // A projecting porch has no porch gable: it goes with the depth and the truss.
+  const proj = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.42, porchDepthFt: 6, porchTruss: true, porchOutFt: 6, porchGable: "open" } });
+  assert(proj.ok, "usable");
+  if (proj.ok) assertEquals(proj.d3.roof, { type: "gable", pitch: 0.42, porchOutFt: 6 });
+  // No porch, or one at the off switch: it describes nothing, so it goes (where porchTruss stays).
+  for (const roof of [{ type: "gable", pitch: 0.4, porchGable: "open" }, { type: "gable", pitch: 0.4, porchDepthFt: 0.5, porchGable: "open" },
+    { type: "gable", pitch: 0.4, porchDepthFt: 0, porchTruss: true, porchGable: "open" }]) {
+    const r = sanitizeD3Spec({ roof });
+    assert(r.ok, JSON.stringify(roof));
+    if (r.ok) assert(!("porchGable" in (r.d3.roof as Record<string, unknown>)), `dropped: ${JSON.stringify(roof)}`);
+  }
+  // One word. Anything else is dropped, never coerced to open.
+  for (const junk of ["Open", " open", "sided", "closed", true, 1, "", null]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6, porchGable: junk } });
+    assert(r.ok, `junk ${JSON.stringify(junk)} does not fail the spec`);
+    if (r.ok) assert(!("porchGable" in (r.d3.roof as Record<string, unknown>)), `junk ${JSON.stringify(junk)} dropped`);
+  }
+  // A model's reply carries it through parseModelSpec.
+  const m = parseModelSpec(`{ "roof": { "type": "gable", "pitch": 0.42, "porchDepthFt": 8, "porchEnd": "front", "porchTruss": true, "porchGable": "open" }, "colors": {}, "wallHeightFt": 7.75 }`);
+  assert(m.ok, "usable");
+  if (m.ok) assertEquals([m.d3.roof.porchGable, m.d3.roof.porchTruss], ["open", true]);
+});
+
+Deno.test("the v2 prompts ask whether the porch gable is open; the frozen legacy prompt does not", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes('"porchGable": <"open" only for a recessed porch whose gable above the porch beam is open framing'), `${name}: porchGable is in the schema`);
+    assert(p.includes("PORCH GABLE: with a RECESSED porch at a gable end"), `${name}: the porch gable paragraph`);
+    assert(p.includes("you can see the porch's ceiling") && p.includes('set porchGable "open"'), `${name}: open is the ceiling or sky showing`);
+    assert(p.includes("leave porchGable out"), `${name}: a sided gable leaves it out`);
+  }
+  assert(!VIDEO_SHAPE_PROMPT.includes("porchGable"), "the legacy prompt is frozen");
+});
+
+Deno.test("self-check: roof.porchGable on the v2 allow-list only; 'sided' takes it off; a swap to projecting drops it", () => {
+  assert((SELF_CHECK_ALLOW as readonly string[]).includes("roof.porchGable"), "v2 may correct it");
+  assert(!(SELF_CHECK_LEGACY_ALLOW as readonly string[]).includes("roof.porchGable"), "legacy never had it");
+  const p = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS }));
+  assert(p.includes("roof.porchGable, recessed porches only, currently not set, which draws the gable over the porch sided"), "the check is told what is drawn");
+  const sidedDraft = cleanSpec({ ...DRAFT, roof: { ...DRAFT.roof, type: "gable", pitch: 0.42 } });
+  const open = applySelfCheck(sidedDraft, readOf({
+    verdict: "corrections", corrections: { roof: { porchGable: "open" } }, changed: [change("roof.porchGable")],
+  }));
+  assert(open.ok && open.verdict === "corrections", "open lands on a recessed porch");
+  if (!open.ok) return;
+  assertEquals(open.d3.roof.porchGable, "open");
+  const openDraft = cleanSpec({ ...DRAFT, roof: { ...DRAFT.roof, type: "gable", pitch: 0.42, porchGable: "open" } });
+  assert(lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: openDraft, viewpoints: SELF_CHECK_VIEWPOINTS })).includes('roof.porchGable, recessed porches only, currently "open"'), "an open draft is said as open");
+  for (const word of ["sided", " Sided "]) {
+    const r = applySelfCheck(openDraft, readOf({
+      verdict: "corrections", corrections: { roof: { porchGable: word } },
+      changed: [{ field: "roof.porchGable", from: "open", to: word, why: "the frame shows siding over the porch" }],
+    }));
+    assert(r.ok && r.verdict === "corrections", JSON.stringify(word));
+    if (!r.ok) return;
+    assert(!("porchGable" in r.d3.roof), `${JSON.stringify(word)}: the key is gone`);
+    assertEquals(r.dropped, []);
+  }
+  // An unreadable word leaves the draft's open gable standing.
+  const junk = applySelfCheck(openDraft, readOf({
+    verdict: "corrections", corrections: { roof: { porchGable: "closed" } }, changed: [change("roof.porchGable")],
+  }));
+  assert(junk.ok, "usable");
+  if (junk.ok) assertEquals([junk.verdict, junk.d3.roof.porchGable, junk.dropped], ["matches", "open", ["roof.porchGable"]]);
+  // Swapped to a projecting porch: the open gable goes with the depth and the truss.
+  const swap = applySelfCheck(openDraft, readOf({
+    verdict: "corrections", corrections: { roof: { porchOutFt: 6 } }, changed: [change("roof.porchOutFt")],
+  }));
+  assert(swap.ok && swap.verdict === "corrections", "the swap lands");
+  if (swap.ok) assert(!("porchGable" in swap.d3.roof) && !("porchDepthFt" in swap.d3.roof), JSON.stringify(swap.d3.roof));
+});
+
+Deno.test("consensusDrafts: porchGable is voted among the recessed reads, like the truss", () => {
+  const RECESSED = { ...NO_PORCH, porchDepthFt: 6, porchEnd: "front", porchTruss: true };
+  const r = consensusDrafts([read({ ...RECESSED, porchGable: "open" }), read({ ...RECESSED }), read({ ...RECESSED, porchGable: "open" })]);
+  assertEquals(r.d3.roof.porchGable, "open");
+  assertEquals(r.report.discreteAgreement.porchGable, "2/3");
+  const s = consensusDrafts([read({ ...RECESSED }), read({ ...RECESSED }), read({ ...RECESSED, porchGable: "open" })]);
+  assert(!("porchGable" in s.d3.roof), "two sided reads win: no key");
+  // A projecting porch has no porch gable to vote on.
+  const pj = consensusDrafts([read(), read(), read()]);
+  assert(pj.report.discreteAgreement.porchGable == null, JSON.stringify(pj.report.discreteAgreement));
 });

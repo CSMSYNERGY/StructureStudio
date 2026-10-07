@@ -2445,7 +2445,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
       // style_ids (272): the "Offered on" ticks. This select needs 272 applied; before it, the
       // whole catalog read fails on the unknown column.
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // in_door (289): a window's "Can be used inside a door" tick. The same applies: 289 is applied
+      // BEFORE this function is deployed, or every portal's catalog read fails.
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -6599,6 +6601,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (s.err) return { err: `${name}: ${s.err}` };
       if (s.value !== undefined) rec.style_ids = s.value;
     }
+    // Can be used inside a door (289): windows only, presence-guarded like the window colour list, so
+    // a spreadsheet or an older portal that never sends it leaves the builder's tick alone. Every other
+    // category is forced false unconditionally (the colour list's invariant), so no door, ramp or vent
+    // can ever be offered inside a door; 289's fixture_items_in_door_window_chk says the same. Strictly
+    // `=== true`: anything else is no.
+    if (category !== "window") {
+      rec.in_door = false;
+    } else if (has("inDoor")) {
+      rec.in_door = row?.inDoor === true;
+    }
     // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
     // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
     // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
@@ -6653,7 +6665,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // this deploy can only ever mean "draw it the way you always did" — never a blank door
       // on a customer's building. Keep this list in step with 187's CHECK constraint and with
       // D3_DOOR_STYLES in portal/03-catalog.jsx.
-      rec.door_style = ["plank", "zbrace", "xbrace", "rollup"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
+      // Widened again by migration 289 with the generator's four looks (american, basic, classic,
+      // dutch) -- the CHECK, D3_DOOR_STYLES in the portal and both designer twins carry the same eight.
+      rec.door_style = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
     }
     return { rec };
   };
@@ -6672,6 +6686,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
+    if (!("in_door" in rec)) rec.in_door = false;
     if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";

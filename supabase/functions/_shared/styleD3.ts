@@ -259,6 +259,11 @@ function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>
 // in its opening. The production designer before these reads an unknown word as no steps.
 export const D3_PORCH_STEPS_FRONT = ["left", "center", "right"] as const;
 export const D3_PORCH_STEPS = [...D3_PORCH_STEPS_FRONT, "leftSide", "rightSide"] as const;
+// roof.porchGable (2026-10-07): the gable over a RECESSED porch at a gable end. "open" is no siding over the
+// porch: the building's front gable stands on the set-back wall and a boarded ceiling runs up under both
+// slopes, seen through the porch frame (the real porch cabin). Absent is SIDED, the gable sided over the porch
+// beam as every style before it was drawn, so no stored style moves. One word; anything else is dropped.
+export const D3_PORCH_GABLES = ["open"] as const;
 // roof.leanToAttach / roof.wingAttach (2026-09-28): does the appendage's roof meet the building ON
 // THE ROOF (above the eave, up the main roof's slope) or ON THE WALL (below the eave)? Carolyn,
 // 09-28 @17:40: "they need to specify if it goes on the roof or if it goes on the sidewall ... I
@@ -544,6 +549,13 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if (typeof rawRoof.porchTruss === "boolean") {
     roof.porchTruss = rawRoof.porchTruss;
   }
+  // Whether the gable over the porch is OPEN (D3_PORCH_GABLES, 2026-10-07): the known word is stored and
+  // anything else dropped, absence never filled in. Unlike porchTruss it is held to a RECESSED porch just
+  // below, since a projecting porch or none has no porch gable for it to open, and a row that keeps it for
+  // later would open the gable of the next recessed porch nobody looked at.
+  if ((D3_PORCH_GABLES as readonly string[]).includes(String(rawRoof.porchGable))) {
+    roof.porchGable = String(rawRoof.porchGable);
+  }
   // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
   // Urban style, read off a walk-around video; "fascia" = the painted trim board the
   // renderer has always drawn.
@@ -609,7 +621,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if (typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
     delete roof.porchDepthFt;
     delete roof.porchTruss;
+    delete roof.porchGable;
   } else {
+    // An open porch gable needs a recessed porch (2026-10-07): with none, it describes nothing.
+    if (!(typeof roof.porchDepthFt === "number" && roof.porchDepthFt > 0.5)) delete roof.porchGable;
     // The mirror image (2026-09-24): the attach height and the width describe a PROJECTING
     // porch's own roof, so without one they describe nothing. Dropped rather than stored for
     // later, unlike porchEnd, because a recessed porch has no roof of its own for them to move
@@ -1253,6 +1268,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchDepthFt": <only if a covered porch is recessed into the front of the building under the main roof: how many feet of the building's depth it takes up>,
     "porchEnd": "front" | "back",
     "porchTruss": <true only if decorative timber beams fill the gable ABOVE the porch opening>,
+    "porchGable": <"open" only for a recessed porch whose gable above the porch beam is open framing, the porch ceiling or the sky showing through it; leave it out when that gable is sided>,
     "porchOutFt": <only if a porch STANDS OUT in front of the FRONT wall under its own lower roof: how many feet its deck and posts project past that wall>,
     "porchAttachFt": <projecting porch only: feet from the floor to the TOP of the porch roof where it meets the wall>,
     "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>,
@@ -1322,6 +1338,8 @@ WINGS DECISION, REQUIRED: observed.wings must carry one of exactly three answers
 PORCH ON THE FRONT WALL: a porch decides which wall is the FRONT, so porchEnd is "front" for every porch, and the front wall can be either kind — a gable end, or a long eave wall. A cabin with a porch across its long front is an ordinary case of the second, and everything below applies to both.
 
 PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the porch opening. If heavy timber beams are fixed across it in a decorative pattern — typically an upright post running from the horizontal header up to the peak, with two diagonal braces angling up to meet it, so the triangle reads as a timber frame rather than as flat siding — set porchTruss true. It is usually raw or stained wood against a painted gable, so it stands out clearly. A plain gable above the porch, even one with a vent in it, is porchTruss false.
+
+PORCH GABLE: with a RECESSED porch at a gable end, look at that same triangle above the porch beam once more, from below and from the side as well as head-on. If there is no siding in it -- you can see the porch's ceiling, usually boards following the two roof slopes back to the wall with the door, or sky, through the beams -- set porchGable "open". The building's own front gable then stands back on that wall, sided, behind the porch. A triangle filled with siding over the porch, with or without a truss fixed on it, is the common case: leave porchGable out. A projecting porch, or no porch, never has it.
 
 PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. A deck with posts along its outer edge, standing in front of a wall that runs full height with the door in it, is PROJECTING, never recessed, however low its roof and however open its sides: recessed means the WALL itself stands back under the main roof. Omit both keys if the building has no porch.
 
@@ -3002,6 +3020,9 @@ export const SELF_CHECK_ALLOW = [
   // The porch's own framing (2026-09-25): its posts, its roof's pitch, and where its steps leave
   // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out.
   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
+  // Whether the gable over a RECESSED porch is open (2026-10-07). sanitizeD3Spec holds it to a recessed
+  // porch on the way out; "sided" takes it off (applySelfCheck).
+  "roof.porchGable",
   // How high a raised floor stands (2026-09-25), top-level beside foundation, which is already on
   // the list and now takes "blocks" and "piers" too. Blocks or piers only, which sanitizeD3Spec
   // holds it to on the way out.
@@ -3320,6 +3341,8 @@ export function selfCheckPrompt(opts: {
     ? `${pitchStored} but DRAWN AT ${Math.round(pitchDrawn * 100) / 100} (hung at porchAttachFt ${feet("porchAttachFt")}, anything steeper leaves less than 6 ft under the porch beam, so the render's porch roof is flatter than this number and raising the number changes nothing; if the frame's porch roof meets the wall higher, correct roof.porchAttachFt)`
     : String(pitchStored);
   const stepsNow = typeof roof.porchSteps === "string" ? said("porchSteps") : "not set, which draws no steps";
+  // The porch gable (2026-10-07): open, or (absent) sided over the porch beam.
+  const gableNow = roof.porchGable === "open" ? '"open"' : "not set, which draws the gable over the porch sided";
   const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
   // The roof step (2026-09-28), said as what the render draws: none, or where the joint is and which
   // way the rear eave steps. sanitizeD3Spec keeps the two keys together or not at all.
@@ -3592,6 +3615,10 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
        where the frame shows steps the render lacks, or shows them at a different place. Give
        "none" where the render shows steps the frame does not, or where the frame's steps leave
        the deck from one of its sides rather than its front edge: "none" removes them.
+     * roof.porchGable, recessed porches only, currently ${gableNow}: whether the gable over the
+       porch beam is sided or open framing. Give "open" where the frame shows the porch's ceiling or
+       sky through the framing above the beam and the render shows siding there; give "sided" where
+       the frame's gable over the porch is sided and the render's is open: "sided" puts the siding back.
 
 4. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
    if the render's walls look plainly shorter or taller than the frame's at the same angle
@@ -4004,6 +4031,14 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     wanted.delete("roof.porchSteps");
     cleared.add("roof.porchSteps");
   }
+  // "sided" PUTS THE PORCH GABLE'S SIDING BACK (v2, 2026-10-07), for the porch steps' reason: sided is an
+  // ABSENT roof.porchGable, which a correction cannot say, and the destructive pass would put the draft's
+  // "open" straight back. So "sided" CLEARS the key; any other unreadable word leaves the draft's standing.
+  if (mode === "v2" && wanted.has("roof.porchGable")
+      && String(wanted.get("roof.porchGable")).trim().toLowerCase() === "sided") {
+    wanted.delete("roof.porchGable");
+    cleared.add("roof.porchGable");
+  }
   // A STEP OF 0 TAKES THE ROOF STEP OFF (v2, 2026-09-28), for the porch steps' reason: no step is
   // an ABSENT rearStepFt and rearEaveRiseFt, a step of 0 is exactly what the sanitiser drops, and
   // the destructive pass below would then put the draft's step straight back, so a step the render
@@ -4042,8 +4077,8 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     const depth = num(wanted.get("roof.porchDepthFt")) ?? 0;
     const gone = new Set<string>();
     if (out > 0.5) {
-      delete roof.porchDepthFt; delete roof.porchTruss;
-      gone.add("roof.porchDepthFt"); gone.add("roof.porchTruss");
+      delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
+      gone.add("roof.porchDepthFt"); gone.add("roof.porchTruss"); gone.add("roof.porchGable");
     } else if (depth > 0.5) {
       delete roof.porchOutFt;
       gone.add("roof.porchOutFt");
@@ -4936,6 +4971,8 @@ const CONSENSUS_FIELDS: readonly ConsensusField[] = [
   { name: "porch", key: (d) => consensusPorchKind(cRoof(d)) },
   { name: "porchEnd", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) !== "none" ? cStr(cRoof(d).porchEnd) : null), apply: copyRoofKey("porchEnd") },
   { name: "porchTruss", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? String(cRoof(d).porchTruss === true) : null), apply: copyRoofKey("porchTruss") },
+  // Voted among the recessed reads, like the truss (2026-10-07): "open", or "sided" for a read that left it out.
+  { name: "porchGable", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? (cRoof(d).porchGable === "open" ? "open" : "sided") : null), apply: copyRoofKey("porchGable") },
   { name: "porchSteps", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (cStr(cRoof(d).porchSteps) ?? "none") : null), apply: copyRoofKey("porchSteps") },
   { name: "porchAttach", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchAttachFt) !== null ? "given" : "wall top") : null) },
   { name: "porchWidth", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchWidthFt) !== null ? "part" : "full") : null) },
@@ -5157,6 +5194,7 @@ const CONSENSUS_FIELD_WORDS: Record<string, string> = {
   porch: "the porch",
   porchEnd: "which end the porch is on",
   porchTruss: "the porch truss",
+  porchGable: "whether the gable over the porch is open",
   porchSteps: "where the porch steps are",
   porchAttach: "where the porch roof meets the wall",
   porchWidth: "how wide the porch is",
