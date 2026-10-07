@@ -128,6 +128,8 @@ import { draftReadSample } from "../_shared/styleD3.ts";
 import { measuredPitchLock } from "../_shared/styleD3.ts";
 // ...and so is an overhang the close-ups measured (2026-09-29).
 import { measuredOverhangLock } from "../_shared/styleD3.ts";
+// ...and a recessed porch's depth the reads' points measured (2026-10-07).
+import { measuredPorchLock, porchPointsApply } from "../_shared/styleD3.ts";
 // A read the API could not serve is sent again, the five reads' first sends are staggered, and an
 // upstream failure is told to the builder in a plain sentence (2026-09-26).
 import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
@@ -5510,6 +5512,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // and applySelfCheck drops a correction to it. Off the ROW, v2 only, and only while the spec this
     // round judges is still a gable. A builder who typed the overhang keeps their own path (dims).
     const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);
+    // ── A RECESSED PORCH'S DEPTH THE READS' POINTS MEASURED IS LOCKED TOO (2026-10-07, measuredPorchLock) ──
+    // The reads measured the depth from points where by eye they gave 8 ft for a 6 ft porch, and step 3
+    // of the check would judge it again by eye. So it is the measured pitch's posture: the prompt says it
+    // is not the check's to change, and applySelfCheck drops a correction to it. Off the ROW, v2 only,
+    // and only while the spec this round judges still has the porch the points measure (porchPointsApply).
+    const porchLocked = v2Check && porchPointsApply(draftRead.d3.roof) && measuredPorchLock(claimed.draft_tokens, claimed.drafted);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
@@ -5534,7 +5542,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
     const plan = selfCheckRequest({
       mode: checkMode, dims, draft: draftRead.d3, pairs,
-      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked, porchLocked,
     });
     const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
@@ -5592,9 +5600,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
     // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
-    // for roof.pitch where the reads measured it (above), and `overhangLocked` for roof.overhang
-    // where the close-ups did.
-    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);
+    // for roof.pitch where the reads measured it (above), `overhangLocked` for roof.overhang
+    // where the close-ups did, and `porchLocked` for roof.porchDepthFt where the reads' points did.
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked, porchLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -5606,7 +5614,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}), ...(porchLocked ? { porchLocked } : {}) },
       });
     }
 

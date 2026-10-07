@@ -1900,7 +1900,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
   const MEASURE_SCHEMA = '  "measure": {\n' +
     '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },\n' +
     '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n' +
-    '    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] }\n' +
+    '    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] },\n' +
+    '    "porch": { "frame": <1-based index of the image you marked the recessed porch in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "porchBase": [<x>, <y>], "frontBase": [<x>, <y>], "porchFascia": [<x>, <y>], "frontFascia": [<x>, <y>] }\n' +
     '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
@@ -1909,8 +1910,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
     assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
       `${name}: and closes the object`);
-    // The block holds the gable's pitch, the wing roofs' points and the roof step's (2026-09-28) and
-    // nothing else, word for word.
+    // The block holds the gable's pitch, the wing roofs' points, the roof step's (2026-09-28) and a
+    // recessed porch's (2026-10-07), and nothing else, word for word.
     assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch and the wings' points alone`);
     for (const gone of ['"porchPitch": {', '"tallTop"', '"shortTop"', '"wall": [', '"edge": [', '"postTop"', '"postBottom"', '"size": <as above>']) {
       assert(!p.includes(gone), `${name}: no ${gone} is asked for`);
