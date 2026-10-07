@@ -240,7 +240,7 @@ try {
     wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`)),
       "wlAdd", "wlAddOn", "wlWidthFt", "wlAttach", "wlAttachFt", "wlPitch", "wlEaveFt", "wlMove", "wlRemove"],
     dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
-    porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
+    porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchGable", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
   const MUST = { leanto: ["leanToWall", "leanToWidthFt", "leanToEnclosed"], wings: ["centerEaveFt", "wingOn-left", "wingWidthFt-left", "wingOn-right", "wingWidthFt-right"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
   const others = (k) => Object.entries(OWN).filter(([o]) => o !== k).flatMap(([, v]) => v);
@@ -440,14 +440,32 @@ try {
   await page.waitForTimeout(200);
   ok("3c: a recessed porch offers the three front steps only, the side flight gone", (await segOpts()) === "None|Left|Center|Right"
     && (await segBtn(page, "Porch steps", "None").getAttribute("aria-pressed")) === "true", await segOpts());
-  ok("3c: …and with no steps, no wood colour to pick", (await page.locator('[data-ss-adv-f="wood"]').count()) === 0);
+  // Its frame and deck are built of the porch wood since 2026-10-07, so the picker shows with no steps too.
+  ok("3c: …and with no steps, the wood colour its frame is built in", (await page.locator('[data-ss-adv-f="wood"]').count()) === 1
+    && /Wood color \(posts, beams, truss, deck\)/.test(await page.locator('[data-ss-adv-f="wood"]').innerText()));
+  // ⚠️ Blank on a recessed porch is NOT natural wood (the 2026-10-07 review): the frame is drawn in the trim colour
+  // with no decking, only the steps natural. The readout says so, the Natural tile writes the natural wood colour
+  // itself (the frame and deck turn wood), and the Trim color tile clears it again.
+  const woodRead = async () => (await page.locator('[data-ss-adv-f="wood"] [data-ss-wood-read]').innerText()).trim();
+  const woodTile = (l) => page.locator(`[data-ss-adv-f="wood"] button[aria-label="${l}"]`);
+  ok("3c: …blank says what it draws: the frame in the trim colour, no decking, natural-wood steps",
+    (await woodRead()) === "Not set: frame in the trim color, no decking, steps in natural wood" && (await woodTile("Trim color").getAttribute("aria-pressed")) === "true", await woodRead());
+  await woodTile("Natural").click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.wood));
+  ok("3c: …Natural writes the natural wood colour, so the frame and the deck are wood",
+    (await woodRead()) === "Natural" && (await woodTile("Natural").getAttribute("aria-pressed")) === "true"
+      && (await page.getByRole("textbox", { name: "Wood color hex", exact: true }).inputValue()).toUpperCase() === "#C4965A", await woodRead());
+  await woodTile("Trim color").click();
+  await panelModel(page, (M) => !!(M.recessedFrame && !M.recessedFrame.wood));
+  ok("3c: …and Trim color clears it, the frame back in the trim colour", (await woodRead()).startsWith("Not set:")
+    && (await page.getByRole("textbox", { name: "Wood color hex", exact: true }).inputValue()) === "", await woodRead());
   await segBtn(page, "Porch steps", "Center").click();
   await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "center" && !M.porch));
   ok("3c: Center builds the recessed porch's steps", true);
   ok("3c: …and its step count shows, on Auto", (await page.locator('[data-ss-adv-f="porchStepCount"]').count()) === 1 && /^Auto \(\d+\)$/.test((await autoChip("porchStepCount").innerText()).trim()));
   // The recessed steps are built of the porch wood (2026-10-04), so its picker shows for them, named so.
   const woodF = page.locator('[data-ss-adv-f="wood"]');
-  ok("3c: …and the wood colour they are built in, as \"Wood color (steps)\"", (await woodF.count()) === 1 && /Wood color \(steps\)/.test(await woodF.innerText()));
+  ok("3c: …and the wood colour they are built in, as \"Wood color (posts, beams, truss, deck)\"", (await woodF.count()) === 1 && /Wood color \(posts, beams, truss, deck\)/.test(await woodF.innerText()));
   await shot(page, "ask-recessed-steps.png");
   await radio(page, "Porch", "Projecting").click();
   await panelModel(page, (M) => !!(M.porch && M.porch.steps && M.porch.steps.where === "center"));
@@ -473,9 +491,19 @@ try {
   await radio(page, "Porch", "Recessed").click();
   await page.waitForTimeout(200);
   ok("3e: a recessed porch on the left wall of a gable front offers no timber truss", (await trussSw()) === 0);
+  // The open porch gable (roof.porchGable, 2026-10-07) is a gable END's the same way.
+  const gableSw = () => page.locator('[data-ss-adv-f="porchGable"]').count();
+  ok("3e: …and no open gable", (await gableSw()) === 0);
   await segBtn(page, "Porch end", "Front wall").click();
   await page.waitForTimeout(200);
   ok("3e: …at the front gable end it does", (await trussSw()) === 1);
+  ok("3e: …and the open gable beside it, which builds the open gable", (await gableSw()) === 1);
+  await page.locator('[data-ss-adv-f="porchGable"]').click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.open === true));
+  ok("3e: ticked, the 3D opens the gable over the porch", true);
+  await page.locator('[data-ss-adv-f="porchGable"]').click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.open === false));
+  ok("3e: …and unticked, it is sided again", true);
   await segBtn(page, "Porch end", "Left wall").click();
   await radio(page, "Porch", "Projecting").click();
   await panelModel(page, (M) => !!(M.porch && M.porch.wall === "west"));

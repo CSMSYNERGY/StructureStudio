@@ -65,6 +65,15 @@ Deno.test("the porch-kind rule still holds, in both directions", () => {
   assert(!has(back, "porchOutFt"), JSON.stringify(back));
   // A typed draft that reports no porch means NO porch (2026-09-25): the draft replaces the roof.
   assert(!has(calDraftRoof({ type: "gable", porchOutFt: 6 }, { type: "gable" }), "porchOutFt"));
+  // The open porch gable (roof.porchGable, 2026-10-07) is a recessed porch's, and goes with it, typed or not.
+  const open = { type: "gable", porchDepthFt: 6, porchTruss: true, porchGable: "open" };
+  for (const dr of [{ porchOutFt: 6 }, { type: "gable", porchOutFt: 6 }]) {
+    const out2 = calDraftRoof(open, dr);
+    assert(!has(out2, "porchGable") && !has(out2, "porchTruss") && !has(out2, "porchDepthFt"), JSON.stringify(out2));
+  }
+  // An untyped recessed redraft keeps it, and a draft that reads it brings it.
+  assertEquals(calDraftRoof(open, { porchDepthFt: 5 }).porchGable, "open");
+  assertEquals(calDraftRoof({ type: "gable", porchDepthFt: 6 }, { type: "gable", porchDepthFt: 6, porchGable: "open" }).porchGable, "open");
 });
 
 Deno.test("⚠️ a stored porch attach height never lands on a porch it was not measured on", () => {
@@ -178,6 +187,11 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
   const { mergeDraft } = await import("../../../../dev/score.mjs");
   const cases: Array<[Any, Any]> = [
     [{ type: "gable", porchDepthFt: 5, porchTruss: true }, { type: "gable", porchOutFt: 6 }],
+    // The open porch gable (2026-10-07) goes with the recessed porch under a projecting draft, typed or not.
+    [{ type: "gable", porchDepthFt: 6, porchTruss: true, porchGable: "open" }, { porchOutFt: 6 }],
+    [{ type: "gable", porchDepthFt: 6, porchTruss: true, porchGable: "open" }, { type: "gable", porchOutFt: 6 }],
+    [{ type: "gable", porchDepthFt: 6, porchGable: "open" }, { porchDepthFt: 5 }],
+    [{ type: "gable", porchDepthFt: 6 }, { type: "gable", porchDepthFt: 6, porchGable: "open" }],
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchOutFt: 5 }],
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchOutFt: 5, porchAttachFt: 8 }],
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchDepthFt: 4 }],
