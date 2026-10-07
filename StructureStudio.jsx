@@ -157,49 +157,58 @@ function _distToSeg(px, py, x1, y1, x2, y2) {
 
 // Treat each wall as a line segment; pick the wall closest to the click.
 // Returns null only when the click is too far from any wall to be reasonable.
-function getWallFromClick(x, y, pW, pH, mgX, mgY) {
-  const ix = x - mgX, iy = y - mgY, T = 80;
-  const walls = [
-    { wall: "north", d: _distToSeg(ix, iy, 0, 0, pW, 0) },
-    { wall: "south", d: _distToSeg(ix, iy, 0, pH, pW, pH) },
-    { wall: "west",  d: _distToSeg(ix, iy, 0, 0, 0, pH) },
-    { wall: "east",  d: _distToSeg(ix, iy, pW, 0, pW, pH) },
+// A WING ALONG PART OF ITS WALL (2026-10-07) leaves open ground beside it, and a footprint wall there is only part
+// of its line: `sp` (optional, on all four helpers here) is each wall's usable stretch in plan px from the
+// building's corner (d3WallSpanFt times the scale), and the wall is that stretch. Absent, the whole wall, as always.
+function _wallSegs(ix, iy, pW, pH, sp) {
+  const s = (w, len) => (sp && sp[w]) || [0, len];
+  const n = s("north", pW), so = s("south", pW), we = s("west", pH), ea = s("east", pH);
+  return [
+    { wall: "north", d: _distToSeg(ix, iy, n[0], 0, n[1], 0) },
+    { wall: "south", d: _distToSeg(ix, iy, so[0], pH, so[1], pH) },
+    { wall: "west",  d: _distToSeg(ix, iy, 0, we[0], 0, we[1]) },
+    { wall: "east",  d: _distToSeg(ix, iy, pW, ea[0], pW, ea[1]) },
   ];
+}
+function getWallFromClick(x, y, pW, pH, mgX, mgY, sp) {
+  const ix = x - mgX, iy = y - mgY, T = 80;
+  const walls = _wallSegs(ix, iy, pW, pH, sp);
   walls.sort((a, b) => a.d - b.d);
   return walls[0].d <= T ? walls[0].wall : null;
 }
 
-function snapToWall(wall, cx, cy, iW, iH, pW, pH, mgX, mgY) {
-  const hw = iW / 2;
+function snapToWall(wall, cx, cy, iW, iH, pW, pH, mgX, mgY, sp) {
+  const hw = iW / 2, r = (sp && sp[wall]) || null;
   switch (wall) {
-    case "north": return { x: Math.max(mgX + hw, Math.min(cx, mgX + pW - hw)), y: mgY, rotation: 0, wall };
-    case "south": return { x: Math.max(mgX + hw, Math.min(cx, mgX + pW - hw)), y: mgY + pH, rotation: 0, wall };
-    case "west":  return { x: mgX, y: Math.max(mgY + hw, Math.min(cy, mgY + pH - hw)), rotation: 90, wall };
-    case "east":  return { x: mgX + pW, y: Math.max(mgY + hw, Math.min(cy, mgY + pH - hw)), rotation: 90, wall };
+    case "north": return { x: _alongClamp(cx, mgX, pW, hw, r), y: mgY, rotation: 0, wall };
+    case "south": return { x: _alongClamp(cx, mgX, pW, hw, r), y: mgY + pH, rotation: 0, wall };
+    case "west":  return { x: mgX, y: _alongClamp(cy, mgY, pH, hw, r), rotation: 90, wall };
+    case "east":  return { x: mgX + pW, y: _alongClamp(cy, mgY, pH, hw, r), rotation: 90, wall };
     default: return { x: cx, y: cy, rotation: 0, wall: null };
   }
 }
 
-function snapToWallInterior(wall, cx, cy, iW, iH, pW, pH, mgX, mgY) {
+function snapToWallInterior(wall, cx, cy, iW, iH, pW, pH, mgX, mgY, sp) {
+  const r = (sp && sp[wall]) || null;
   switch (wall) {
-    case "north": return { x: Math.max(mgX + iW / 2, Math.min(cx, mgX + pW - iW / 2)), y: mgY + iH / 2, rotation: 0, wall };
-    case "south": return { x: Math.max(mgX + iW / 2, Math.min(cx, mgX + pW - iW / 2)), y: mgY + pH - iH / 2, rotation: 0, wall };
-    case "west":  return { x: mgX + iH / 2, y: Math.max(mgY + iW / 2, Math.min(cy, mgY + pH - iW / 2)), rotation: 90, wall };
-    case "east":  return { x: mgX + pW - iH / 2, y: Math.max(mgY + iW / 2, Math.min(cy, mgY + pH - iW / 2)), rotation: 90, wall };
+    case "north": return { x: _alongClamp(cx, mgX, pW, iW / 2, r), y: mgY + iH / 2, rotation: 0, wall };
+    case "south": return { x: _alongClamp(cx, mgX, pW, iW / 2, r), y: mgY + pH - iH / 2, rotation: 0, wall };
+    case "west":  return { x: mgX + iH / 2, y: _alongClamp(cy, mgY, pH, iW / 2, r), rotation: 90, wall };
+    case "east":  return { x: mgX + pW - iH / 2, y: _alongClamp(cy, mgY, pH, iW / 2, r), rotation: 90, wall };
     default: return { x: cx, y: cy, rotation: 0, wall: null };
   }
+}
+// An item's centre held along its wall: half its width in from each end of the wall, or of the stretch `r`.
+// (Here, under both snappers: tests lift snapToWall .. getNearestWall's comment as one block.)
+function _alongClamp(c, m, len, hw, r) {
+  return r ? Math.max(m + r[0] + hw, Math.min(c, m + r[1] - hw)) : Math.max(m + hw, Math.min(c, m + len - hw));
 }
 
 // Always returns a wall — used as a fallback when the click is ambiguous or far
 // from the plan. Uses segment distance so corner clicks resolve to the closer side.
-function getNearestWall(x, y, pW, pH, mgX, mgY) {
+function getNearestWall(x, y, pW, pH, mgX, mgY, sp) {
   const ix = x - mgX, iy = y - mgY;
-  const walls = [
-    { wall: "north", d: _distToSeg(ix, iy, 0, 0, pW, 0) },
-    { wall: "south", d: _distToSeg(ix, iy, 0, pH, pW, pH) },
-    { wall: "west",  d: _distToSeg(ix, iy, 0, 0, 0, pH) },
-    { wall: "east",  d: _distToSeg(ix, iy, pW, 0, pW, pH) },
-  ];
+  const walls = _wallSegs(ix, iy, pW, pH, sp);
   walls.sort((a, b) => a.d - b.d);
   return walls[0].wall;
 }
@@ -392,7 +401,14 @@ const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other
 // included chip, the size-change reflow's seat); a drag across to a short wall was the way round
 // all of them. Shared by the 2D and 3D drags like the three above.
 const SS_REFUSE_TOO_LONG = "That wall is too short for it — it stays on a wall it fits.";
-const ssLongerThanWall = (widthFt, wall, bldgW, bldgH) => Number(widthFt) > ((wall === "north" || wall === "south") ? bldgW : bldgH) + 1e-6;
+// `spFt` (optional): each wall's usable stretch in feet beside a part-wall wing (d3WallSpanFt); the wall is that long.
+const ssLongerThanWall = (widthFt, wall, bldgW, bldgH, spFt) => Number(widthFt) > (spFt && spFt[wall] ? spFt[wall][1] - spFt[wall][0] : ((wall === "north" || wall === "south") ? bldgW : bldgH)) + 1e-6;
+// A part-wall wing's open ground refuses what is placed, dragged or stretched into it, one sentence for every path.
+const SS_REFUSE_OPEN = "That's open ground beside the wing, outside the building. Place it inside the walls.";
+// PLACED on a wall shorter than the item (a wall beside a part-wall wing can keep as little as 4 ft): refused, where
+// snapToWall's clamp would park it hanging past the corner. The pickers and the included chip say it with the item's
+// kind; the palette's wall built-ins and benches, and the pickers' Rough opening tile, say this.
+const SS_REFUSE_TOO_WIDE = "That's wider than this wall — pick a longer wall.";
 
 // ✅ THE 2026-09-04 GAP IS CLOSED (2026-09-09). It read: a wallOnly caller passes no `cand`, so
 // its candidate band defaults to full height and a RAISED door — or a transom — is refused
@@ -853,7 +869,9 @@ function ssPartitionSummary(items, wallFt) {
 // measured down from the plate (ssVentSpan). Without it every vent is measured under an 8 ft plate,
 // so on a 10 ft wall a 4 ft window sitting legally under a top-spot vent "collides" and is slid
 // away — on a same-size repairLoaded that moved a saved design's window on every open.
-function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt) {
+// `notches` (optional): the NEW size's open ground beside a part-wall wing (d3WingNotches). A wall item is seated
+// on what is left of its wall; anything else keeps its proportional place, and the plan marks it if that is open.
+function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt, notches) {
   const A = pageGeom(prev.w, prev.h), B = pageGeom(next.w, next.h);
   const events = [];
   const byId = new Map();
@@ -866,8 +884,10 @@ function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt) {
     const isH = wall === "north" || wall === "south";
     const wallLen = isH ? next.w : next.h;
     const half = wFt / 2;
-    if (wFt > wallLen) return null;
-    const lo = half, hi = wallLen - half;
+    const span = notches ? d3WallSpanFt(notches, wall, next.w, next.h) : null;
+    const spPx = span ? { [wall]: [span[0] * B.scale, span[1] * B.scale] } : undefined;
+    if (wFt > (span ? span[1] - span[0] : wallLen)) return null;
+    const lo = span ? span[0] + half : half, hi = span ? span[1] - half : wallLen - half;
     const start = Math.max(lo, Math.min(wantFt, hi));
     // Search outward from the wanted spot in 0.25 ft steps, nearest first.
     for (let d = 0; d <= (hi - lo) + 0.25; d += 0.25) {
@@ -875,8 +895,8 @@ function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt) {
         if (c < lo - 0.001 || c > hi + 0.001) continue;
         const px = (isH ? B.mgX : B.mgY) + c * B.scale;
         const sn = cfg.wallSnap
-          ? snapToWallInterior(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY)
-          : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY);
+          ? snapToWallInterior(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY, spPx)
+          : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY, spPx);
         let cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
         let out = sn;
         if (gablePlace && ssIsGableVent(it)) {
@@ -2125,19 +2145,23 @@ function fmtDimFtIn(feet) { return fmtFtIn(Number(feet) * 12) || '0"'; }
 // Returns null for anything with no wall, which is the honest answer for a loft, a note, a
 // line, a stored prop, and a ceiling-mounted electrical device — they float free, and there is
 // no wall to be centred on. Callers must handle null rather than defaulting to a wall.
-function ssWallDims(item, cfg, bldgW, bldgH, mgX, mgY, scale) {
+// Beside a part-wall wing (spFt, d3WallSpanFt: each wall's usable stretch in feet) the wall is what is left of it,
+// a0..a1 on the same axis, and both readings run to ITS ends: centred means centred on what can be built.
+function ssWallDims(item, cfg, bldgW, bldgH, mgX, mgY, scale, spFt) {
   if (!item || !cfg || !item.wall) return null;
   const isHoriz = item.wall === "north" || item.wall === "south";
-  const wallLen = isHoriz ? bldgW : bldgH;
+  const sp = spFt && spFt[item.wall];
+  const a0 = sp ? sp[0] : 0, a1 = sp ? sp[1] : (isHoriz ? bldgW : bldgH);
+  const wallLen = a1 - a0;
   const widthFt = Number(item.widthFt) || Number(cfg.width) || 0;
   const posFt = isHoriz ? (item.x - mgX) / scale : (item.y - mgY) / scale;
   const half = widthFt / 2;
-  const before = Math.max(0, posFt - half);
-  const after = Math.max(0, wallLen - (posFt + half));
+  const before = Math.max(0, posFt - half - a0);
+  const after = Math.max(0, a1 - (posFt + half));
   // A quarter of an inch. Finer than anyone frames to, and loose enough that "centred" does
   // not flicker off under a sub-pixel drag — which would read as a bug rather than a reading.
   const centered = Math.abs(before - after) < 0.02;
-  return { isHoriz, wallLen, widthFt, posFt, half, before, after, centered };
+  return { isHoriz, wallLen, widthFt, posFt, half, before, after, centered, a0, a1 };
 }
 // The vertical band a wall item occupies, in FEET off the floor.
 //
@@ -2817,9 +2841,15 @@ function electricalAutoItems(cfg, o) {
   // refusal appends that slab's top + 6" as the next try — the "go above it" rule measured off
   // the thing in the way rather than off one number the builder set for a bench. A door refusal
   // ends the attempt at once: a doorway is the one thing an outlet never climbs over.
+  // Beside a part-wall wing (o.notches, d3WingNotches) a device is never laid out in the open ground: a point on
+  // a footprint wall's line out there is skipped, as a blocked span is, and so is a light over it.
   const tryWall = (type, xFt, yFt, wall, heights, climb) => {
     const c = T[type];
     if (!c) return false;
+    if (o.notches) {
+      const sp = d3WallSpanFt(o.notches, wall, W, L), a = (wall === "north" || wall === "south") ? xFt : yFt;
+      if (a - c.width / 2 < sp[0] - 1e-6 || a + c.width / 2 > sp[1] + 1e-6) return false;
+    }
     const sn = snapToWallInterior(wall, o.mgX + xFt * sc, o.mgY + yFt * sc,
       c.width * sc, slabDepthFt(c) * sc, o.pW, o.pH, o.mgX, o.mgY);
     const tries = (heights && heights.length ? heights : [null]).slice();
@@ -2874,6 +2904,7 @@ function electricalAutoItems(cfg, o) {
   if (lc) {
     for (let i = 0; i < counts.lightFixture; i++) {
       const yFt = L * (i + 0.5) / counts.lightFixture;
+      if (o.notches && d3InNotch(o.notches, W / 2 - lc.width / 2, yFt - lc.height / 2, W / 2 + lc.width / 2, yFt + lc.height / 2)) continue;
       out.push({ id: id++, type: lightId, electricalItemId: lightId,
         x: o.mgX + (W / 2) * sc, y: o.mgY + yFt * sc,
         widthFt: lc.width, heightFt: lc.height, rotation: 0,
@@ -5872,10 +5903,22 @@ function d3SeatLiftFt(roofCfg) {
   return (isFinite(n) ? Math.max(1.5, Math.min(12, n)) : 3.5) / 12;
 }
 function d3ShellFt(roofCfg, plateFt) { const lift = d3SeatLiftFt(roofCfg); return lift > 0 ? Number(plateFt) + lift : plateFt; }
-// The massing holds something the legacy readers cannot express: a wing on a wing, or an end wing. Only
-// then does a reader take its list branch; one wing per side from a list is read by today's code, whose
-// records it carries field for field.
-function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length) || m.wings.some((g) => g.tier > 1))); }
+// The massing holds something the legacy readers cannot express: a wing on a wing, an end wing, or a wing
+// along part of its wall (part, 2026-10-07). Only then does a reader take its list branch; one whole-wall
+// wing per side from a list is read by today's code, whose records it carries field for field.
+function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length) || m.wings.some((g) => g.tier > 1 || g.part))); }
+// How much of its wall a PART-WALL WING runs along (roof.wingList[i].lengthFt / offsetFt, 2026-10-07): the
+// lean-to's rule (d3LeanToRun) with a room's 4 ft for the least, read off the massing's banded asks (r.len0,
+// r.off0). The whole wall without a length or with one at least the wall's; else that length, its middle
+// off0 from the wall's middle, slid back inside the wall (offHeld when it had to be).
+function d3WingRun(r, wallLen) {
+  const want = r && r.len0 != null ? Number(r.len0) : NaN;
+  if (!(want > 0) || want >= wallLen - 1e-9) return { whole: true, len: wallLen, off: 0, room: 0 };
+  const len = Math.max(Math.min(4, wallLen), want);
+  const room = Math.max(0, (wallLen - len) / 2);
+  const off0 = Number(r.off0) || 0;
+  return { whole: false, len, off: Math.max(-room, Math.min(room, off0)), room, offHeld: Math.abs(off0) > room + 1e-9 };
+}
 // THE MASSING FROM A WING LIST. d3Massing hands over here when d3WingListOn, with `out` its plain building
 // (Sc = S, uc = 0, Hc = H), and this fills it in. Every legacy key keeps its meaning -- Sc and uc the middle
 // section's span and offset (the SUMS of every side wing), Hc its wall height, ya the highest side-wing roof
@@ -5896,6 +5939,11 @@ function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length)
 // 1: z L), sz (its outward sign), tier, outer, w, want, shrunk, pitch, zO (its outside wall), zI (its inner
 // line), ye, ya, top, attach, attachFt, clamped, cuts, meets, meetFt, ask, askIgnored, raised, raisedBy,
 // raisedFrom, low, tight, roofIgnored.
+// A WING ALONG PART OF ITS WALL (lengthFt / offsetFt, 2026-10-07; d3WingRun): only the OUTERMOST wing on a side
+// wall, and only without end wings. Its record ends with part (true), z0, z1 (its run along the ridge, rg z),
+// len, off (where its middle is, from the wall's, in the lean-to frame) and offHeld. Any other side wing asked
+// for a length is drawn whole and says why: partIgnored "inner" (a wing outside it) or "ends" (end wings). A
+// whole-wall wing's record is the one it always was, field for field.
 // WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet === true, beside end wings only; d3WingCornerPairs):
 //   corners   { joins, near }, each { name ("front-left"), s, at, i, j }: a join's w, pitch, ye and ya (the
 //             side wing's, the end wing's to D3_WL_CORNER_TOL), a near-miss's why, dw, dp and dy
@@ -5918,10 +5966,11 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
   const sideRecs = [], endRecs = [];
   d3WingListEntries(cfg).forEach(({ e, i }) => {
     const r = { i, bwall: e.wall, want: Math.min(16, d3WlNum(e.widthFt)), p0: band(e.pitch, 0, 1.5, 0.25),
-      attach: e.attach === "roof" || e.attach === "wall" ? e.attach : null, d: band(e.attachFt, 0, 10, 0), ask0: band(e.eaveFt, 6, 26, null) };
+      attach: e.attach === "roof" || e.attach === "wall" ? e.attach : null, d: band(e.attachFt, 0, 10, 0), ask0: band(e.eaveFt, 6, 26, null),
+      len0: band(e.lengthFt, 4, 100, null), off0: band(e.offsetFt, -50, 50, 0) };
     const f = d3LeanToWall(ax, e.wall);
     if (f.kind === "eave") {
-      r.side = f.dir;
+      r.side = f.dir; r.along = f.along;
       r.wall = ax.uAxisIsX ? (f.dir < 0 ? "west" : "east") : (f.dir < 0 ? "north" : "south");
       sideRecs.push(r);
     } else if (!allowEnds) out.listDropped.push({ i, why: "end" });
@@ -5956,6 +6005,18 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
     r.ask = r.askIgnored ? null : r.ask0;
   });
   chain(G["-1"], false); chain(G["1"], false); chain(Z[0], true); chain(Z[1], true);
+  // 3a. PART OF A WALL: the outermost side wing, without end wings, runs the length it asks (d3WingRun), centred
+  // where it asks along the ridge. Nothing else about it moves: its width, room share, pushes and walls are a
+  // whole wing's. Any other side wing asked for a length is built whole (partIgnored), its length kept.
+  sides.forEach((r) => {
+    if (r.len0 == null) return;
+    const run = d3WingRun(r, ax.L);
+    if (run.whole) return;
+    if (hasEnds) { r.partIgnored = "ends"; return; }
+    if (!r.outer) { r.partIgnored = "inner"; return; }
+    const zc = ax.L / 2 + r.along * run.off;
+    Object.assign(r, { part: true, z0: zc - run.len / 2, z1: zc + run.len / 2, len: run.len, off: run.off, offHeld: !!run.offHeld });
+  });
   if (!sides.length && !hasEnds) {
     out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
     return out;
@@ -6167,6 +6228,8 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
       raised: g.raised, raisedBy: g.raisedBy, raisedFrom: g.raisedFrom, low: g.low, tight: g.tight, roofIgnored: g.roofIgnored });
     if (g.tier > 1 && g.mt) Object.assign(o, g.mt);
     if (g.hipEnds) o.hipEnds = g.hipEnds.slice();
+    if (g.part) Object.assign(o, { part: true, z0: g.z0, z1: g.z1, len: g.len, off: g.off, offHeld: g.offHeld });
+    if (g.partIgnored) o.partIgnored = g.partIgnored;
     return o;
   };
   const endRec = (t) => ({ i: t.i, wall: t.wall, bwall: t.bwall, at: t.at, sz: t.sz, tier: t.tier, outer: t.outer, w: t.w, want: t.want, shrunk: t.shrunk,
@@ -6288,16 +6351,21 @@ function d3ListTopAt(m, u) {
 // A gable wall across the middle stretch (no end wing on it), in the wall's along-frame (u + S/2): each side
 // wing's outside wall height over its band, outermost first, the middle at Hc, each inner boundary at the
 // clerestory's outer face (d3WallTops' c0/c1, one per wing). Null when every piece is H.
-function d3ListEndStair(m) {
+// `at` (0: rg z 0, 1: z L) names the gable wall: a part-wall wing that stops short of it (a notch at that
+// end, d3WingNotches) has no piece there, so the wall starts, or ends, at the face it meets. Without `at`, or
+// with no such wing, the stair it always was.
+function d3ListEndStair(m, at) {
   const T = D3.WALL_T, S = m.S, half = S / 2, out = [];
+  const cut = (g) => at != null && !!g.part && (at ? g.z1 < m.L - 1e-6 : g.z0 > 1e-6);
+  let cuts = 0;
   const L0 = m.wings.filter((g) => g.side < 0).sort((p, q) => q.tier - p.tier);
   const R0 = m.wings.filter((g) => g.side > 0).sort((p, q) => p.tier - q.tier);
   let x = 0;
-  L0.forEach((g) => { const b = g.u0 - T / 2 + half; out.push([x, b, g.ye]); x = b; });
+  L0.forEach((g) => { const b = g.u0 - T / 2 + half; if (cut(g)) cuts++; else out.push([x, b, g.ye]); x = b; });
   const mid = R0.length ? R0[0].u0 + T / 2 + half : S;
   out.push([x, mid, m.Hc]); x = mid;
-  R0.forEach((g, k) => { const b = g.outer ? S : R0[k + 1].u0 + T / 2 + half; out.push([x, b, g.ye]); x = b; });
-  return out.every((p) => p[2] === m.H) ? null : out;
+  R0.forEach((g, k) => { const b = g.outer ? S : R0[k + 1].u0 + T / 2 + half; if (cut(g)) cuts++; else out.push([x, b, g.ye]); x = b; });
+  return !cuts && out.every((p) => p[2] === m.H) ? null : out;
 }
 // d3WallTops over a DEEP list. A gable wall carrying an end wing is that wing's outside wall, H (null); one
 // without is the stair. A long wall: without end wings, today's (null under side wings, else Hc); with them,
@@ -6307,9 +6375,13 @@ function d3ListWallTops(m, wall) {
   const gables = m.uAxisIsX ? ["north", "south"] : ["west", "east"];
   if (gables.indexOf(wall) >= 0) {
     const at = wall === (m.uAxisIsX ? "north" : "east") ? 0 : 1;
-    return m.ends.some((t) => t.at === at) ? null : d3ListEndStair(m);
+    return m.ends.some((t) => t.at === at) ? null : d3ListEndStair(m, at);
   }
   const s = wall === (m.uAxisIsX ? "west" : "north") ? -1 : 1;
+  // A PART-WALL WING (part, 2026-10-07) is this wall over its own stretch only: its outside wall, and open
+  // ground either side of it (d3WingNotches), in the plan's along-frame.
+  const gp = m.ends.length ? null : m.wings.find((g) => g.side === s && g.part);
+  if (gp) return m.uAxisIsX ? [[gp.z0, gp.z1, gp.ye]] : [[m.L - gp.z1, m.L - gp.z0, gp.ye]];
   if (!m.ends.length) return m.wings.some((g) => g.side === s) ? null : [[0, m.L, m.Hc]];
   const T = D3.WALL_T;
   const E0 = m.ends.filter((t) => t.at === 0).sort((p, q) => q.tier - p.tier);
@@ -6342,6 +6414,122 @@ function d3ListCeilingFt(m, x, z) {
   }
   return m.H;
 }
+// ── A WING ALONG PART OF ITS WALL: THE OPEN GROUND BESIDE IT (2026-10-07) ─────────────────────────────
+// Carolyn, Q3: "yes, a wing can cover part of a side (e.g. 20 ft of a 40 ft wall)". It stays INSIDE the size,
+// as every wing does, so the outline from above becomes an L (or a T, with the wing in the middle of its wall)
+// inside the same W x L. Beside each end of the wing, from its outer wall in to the face it meets, is OPEN
+// GROUND: a notch at the building's corner, so the perimeter is the rectangle's. d3WingNotches is the one
+// answer the renderer, the plan and every placement path read, in PLAN feet (x from the west wall, y from the
+// north wall; the plan card's mapping, d3WingListPlanSVG's `at`): [{ i, side, wall, x0, x1, y0, y1 }], i the
+// wing's index in roof.wingList and wall its compass wall, or null without a part-wall wing.
+// Top-level statements here stay literal-only (shedProfile_test evaluates this region alone).
+function d3WingNotches(roofCfg, W, L, H) {
+  if (!d3WingListOn(roofCfg)) return null;
+  const m = d3Massing(roofCfg, W, L, H);
+  const out = [];
+  m.wings.forEach((g) => {
+    if (!g.part) return;
+    const lo = Math.min(g.u0, g.u1) + m.S / 2, hi = Math.max(g.u0, g.u1) + m.S / 2;
+    [[m.zA, g.z0], [g.z1, m.zB]].forEach((r) => {
+      if (!(r[1] - r[0] > 1e-6)) return;
+      const box = m.uAxisIsX ? { x0: lo, x1: hi, y0: r[0], y1: r[1] } : { x0: m.L - r[1], x1: m.L - r[0], y0: lo, y1: hi };
+      out.push({ i: g.i, side: g.side, wall: g.wall, x0: box.x0, x1: box.x1, y0: box.y0, y1: box.y1 });
+    });
+  });
+  return out.length ? out : null;
+}
+// The stretch of footprint wall `wall` a door, window, slab or wall device can use, in the plan's along-frame
+// (feet from its west or north end): [0, its length], or past the notches at its ends. A notch is always at a
+// corner, so what is left is one stretch.
+function d3WallSpanFt(notches, wall, W, L) {
+  const horiz = wall === "north" || wall === "south", len = horiz ? Number(W) : Number(L);
+  let a0 = 0, a1 = len;
+  (notches || []).forEach((n) => {
+    const on = wall === "north" ? n.y0 < 1e-6 : wall === "south" ? n.y1 > L - 1e-6 : wall === "west" ? n.x0 < 1e-6 : n.x1 > W - 1e-6;
+    if (!on) return;
+    const p = horiz ? n.x0 : n.y0, q = horiz ? n.x1 : n.y1;
+    if (p < 1e-6) a0 = Math.max(a0, q);
+    if (q > len - 1e-6) a1 = Math.min(a1, p);
+  });
+  return [a0, a1];
+}
+// Whether a rectangle on the plan (feet, x0 < x1, y0 < y1) reaches into the open ground by more than a hair.
+function d3InNotch(notches, x0, y0, x1, y1) {
+  return (notches || []).some((n) => Math.min(x1, n.x1) - Math.max(x0, n.x0) > 0.01 && Math.min(y1, n.y1) - Math.max(y0, n.y0) > 0.01);
+}
+// The building's outline from above in plan feet, clockwise from the north-west corner, each notch cut out of
+// its corner, and every edge moved `pad` feet out (the floor's rim): each corner moves along both its edges'
+// outward normals, so an inside corner moves into the notch. Edges alternate across and down.
+function d3OutlinePoly(notches, W, L, pad) {
+  const ns = notches || [];
+  const at = (x, y) => ns.find((n) => n.x0 <= x + 1e-6 && x - 1e-6 <= n.x1 && n.y0 <= y + 1e-6 && y - 1e-6 <= n.y1);
+  const pts = [];
+  [[0, 0], [W, 0], [W, L], [0, L]].forEach((c, k) => {
+    const n = at(c[0], c[1]);
+    if (!n) pts.push([c[0], c[1]]);
+    else if (k === 0) pts.push([0, n.y1], [n.x1, n.y1], [n.x1, 0]);
+    else if (k === 1) pts.push([n.x0, 0], [n.x0, n.y1], [W, n.y1]);
+    else if (k === 2) pts.push([W, n.y0], [n.x0, n.y0], [n.x0, L]);
+    else pts.push([n.x1, L], [n.x1, n.y0], [0, n.y0]);
+  });
+  if (!(pad > 0)) return pts;
+  const nrm = (a, b) => [Math.sign(b[1] - a[1]), -Math.sign(b[0] - a[0])];
+  return pts.map((p, k) => {
+    const n1 = nrm(pts[(k + pts.length - 1) % pts.length], p), n2 = nrm(p, pts[(k + 1) % pts.length]);
+    return [p[0] + pad * (n1[0] + n2[0]), p[1] + pad * (n1[1] + n2[1])];
+  });
+}
+// The same outline, `pad` feet out, as rectangles [x0, x1, y0, y1] in plan feet: bands down the plan between
+// the notches' edges, each cut where a notch is. What a flat sheet needs (the shade under a raised floor).
+function d3OutlineRects(notches, W, L, pad) {
+  const p = Number(pad) || 0;
+  const ns = (notches || []).map((n) => ({
+    x0: n.x0 < 1e-6 ? -p - 1 : n.x0 + p, x1: n.x1 > W - 1e-6 ? W + p + 1 : n.x1 - p,
+    y0: n.y0 < 1e-6 ? -p - 1 : n.y0 + p, y1: n.y1 > L - 1e-6 ? L + p + 1 : n.y1 - p,
+  }));
+  const ys = [-p, L + p];
+  ns.forEach((n) => [n.y0, n.y1].forEach((y) => { if (y > -p + 1e-6 && y < L + p - 1e-6) ys.push(y); }));
+  ys.sort((a, b) => a - b);
+  const out = [];
+  for (let k = 0; k + 1 < ys.length; k++) {
+    const y0 = ys[k], y1 = ys[k + 1];
+    if (!(y1 - y0 > 1e-6)) continue;
+    let xs = [[-p, W + p]];
+    ns.forEach((n) => {
+      if (!(n.y0 <= y0 + 1e-6 && n.y1 >= y1 - 1e-6)) return;
+      xs = xs.flatMap((r) => [[r[0], Math.min(r[1], n.x0)], [Math.max(r[0], n.x1), r[1]]]).filter((r) => r[1] - r[0] > 1e-6);
+    });
+    xs.forEach((r) => out.push([r[0], r[1], y0, y1]));
+  }
+  return out;
+}
+// The lean-tos a part-wall wing leaves with nothing to hang on: one on the wing's own wall that runs past the
+// wing's stretch, and one on an end wall whose run reaches into the open ground beside the wing. Each { i, kind,
+// wing (its index in roof.wingList), len (the wing's length) }. They are not drawn (d3LeanTosGeom leaves them
+// out, so the corners, the porch and every other reader see only what is built), and the lean-to's card says
+// why. Null without a part-wall wing or a lean-to list.
+function d3LeanTosOffWing(roofCfg, W, L, H) {
+  const list = d3LeanToList(roofCfg);
+  if (!list || !d3WingListOn(roofCfg)) return null;
+  const cfg = roofCfg || {};
+  const ax = d3RoofAxes(cfg, W, L);
+  const parts = d3Massing(cfg, W, L, Number(H) > 0 ? Number(H) : D3.WALL_H).wings.filter((g) => g.part);
+  if (!parts.length) return null;
+  const out = [];
+  list.forEach((x) => {
+    const e = x.e, i = x.i, f = d3LeanToWall(ax, e.wall), run = d3LeanToRun(e, f.wallLen), mid = f.along * run.off;
+    if (f.kind === "eave") {
+      const g = parts.find((q) => q.side === f.dir);
+      const a0 = ax.L / 2 + mid - run.len / 2, a1 = ax.L / 2 + mid + run.len / 2;
+      if (g && (a0 < g.z0 - 1e-6 || a1 > g.z1 + 1e-6)) out.push({ i, kind: "eave", wing: g.i, len: g.len });
+      return;
+    }
+    const a0 = mid - run.len / 2, a1 = mid + run.len / 2;
+    const g = parts.find((q) => (f.atL ? q.z1 < ax.L - 1e-6 : q.z0 > 1e-6) && Math.min(a1, Math.max(q.u0, q.u1)) - Math.max(a0, Math.min(q.u0, q.u1)) > 1e-6);
+    if (g) out.push({ i, kind: "gable", wing: g.i, len: g.len });
+  });
+  return out.length ? out : null;
+}
 // HOW WIDE A DORMER IS DRAWN (2026-10-04). roof.dormerWidthFt is the style's, and one style is drawn on
 // every size the builder sells, so a dormer typed the full length of a 12x24 would stand past both gable
 // ends of a 12x16. It is held to L, the ridge's run, less 3 in at each end: a transom's roof runs 3 in
@@ -6367,6 +6555,8 @@ function d3DormerBlocked(roofCfg, W, L, H) {
 function d3WingListBlocksPorch(roofCfg, W, L, wall) {
   if (!d3WingListOn(roofCfg)) return false;
   const m = d3Massing(roofCfg, W, L, D3.WALL_H);
+  // A side wall with a part-wall wing (part, 2026-10-07) has open ground along it: no porch there either.
+  if (m.list && m.wings.some((g) => g.part && g.wall === wall)) return true;
   if (!(m.list && m.ends.length)) return false;
   const gable = m.uAxisIsX ? wall === "north" || wall === "south" : wall === "west" || wall === "east";
   return gable ? m.ends.some((t) => t.wall === wall) : true;
@@ -6570,8 +6760,11 @@ function d3LeanToRun(e, wallLen) {
 //   zW, zO, sz                        a gable end's wall line, outer edge and outward sign
 //   roofIgnored                       "On the roof" asked on a gable end, built at wall height
 function d3LeanTosGeom(roofCfg, W, L, H) {
-  const list = d3LeanToList(roofCfg);
-  if (!list) return null;
+  const list0 = d3LeanToList(roofCfg);
+  if (!list0) return null;
+  // Beside a part-wall wing, only the lean-tos that have a wall to hang on (d3LeanTosOffWing).
+  const off = d3LeanTosOffWing(roofCfg, W, L, H);
+  const list = off ? list0.filter((x) => !off.some((o) => o.i === x.i)) : list0;
   const cfg = roofCfg || {};
   const ax = d3RoofAxes(cfg, W, L);
   const Hn = Number(H) > 0 ? Number(H) : D3.WALL_H;
@@ -8737,6 +8930,9 @@ function d3WingListSideElevation(spec, sizeLabel, focusKey, frame) {
   const { w, d } = d3WingListSize(sizeLabel);
   const H = (spec && spec.wallHeightFt) || 8;
   const m = d3Massing(roof, w, d, H);
+  // A PART-WALL WING (no end wings): its own side view, from the wall it is on (d3WingListPartSide).
+  const gp = m.list && !(m.ends && m.ends.length) ? (m.wings.find((g) => g.part && g.side === (m.uAxisIsX ? -1 : 1)) || m.wings.find((g) => g.part)) : null;
+  if (gp) return d3WingListPartSide(m, gp, roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG, focusKey, frame);
   if (!(m.list && m.ends && m.ends.length)) return null;
   const OV = roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG;
   const L = m.L, P = m.uAxisIsX;
@@ -8783,6 +8979,59 @@ function d3WingListSideElevation(spec, sizeLabel, focusKey, frame) {
       <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(E)} stroke={DIM} strokeWidth="1" />
       <text x={VW - PR + 14} y={(Y(0) + Y(E)) / 2} textAnchor="start" style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: INK }}>{d3FtIn(E)}</text>
       <text x={VW - PR + 14} y={(Y(0) + Y(E)) / 2 + 10} textAnchor="start" style={{ fontSize: fs, fill: DIM }}>{E > H + 1e-6 ? "middle walls, raised" : "middle walls"}</text>
+    </svg>
+  );
+}
+// THE SIDE VIEW OF A PART-WALL WING (lengthFt, 2026-10-07): standing at the wall it is on, the wing in front over
+// its own stretch (its outside wall, and its roof seen face on from its eave up to where it meets the face behind,
+// out past each end by the overhang), and behind it the middle's long wall up to its eave, down to the ground over
+// the open ground either side, with the middle's roof above. Dimensioned: the wing's length, the open ground each
+// side, the wing's outside wall and the middle's. Seen from the wing's side: north (portrait) or west (landscape)
+// on the left from the -u side, on the right from the +u side.
+function d3WingListPartSide(m, g, OV, focusKey, frame) {
+  const L = m.L, vs = g.side;
+  let peak = m.Hc;
+  m.prof.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  const VW = 360, VH = 200, PL = 54, PR = 88, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(L + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (z) => PL + innerW / 2 + ((vs < 0 ? z : L - z) - L / 2) * sc;
+  const Y = (y) => PT + innerH - y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const lit = d3WingListLit(focusKey, g.i);
+  const PLAIN = frame === "plain";
+  const fs = PLAIN ? 9 : 8;
+  const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+  const xa = Math.min(X(0), X(L)), xb = Math.max(X(0), X(L));
+  const w0 = Math.min(X(g.z0), X(g.z1)), w1 = Math.max(X(g.z0), X(g.z1));
+  const lo = g.ye - OV * g.pitch;
+  const opens = [[0, g.z0], [g.z1, L]].filter((q) => q[1] - q[0] > 1e-6);
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)} data-ss-elev-winglist-side="" data-ss-elev-part={g.i}>
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      <polygon points={pts([[-OV, m.Hc], [L + OV, m.Hc], [L + OV, peak], [-OV, peak]])} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
+      <rect x={xa} y={Y(m.Hc)} width={xb - xa} height={m.Hc * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      <rect x={w0} y={Y(g.ye)} width={w1 - w0} height={g.ye * sc} fill="#FEF3C7" stroke={lit ? HL : INK} strokeWidth={lit ? 2 : 1.2} />
+      <polygon points={pts([[g.z0 - OV, lo], [g.z1 + OV, lo], [g.z1 + OV, g.ya], [g.z0 - OV, g.ya]])} fill="#FDE68A" fillOpacity="0.9" stroke={lit ? HL : INK} strokeWidth={lit ? 2 : 1.2} strokeLinejoin="round" />
+      <line x1={w0} y1={Y(0) + 6} x2={w1} y2={Y(0) + 6} stroke={lit ? HL : DIM} strokeWidth={lit ? 2 : 1} />
+      <text x={(w0 + w1) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit ? HL : INK }}>{d3FtIn(g.len)}</text>
+      <text x={(w0 + w1) / 2} y={Y(0) + 27} textAnchor="middle" style={{ fontSize: fs - 1, fill: DIM }}>{`${g.bwall} wing`}</text>
+      {opens.map(([a, b]) => {
+        const x0 = Math.min(X(a), X(b)), x1 = Math.max(X(a), X(b));
+        return (
+          <g key={"open" + a}>
+            <line x1={x0} y1={Y(0) + 6} x2={x1} y2={Y(0) + 6} stroke={DIM} strokeWidth="1" strokeDasharray="3 3" />
+            <text x={(x0 + x1) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fill: DIM }}>{d3FtIn(b - a)}</text>
+            {x1 - x0 >= 26 && <text x={(x0 + x1) / 2} y={Y(0) + 27} textAnchor="middle" style={{ fontSize: fs - 1, fill: DIM }}>open</text>}
+          </g>
+        );
+      })}
+      <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(g.ye)} stroke={DIM} strokeWidth="1" />
+      <text x={PL - 26} y={(Y(0) + Y(g.ye)) / 2} textAnchor="end" style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: INK }}>{d3FtIn(g.ye)}</text>
+      <text x={PL - 26} y={(Y(0) + Y(g.ye)) / 2 + 10} textAnchor="end" style={{ fontSize: fs, fill: DIM }}>wing wall</text>
+      <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(m.Hc)} stroke={DIM} strokeWidth="1" />
+      <text x={VW - PR + 14} y={(Y(0) + Y(m.Hc)) / 2} textAnchor="start" style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: INK }}>{d3FtIn(m.Hc)}</text>
+      <text x={VW - PR + 14} y={(Y(0) + Y(m.Hc)) / 2 + 10} textAnchor="start" style={{ fontSize: fs, fill: DIM }}>middle walls</text>
     </svg>
   );
 }
@@ -8836,8 +9085,9 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     const gOn = (s) => (t.hipSides.indexOf(s) >= 0 ? m.wings.find((g) => g.side === s) : null), gl = gOn(-1), gr = gOn(1);
     return [[-S / 2, t.zO], [S / 2, t.zO], [gr ? gr.u0 : S / 2, t.zI], [gl ? gl.u0 : -S / 2, t.zI]];
   };
+  // A part-wall wing (part, 2026-10-07) over its own stretch; the open ground beside it is drawn dashed (opens).
   const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + no(g), name: named(g.bwall, false, no(g)), ye: g.ye,
-    b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0), poly: g.hipEnds ? sideHipPoly(g) : null }))
+    b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), g.part ? g.z0 : m.zA, g.part ? g.z1 : m.zB), v: vec(g.side, 0), poly: g.hipEnds ? sideHipPoly(g) : null }))
     .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + no(t), name: named(t.bwall, true, no(t)), ye: t.ye,
       b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz), poly: t.hipSides ? endHipPoly(t) : null })));
   const planPts = (poly) => poly.map(([u, z]) => { const p = at(u, z); return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
@@ -8872,8 +9122,18 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     }
     return mid.w >= 10 * K ? [<text key="m" x={cx} y={cy + 4} textAnchor="middle" {...halo(bg)} style={big}>M</text>] : [];
   })();
+  const opens = d3WingNotches(roof, w, d, H) || [];
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} role="group" aria-label="The building from above, the front at the bottom" style={{ width: "100%", height: "auto", display: "block" }}>
+      {opens.map((n, k) => (
+        <g key={"open" + k} data-ss-plan-open={n.i}>
+          <title>Open ground beside the wing</title>
+          <rect x={X(n.x0)} y={Y(n.y0)} width={(n.x1 - n.x0) * sc} height={(n.y1 - n.y0) * sc} fill="none" stroke={DIM} strokeWidth="1" strokeDasharray="3 3" />
+          {fitsIn("open", 9, (n.x1 - n.x0) * sc) && (n.y1 - n.y0) * sc >= 14 && (
+            <text x={X((n.x0 + n.x1) / 2)} y={Y((n.y0 + n.y1) / 2) + 3} textAnchor="middle" style={{ fontSize: fz(9), fill: DIM }}>open</text>
+          )}
+        </g>
+      ))}
       <g>
         <title>{`Middle: walls ${d3FtIn(m.Hc)}`}</title>
         <rect x={mid.x} y={mid.y} width={mid.w} height={mid.h} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
@@ -10160,6 +10420,10 @@ function buildShed3DModel(THREE, p) {
   // a projecting porch (d3ProjectingPorch, 2026-09-17) moves the label on its wall out past the deck.
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const porchOut = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+  // A WING ALONG PART OF ITS WALL (roof.wingList[i].lengthFt, 2026-10-07): the open ground beside it, in plan feet
+  // (d3WingNotches), so the outline from above is an L or a T inside the same size. Null on every other building,
+  // and every branch it opens below (the floor, the base under it, the walls and their corners) is guarded by it.
+  const NOTCH = d3WingNotches(roofCfg, bldgW, bldgH, H);
   // THE NEW FRAME (d3NewFrame, 2026-09-24): the style names its front (roof.front) or its shed high
   // side (roof.highSide). Every branch it opens below is guarded by this, so with neither key the
   // model is built by exactly the code it always was.
@@ -10286,10 +10550,32 @@ function buildShed3DModel(THREE, p) {
   // short. Same envelope, different reading.
   // `floor` stays in the OUTER scope because the shadow pass below still needs the base
   // mesh by name, whichever branch made it.
+  // With open ground beside a part-wall wing (NOTCH) the slab or deck is ONE prism over the outline with the
+  // notches cut out (d3OutlinePoly, the same 0.1 ft rim), its top at the floor, `depth` deep; and a runner is
+  // built in the pieces of it that cross the outline (notchRuns), each out to the rim.
+  const notchedSlab = (m, depth) => {
+    const sh = new THREE.Shape();
+    d3OutlinePoly(NOTCH, bldgW, bldgH, 0.1).forEach((q, k) => (k ? sh.lineTo(q[0] - bldgW / 2, q[1] - bldgH / 2) : sh.moveTo(q[0] - bldgW / 2, q[1] - bldgH / 2)));
+    const geo = new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: false });
+    geo.rotateX(Math.PI / 2);   // the shape's y is world z; the extrusion runs down from the floor's top
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.userData.ssNotched = true;
+    return mesh;
+  };
+  const notchRuns = (alongX, at) => {
+    const len = alongX ? bldgW : bldgH, c = at + (alongX ? bldgH : bldgW) / 2;
+    let xs = [[0, len]];
+    (NOTCH || []).forEach((n) => {
+      if (!(c > (alongX ? n.y0 : n.x0) + 1e-6 && c < (alongX ? n.y1 : n.x1) - 1e-6)) return;
+      const a0 = alongX ? n.x0 : n.y0, a1 = alongX ? n.x1 : n.y1;
+      xs = xs.flatMap((r) => [[r[0], Math.min(r[1], a0)], [Math.max(r[0], a1), r[1]]]).filter((r) => r[1] - r[0] > 1e-6);
+    });
+    return xs.map((r) => [r[0] - len / 2 - 0.1, r[1] - len / 2 + 0.1]);
+  };
   let floor;
   if ((p.styleSpec && p.styleSpec.foundation) !== "skids") {
-    floor = box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
-    floor.position.y = -D3.FLOOR_T / 2;
+    floor = NOTCH ? notchedSlab(mat(D3_COLORS.floor), D3.FLOOR_T) : box(mat(D3_COLORS.floor), bldgW + 0.2, D3.FLOOR_T, bldgH + 0.2);
+    if (!NOTCH) floor.position.y = -D3.FLOOR_T / 2;
     root.add(floor);
   } else {
     // A portable building sits on runners. The shadow gap under the deck is what says
@@ -10297,8 +10583,8 @@ function buildShed3DModel(THREE, p) {
     const DECK_T = 0.12;
     const SKID_T = D3.FLOOR_T - DECK_T;      // reads as a 4x4 under a thin deck
     const SKID_W = 3.5 / 12;
-    const deck = box(mat(D3_COLORS.floor), bldgW + 0.2, DECK_T, bldgH + 0.2);
-    deck.position.y = -DECK_T / 2;
+    const deck = NOTCH ? notchedSlab(mat(D3_COLORS.floor), DECK_T) : box(mat(D3_COLORS.floor), bldgW + 0.2, DECK_T, bldgH + 0.2);
+    if (!NOTCH) deck.position.y = -DECK_T / 2;
     root.add(deck);
     floor = deck;
     // Runners follow the LONG axis, the way they are framed and the way a trailer pulls
@@ -10311,6 +10597,14 @@ function buildShed3DModel(THREE, p) {
     for (let i = 0; i < nSkid; i++) {
       const t = nSkid === 1 ? 0.5 : i / (nSkid - 1);
       const at = -across / 2 + inset + t * (across - 2 * inset);
+      if (NOTCH) {
+        notchRuns(alongX, at).forEach(([a, b]) => {
+          const pc = alongX ? box(mat(D3_COLORS.bench), b - a, SKID_T, SKID_W) : box(mat(D3_COLORS.bench), SKID_W, SKID_T, b - a);
+          pc.position.set(alongX ? (a + b) / 2 : at, -DECK_T - SKID_T / 2, alongX ? at : (a + b) / 2);
+          root.add(pc);
+        });
+        continue;
+      }
       const sk = alongX
         ? box(mat(D3_COLORS.bench), bldgW + 0.2, SKID_T, SKID_W)
         : box(mat(D3_COLORS.bench), SKID_W, SKID_T, bldgH + 0.2);
@@ -10402,10 +10696,22 @@ function buildShed3DModel(THREE, p) {
     };
     // North and south run corner to corner over the walls' ends; west and east stop between them,
     // so no two skirt faces share a plane.
-    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
-    fGroup.add(skirtBox([-bldgW / 2, bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
-    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
-    fGroup.add(skirtBox([bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    // With open ground (NOTCH) the skirt follows the outline by the same rule: every edge across (x) runs over
+    // the walls' ends, every edge down (z) stops between them, an inside corner included.
+    if (NOTCH) {
+      const ol = d3OutlinePoly(NOTCH, bldgW, bldgH, 0);
+      ol.forEach((pa, k) => {
+        const pb = ol[(k + 1) % ol.length], across = pa[1] === pb[1];
+        const lo = across ? Math.min(pa[0], pb[0]) : Math.min(pa[1], pb[1]), hi = across ? Math.max(pa[0], pb[0]) : Math.max(pa[1], pb[1]);
+        fGroup.add(across ? skirtBox([lo - bldgW / 2, pa[1] - bldgH / 2], [1, 0], -T / 2, hi - lo + T / 2)
+          : skirtBox([pa[0] - bldgW / 2, lo - bldgH / 2], [0, 1], T / 2, hi - lo - T / 2));
+      });
+    } else {
+      fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+      fGroup.add(skirtBox([-bldgW / 2, bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+      fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+      fGroup.add(skirtBox([bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    }
     const runners = [], supports = [];
     // Where the ground falls away (FALL) the far side stands on supports even when the front's gap is
     // too thin for a runner: there the runners are 4x4s on edge, bedded into the grade at the front.
@@ -10425,6 +10731,29 @@ function buildShed3DModel(THREE, p) {
       for (let i = 0; i < nRun; i++) {
         const t = i / (nRun - 1);
         const at = -across / 2 + inset + t * (across - 2 * inset);
+        // With open ground (NOTCH): the runner in its pieces across the outline, and each piece's own row of
+        // supports by the same rule (one near each end, every OC or less between), so none stands in a notch.
+        if (NOTCH) {
+          runners.push({ at, y0: runBot, y1: -D3.FLOOR_T });
+          notchRuns(alongX, at).forEach(([a, b]) => {
+            const pc = alongX ? box(runMat, b - a, RUN_H, RUN_W) : box(runMat, RUN_W, RUN_H, b - a);
+            pc.position.set(alongX ? (a + b) / 2 : at, -D3.FLOOR_T - RUN_H / 2, alongX ? at : (a + b) / 2);
+            pc.userData.ssFoundationPart = "runner";
+            fGroup.add(pc);
+            if (!FALL && runBot + GRADE < 0.04) return;
+            const p0 = a + 0.1, plen = b - a - 0.2;
+            const nP = Math.max(2, Math.ceil((plen - 2 * END) / OC - 1e-9) + 1);
+            for (let k = 0; k < nP; k++) {
+              const along = p0 + END + (k * (plen - 2 * END)) / (nP - 1);
+              const x = alongX ? along : at, z = alongX ? at : along;
+              const dep = FALL ? supportDepth(x, z, !alongX) : GRADE;
+              if (runBot + dep < 0.04) continue;
+              courses = addSupport(fGroup, x, z, runBot, !alongX, dep);
+              supports.push(FALL ? { x, z, y0: -dep, y1: runBot, courses } : { x, z, y0: -GRADE, y1: runBot });
+            }
+          });
+          continue;
+        }
         const run = alongX ? box(runMat, bldgW + 0.2, RUN_H, RUN_W) : box(runMat, RUN_W, RUN_H, bldgH + 0.2);
         run.position.set(alongX ? 0 : at, -D3.FLOOR_T - RUN_H / 2, alongX ? at : 0);
         run.userData.ssFoundationPart = "runner";
@@ -10455,7 +10784,9 @@ function buildShed3DModel(THREE, p) {
     // lit straight through. A translucent black sheet over the grass under the footprint out to the
     // walls' outer faces (where a projecting porch's deck, and its own sheet, begins), in the
     // ENVIRONMENT group so it hides with the grass (the Landscape toggle), a hair above it.
-    addUnderShade(0, 0, bldgW + T, bldgH + T);
+    // With open ground (NOTCH) a sheet per band of the outline (d3OutlineRects), none over the notches.
+    if (NOTCH) d3OutlineRects(NOTCH, bldgW, bldgH, T / 2).forEach((r) => addUnderShade((r[0] + r[1]) / 2 - bldgW / 2, (r[2] + r[3]) / 2 - bldgH / 2, r[1] - r[0], r[3] - r[2]));
+    else addUnderShade(0, 0, bldgW + T, bldgH + T);
   }
   // ── A SLAB ON GROUND THAT FALLS AWAY: ITS STEM WALL (gradeCornersFt on a slab, 2026-10-03) ─────────
   // The floor band above is the slab's top, as on every slab, and its highest corner meets the grass
@@ -10502,10 +10833,29 @@ function buildShed3DModel(THREE, p) {
       sGroup.add(mesh);
       stems.push({ wall, top: -D3.FLOOR_T, bottom });
     };
-    stemWall("north", [-bldgW / 2, -(bldgH / 2 + OUT)], [1, 0], [0, -1], -OUT, bldgW + OUT);
-    stemWall("south", [-bldgW / 2, bldgH / 2 + OUT], [1, 0], [0, 1], -OUT, bldgW + OUT);
-    stemWall("west", [-(bldgW / 2 + OUT), -bldgH / 2], [0, 1], [-1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
-    stemWall("east", [bldgW / 2 + OUT, -bldgH / 2], [0, 1], [1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
+    if (NOTCH) {
+      // Round the outline with the open ground (NOTCH): each edge's stem by the same rule, run along the edge
+      // clockwise with its exterior normal. Across (x), past an outside corner by OUT and short of an inside
+      // one by OUT; down (z), short of an outside corner by STEM_T - OUT and past an inside one by as much, so
+      // every corner closes. Named for the way each edge faces.
+      const ol = d3OutlinePoly(NOTCH, bldgW, bldgH, 0), nO = ol.length;
+      const dirOf = (a, b) => [Math.sign(b[0] - a[0]), Math.sign(b[1] - a[1])];
+      ol.forEach((pa, k) => {
+        const pb = ol[(k + 1) % nO], d = dirOf(pa, pb), nv = [d[1], -d[0]];
+        const dPrev = dirOf(ol[(k + nO - 1) % nO], pa), dNext = dirOf(pb, ol[(k + 2) % nO]);
+        const convex0 = dPrev[0] * d[1] - dPrev[1] * d[0] > 0, convex1 = d[0] * dNext[1] - d[1] * dNext[0] > 0;
+        const across = d[1] === 0, len = Math.abs(pb[0] - pa[0]) + Math.abs(pb[1] - pa[1]);
+        const e0 = across ? (convex0 ? -OUT : OUT) : (convex0 ? STEM_T - OUT : OUT - STEM_T);
+        const e1 = across ? (convex1 ? len + OUT : len - OUT) : (convex1 ? len - STEM_T + OUT : len + STEM_T - OUT);
+        const name = nv[1] < 0 ? "north" : nv[1] > 0 ? "south" : nv[0] < 0 ? "west" : "east";
+        stemWall(name, [pa[0] - bldgW / 2 + OUT * nv[0], pa[1] - bldgH / 2 + OUT * nv[1]], d, nv, e0, e1);
+      });
+    } else {
+      stemWall("north", [-bldgW / 2, -(bldgH / 2 + OUT)], [1, 0], [0, -1], -OUT, bldgW + OUT);
+      stemWall("south", [-bldgW / 2, bldgH / 2 + OUT], [1, 0], [0, 1], -OUT, bldgW + OUT);
+      stemWall("west", [-(bldgW / 2 + OUT), -bldgH / 2], [0, 1], [-1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
+      stemWall("east", [bldgW / 2 + OUT, -bldgH / 2], [0, 1], [1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
+    }
     root.add(sGroup);
     slabStemGroup = sGroup;
     foundationInfo = { kind: "slab", grade: GRADE, stemT: STEM_T, stems };
@@ -10608,6 +10958,24 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // A WING ALONG PART OF ITS WALL (NOTCH): a footprint wall the open ground reaches is built over what is left of
+  // it (d3WallSpanFt), through the same len / O / a0Ft a recessed porch sets a wall back by (a recessed porch is
+  // off with wings, so the two never stack). An opening it holds out in the open ground is not built (onWallLeft);
+  // the plan marks it.
+  if (NOTCH) {
+    Object.keys(WALLS).forEach((n) => {
+      const wf = WALLS[n], sp = d3WallSpanFt(NOTCH, n, bldgW, bldgH);
+      if (sp[0] < 1e-9 && sp[1] > wf.len - 1e-9) return;
+      WALLS[n] = { ...wf, len: sp[1] - sp[0], O: [wf.O[0] + wf.U[0] * sp[0], wf.O[1] + wf.U[1] * sp[0]], a0Ft: sp[0], notched: true };
+    });
+  }
+  // Whether an item on footprint wall `wf`, w feet wide, stands by its plan position on what is left of a wall the
+  // open ground shortened. True on every other wall.
+  const onWallLeft = (wf, it, w) => {
+    if (!wf.notched) return true;
+    const along = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - wf.a0Ft;
+    return along - w / 2 > -0.05 && along + w / 2 < wf.len + 0.05;
+  };
   // ── EACH WALL'S OWN TOP (d3WallTops, 2026-09-24) ──
   // A wall with `tops` ([[a0, a1, top]] in its own frame) is built to its LOCAL top: a new-frame
   // shed's HIGH eave wall is a real clad wall up to the high eave -- battens in phase to its top, no
@@ -10644,6 +11012,41 @@ function buildShed3DModel(THREE, p) {
   // items, and never pickable (no `wall` name: nothing can be placed on them).
   const CLERESTORY = {};
   mass.wings.forEach((g) => {
+    // A WING ALONG PART OF ITS WALL (g.part, always a list's): its clerestory over its own stretch, and over the open
+    // ground each side of it the same face down to the floor (partWall "open"): the middle's wall, or the wall of
+    // the wing inside it, standing on the open ground, up to the face's top (g.top), even where the wing's roof
+    // runs up onto the middle's roof and leaves no clerestory over the stretch. The three share one along-frame
+    // from the wall's far end (`start`, the frame every eave-side wall uses), so the siding runs on across the
+    // joins in phase, and a join is no corner: lap courses run to it (joinStart, joinEnd). Then the wing's own END
+    // WALL at each end it stops short at, across its width from the floor to its outside wall's top (partWall
+    // "end"); the triangle over it is the wing's body cap. None has a footprint wall's name: nothing goes on them.
+    if (g.part) {
+      const k = g.tier, ye = g.ye, top = g.top != null ? g.top : mass.Hc;
+      const yFk = k === 1 && g.attach === "roof" ? ye + (g.w - T / 2) * g.pitch : g.ya - (T / 2) * g.pitch;
+      const botK = Math.max(ye, yFk - 0.3), key = (g.side < 0 ? "clerestoryNeg" : "clerestoryPos") + (k === 1 ? "" : k);
+      const Lm = mass.L, ax = (z) => (mass.uAxisIsX ? z : Lm - z);
+      // Each piece runs a hundredth of a foot on past a join, so no hairline opens between the two: in one plane,
+      // from one origin, the overlap draws the same siding twice.
+      const fr = (za, zb, bot, extra) => {
+        const a = Math.min(ax(za), ax(zb)) - (extra.joinStart ? 0.01 : 0), b = Math.max(ax(za), ax(zb)) + (extra.joinEnd ? 0.01 : 0);
+        return { ...(mass.uAxisIsX ? { O: [g.u0, -Lm / 2], U: [0, 1], N: [g.side, 0] } : { O: [-Lm / 2, g.u0], U: [1, 0], N: [0, g.side] }),
+          len: b, start: a, a0Ft: 0, bot, tops: [[a, b, top]], clerestory: g.side, clerestoryI: g.i, clerestoryTier: k, uAlong: true, ...extra };
+      };
+      const open0 = g.z0 > 1e-6, open1 = g.z1 < Lm - 1e-6, landed = g.attach === "roof" && !g.cuts;
+      // The joins, in the frame's along: z0 and z1 run the other way on a landscape footprint.
+      const j = (atZ0) => (mass.uAxisIsX ? (atZ0 ? { joinStart: true } : { joinEnd: true }) : (atZ0 ? { joinEnd: true } : { joinStart: true }));
+      if (!landed) CLERESTORY[key] = fr(g.z0, g.z1, botK, { ...(open0 ? j(true) : {}), ...(open1 ? j(false) : {}) });
+      if (open0) CLERESTORY[key + "Open0"] = fr(0, g.z0, 0, { partWall: "open", ...(landed ? {} : j(false)) });
+      if (open1) CLERESTORY[key + "Open1"] = fr(g.z1, Lm, 0, { partWall: "open", ...(landed ? {} : j(true)) });
+      const uLo = Math.min(g.u0, g.u1);
+      [[g.z0, open0, -1], [g.z1, open1, 1]].forEach(([z, open, sz], e) => {
+        if (!open) return;
+        CLERESTORY["wingEnd" + g.i + "_" + e] = mass.uAxisIsX
+          ? { len: g.w, O: [uLo, z - Lm / 2], U: [1, 0], N: [0, sz], a0Ft: 0, bot: 0, tops: [[0, g.w, ye]], clerestory: g.side, clerestoryI: g.i, clerestoryTier: k, partWall: "end" }
+          : { len: g.w, O: [Lm / 2 - z, uLo], U: [0, 1], N: [-sz, 0], a0Ft: 0, bot: 0, tops: [[0, g.w, ye]], clerestory: g.side, clerestoryI: g.i, clerestoryTier: k, partWall: "end" };
+      });
+      return;
+    }
     // A wing roof run up onto the centre's roof (wingAttach "roof", 2026-09-28) leaves no centre wall
     // showing above it: the wing's own body closes the gable end up to it instead.
     if (g.attach === "roof" && !g.cuts) return;
@@ -10750,7 +11153,11 @@ function buildShed3DModel(THREE, p) {
     // buried in corner trim, invisible either way.
     const uvA = b.geometry.attributes.uv, posA = b.geometry.attributes.position;
     const cu = (a0 + a1) / 2, cv = (y0 + y1) / 2;
-    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
+    // A part-wall wing's face is pieces in one plane, meeting in line with no trim between them (uAlong): turned a
+    // quarter (U along z), a box's own x runs against the wall's along, so each piece read u mirrored about its own
+    // middle and the siding jumped at every join. Read along the wall instead. Every other wall as it always was.
+    const uFlip = wf.uAlong && wf.U[0] === 0 ? -1 : 1;
+    for (let i = 0; i < uvA.count; i++) uvA.setXY(i, uFlip * posA.getX(i) + cu, posA.getY(i) + cv);
     uvA.needsUpdate = true;
     const ac = (a0 + a1) / 2;
     b.position.set(
@@ -11163,6 +11570,8 @@ function buildShed3DModel(THREE, p) {
     const ops = itemsNow
       // A vent the roof draws in the gable is not an opening in this wall (gableVentFitOf).
       .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname && !gableVentFitOf(it); })
+      // Out in the open ground beside a part-wall wing (NOTCH) an opening has no wall to be in: not built.
+      .filter((it) => onWallLeft(wf, it, it.widthFt || itemTypes[it.type].width))
       .map((it) => {
         const c = itemTypes[it.type];
         const w = it.widthFt || c.width;
@@ -11200,6 +11609,8 @@ function buildShed3DModel(THREE, p) {
     // clicking a wall.
     const wg = new THREE.Group();
     wg.userData = wf.clerestory ? (wf.clerestoryI != null ? { clerestory: wf.clerestory, clerestoryI: wf.clerestoryI } : { clerestory: wf.clerestory }) : { wall: wname };
+    // A part-wall wing's walls (CLERESTORY): "open", the face on the open ground; "end", the wing's end wall.
+    if (wf.partWall) wg.userData.ssPartWall = wf.partWall;
     // UP TO THE LOCAL TOP (topsOf, wings): one box to the lowest top across the run, then one box
     // per piece that stands higher, so no seam runs down the wall under the step. Without `tops`
     // that is exactly the one box to H this has always built.
@@ -11259,8 +11670,10 @@ function buildShed3DModel(THREE, p) {
           // Courses DIE INTO the corner boards instead of running to the wall's end — the
           // clamp bites only when b0/b1 ARE the wall's own ends (interior spans between
           // openings sit far from 0 / wf.len), so this is a corner rule, not a gap rule.
-          const s0 = Math.max(b0 + 0.03, (wf.start || 0) + trimFace);
-          const s1 = Math.min(b1 - 0.03, wf.len - trimFace);
+          // A part-wall wing's walls meet in line, not at a corner (joinStart, joinEnd): there the courses run on.
+          const j0 = wf.joinStart && Math.abs(b0 - (wf.start || 0)) < 1e-6, j1 = wf.joinEnd && Math.abs(b1 - wf.len) < 1e-6;
+          const s0 = j0 ? b0 : Math.max(b0 + 0.03, (wf.start || 0) + trimFace);
+          const s1 = j1 ? b1 : Math.min(b1 - 0.03, wf.len - trimFace);
           if (s1 - s0 < 0.1) return;
           // Same phase argument as the battens: y walks the whole wall from the ground and
           // the BAND filters it, rather than restarting the courses inside the band. A lap
@@ -13058,7 +13471,8 @@ function buildShed3DModel(THREE, p) {
     // ROUND A CORNER (hipEnds, roof.wingCornersMeet): at a joined end it runs on out to the end wall (za, zb),
     // and the hip cuts it back.
     const hz0 = !!(g.hipEnds && g.hipEnds.indexOf(0) >= 0), hz1 = !!(g.hipEnds && g.hipEnds.indexOf(1) >= 0);
-    const za = hz0 ? 0 : mass.zA, zb = hz1 ? L : mass.zB;
+    // ALONG PART OF ITS WALL (g.part) it runs over its own stretch, z0..z1, each end capped flush with its end wall.
+    const za = g.part ? g.z0 : hz0 ? 0 : mass.zA, zb = g.part ? g.z1 : hz1 ? L : mass.zB;
     if (yFace - ye > 0.02) {
       const sh = new THREE.Shape();
       sh.moveTo(lu1, ye); sh.lineTo(face, ye);
@@ -13066,8 +13480,8 @@ function buildShed3DModel(THREE, p) {
       else sh.lineTo(face, yFace);
       sh.lineTo(lu1, ye);
       // Beside END WINGS (hasEnds) a side wing runs over the middle's stretch only, mass.zA..mass.zB.
-      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: hasEnds ? zb - za : L, bevelEnabled: false });
-      if (hasEnds) wgeo.translate(0, 0, za);
+      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: hasEnds || g.part ? zb - za : L, bevelEnabled: false });
+      if (hasEnds || g.part) wgeo.translate(0, 0, za);
       const wuv = wgeo.attributes.uv;
       if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
       // The caps flush with the wall face, as moveCapsFlush does for the centre's.
@@ -13078,6 +13492,9 @@ function buildShed3DModel(THREE, p) {
           if (hasEnds) {
             if (Math.abs(z - mass.zA) < 1e-6) wpos.setZ(i, mass.zA - capOut0);
             else if (Math.abs(z - mass.zB) < 1e-6) wpos.setZ(i, mass.zB + capOutL);
+          } else if (g.part) {
+            if (Math.abs(z - za) < 1e-6) wpos.setZ(i, za - capOut0);
+            else if (Math.abs(z - zb) < 1e-6) wpos.setZ(i, zb + capOutL);
           } else if (Math.abs(z) < 1e-6) wpos.setZ(i, -capOut0);
           else if (Math.abs(z - L) < 1e-6) wpos.setZ(i, L + capOutL);
         }
@@ -13094,11 +13511,11 @@ function buildShed3DModel(THREE, p) {
     // The flashing where the wing roof meets the clerestory, from the slab's top up 0.3 ft, standing
     // just clear of the clerestory's own relief and between its corner boards.
     const slabTop = yFace + (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.pitch * g.pitch);
-    const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = hasEnds ? mass.zB - mass.zA - 2 * trimFace : L - 2 * trimFace;
+    const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = g.part ? zb - za - 2 * trimFace : hasEnds ? mass.zB - mass.zA - 2 * trimFace : L - 2 * trimFace;
     if (fLen > 0.5 && !onRoof) {
       const fl = box(roofMat, fT, 0.38, fLen);
       d3RoofSlabUVs(fl);
-      fl.position.set(face + s * fT / 2, slabTop + 0.14, hasEnds ? (mass.zA + mass.zB) / 2 : L / 2);
+      fl.position.set(face + s * fT / 2, slabTop + 0.14, g.part ? (za + zb) / 2 : hasEnds ? (mass.zA + mass.zB) / 2 : L / 2);
       fl.userData.ssWing = s;
       tagWingList(fl, g);
       rg.add(fl);
@@ -13111,6 +13528,8 @@ function buildShed3DModel(THREE, p) {
     sl.wingIn = inner;
     sl.wingInExt = onRoof ? 0 : (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
     sl.wingList = g.i; sl.wingTier = g.tier;
+    // Along part of its wall its slope is a section of its own over z0..z1, a rake at each end (hipSec's way).
+    if (g.part) sl.partSec = (whole) => ({ ...whole, zLen: (zb - za) + OV * 2, zMid: (za + zb) / 2, z0: za, z1: zb, end0: true, endL: true });
     // Round a corner its slope has its own section: on past each joined end (its slab, fascia and soffit an
     // overhang and a foot past the end wall, cut on the hip), no rake there, and no tail at the corner.
     if (g.hipEnds) {
@@ -13161,7 +13580,7 @@ function buildShed3DModel(THREE, p) {
       if (!o) {
         if (sl.wingIn === P) return sl.wingInExt;   // a wing's inner end stops at the wall
         // The centre's eave under a wing roof that lands on it (wingAttach "roof"): cut back to the landing.
-        const cut = sl.wing ? null : wingLandsAt(P);
+        const cut = sl.wing || sec.noLand ? null : wingLandsAt(P);
         return cut != null ? cut : OV;               // free edge: the real eave overhang
       }
       const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1];
@@ -13193,7 +13612,7 @@ function buildShed3DModel(THREE, p) {
     // detached at some angles. Only slopes that reach the wall plate get one
     // (a gambrel's upper legs do not).
     const lowEnd = A[1] <= B[1] ? A : B;
-    if (lowEnd[1] <= sec.Hr + 0.01 && (sl.wing || wingLandsAt(lowEnd) == null)) {
+    if (lowEnd[1] <= sec.Hr + 0.01 && (sl.wing || sec.noLand || wingLandsAt(lowEnd) == null)) {
       const towardLow = lowEnd === A ? -1 : 1;
       // The eave end ON the slope line. Every eave detail registers against this point:
       // at a free edge jointExt returns OV, so the slab's end face is the plane through
@@ -13441,7 +13860,23 @@ function buildShed3DModel(THREE, p) {
     const whole = hasEnds
       ? { Hr, peak: profPeak, joint: jointPartnerAt, zLen: (mass.zB - mass.zA) + OV * 2, zMid: (mass.zA + mass.zB) / 2, z0: mass.zA, z1: mass.zB, end0: true, endL: true }
       : { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L + OV * 2, zMid: L / 2, z0: 0, z1: L, end0: true, endL: true };
-    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, sl.hipSec ? sl.hipSec(whole) : whole));
+    // A part-wall wing whose roof runs up onto the middle's (g.part, "On the roof") lands over its own stretch only:
+    // the middle's slope on that side is three sections, cut back to the landing over z0..z1 and with its full eave
+    // over the open ground either side (noLand), each with its rake only where it ends at a gable end.
+    const landsPart = (sl) => {
+      if (sl.wing) return null;
+      const P = sl[0][1] <= sl[1][1] ? sl[0] : sl[1];
+      return mass.wings.find((q) => q.part && (q.tier || 1) === 1 && q.attach === "roof" && !q.cuts && Math.abs(P[0] - (q.u0 - mass.uc)) < 1e-6 && Math.abs(P[1] - Hr) < 1e-6) || null;
+    };
+    const secOf = (a, b, noLand) => {
+      const e0 = a < 1e-6, e1 = b > L - 1e-6, lo = a - (e0 ? OV : 0), hi = b + (e1 ? OV : 0);
+      return { ...whole, zLen: hi - lo, zMid: (lo + hi) / 2, z0: a, z1: b, end0: e0, endL: e1, ...(noLand ? { noLand: true } : {}) };
+    };
+    slopes.concat(wingSlopes).forEach((sl) => {
+      const gl = landsPart(sl);
+      if (gl) { [[0, gl.z0, true], [gl.z0, gl.z1, false], [gl.z1, L, true]].filter((q) => q[1] - q[0] > 1e-6).forEach((q) => buildSlope(sl, secOf(q[0], q[1], q[2]))); return; }
+      buildSlope(sl, sl.hipSec ? sl.hipSec(whole) : sl.partSec ? sl.partSec(whole) : whole);
+    });
   } else {
     const zJ = STEP.stepFt;
     const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
@@ -14269,7 +14704,7 @@ function buildShed3DModel(THREE, p) {
         if (u < lo || u > hi) continue;
         const yTop = ye + Math.abs(u + s * halfW - g.u1) * g.pitch;
         if (yTop <= ye + 0.05) continue;
-        (hasEnds ? [mass.zA - capStripOut(capOut0), mass.zB + capStripOut(capOutL)] : [-capStripOut(capOut0), L + capStripOut(capOutL)])
+        (hasEnds ? [mass.zA - capStripOut(capOut0), mass.zB + capStripOut(capOutL)] : g.part ? [g.z0 - capStripOut(capOut0), g.z1 + capStripOut(capOutL)] : [-capStripOut(capOut0), L + capStripOut(capOutL)])
           .filter((z, k) => !(g.hipEnds && g.hipEnds.indexOf(k) >= 0)).forEach((z) => {
           const st = box(reliefMat, halfW * 2, yTop - ye, capStripDepth);
           st.position.set(u - mass.uc, (ye + yTop) / 2, z);
@@ -14295,7 +14730,7 @@ function buildShed3DModel(THREE, p) {
         const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - ye) / g.pitch);
         if ((face - uIn) * -s < 0.1) continue;
         const a = Math.min(uIn, face), b = Math.max(uIn, face);
-        (hasEnds ? [mass.zA - CLAD_RELIEF_OUT, mass.zB + CLAD_RELIEF_OUT] : [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT])
+        (hasEnds ? [mass.zA - CLAD_RELIEF_OUT, mass.zB + CLAD_RELIEF_OUT] : g.part ? [g.z0 - CLAD_RELIEF_OUT, g.z1 + CLAD_RELIEF_OUT] : [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT])
           .filter((z, k) => !(g.hipEnds && g.hipEnds.indexOf(k) >= 0)).forEach((z) => {
           const st = box(wallMat, b - a, 0.08, 0.1);
           st.position.set((a + b) / 2 - mass.uc, y, z);
@@ -14339,6 +14774,8 @@ function buildShed3DModel(THREE, p) {
   // up the tall corner to just under the roof line at its inner face, so it covers the corner notch
   // the whole way without poking up through the slab on a steep pitch.
   [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
+    // A corner out in the open ground beside a part-wall wing (NOTCH) has no walls to close: no board.
+    if (NOTCH && NOTCH.some((n) => c[0] + bldgW / 2 >= n.x0 - 1e-6 && c[0] + bldgW / 2 <= n.x1 + 1e-6 && c[1] + bldgH / 2 >= n.y0 - 1e-6 && c[1] + bldgH / 2 <= n.y1 + 1e-6)) return;
     const half = Math.max(T / 2 + 0.07, trimFace);
     const nsW = c[1] < 0 ? "north" : "south", ewW = c[0] < 0 ? "west" : "east";
     // Along each wall from its west/north end, in the PLAN's frame (d3WallTops').
@@ -14370,13 +14807,41 @@ function buildShed3DModel(THREE, p) {
     const yFoot = (wlDeep ? g.ye : H) + Math.max(0, g.w - half) * g.pitch + D3.ROOF_T * 0.5;
     const hPost = (wlDeep && g.top != null ? g.top : mass.Hc) - yFoot;
     if (!(hPost > 0.3)) return;
-    // Beside end wings, at the middle's ends: world z (portrait) or x (landscape) of rg's zA and zB.
-    (hasEnds ? (uAxisIsX ? [mass.zA - L / 2, mass.zB - L / 2] : [L / 2 - mass.zB, L / 2 - mass.zA]) : [-L / 2, L / 2]).forEach((e) => {
+    // Beside end wings, at the middle's ends: world z (portrait) or x (landscape) of rg's zA and zB. Along part of
+    // its wall, only at an end of the building the wing reaches: elsewhere its clerestory runs on into the face on
+    // the open ground, and the corners there are below.
+    (hasEnds ? (uAxisIsX ? [mass.zA - L / 2, mass.zB - L / 2] : [L / 2 - mass.zB, L / 2 - mass.zA])
+      : g.part ? [[0, g.z0 <= 1e-6], [L, g.z1 >= L - 1e-6]].filter((q) => q[1]).map((q) => (uAxisIsX ? q[0] - L / 2 : L / 2 - q[0]))
+        : [-L / 2, L / 2]).forEach((e) => {
       const post = box(cornerMat, half * 2, hPost, half * 2);
       post.position.set(uAxisIsX ? g.u0 : e, yFoot + hPost / 2, uAxisIsX ? e : g.u0);
       post.userData.ssWing = g.side;
       tagWingList(post, g);
       roofGroup.add(post);
+    });
+  });
+  // THE CORNERS THE OPEN GROUND MAKES (a part-wall wing, NOTCH), a board at each like the building's: where the
+  // wing stops short of an end, its outside corner (its outer wall and its end wall, up to its wall's top), the
+  // inside corner where its end wall meets the face behind it (up to the wing roof's underside there), and where
+  // that face meets the building's end wall (up to the face's top, under the roof over it). ssCorner names each.
+  mass.wings.forEach((g) => {
+    if (!g.part) return;
+    const half = Math.max(T / 2 + 0.07, trimFace), cBot = RAISED ? -foundationInfo.skirt : 0;
+    const top = g.top != null ? g.top : mass.Hc, yIn = g.ye + Math.max(0, g.w - T / 2 - half) * g.pitch;
+    const post = (u, z, y1, tag, size) => {
+      const b = box(cornerMat, size, y1 - cBot, size);
+      b.position.set(uAxisIsX ? u : L / 2 - z, (y1 + cBot) / 2, uAxisIsX ? z - L / 2 : u);
+      b.userData.ssCorner = tag;
+      b.userData.ssWing = g.side;
+      tagWingList(b, g);
+      roofGroup.add(b);
+    };
+    [[g.z0, g.z0 > 1e-6, 0, -1], [g.z1, g.z1 < L - 1e-6, L, 1]].forEach(([z, open, zEnd, sz]) => {
+      if (!open) return;
+      post(g.u1, z, g.ye, "wingOut", half * 2);
+      // In the inside corner a board `half` square, against both faces: what an outside board shows of itself.
+      post(g.u0 + g.side * (T / 2 + half / 2), z + sz * (T / 2 + half / 2), yIn, "wingIn", half);
+      post(g.u0, zEnd, top, "openGround", half * 2);
     });
   });
 
@@ -14426,6 +14891,7 @@ function buildShed3DModel(THREE, p) {
     if (onWall) {
       const wf = WALLS[it.wall];
       if (!wf) return;          // a wall device whose wall no longer exists has nowhere to hang
+      if (!onWallLeft(wf, it, 0)) return;   // out in the open ground beside a part-wall wing: no wall there
       // The same plan-frame -> wall-frame shift and porch clamp buildOneWall gives an opening.
       const alongRaw = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
       const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
@@ -14650,6 +15116,8 @@ function buildShed3DModel(THREE, p) {
     // The whole list goes with it: a ceiling fitting under a loft hangs from the loft (UNDER A LOFT).
     if (it.electricalItemId) { buildElectrical3D(it, c, itemsNow); return; }
     if (!c) return;
+    // A wall slab saved on a footprint wall out in the open ground beside a part-wall wing has no wall there: not built.
+    if (NOTCH && it.wall && c.wallSnap && WALLS[it.wall] && !onWallLeft(WALLS[it.wall], it, it.widthFt || c.width || 0)) return;
     // Plan annotations, one more view of them: the note's text as a plaque
     // lying at its plan position, the line as a thin strip between its
     // endpoints. Text edits stay a 2D affordance.
@@ -14814,6 +15282,7 @@ function buildShed3DModel(THREE, p) {
       const wf = WALLS[it.wall];
       if (!wf) return;
       const w = it.widthFt || 3;
+      if (!onWallLeft(wf, it, w)) return;   // its door is out in the open ground beside a part-wall wing: not built
       // The plan's frame shifted into this wall's own, as buildOneWall shifts its door: a wall a
       // recessed porch shortened at its along=0 end starts a0Ft further along (WALLS), and without
       // the subtraction the ramp stood a porch-depth along the wall from its door.
@@ -14959,6 +15428,9 @@ function buildShed3DModel(THREE, p) {
   // stemT, stems }), for tests/harness/foundation.mjs; nothing in the app reads them.
   model.grade = GRADE;
   model.foundation = foundationInfo;
+  // The open ground beside a part-wall wing (d3WingNotches, plan feet) the model was built round, for
+  // tests/harness/wingList.mjs case P; absent on every other building. Nothing in the app reads it.
+  if (NOTCH) model.notches = NOTCH;
   // The ground's fall (d3GradeFall: { fallFt, toward }), null on level ground and beside corners, and
   // the ground at each corner as drawn (d3GradeCorners: each corner's drop below the highest, a fall
   // read as corners), null on level ground; model.grade stays the depth at the highest corner. For
@@ -15852,6 +16324,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // a grab on an item from also starting an orbit.
       const canvas = canvasRef.current;
       const pWpx = bldgW * scale, pHpx = bldgH * scale;
+      // A WING ALONG PART OF ITS WALL (d3WingNotches): the plan's stretches and keep-out (StructureStudioInner's
+      // spanFt, spanPx and inOpenGround), so a placement or a drag here refuses what the plan refuses.
+      // (The open ground does not depend on the wall height, so no wall height is read for it.)
+      const notch3 = d3WingNotches(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, D3.WALL_H);
+      const sp3Ft = notch3 ? Object.fromEntries(["north", "south", "east", "west"].map((w) => [w, d3WallSpanFt(notch3, w, bldgW, bldgH)])) : undefined;
+      const sp3Px = sp3Ft ? Object.fromEntries(Object.keys(sp3Ft).map((w) => [w, [sp3Ft[w][0] * scale, sp3Ft[w][1] * scale]])) : undefined;
+      const open3 = (cx, cy, wPx, hPx) => !!notch3 && d3InNotch(notch3, (cx - wPx / 2 - mgX) / scale, (cy - hPx / 2 - mgY) / scale, (cx + wPx / 2 - mgX) / scale, (cy + hPx / 2 - mgY) / scale);
       let liveItems = items;
       let dragging3 = null;      // { id, moved }
       let dormDrag = null;       // the dormer window's own drag - not an item, see dormerGrab3
@@ -15914,7 +16393,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const placeDims = (it) => {
         clearDims();
         const cfg = it && itemTypes[it.type];
-        const d = cfg ? ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale) : null;
+        const d = cfg ? ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale, sp3Ft) : null;
         if (!d) { dimGroup.visible = false; return; }   // loft, note, line, prop: no wall to measure along
         // Height: the middle of the band the item actually occupies, so the run reads ACROSS
         // the item instead of under it. ssItemVBand returns null when nothing on the item says
@@ -15959,8 +16438,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             dimGroup.add(chip);
           }
         };
-        run(0, d.posFt - d.half, d.before);
-        run(d.posFt + d.half, d.wallLen, d.after);
+        run(d.a0, d.posFt - d.half, d.before);
+        run(d.posFt + d.half, d.a1, d.after);
         dimGroup.visible = true;
       };
       const applyShellMode = (e) => {
@@ -16399,13 +16878,28 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // gesture: one click to have it, then move it if you care where it sits.
       //
       // Nudged off dead centre per prop so a second item does not hide inside the first.
+      //
+      // Beside a part-wall wing the middle of the size can be open ground (an L's inside corner): then the clear spot
+      // on the floor nearest it, half a foot at a time, and the open-ground sentence only when it fits nowhere.
       const placeProp3 = (kind) => {
         const spec = d3PropSpec(kind);
         const n = liveItems.filter((i) => (itemTypes[i.type] || {}).propType).length;
         const off = ((n % 4) - 1.5) * 1.25;
         const halfW = spec.w / 2, halfH = spec.d / 2;
-        const cxFt = Math.max(halfW, Math.min(bldgW / 2 + off, bldgW - halfW));
-        const cyFt = Math.max(halfH, Math.min(bldgH / 2 + off, bldgH - halfH));
+        let cxFt = Math.max(halfW, Math.min(bldgW / 2 + off, bldgW - halfW));
+        let cyFt = Math.max(halfH, Math.min(bldgH / 2 + off, bldgH - halfH));
+        if (notch3 && d3InNotch(notch3, cxFt - halfW, cyFt - halfH, cxFt + halfW, cyFt + halfH)) {
+          let best = null;
+          for (let x = halfW; x <= bldgW - halfW + 1e-6; x += 0.5) {
+            for (let y = halfH; y <= bldgH - halfH + 1e-6; y += 0.5) {
+              if (d3InNotch(notch3, x - halfW, y - halfH, x + halfW, y + halfH)) continue;
+              const d = (x - cxFt) * (x - cxFt) + (y - cyFt) * (y - cyFt);
+              if (!best || d < best[2]) best = [x, y, d];
+            }
+          }
+          if (!best) { flash3(SS_REFUSE_OPEN); return false; }
+          cxFt = best[0]; cyFt = best[1];
+        }
         const ni = {
           id: idCounter++, type: "prop", propKind: kind,
           x: mgX + cxFt * scale, y: mgY + cyFt * scale,
@@ -16452,16 +16946,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // these as their raw tool key was the bug that made 3D-placed included
       // fixtures invisible to pricing.
       const placeFixture3 = (fx, type, ptx, pty) => {
-        const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY);
+        const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY, sp3Px) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY, sp3Px);
         const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : type === "vent" ? 12 : 36)) / 12;
         // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
         // overhangs the building corner; refuse up front — same computation the 2D
         // included-chip branch gained in the 2026-08-20 audit.
-        if (widthFt > (w === "north" || w === "south" ? pWpx : pHpx) / scale + 1e-6) {
+        if (widthFt > (sp3Ft ? sp3Ft[w][1] - sp3Ft[w][0] : (w === "north" || w === "south" ? pWpx : pHpx) / scale) + 1e-6) {
           flash3(`That ${type === "window" ? "window" : type === "vent" ? "vent" : "door"} is wider than this wall — pick a longer wall.`);
           return false;
         }
-        const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
+        const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY, sp3Px);
         let ni;
         let gableNote = null;
         if (type === "vent") {
@@ -16558,7 +17052,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         if (cfg.isDoorPicker || cfg.isWindowPicker) {
-          const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+          const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px);
           setPick3({ kind: cfg.isDoorPicker ? "door" : "window", wall: w, ptx: pageX, pty: pageY });
           setTool3(null);
           return;
@@ -16622,12 +17116,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const iw = cfg.width * scale, ih = slabDepthFt(cfg) * scale;
           const x = Math.max(mgX + iw / 2, Math.min(pageX, mgX + pWpx - iw / 2));
           const y = Math.max(mgY + ih / 2, Math.min(pageY, mgY + pHpx - ih / 2));
+          if (open3(x, y, iw, ih)) { flash3(SS_REFUSE_OPEN); return; }
           commitPlaced3({ id: idCounter++, type: tool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height, ...ssElecStamps(cfg) });
           return;
         }
         if (cfg.wallSnap) {
-          const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-          const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, slabDepthFt(cfg) * scale, pWpx, pHpx, mgX, mgY);
+          const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px);
+          if (ssLongerThanWall(cfg.width, nw, bldgW, bldgH, sp3Ft)) { flash3(SS_REFUSE_TOO_WIDE); return; }
+          const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, slabDepthFt(cfg) * scale, pWpx, pHpx, mgX, mgY, sp3Px);
           // The 2D wallSnap branch's candidate, depthIn and stamps included: a wall device placed
           // without its stamps would draw as nothing and price at $0 (ssElecStamps).
           const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: slabDepthFt(cfg),
@@ -16659,13 +17155,18 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               return;
             }
           }
+          if (open3(mgX + (nL + nR) / 2 * scale, mgY + (nT + nB) / 2 * scale, (nR - nL) * scale, (nB - nT) * scale)) {
+            flash3("A loft here would reach into the open ground beside the wing. Click where the building is full width.");
+            return;
+          }
           // On the top plate (LOFT HEIGHT): onPlate, never a number, so it follows the walls. The 2D rule too.
           commitPlaced3({ id: idCounter++, type: "loft", x: mgX + (bldgW / 2) * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, onPlate: true });
           return;
         }
         // wallOnly built-ins (config window/roughOpeningDoor/roughOpeningWindow)
-        const w2 = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-        const sn = snapToWall(w2, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
+        const w2 = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px);
+        if (ssLongerThanWall(cfg.width, w2, bldgW, bldgH, sp3Ft)) { flash3(SS_REFUSE_TOO_WIDE); return; }
+        const sn = snapToWall(w2, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY, sp3Px);
         const cand = { id: -1, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
         if (checkDoorCollision(cand, cfg, liveItems, itemTypes, scale)) {
           flash3("Something is already on that spot. Pick a clear part of the wall.");
@@ -16853,9 +17354,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageX = mgX + (p.x + bldgW / 2) * scale;
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
-            const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-            if (ssLongerThanWall(wFt, w, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
-            const sn0 = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px);
+            if (ssLongerThanWall(wFt, w, bldgW, bldgH, sp3Ft)) { flash3(SS_REFUSE_TOO_LONG); return; }
+            const sn0 = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY, sp3Px);
             // A VENT MOVES UP AND DOWN as well as along (Carolyn, 2026-09-14: the vent had to be
             // "draggable up"). The wall-plane hit's height is the vent's. Carried a quarter foot past
             // the plate on a gable end it goes INTO THE GABLE, re-fitted under the rakes at every step;
@@ -16953,9 +17454,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageX = mgX + (p.x + bldgW / 2) * scale;
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 6;
-            const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-            if (ssLongerThanWall(wFt, nw, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
-            const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY);
+            const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY, sp3Px);
+            if (ssLongerThanWall(wFt, nw, bldgW, bldgH, sp3Ft)) { flash3(SS_REFUSE_TOO_LONG); return; }
+            const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY, sp3Px);
             const others = liveItems.filter((i) => i.id !== it.id);
             // ⚠️ THE TENTH REFUSAL PATH, and it was missed the first time round. Nine drag
             // returns learned to speak and this one stayed a bare `return` — a workbench or
@@ -17009,6 +17510,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             }
             cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
             cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+            if (open3(mgX + cxFt * scale, mgY + cyFt * scale, halfW * 2 * scale, halfH * 2 * scale)) { flash3(SS_REFUSE_OPEN); return; }
             const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
             for (let oi = 0; oi < otherLofts.length; oi++) {
               const o = otherLofts[oi];
@@ -17045,6 +17547,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // inside the building, which is a wall, not a grid.
             const cxFt = Math.max(halfW, Math.min(p.x + bldgW / 2, bldgW - halfW));
             const cyFt = Math.max(halfH, Math.min(p.z + bldgH / 2, bldgH - halfH));
+            if (open3(mgX + cxFt * scale, mgY + cyFt * scale, halfW * 2 * scale, halfH * 2 * scale)) { flash3(SS_REFUSE_OPEN); return; }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           } else if (it.electricalItemId && !c.wallSnap) {
@@ -17064,6 +17567,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const halfW = (it.widthFt || c.width || 0.8) / 2, halfH = (it.heightFt || c.height || 0.8) / 2;
             const cxFt = Math.max(halfW, Math.min(p.x + bldgW / 2, bldgW - halfW));
             const cyFt = Math.max(halfH, Math.min(p.z + bldgH / 2, bldgH - halfH));
+            if (open3(mgX + cxFt * scale, mgY + cyFt * scale, halfW * 2 * scale, halfH * 2 * scale)) { flash3(SS_REFUSE_OPEN); return; }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           }
@@ -23953,7 +24457,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const vr = ventRoof2D();
       const { items: reflowed, events } = reflowItems(reflowable, prev, p, ITEMS, (cand, sn, g) =>
         ssGableVentPlace(vr.roof, p.w, p.h, vr.H, cand, sn, g.scale, g.mgX, g.mgY,
-          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt), vr.H);
+          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt), vr.H, d3WingNotches(vr.roof, p.w, p.h, vr.H));
       const blocked = events.filter((e) => e.kind === "blocked");
       if (blocked.length) {
         // Nothing has changed yet — put the size back and let them decide.
@@ -23965,7 +24469,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (elecPkg) {
         const g = pageGeom(p.w, p.h);
         const add = electricalAutoItems(elecPkg, {
-          widthFt: p.w, lengthFt: p.h, scale: g.scale, mgX: g.mgX, mgY: g.mgY, pW: g.pW, pH: g.pH,
+          widthFt: p.w, lengthFt: p.h, scale: g.scale, mgX: g.mgX, mgY: g.mgY, pW: g.pW, pH: g.pH, notches: d3WingNotches(vr.roof, p.w, p.h, vr.H),
           itemTypes: { ...ITEMS, ...elecToolsFor(true) },
           existing: reflowed, frontWall: getFrontWall(reflowed), startId: idCounter,
         });
@@ -24497,6 +25001,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = (s && s.roof) || D3_DEFAULT_ROOF, Hplate = (s && s.wallHeightFt) || D3.WALL_H;
     return { roof, H: d3ShellFt(roof, Hplate), Hplate };
   };
+  // A WING ALONG PART OF ITS WALL (d3WingNotches, 2026-10-07): the open ground beside it, in plan feet, or null. Every
+  // placement path below reads it: a footprint wall's usable stretch (spanFt in feet, spanPx in plan px from the
+  // building's corner, the wall helpers' `sp`) and the keep-out for anything standing on the floor (inOpenGround,
+  // a rectangle in page px). Plain consts, no hook; notchKey is what the callbacks below depend on. Null on every
+  // other building, and then each path is exactly what it was.
+  const wingNotches = (() => { const vr = ventRoof2D(); return d3WingNotches(vr.roof, bldgW, bldgH, vr.H); })();
+  const notchKey = wingNotches ? JSON.stringify(wingNotches) : "";
+  const spanFt = wingNotches ? Object.fromEntries(["north", "south", "east", "west"].map((w) => [w, d3WallSpanFt(wingNotches, w, bldgW, bldgH)])) : undefined;
+  const spanPx = spanFt ? Object.fromEntries(Object.keys(spanFt).map((w) => [w, [spanFt[w][0] * scale, spanFt[w][1] * scale]])) : undefined;
+  const inOpenGround = (cx, cy, wPx, hPx) => !!wingNotches && d3InNotch(wingNotches, (cx - wPx / 2 - mgX) / scale, (cy - hPx / 2 - mgY) / scale, (cx + wPx / 2 - mgX) / scale, (cy + hPx / 2 - mgY) / scale);
+  // A footprint wall's length for a "wider than the wall" refusal: what is left of it beside a part-wall wing.
+  const wallLenFt = (w) => (spanFt && spanFt[w] ? spanFt[w][1] - spanFt[w][0] : (w === "north" || w === "south" ? pW : pH) / scale);
+  // A partition wall's line, as the rectangle it is drawn, reaching into the open ground.
+  const partitionInOpen = (p) => !!wingNotches && ssIsPartition(p) && (p.axis === "y"
+    ? d3InNotch(wingNotches, Number(p.atFt) - SS_PARTITION_T_FT / 2, Number(p.fromFt), Number(p.atFt) + SS_PARTITION_T_FT / 2, Number(p.toFt))
+    : d3InNotch(wingNotches, Number(p.fromFt), Number(p.atFt) - SS_PARTITION_T_FT / 2, Number(p.toFt), Number(p.atFt) + SS_PARTITION_T_FT / 2));
+  // What is ALREADY in the open ground (saved before the wing was set to part of its wall): left where it is, never
+  // moved, and marked on the plan with one sentence. Footprint-wall items out there are not built in 3D either.
+  const inOpenItems = wingNotches ? items.filter((it) => {
+    const c = ITEMS[it.type];
+    if (!c || c.noteType || c.lineType || it.type === "line" || it.type === "textNote") return false;
+    if (ssIsPartition(it)) return partitionInOpen(it);
+    const w = (it.widthFt || c.width || 0) * scale, h = (it.heightFt || c.height || 0) * scale;
+    const rot = it.rotation === 90 || it.rotation === 270;
+    if (it.wall && spanFt[it.wall] && (c.wallOnly || c.wallSnap) && it.type !== "ramp") {
+      const sp = spanFt[it.wall], a = (it.wall === "north" || it.wall === "south" ? it.x - mgX : it.y - mgY) / scale, hw = (it.widthFt || c.width || 0) / 2;
+      return a - hw < sp[0] - 0.05 || a + hw > sp[1] + 0.05;
+    }
+    return inOpenGround(it.x, it.y, rot ? h : w, rot ? w : h);
+  }) : [];
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
   const frontWall = getFrontWall(items);
   // Detect unattached lofts for warning banner
@@ -24563,8 +25097,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // (workbench) branch, so the invariant holds whichever item is the one moving.
   const ssWallItemAt = (key, wall, x, y) => {
     const cfg = ITEMS[key];
+    if (ssLongerThanWall(cfg.width, wall, bldgW, bldgH, spanFt)) return { refusal: SS_REFUSE_TOO_WIDE };
     const iwPx = cfg.width * scale; const ihPx = slabDepthFt(cfg) * scale;
-    const sn = snapToWall(wall, x, y, iwPx, ihPx, pW, pH, mgX, mgY);
+    const sn = snapToWall(wall, x, y, iwPx, ihPx, pW, pH, mgX, mgY, spanPx);
     const cand = { id: -1, type: key, ...sn, widthFt: cfg.width, heightFt: cfg.height };
     if (checkDoorCollision(cand, cfg, items, ITEMS, scale)) return { refusal: "Something is already on that spot. Pick a clear part of the wall." };
     if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, cand)) return { refusal: ssSlabInWay(sn, iwPx, items, ITEMS, scale, cand, "place this somewhere else on the wall.") };
@@ -24633,7 +25168,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The single "Door" tool: don't place yet — remember the wall + click point and open the
     // door picker, which chooses the door + swing/operation and then places it (placePickedDoor).
     if (cfg.isDoorPicker) {
-      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY, spanPx) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
       setDoorPick({ wall: w, ptx: pt.x, pty: pt.y });
       setActiveTool(null); setToast(null);
       return;
@@ -24641,7 +25176,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The "Window" tool: like the door picker but no swing/operation — remember the wall + point
     // and open the window picker, which places the chosen catalog window (placePickedWindow).
     if (cfg.isWindowPicker) {
-      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY, spanPx) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
       setWindowPick({ wall: w, ptx: pt.x, pty: pt.y });
       setActiveTool(null); setToast(null);
       return;
@@ -24650,17 +25185,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Included ramps are doorSnap and handled in the doorSnap branch below.
     if (cfg.includedFixture && !cfg.doorSnap) {
       const fx = cfg.includedFixture;
-      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+      const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY, spanPx) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
       const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : fx.category === "vent" ? 12 : 36)) / 12;
       // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
       // overhangs the building corner; refuse up front, as the door picker does
       // (audit 2026-08-20).
-      if (widthFt > (w === "north" || w === "south" ? pW : pH) / scale + 1e-6) {
+      if (widthFt > wallLenFt(w) + 1e-6) {
         setToast(`That ${fx.category === "window" ? "window" : fx.category === "vent" ? "vent" : "door"} is wider than this wall — pick a longer wall.`);
         setTimeout(() => setToast(null), 4000); return;
       }
       const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
-      const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
+      const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY, spanPx);
       let ni;
       let gableNote = null;
       if (fx.category === "vent") {
@@ -24717,10 +25252,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return;
     }
     const iwPx = cfg.width * scale; const ihPx = slabDepthFt(cfg) * scale;
-    let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
+    let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
     // Wall-only items always go on a wall; if the click missed the threshold,
     // fall back to the nearest wall so the placement still happens.
-    if (cfg.wallOnly && !wall) wall = getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
+    if (cfg.wallOnly && !wall) wall = getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
 
     // Annotation tools (note + line): free placement anywhere on the visible
     // page area (above the auto info band), not just inside the plan rectangle.
@@ -24766,6 +25301,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (!g) { refuse("This building is too small for a partition wall."); return; }
       const ni = { id: idCounter++, type: activeTool, wall: null, ...g, heightIn: null, openings: [] };
       if (ssPartitionClash(ni, items)) { refuse("There is already a partition wall there. Click somewhere else."); return; }
+      if (partitionInOpen(ni)) { refuse("A partition wall here would cross the open ground beside the wing. Click where it runs wall to wall inside the building."); return; }
       setItems((p) => [...p, ni]); dropPartitionPrices(ni.id); setSelectedId(ni.id); setSelOpening(null); setActiveTool(null); setToast(null);
       return;
     }
@@ -24839,8 +25375,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // (cfg.wallOnly is always assigned a wall above — no need to abort here)
     let ni;
     if (cfg.wallSnap) {
-      const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
-      const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
+      const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
+      if (ssLongerThanWall(cfg.width, clickedWall, bldgW, bldgH, spanFt)) { setToast(SS_REFUSE_TOO_WIDE); setTimeout(() => setToast(null), 4000); return; }
+      const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY, spanPx);
       // depthIn (builder-set, inches) IS the drawn footprint depth when present; absent, the
       // config's own height stands, which is every item that predates the column. Both numbers
       // are SNAPSHOT onto the item so re-pricing a shelf later never moves one already placed.
@@ -24881,6 +25418,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           return;
         }
       }
+      // Wall to wall it would reach into the open ground beside a part-wall wing: refused, where the building is
+      // full width it is not.
+      if (inOpenGround(mgX + (nL + nR) / 2 * scale, mgY + (nT + nB) / 2 * scale, (nR - nL) * scale, (nB - nT) * scale)) {
+        setToast("A loft here would reach into the open ground beside the wing. Click where the building is full width.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
       // On the top plate (LOFT HEIGHT): onPlate, never a number, so it follows the walls.
       ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, onPlate: true };
     } else if (wall && !cfg.electricalItemId) {
@@ -24891,6 +25435,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } else {
       const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
       const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
+      if (inOpenGround(x, y, iwPx, ihPx)) { setToast(SS_REFUSE_OPEN); setTimeout(() => setToast(null), 4000); return; }
       // The same two stamps the wallSnap branch makes. A ceiling-mounted electrical item lands
       // HERE, not there, and without its catalog id it would render on the plan and reach the
       // quote as nothing at all — placed, visible, and free.
@@ -24913,7 +25458,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setSelectedId(ni.id);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, paintColors]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, paintColors, notchKey]);
 
   // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
@@ -24976,13 +25521,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSwapId(null); setDoorPick(null);
         return;
       }
-      if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
+      if (wFt > wallLenFt(cur.wall) + 1e-6) {
         setToast("That door is wider than this wall — pick a narrower door.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setDoorPick(null);
         return;
       }
-      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
+      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY, spanPx);
       const others = items.filter((it) => it.id !== swapId);
       const swapDoorCand = { ...cur, ...sn, widthFt: wFt };
       if (checkDoorCollision(swapDoorCand, { width: wFt }, others, ITEMS, scale)) {
@@ -25041,14 +25586,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // corner — on the plan, in the exported PDF, and as an opening wider than the wall in
     // 3D. reflowItems' seat() already refuses wFt > wallLen on size change; enforce the
     // same invariant at placement (audit 2026-08-20).
-    if (widthFt > (doorPick.wall === "north" || doorPick.wall === "south" ? pW : pH) / scale + 1e-6) {
+    if (widthFt > wallLenFt(doorPick.wall) + 1e-6) {
       setToast("That door is wider than this wall — pick a longer wall or a narrower door.");
       setTimeout(() => setToast(null), 4000);
       setDoorPick(null);
       return;
     }
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
-    const sn = snapToWall(doorPick.wall, doorPick.ptx, doorPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const sn = snapToWall(doorPick.wall, doorPick.ptx, doorPick.pty, iwPx, ihPx, pW, pH, mgX, mgY, spanPx);
     const ni = {
       id: idCounter++, type: "fixtureDoor", ...sn, widthFt, heightFt: 0.5,
       fixtureItemId: fx.id, doorName: fx.name || "Door",
@@ -25096,13 +25641,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wFt = (Number(fx.widthIn) || 24) / 12;
       const cur = items.find((it) => it.id === swapId);
       if (!cur || !cur.wall) { setSwapId(null); setWindowPick(null); return; }
-      if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
+      if (wFt > wallLenFt(cur.wall) + 1e-6) {
         setToast("That window is wider than this wall — pick a narrower window.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setWindowPick(null);
         return;
       }
-      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
+      const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY, spanPx);
       const others = items.filter((it) => it.id !== swapId);
       const swapWinCand = { ...cur, ...sn, widthFt: wFt };
       if (checkDoorCollision(swapWinCand, { width: wFt }, others, ITEMS, scale)) {
@@ -25138,14 +25683,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const widthFt = (Number(fx.widthIn) || 24) / 12;
     // Wider than the clicked wall = snapToWall's clamp degenerates and the window overhangs
     // the building corner; refuse up front, as the door picker does (audit 2026-08-20).
-    if (widthFt > (windowPick.wall === "north" || windowPick.wall === "south" ? pW : pH) / scale + 1e-6) {
+    if (widthFt > wallLenFt(windowPick.wall) + 1e-6) {
       setToast("That window is wider than this wall — pick a longer wall or a narrower window.");
       setTimeout(() => setToast(null), 4000);
       setWindowPick(null);
       return;
     }
     const iwPx = widthFt * scale, ihPx = 0.5 * scale;
-    const sn = snapToWall(windowPick.wall, windowPick.ptx, windowPick.pty, iwPx, ihPx, pW, pH, mgX, mgY);
+    const sn = snapToWall(windowPick.wall, windowPick.ptx, windowPick.pty, iwPx, ihPx, pW, pH, mgX, mgY, spanPx);
     const ni = {
       id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5,
       fixtureItemId: fx.id, windowName: fx.name || "Window",
@@ -25279,8 +25824,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const isHoriz = item.wall === "north" || item.wall === "south";
     const wallLen = isHoriz ? bldgW : bldgH;
     
-    let minEdge = 0; // wall start in ft
-    let maxEdge = wallLen; // wall end in ft
+    // Beside a part-wall wing, the ends of what is left of the wall (spanFt).
+    const spR = spanFt && spanFt[item.wall];
+    let minEdge = spR ? spR[0] : 0; // wall start in ft
+    let maxEdge = spR ? spR[1] : wallLen; // wall end in ft
     
     // Find obstacles on same wall
     //
@@ -25311,7 +25858,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     });
 
     return { minEdge, maxEdge, isHoriz };
-  }, [items, ITEMS, bldgW, bldgH, mgX, mgY, scale]);
+  }, [items, ITEMS, bldgW, bldgH, mgX, mgY, scale, notchKey]);
 
   const onPtrMove = useCallback((e) => {
     // Mark the gesture as a real drag/resize once the pointer travels past a
@@ -25333,6 +25880,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const along = (it.axis !== "y" ? pt.x - mgX : pt.y - mgY) / scale;
         const patch = ssPartitionMoveEnd(it, resizing.handle === "from" ? "from" : "to", along, pW / scale, pH / scale, items);
         if (Object.keys(patch).every((k) => patch[k] === it[k])) return;
+        if (partitionInOpen({ ...it, ...patch })) { refuseDrag("A partition wall can't run into the open ground beside the wing."); return; }
         setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...patch } : i)));
         return;
       }
@@ -25420,6 +25968,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         }
 
         const nW = Math.max(2, nR - nL), nH = Math.max(2, nB - nT);
+        // Stretched into the open ground beside a part-wall wing: refused, it keeps its last size.
+        if (inOpenGround(mgX + (nL + nR) / 2 * scale, mgY + (nT + nB) / 2 * scale, nW * scale, nH * scale)) { refuseDrag(SS_REFUSE_OPEN); return; }
         setItems((p) => p.map((i) => i.id === resizing.id ? {
           ...i, widthFt: nW, heightFt: nH,
           x: mgX + (nL + nR) / 2 * scale,
@@ -25509,6 +26059,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const atFt = ssPartitionMoveAcross(it, ((it.axis !== "y" ? pt.y - mgY : pt.x - mgX) / scale) - dragging.off, pW / scale, pH / scale);
       if (atFt === Number(it.atFt)) return;
       if (ssPartitionClash({ ...it, atFt }, items)) { refuseDrag("Another partition wall is in the way."); return; }
+      if (partitionInOpen({ ...it, atFt })) { refuseDrag("A partition wall can't cross the open ground beside the wing. Shorten it first."); return; }
       setItems((p) => p.map((i) => (i.id === it.id ? { ...i, atFt } : i)));
       return;
     }
@@ -25544,9 +26095,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Always snap to nearest wall during drag so the door follows the mouse
       // and doesn't get stuck off-wall. The door's ramp (if any) follows too —
       // its placement is derived from the door's position/wall.
-      const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
-      if (ssLongerThanWall(iWidthFt, w, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
-      const sn0 = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
+      const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY, spanPx) || getNearestWall(rx, ry, pW, pH, mgX, mgY, spanPx);
+      if (ssLongerThanWall(iWidthFt, w, bldgW, bldgH, spanFt)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
+      const sn0 = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY, spanPx);
       // A vent in the gable slides along it, re-fitted under the rakes; dragged onto a wall with no
       // gable above it (or too small a one) it comes down to that wall. The 3D drag's rule.
       let sn = sn0;
@@ -25582,9 +26133,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return i;
       }));
     } else if (cfg.wallSnap) {
-      const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
-      if (ssLongerThanWall(iWidthFt, nw, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
-      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
+      const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY, spanPx);
+      if (ssLongerThanWall(iWidthFt, nw, bldgW, bldgH, spanFt)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
+      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY, spanPx);
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
       const others = items.filter((i) => i.id !== dragging.id);
@@ -25660,6 +26211,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // Constrain to building
         cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
         cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+        if (inOpenGround(mgX + cxFt * scale, mgY + cyFt * scale, halfW * 2 * scale, halfH * 2 * scale)) { refuseDrag(SS_REFUSE_OPEN); return; }
 
         // Check overlap — reject if overlapping any loft
         const fL = cxFt - halfW, fR = cxFt + halfW, fT = cyFt - halfH, fB = cyFt + halfH;
@@ -25682,13 +26234,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } else {
         cxFt = Math.max(halfW, Math.min(cxFt, bldgW - halfW));
         cyFt = Math.max(halfH, Math.min(cyFt, bldgH - halfH));
+        if (inOpenGround(mgX + cxFt * scale, mgY + cyFt * scale, halfW * 2 * scale, halfH * 2 * scale)) { refuseDrag(SS_REFUSE_OPEN); return; }
       }
 
       const x = mgX + cxFt * scale;
       const y = mgY + cyFt * scale;
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x, y } : i));
     }
-  }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds]);
+  }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds, notchKey]);
 
   const onPtrUp = useCallback(() => {
     // Dropping a note's leader handle back onto the note removes the pointer
@@ -25812,16 +26365,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!it) return;
     const cfg = ITEMS[it.type];
     if (!cfg) return;
-    const dims = ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale);
+    const dims = ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale, spanFt);
     if (!dims) return;                       // no wall: nothing to be centred on
     const iWidthFt = it.widthFt || cfg.width;
     const iwPx = iWidthFt * scale;
-    // The wall's midpoint in page coordinates. Both snappers clamp, so this is all they need.
-    const midX = mgX + pW / 2, midY = mgY + pH / 2;
+    // The wall's midpoint in page coordinates. Both snappers clamp, so this is all they need. Beside a part-wall
+    // wing, the middle of what is left of the wall (dims.a0..a1).
+    const midX = dims.isHoriz ? mgX + ((dims.a0 + dims.a1) / 2) * scale : mgX + pW / 2, midY = dims.isHoriz ? mgY + pH / 2 : mgY + ((dims.a0 + dims.a1) / 2) * scale;
     const others = items.filter((i) => i.id !== it.id);
     let sn;
     if (cfg.wallOnly) {
-      sn = snapToWall(it.wall, midX, midY, iwPx, 0.5 * scale, pW, pH, mgX, mgY);
+      sn = snapToWall(it.wall, midX, midY, iwPx, 0.5 * scale, pW, pH, mgX, mgY, spanPx);
       const cand = { ...it, ...sn, widthFt: iWidthFt };
       if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)
         || checkWallSlabOverlap(sn, iwPx, others, ITEMS, scale, cand)) {
@@ -25830,7 +26384,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
     } else if (cfg.wallSnap) {
-      sn = snapToWallInterior(it.wall, midX, midY, iwPx, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
+      sn = snapToWallInterior(it.wall, midX, midY, iwPx, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY, spanPx);
       const cand = { ...it, ...sn };
       if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)
         || checkWallSlabOverlap(sn, iwPx, others, ITEMS, scale, cand)) {
@@ -25931,6 +26485,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The on-screen SVG already uses page coordinates (cW × cH = 850 × 1100),
   // so the export is a straight 2× DPR rasterization — same scale, same mgX/mgY,
   // same item positions. No coordinate conversion needed.
+  // THE OPEN GROUND ON THE PLAN (a part-wall wing, wingNotches): one notch in page px. `cover` hides the plan's
+  // surface, grid and outline over it, reaching past the outline's stroke on the notch's outer sides only; `line` is
+  // the two walls that face it, from the outline on one side to the inside corner to the outline on the other;
+  // `words`, when the corner is big enough to hold them. The plan and the PDF draw the same notch.
+  const planNotchGeom = (n) => {
+    const e = 1e-6, pad = WALL_THICKNESS / 2 + 1;
+    const x0 = mgX + n.x0 * scale - (n.x0 < e ? pad : 0), x1 = mgX + n.x1 * scale + (n.x1 > bldgW - e ? pad : 0);
+    const y0 = mgY + n.y0 * scale - (n.y0 < e ? pad : 0), y1 = mgY + n.y1 * scale + (n.y1 > bldgH - e ? pad : 0);
+    const cX = mgX + (n.x0 < e ? n.x1 : n.x0) * scale, cY = mgY + (n.y0 < e ? n.y1 : n.y0) * scale;
+    const oX = n.x0 < e ? mgX : mgX + pW, oY = n.y0 < e ? mgY : mgY + pH;
+    const wPx = (n.x1 - n.x0) * scale, hPx = (n.y1 - n.y0) * scale;
+    return { cover: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, line: [[oX, cY], [cX, cY], [cX, oY]],
+      cx: mgX + ((n.x0 + n.x1) / 2) * scale, cy: mgY + ((n.y0 + n.y1) / 2) * scale,
+      words: wPx >= 44 && hPx >= 30 ? ["Open", "ground"] : wPx >= 70 && hPx >= 16 ? ["Open ground"] : null };
+  };
   const renderExportCanvas = () => {
     // The plan's Measure chips are screen-only selection chrome, so they are deliberately not drawn here.
     const dpr = 2;
@@ -25944,6 +26513,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     for (let fx = 0; fx <= bldgW; fx++) { const x = mgX + fx * scale; ctx.beginPath(); ctx.moveTo(x, mgY); ctx.lineTo(x, mgY + pH); ctx.stroke(); }
     for (let fy = 0; fy <= bldgH; fy++) { const y = mgY + fy * scale; ctx.beginPath(); ctx.moveTo(mgX, y); ctx.lineTo(mgX + pW, y); ctx.stroke(); }
     ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.strokeRect(mgX, mgY, pW, pH);
+    // The open ground beside a part-wall wing, as the plan draws it (planNotchGeom): the page's white over the
+    // corner, the walls that face it, and its words.
+    (wingNotches || []).forEach((n) => {
+      const g = planNotchGeom(n);
+      ctx.save();
+      ctx.fillStyle = "#FFF"; ctx.fillRect(g.cover.x, g.cover.y, g.cover.w, g.cover.h);
+      ctx.strokeStyle = "#1E293B"; ctx.lineWidth = WALL_THICKNESS; ctx.lineCap = "square"; ctx.lineJoin = "miter";
+      ctx.beginPath(); g.line.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.stroke();
+      if (g.words) {
+        ctx.fillStyle = "#94A3B8"; ctx.font = "600 10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        g.words.forEach((t, k) => ctx.fillText(t, g.cx, g.cy + (k - (g.words.length - 1) / 2) * 12));
+      }
+      ctx.restore();
+    });
 
     // Items render in page coordinates directly — same as the SVG.
     // Ramps render first so other items (workbench, doors, etc) sit on top of them.
@@ -32884,6 +33467,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const dc = rds.some((r) => r.kind === "eave" && r.mode === "roof") ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: list } }, sel.size) : null;
       // END WINGS (roof.wingList): which end wing an attached side-wall lean-to runs past (endCross, d3LeanTosGeom).
       const ltEndM = rds.some((r) => r.endCross) ? d3Massing({ ...roof, leanTos: list }, bldgW, bldgH, wallH) : null;
+      // A PART-WALL WING (lengthFt, 2026-10-07): the lean-tos it leaves with nothing to hang on (d3LeanTosOffWing),
+      // not drawn, and said on their cards.
+      const ltOff = list.length ? d3LeanTosOffWing({ ...roof, leanTos: list }, bldgW, bldgH, wallH) : null;
       const ltEndWords = (r) => {
         const ts = ltEndM ? ltEndM.ends.filter((t) => t.tier === 1 && ((t.at === 0 && r.a0 < ltEndM.zA - 1e-9) || (t.at === 1 && r.a1 > ltEndM.zB + 1e-9))) : [];
         return ts.length === 1 ? `the ${ts[0].bwall} end wing` : ts.length ? `the ${ts.map((t) => t.bwall).join(" and ")} end wings` : "an end wing";
@@ -33083,6 +33669,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 children: porchSay ? advSay(porchSay.t, porchSay.kind === "near", { "data-ss-leanto-porch": porchSay.kind }) : null })}
               {clash.length > 0 && <div key="clash" className="ss-adv-f is-full">{clash.map((t, k) => <div key={k}>{advSay(t, true, { "data-ss-leanto-clash": "" })}</div>)}</div>}
               {r && r.endCross && <div key="endCross" className="ss-adv-f is-full">{advSay(`Runs past ${ltEndWords(r)}: hung at wall height.`, true, { "data-ss-leanto-endcross": "" })}</div>}
+              {(() => {
+                const ow = ltOff && ltOff.find((o) => o.i === i);
+                return ow ? <div key="offWing" className="ss-adv-f is-full">{advSay(ow.kind === "eave"
+                  ? `Not drawn: it runs past the wing's end into open ground. Keep it within the wing's ${d3FtIn(ow.len)}, or set the wing to the whole wall.`
+                  : "Not drawn: it runs into the open ground beside the wing. Keep it clear of that corner, or set the wing to the whole wall.", true, { "data-ss-leanto-offwing": ow.kind })}</div> : null;
+              })()}
               {cornerSay.length > 0 && <div key="corner" className="ss-adv-f is-full">{cornerSay.map((c, k) => <div key={k}>{advSay(c.t, !c.joined, { "data-ss-leanto-corner": c.joined ? "joined" : "near" })}</div>)}</div>}
             </div>
           </div>,
@@ -33141,8 +33733,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
           {advNoteEl(D3_WINGLIST_ENDS
-            ? ["A wing goes on a whole wall: along a side, or across a whole end.", "For part of a wall, or an end wing's side, use a lean-to. A wing behind just one side wing is not a wing in this version either: an enclosed lean-to on the Lean-to tab does that."]
-            : ["A wing goes along a whole side wall. Wings across an end wall come in the next update.", "For part of a wall, or an end wall, use a lean-to: an enclosed lean-to on the Lean-to tab goes on any wall, whole or part."])}
+            ? ["A wing goes along a side, the whole wall or part of it, or across a whole end.", "For part of an end wall, or an end wing's side, use a lean-to. A wing behind just one side wing is not a wing in this version either: an enclosed lean-to on the Lean-to tab does that."]
+            : ["A wing goes along a side wall, the whole wall or part of it. Wings across an end wall come in the next update.", "For an end wall, use a lean-to: an enclosed lean-to on the Lean-to tab goes on any wall, whole or part."])}
           {legacy && onWing.length > 0 && !d3NewFrame(roof) && <div data-ss-adv-wl-frame="">{advNoteEl(wlFrameNote(true))}</div>}
           {full && advNoteEl(`Up to ${D3_WINGLIST_MAX} wings on one building.`)}
         </div>
@@ -33251,13 +33843,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {oldFrame && <div data-ss-adv-wl-frame="">{advNoteEl(flipped.length ? [flipped.map((bw) => (isEnd(bw)
             ? `At this size the ${bw} wall is an end wall, so its wings are end wings.`
             : `At this size the ${bw} wall is a side wall, so its wings are side wings.`)).join(" "), frameNote.join(" ")] : frameNote)}</div>}
-          {/* PRODUCTION (R5, design §2.6): the older designer draws d3WingListFallback's one wing a side, and its
-              own wings-off leaves this list in place. Said here, where a builder sets the list, and only on a beta
-              host (the submit's betaMode test): this code is what production gets, where the sentence is false.
-              ⚠️ PROMOTION HOLD: delete this note in the first change after the wing list reaches production; the
-              work log carries the item (review, 2026-09-30). */}
-          {wlOnBeta && <div data-ss-adv-wl-live="">{advNoteEl(["Until this update reaches your live site, it shows one wing on each side.",
-            "There each side's wings are drawn as one wing (only the wider side's, when the two sides differ a lot), and end wings are not drawn. Turning the wings off on your live site leaves this list in place: turn them off here."])}</div>}
         </div>,
       );
       // ── WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05) ──
@@ -33346,6 +33931,57 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           write: (v) => { if (v != null) set({ widthFt: Math.max(1, Math.min(16, v)) }); }, fallback: 8, full: true,
           note: drop ? (drop.why === "room" ? `Not drawn at ${sizeAt}: the middle keeps at least 4 ft. It stays saved.` : "Not drawn yet: wings across an end wall come in the next update. It stays saved.")
             : r && r.shrunk ? `Drawn ${d3FtIn(r.w)} wide: the middle keeps at least 4 ft.` : null }));
+        // PART OF A WALL (lengthFt / offsetFt, 2026-10-07; Carolyn, Q3: "a wing can cover part of a side"). The
+        // outermost side wing, without end wings, can run part of its wall: Whole wall, or Part of it with its length
+        // and where it sits, the lean-to's controls. The ground beside it is open, on the Plan and the floor plan. A
+        // length kept on any other wing says why it is not used, and stays saved for when the wing is outermost again.
+        if (!end && r && r.partIgnored) {
+          body.push(<div key="wlpi" className="ss-adv-f is-full">{advSay(r.partIgnored === "ends"
+            ? "Beside end wings a side wing runs the whole middle stretch. Its length stays saved."
+            : "Only the outermost wing on a wall can run part of it. This one runs the whole wall; its length stays saved.", true, { "data-ss-adv-wl-partignored": r.partIgnored })}</div>);
+        } else if (!end && r && r.outer && !wm.ends.length) {
+          const run = ax.L, part = !!r.part, room = part ? Math.max(0, (run - r.len) / 2) : 0;
+          // A length saved at a longer size (len0, the entry banded as d3MassingList reads it) covers the whole wall at a
+          // size this short (d3WingRun) and still runs part of the wall on every longer one: Part of it stays pressed,
+          // the card says both and keeps the length box, so Whole wall is a change the builder makes, never one the
+          // page shows as made (review, 10-07).
+          const n0 = d3WlNum(e.lengthFt), len0 = n0 === null ? null : Math.max(4, Math.min(100, n0));
+          const longer = !part && len0 != null, asPart = part || longer;
+          const across = bw === "front" || bw === "back";
+          body.push(
+            <div key="wllen" className="ss-adv-f is-full" data-ss-adv-f="wlLength">
+              <div className="ss-adv-fh"><span className="ssd-fld-l">Along the wall</span></div>
+              <div className="ss-adv-chips" role="group" aria-label={`${name} length`} style={{ marginTop: 0 }}>
+                <button type="button" aria-pressed={!asPart} className={!asPart ? "ssd-chip is-on" : "ssd-chip"} style={advPill}
+                  onClick={() => set({ lengthFt: null, offsetFt: null })}>Whole wall</button>
+                <button type="button" aria-pressed={asPart} className={asPart ? "ssd-chip is-on" : "ssd-chip"} style={advPill}
+                  onClick={() => { if (!asPart) set({ lengthFt: Math.min(run - 0.5, run / 2) }); }}>Part of it</button>
+              </div>
+              {advNoteEl(part ? [`${d3FtIn(r.len)} of the ${d3FtIn(run)} ${bw} wall. Beside it is open ground, outside the building: no floor and no wall.`,
+                "Doors and windows go on the walls around the building, not on the walls facing the open ground."]
+                : longer ? `At this size its ${d3FtIn(len0)} length covers the whole ${d3FtIn(run)} ${bw} wall. On a longer wall it runs ${d3FtIn(len0)}, with open ground beside it.`
+                : `All ${d3FtIn(run)} of the ${bw} wall.`)}
+              {/* PRODUCTION: the live site's designer draws a part-wall wing along the whole wall until this change is
+                  promoted. Said only on a beta host (the submit's betaMode test), where a builder sets the length.
+                  ⚠️ PROMOTION HOLD: delete this note in the first change after part-wall wings reach production; the
+                  work log carries the item (review, 2026-10-07). */}
+              {asPart && wlOnBeta && <div data-ss-adv-wl-live="">{advNoteEl("Until this update reaches your live site, this wing is drawn along the whole wall there.")}</div>}
+            </div>,
+          );
+          if (asPart) {
+            body.push(advNum({ k: `wl${i}-lengthFt`, f: "wlLengthFt", label: "Length along the wall (ft)", aria: aria("length along the wall (ft)"), value: part ? r.len : len0,
+              min: 4, max: part ? run : Math.max(run, len0), step: 0.5,
+              commit: (v) => set({ lengthFt: Math.max(4, Math.min(100, v)) }) }));
+          }
+          if (part) {
+            const towards = r.off > 0 ? (across ? "toward the right" : "toward the front") : (across ? "toward the left" : "toward the back");
+            body.push(advNum({ k: `wl${i}-offsetFt`, f: "wlOffsetFt", label: "Position from the middle (ft)", aria: aria("position from the middle (ft)"), value: r.off,
+              min: -Math.floor(room * 2) / 2, max: Math.floor(room * 2) / 2, step: 0.5, disabled: !(room > 0.25),
+              commit: (v) => set({ offsetFt: Math.max(-50, Math.min(50, v)) || null }),
+              ends: across ? ["toward the left", "toward the right"] : ["toward the back", "toward the front"],
+              children: r.offHeld ? advSay(`Held ${d3FtIn(Math.abs(r.off))} ${towards} of the middle: a ${d3FtIn(r.len)} wing goes no further along this wall.`, true, { "data-ss-adv-wl-offheld": "" }) : null }));
+          }
+        }
         const meetsLabel = !parent ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
         // A wing asked "On the roof" that is built Automatic (roofIgnored) shows Automatic pressed, the mode that
         // is built, rather than a pressed and disabled chip (review, 2026-09-30); the sentence says the ask is kept.
@@ -33638,6 +34274,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const ux = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX;
         const pw = d3PorchWall(roof, bldgW, bldgH);
         if (!d3WingListBlocksPorch(roof, bldgW, bldgH, pw)) return null;
+        // A part-wall wing on that side wall (part, 2026-10-07) is said first.
+        if (d3Massing(roof, bldgW, bldgH, D3.WALL_H).wings.some((g) => g.part && g.wall === pw)) return "part";
         return (ux ? pw === "north" || pw === "south" : pw === "west" || pw === "east") ? "end" : "side";
       })();
       const newFrame = roof.front != null || roof.highSide != null;
@@ -33678,7 +34316,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const porchW = Math.max(bldgW, bldgH);
       out.push(
         <div key="pc" className="ss-adv-flds">
-          {pjEnd && <div key="pjEnd" className="ss-adv-f is-full">{advSay(pjEnd === "end" ? "Not drawn: an end wing is on that end." : "Not drawn: a side-wall porch waits until the end wings are off.", true, { "data-ss-porch-endwing": "" })}</div>}
+          {pjEnd && <div key="pjEnd" className="ss-adv-f is-full">{advSay(pjEnd === "part" ? "Not drawn: the wing on that wall runs only part of it, with open ground beside it. Set that wing to the whole wall, or put the porch on an end."
+            : pjEnd === "end" ? "Not drawn: an end wing is on that end." : "Not drawn: a side-wall porch waits until the end wings are off.", true, { "data-ss-porch-endwing": pjEnd })}</div>}
           {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 12, step: 0.5,
             commit: (n) => { if (n > 0.5) calSetPorch(kind, n); },
             children: <>
@@ -34586,8 +35225,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {/* What the plan just did (loft support, a size change's reflow): an empty-rail row between
           sections 02 and 03, in the same DOM position as before, styled as warning cards
           (DESIGN-SPEC 8: fixed amber, never the builder's colours). */}
-      {(unattachedLofts.length > 0 || (reflowNote && reflowNote.length > 0)) && (
+      {(unattachedLofts.length > 0 || (reflowNote && reflowNote.length > 0) || inOpenItems.length > 0) && (
       <SSRow>
+      {/* Saved in the open ground beside a part-wall wing (inOpenItems): ringed on the plan, said once here. */}
+      {inOpenItems.length > 0 && (
+        <div data-ss-open-note="" style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "10px 14px", marginBottom: unattachedLofts.length > 0 || (reflowNote && reflowNote.length > 0) ? 8 : 0, fontSize: 12, color: "#92400E" }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Open ground beside the wing</div>
+          <div style={{ fontWeight: 500 }}>
+            {(() => {
+              const names = inOpenItems.map((it) => it.doorName || it.windowName || it.rampName || (ITEMS[it.type] && ITEMS[it.type].label) || it.type);
+              const list = names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0];
+              const them = names.length > 1 ? "them" : "it";
+              return `${list} ${names.length > 1 ? "are" : "is"} outside the walls now, in the open corner beside the wing (ringed in red). ${names.length > 1 ? "They're" : "It's"} still on your estimate and your floor plan, but can't be built there: move ${them} inside the walls or remove ${them}.`;
+            })()}
+          </div>
+        </div>
+      )}
       {unattachedLofts.length > 0 && (
         <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "10px 14px", fontSize: 12, color: "#92400E" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Loft support warning — {unattachedLofts.length} loft{unattachedLofts.length > 1 ? "s" : ""} not properly supported</div>
@@ -34815,7 +35468,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             }
             setItems((its) => {
               const add = electricalAutoItems(elecCfg, {
-                widthFt: bldgW, lengthFt: bldgH, scale: scale, mgX: mgX, mgY: mgY, pW: pW, pH: pH,
+                widthFt: bldgW, lengthFt: bldgH, scale: scale, mgX: mgX, mgY: mgY, pW: pW, pH: pH, notches: wingNotches,
                 // Tools for the state we are moving TO — see elecToolsFor. With the package on,
                 // the devices are offered; with it off they usually are not, so passing the
                 // current ITEMS here placed nothing.
@@ -35080,7 +35733,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const si = items.find((i) => i.id === selectedId);
             const sc = si && ITEMS[si.type];
             if (!si || !sc || !(sc.wallOnly || sc.wallSnap)) return null;
-            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
+            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale, spanFt);
             if (!d) return null;
             return d.centered
               ? <span className="ssd-tb-btn is-accent is-static">✓ Centered</span>
@@ -35242,6 +35895,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mgX + i * scale} y1={mgY} x2={mgX + i * scale} y2={mgY + pH} stroke={pal.planGrid} strokeWidth={0.5} />)}
           {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mgX} y1={mgY + i * scale} x2={mgX + pW} y2={mgY + i * scale} stroke={pal.planGrid} strokeWidth={0.5} />)}
           <rect x={mgX} y={mgY} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} style={{ stroke: pal.primary }} />
+          {/* A PART-WALL WING's open ground (planNotchGeom): the corner beside the wing is outside the building, so the
+              outline turns in round it, and it says so. The rectangle above stays: the harnesses find the plan by it. */}
+          {(wingNotches || []).map((n, k) => {
+            const g = planNotchGeom(n);
+            return (
+              <g key={"notch" + k} data-ss-notch={n.i} pointerEvents="none">
+                <rect x={g.cover.x} y={g.cover.y} width={g.cover.w} height={g.cover.h} fill={pal.panel} />
+                <polyline points={g.line.map((q) => q[0] + "," + q[1]).join(" ")} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS}
+                  strokeLinecap="square" strokeLinejoin="miter" style={{ stroke: pal.primary }} />
+                {g.words && g.words.map((t, j) => (
+                  <text key={j} x={g.cx} y={g.cy + (j - (g.words.length - 1) / 2) * 12 + 3.5} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600">{t}</text>
+                ))}
+              </g>
+            );
+          })}
 
           {[...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).map((item) => {
             const cfg = ITEMS[item.type]; if (!cfg) return null;
@@ -35623,6 +36291,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
+          {/* SAVED IN THE OPEN GROUND (inOpenItems): left where it is, never moved, ringed in red; the strip under the
+              plan says what to do. Screen only, like the selection chrome. */}
+          {inOpenItems.map((it) => {
+            const c = ITEMS[it.type] || {};
+            let x0, y0, w, h;
+            if (ssIsPartition(it)) {
+              const a = Number(it.fromFt) * scale, b = Number(it.toFt) * scale, t = Math.max(6, SS_PARTITION_T_FT * scale);
+              if (it.axis === "y") { x0 = mgX + Number(it.atFt) * scale - t / 2; y0 = mgY + a; w = t; h = b - a; }
+              else { x0 = mgX + a; y0 = mgY + Number(it.atFt) * scale - t / 2; w = b - a; h = t; }
+            } else {
+              const iw = (it.widthFt || c.width || 1) * scale, ih = (it.heightFt || c.height || 0.5) * scale;
+              const rot = it.rotation === 90 || it.rotation === 270;
+              w = rot ? ih : iw; h = rot ? iw : ih; x0 = it.x - w / 2; y0 = it.y - h / 2;
+            }
+            return <rect key={"open" + it.id} data-ss-open-item={it.id} x={x0 - 4} y={y0 - 4} width={w + 8} height={h + 8} rx={3}
+              fill="none" stroke="#DC2626" strokeWidth={2} strokeDasharray="5 3" pointerEvents="none" />;
+          })}
           {/* ── ALONG-WALL DIMENSIONS FOR THE SELECTED ITEM, behind the Measure toggle ──────────────
               Two measurements, one to each end of the wall, the way ShedPro draws them (Carolyn
               2026-09-03): "we're not showing the measurements of light, so they don't know if
@@ -35661,7 +36346,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const si = items.find((i) => i.id === selectedId);
             const sc = si && ITEMS[si.type];
             if (!si || !sc || !(sc.wallOnly || sc.wallSnap)) return null;
-            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
+            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale, spanFt);
             if (!d) return null;                     // no wall to measure along
             const isSlab = !!ssSlabModel(si.type, ITEMS);
             // Clear the item itself: a wall slab is drawn inside the wall and would sit on top
@@ -35670,7 +36355,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const axis0 = d.isHoriz ? mgX : mgY;
             const near = axis0 + (d.posFt - d.half) * scale;
             const far = axis0 + (d.posFt + d.half) * scale;
-            const end = axis0 + d.wallLen * scale;
+            // From and to the ends of what is left of the wall beside a part-wall wing (d.a0, d.a1).
+            const start = axis0 + d.a0 * scale;
+            const end = axis0 + d.a1 * scale;
             const cross = d.isHoriz
               ? (si.wall === "north" ? mgY + inset : mgY + pH - inset)
               : (si.wall === "west" ? mgX + inset : mgX + pW - inset);
@@ -35697,7 +36384,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </g>
               );
             };
-            return <>{seg("before", axis0, near, d.before)}{seg("after", far, end, d.after)}</>;
+            return <>{seg("before", start, near, d.before)}{seg("after", far, end, d.after)}</>;
           })()}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);

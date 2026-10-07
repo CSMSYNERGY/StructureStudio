@@ -38,7 +38,7 @@ import { carryForwardFoundation, D3_FOUNDATIONS, D3_RAISED_FOUNDATIONS, FLOOR_HE
 // Where an appendage meets the building, the porch's step count, and the ground's fall (2026-09-28).
 import { D3_ATTACH, D3_GRADE_FALL_TOWARD, GRADE_FALL_FT } from "./styleD3.ts";
 // Stackable wings (roof.wingList, 2026-10-01).
-import { sanitizeWingList, D3_WINGLIST_MAX, D3_WINGLIST_WALLS, WINGLIST_BANDS } from "./styleD3.ts";
+import { sanitizeWingList, D3_WINGLIST_MAX, D3_WINGLIST_WALLS, WINGLIST_BANDS, D3_SPEC_MAX_BYTES } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -7396,7 +7396,7 @@ const wlShow = (v: unknown) => JSON.stringify(v) ?? String(v);
 Deno.test("roof.wingList: round-trips on a gable and a gambrel, in one key order, and nothing is invented", () => {
   assertEquals([...D3_WINGLIST_WALLS], ["left", "right", "front", "back"]);
   assertEquals(D3_WINGLIST_MAX, 16, "sixteen wings per building");
-  assertEquals(WINGLIST_BANDS, { widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26] });
+  assertEquals(WINGLIST_BANDS, { widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26], lengthFt: [4, 100], offsetFt: [-50, 50] });
   for (const type of ["gable", "gambrel"]) {
     const full = roofOf({ type, wingList: [WL_FULL] });
     assertEquals(full.wingList, [WL_FULL], `${type}: every key kept`);
@@ -7460,6 +7460,39 @@ Deno.test("roof.wingList: bands clamp, junk fields and junk entries are dropped"
     assert(!("wingList" in roofOf({ type: "gable", wingList: v })), `${wlShow(v)}: stores no key`);
   }
   assert(!("wingList" in roofOf({ type: "gable", wingList: [] })), "an empty list stores no key");
+});
+
+// PART OF A WALL (lengthFt/offsetFt, 2026-10-07): a wing that covers only part of its wall. Both are plain
+// numbers in their bands, written after eaveFt, kept on any entry (the renderer decides where they apply).
+Deno.test("roof.wingList: a part-wall wing keeps lengthFt and offsetFt, clamped, after eaveFt", () => {
+  const part = { ...WL_FULL, lengthFt: 20, offsetFt: -5 };
+  assertEquals(wlOne(part), part, "both kept as given inside their bands");
+  assertEquals(Object.keys(wlOne(part)), ["wall", "widthFt", "pitch", "attach", "attachFt", "eaveFt", "lengthFt", "offsetFt"], "appended after eaveFt");
+  const shuffled = { offsetFt: 3, lengthFt: 12, eaveFt: 12, wall: "left", widthFt: 8 };
+  assertEquals(Object.keys(wlOne(shuffled)), ["wall", "widthFt", "eaveFt", "lengthFt", "offsetFt"], "reordered on the way in");
+  // The bands: at least 4 ft long (a wing is a room), at most 100; the middle at most 50 ft off the wall's.
+  assertEquals(wlOne({ lengthFt: 2 }).lengthFt, 4, "length 2 clamps up to 4");
+  assertEquals(wlOne({ lengthFt: 500 }).lengthFt, 100, "length 500 clamps down to 100");
+  assertEquals(wlOne({ offsetFt: 80 }).offsetFt, 50, "offset 80 clamps to 50");
+  assertEquals(wlOne({ offsetFt: -80 }).offsetFt, -50, "offset -80 clamps to -50");
+  assertEquals(wlOne({ lengthFt: "20", offsetFt: "-2.5" }), { wall: "left", widthFt: 8, lengthFt: 20, offsetFt: -2.5 }, "numeric strings read as their numbers");
+  // A blank box is no number: the field is left out, never written as 4 or 0.
+  for (const k of ["lengthFt", "offsetFt"]) {
+    for (const v of ["", " ", "x", null, undefined, NaN, Infinity, -Infinity, true, [3], {}]) {
+      assert(!(k in wlOne({ [k]: v })), `${k} ${wlShow(v)}: field absent`);
+    }
+  }
+  // Kept on any entry, wall or tier: an end wall's or an inner wing's length stays saved for the page to explain.
+  for (const wall of D3_WINGLIST_WALLS) assertEquals(sanitizeWingList([{ wall, widthFt: 6, lengthFt: 10 }]), [{ wall, widthFt: 6, lengthFt: 10 }], `kept on the ${wall} wall`);
+  assertEquals(sanitizeWingList([{ wall: "left", widthFt: 6, lengthFt: 10 }, { wall: "left", widthFt: 4, offsetFt: 2 }]),
+    [{ wall: "left", widthFt: 6, lengthFt: 10 }, { wall: "left", widthFt: 4, offsetFt: 2 }], "an inner wing keeps its length too");
+  // The structural rule does not move: a length does not make a wing of an entry that is not one.
+  for (const junk of [{ wall: "top", widthFt: 8, lengthFt: 10 }, { wall: "left", lengthFt: 10 }, { wall: "left", widthFt: 0.5, lengthFt: 10 }]) {
+    assertEquals(sanitizeWingList([junk]), null, `${wlShow(junk)}: still dropped`);
+  }
+  // A shed drops the whole wing set, a part-wall wing included; a gable and a gambrel keep it.
+  assert(!("wingList" in roofOf({ type: "shed", pitch: 0.2, wingList: [part] })), "a shed drops it");
+  for (const type of ["gable", "gambrel"]) assertEquals(roofOf({ type, wingList: [part] }).wingList, [part], `${type} keeps it`);
 });
 
 Deno.test("roof.wingList: the first sixteen structural entries, in order", () => {
@@ -7543,8 +7576,11 @@ Deno.test("roof.wingList: the roof step is refused beside a structural list, and
   }
 });
 
-Deno.test("⚠️ roof.wingList: the heaviest spec a builder can save still fits under the 4096-byte guard", () => {
-  const wing = { wall: "right", widthFt: 15.5, pitch: 0.3333333333333333, attach: "wall", attachFt: 9.75, eaveFt: 25.5 };
+Deno.test("⚠️ roof.wingList: the heaviest spec a builder can save still fits under the size guard", () => {
+  // PART OF A WALL (lengthFt/offsetFt, 2026-10-07): the page offers a length only on the outermost wing of a
+  // side wall, but a wing keeps its length when another is added outside it, and its card then has no way to
+  // clear it. So every one of the sixteen can carry both, at their longest numbers: the page can save that.
+  const wing = { wall: "right", widthFt: 15.5, pitch: 0.3333333333333333, attach: "wall", attachFt: 9.75, eaveFt: 25.5, lengthFt: 99.5, offsetFt: -49.5 };
   const leanTo = { wall: "front", widthFt: 15.75, dropFt: 5.25, attach: "wall", attachFt: 7.75, lengthFt: 59.5, offsetFt: -29.5, enclosed: true, meetPorch: true };
   const worst = {
     roof: {
@@ -7555,8 +7591,10 @@ Deno.test("⚠️ roof.wingList: the heaviest spec a builder can save still fits
       porchSteps: "center", porchStepCount: 12, porchTruss: true,
       wingSide: "both", wingWidthFt: 15.5, wingPitch: 0.3333333333333333, centerEaveFt: 25.5,
       leanTos: Array.from({ length: 6 }, () => leanTo),
-      wingList: Array.from({ length: D3_WINGLIST_MAX }, () => wing),
+      wingList: Array.from({ length: D3_WINGLIST_MAX }, (_, k) => ({ ...wing, wall: k % 2 ? "right" : "left" })),
       wingCornersMeet: true,
+      // THE ROOF RAISED BY THE RAFTER (2026-10-06): both keys, the longer word and a two-decimal depth.
+      seat: "raised", rafterDepthIn: 11.75,
     },
     siding: "batten",
     colors: { body: "#AABBCC", trim: "#AABBCC", roof: "#AABBCC", wood: "#AABBCC", corner: "#AABBCC", fascia: "#AABBCC" },
@@ -7567,13 +7605,30 @@ Deno.test("⚠️ roof.wingList: the heaviest spec a builder can save still fits
   };
   const r = sanitizeD3Spec(worst);
   const bytes = r.ok ? JSON.stringify(r.d3).length : -1;
-  console.log(`worst spec, ${D3_WINGLIST_MAX} maximal wings and 6 maximal lean-tos: ${bytes} of 4096 bytes`);
+  console.log(`worst spec, ${D3_WINGLIST_MAX} maximal part-wall wings and 6 maximal lean-tos: ${bytes} of ${D3_SPEC_MAX_BYTES} bytes`);
   assert(r.ok, `the worst spec is accepted (${r.ok ? bytes : r.error})`);
   if (!r.ok) return;
   assertEquals((r.d3.roof.wingList as unknown[]).length, D3_WINGLIST_MAX, "every wing kept");
+  assert((r.d3.roof.wingList as Record<string, unknown>[]).every((e) => e.lengthFt === 99.5 && e.offsetFt === -49.5), "every wing with its length and position");
   assertEquals((r.d3.roof.leanTos as unknown[]).length, 6, "every lean-to kept");
   assertEquals(r.d3.roof.wingCornersMeet, true, "and the corners switch");
-  assert(bytes <= 4096, `${bytes} bytes fit under the guard`);
+  assertEquals([r.d3.roof.seat, r.d3.roof.rafterDepthIn], ["raised", 11.75], "and where the roof sits");
+  assert(bytes <= D3_SPEC_MAX_BYTES, `${bytes} bytes fit under the guard`);
+  // The old 4096 ceiling would refuse this save: the reason the guard moved (D3_SPEC_MAX_BYTES).
+  assert(bytes > 4096, `${bytes} bytes: the test still builds the spec that moved the guard`);
+});
+
+Deno.test("roof.wingList: sixteen full part-wall wings beside an ordinary style stay under the size guard", () => {
+  const wing = { wall: "left", widthFt: 15.5, pitch: 0.3333333333333333, attach: "wall", attachFt: 9.75, eaveFt: 25.5, lengthFt: 99.5, offsetFt: -49.5 };
+  const spec = { roof: { type: "gable", front: "gable", pitch: 0.4166666666666667, overhang: 1.1666666666666667, eave: "fascia", centerEaveFt: 25.5,
+                         wingList: Array.from({ length: D3_WINGLIST_MAX }, () => wing) },
+                 siding: "lap", colors: { body: "#AABBCC", trim: "#AABBCC", roof: "#AABBCC" }, wallHeightFt: 13.5, foundation: "blocks", floorHeightFt: 2.75 };
+  const r = sanitizeD3Spec(spec);
+  assert(r.ok, `accepted (${r.ok ? "" : r.error})`);
+  if (!r.ok) return;
+  const bytes = JSON.stringify(r.d3).length;
+  assert(bytes <= D3_SPEC_MAX_BYTES, `${bytes} bytes fit under the guard`);
+  assertEquals(r.d3.roof.wingList, Array.from({ length: D3_WINGLIST_MAX }, () => wing), "every wing kept whole, the order as written");
 });
 
 Deno.test("⚠️ roof.wingList never reaches the video path: no allow-list entry, no prompt names it", () => {
