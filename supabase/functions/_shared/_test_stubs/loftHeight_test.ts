@@ -84,12 +84,15 @@ const F = new Function(
 )() as Record<string, Any>;
 
 // The renderer's loftElevOf with the closure it reads handed in: page px are feet (scale 1, no margin).
-function drawnElev(roofCfg: Any, W: number, L: number, H: number) {
+// `H` is the wall PLATE here. Since the roof raised by the rafter (roof.seat, 2026-10-06) the renderer
+// has two heights, H the shell and Hplate the plate, and a loft reads only Hplate; `shell` (default: the
+// plate, every building without a raised roof) is handed in as the renderer's H to prove it is not read.
+function drawnElev(roofCfg: Any, W: number, L: number, H: number, shell: number = H) {
   const fn = new Function(
-    "ssLoftPlateFt", "ssLoftElevFt", "D3_LOFT_PLATE_GAP", "itemTypes", "roofCfg", "bldgW", "bldgH", "H", "ftX", "ftZ",
+    "ssLoftPlateFt", "ssLoftElevFt", "D3_LOFT_PLATE_GAP", "itemTypes", "roofCfg", "bldgW", "bldgH", "H", "Hplate", "ftX", "ftZ",
     `${elevCmp}; return loftElevOf;`,
   );
-  return fn(F.ssLoftPlateFt, F.ssLoftElevFt, F.D3_LOFT_PLATE_GAP, { loft: { width: 6, height: 4 } }, roofCfg, W, L, H,
+  return fn(F.ssLoftPlateFt, F.ssLoftElevFt, F.D3_LOFT_PLATE_GAP, { loft: { width: 6, height: 4 } }, roofCfg, W, L, shell, H,
     (px: number) => px - W / 2, (py: number) => py - L / 2) as (it: Any) => number;
 }
 // A wall-to-wall loft at depth z (feet from the north wall), 4 ft deep, as a 2D or 3D click places it.
@@ -221,15 +224,16 @@ Deno.test("(e) ssLoftWithHeight: null is the plate; at or over the plate is the 
 
 // The ceiling height buildElectrical3D hangs a fitting from (its cH), at plan feet (xFt, zFt) among
 // `items`. The light's disc is drawn at cH - 0.06, 0.08 tall: cH - 0.10 .. cH - 0.02.
-function hungAt(roofCfg: Any, W: number, L: number, H: number) {
+// `H` is the wall plate (Hplate in the renderer) and `shell` the renderer's H, as in drawnElev.
+function hungAt(roofCfg: Any, W: number, L: number, H: number, shell: number = H) {
   const fn = new Function(
-    "name", "g", "itemsNow", "itemTypes", "ftX", "ftZ", "loftElevOf", "D3", "d3CeilingFt", "roofCfg", "bldgW", "bldgH", "H",
+    "name", "g", "itemsNow", "itemTypes", "ftX", "ftZ", "loftElevOf", "D3", "d3CeilingFt", "roofCfg", "bldgW", "bldgH", "H", "Hplate",
     `${underCmp}; return cH;`,
   );
-  const loftElevOf = drawnElev(roofCfg, W, L, H);
+  const loftElevOf = drawnElev(roofCfg, W, L, H, shell);
   return (name: string, xFt: number, zFt: number, items: Any) =>
     fn(name, { position: { x: xFt - W / 2, z: zFt - L / 2 } }, items, { loft: { width: 6, height: 4 } },
-      (px: number) => px - W / 2, (py: number) => py - L / 2, loftElevOf, F.D3, F.d3CeilingFt, roofCfg, W, L, H) as number;
+      (px: number) => px - W / 2, (py: number) => py - L / 2, loftElevOf, F.D3, F.d3CeilingFt, roofCfg, W, L, shell, H) as number;
 }
 
 Deno.test("(f) a light under a plate loft hangs under the loft's floor, not inside it; a saved 5'6\" loft leaves it where it was", () => {
@@ -264,6 +268,19 @@ Deno.test("(f) a light under a plate loft hangs under the loft's floor, not insi
   assertEquals(hang("Ceiling Fan", 3, 4.3, [loftAt(12, 2, { onPlate: true })]), 8);
   // Another item type is never a loft.
   assertEquals(hang("Light", 3, 2, [{ ...loftAt(12, 2, { onPlate: true }), type: "workbench" }]), 8);
+});
+
+// ── (g) a roof raised by the rafter (roof.seat, 2026-10-06) ─────────────────────────────────────
+// The renderer's H becomes the SHELL, a rafter above the plate. A loft and a ceiling fitting stand on the
+// walls, so both stay where they were: the shell handed in as H must not move either of them.
+Deno.test("(g) under a roof raised by the rafter the loft and the ceiling light stay on the PLATE, not the shell", () => {
+  const RAISED = { ...GABLE, seat: "raised", rafterDepthIn: 5.5 };
+  const shell = 8 + 5.5 / 12;
+  const elev = drawnElev(RAISED, 12, 24, 8, shell);
+  assertAlmostEquals(elev(loftAt(12, 2, { onPlate: true })), 8 - F.D3_LOFT_PLATE_GAP, 1e-9, "a plate loft is on the 8 ft plate");
+  assertAlmostEquals(elev(loftAt(12, 2, { elevationFt: 9 })), 8 - F.D3_LOFT_PLATE_GAP, 1e-9, "a set height is still capped at the plate, not the shell");
+  const hang = hungAt(RAISED, 12, 24, 8, shell);
+  assertEquals(hang("Light", 3, 12, []), 8, "the ceiling is the top of the walls");
 });
 
 Deno.test("(f) under a loft on a raised centre's plate, and under one that drops to a lower rear section", () => {
@@ -311,8 +328,9 @@ Deno.test("every placement writes onPlate and no number; every reader goes throu
     assertEquals((src.match(/if \(it\.electricalItemId\) \{ buildElectrical3D\(it, c, itemsNow\); return; \}/g) || []).length, 1, `${name}: buildInterior hands buildElectrical3D the items`);
     // The plan's toolbar: the rep designer only, beside the partition bar, reading the same plate.
     assert(src.includes('{selectedId && !planLocked && embedded && (() => {\n            const si = items.find((i) => i.id === selectedId);\n            if (!si || si.type !== "loft") return null;'), `${name}: the loft bar's gate`);
-    assert(src.includes("ssLoftPlateFt(vr.roof, bldgW, bldgH, vr.H,"), `${name}: the plan's plate read`);
-    assert(src.includes("ssLoftPlateFt(roofCfg, bldgW, bldgH, H, ftX(it.x), ftZ(it.y),"), `${name}: the renderer's plate read`);
+    // The PLATE, not the shell (roof.seat, 2026-10-06): ventRoof2D's Hplate and the renderer's Hplate.
+    assert(src.includes("ssLoftPlateFt(vr.roof, bldgW, bldgH, vr.Hplate,"), `${name}: the plan's plate read`);
+    assert(src.includes("ssLoftPlateFt(roofCfg, bldgW, bldgH, Hplate, ftX(it.x), ftZ(it.y),"), `${name}: the renderer's plate read`);
     assert(src.includes('data-ss-loft-height="1"'), `${name}: the inch field`);
   }
 });

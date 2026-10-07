@@ -83,7 +83,8 @@ Deno.test("⚠️ the two senders are wired into the saves, each saying it knows
   for (const [file, src] of [["StructureStudio.jsx", JSX], ["structure-studio.component.js", CMP]]) {
     assert(src.includes(`action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec),`),
       `${file}: the operator page's save must send calSpecToSend(adminCal.spec)`);
-    assert(src.includes(`d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true },`), `${file}: the operator page's save must send slabGround: true`);
+    // The body goes on with seatAware (roofSeat_test pins it), so the pin stops at slabGround.
+    assert(src.includes(`d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true`), `${file}: the operator page's save must send slabGround: true`);
   }
 });
 
