@@ -961,6 +961,105 @@ Deno.test("plateBand round-trips as a real boolean only, and absent stays absent
   assert(absent.ok && !("plateBand" in absent.d3.roof), "no band unless one was asked for");
 });
 
+// THE ROOF RAISED BY THE RAFTER (2026-10-06, Carolyn's Q28). Two builder-only keys: roof.seat says
+// whether the roof sits on the wall plate (absent, today) or one rafter above it, and
+// roof.rafterDepthIn how deep that rafter is. Neither is ever defaulted here: absent is on the
+// plate, and a blank rafter is the renderer's 3.5 in at draw time.
+Deno.test("roof.seat keeps only the two exact words, and absent stays absent", () => {
+  const seat = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, seat: v } });
+    assert(r.ok, "seat never fails the spec");
+    return r.ok ? r.d3.roof : {};
+  };
+  assertEquals(seat("raised").seat, "raised");
+  assertEquals(seat("plate").seat, "plate", "the explicit word is kept too");
+  for (const junk of ["Raised", true, 1, "", "raise", null]) {
+    assert(!("seat" in seat(junk)), `${JSON.stringify(junk)} is not a seat`);
+  }
+  // Every roof type takes it: a shed's rafters sit on its plates the same way.
+  const shed = sanitizeD3Spec({ roof: { type: "shed", pitch: 0.25, seat: "raised" } });
+  assert(shed.ok && shed.d3.roof.seat === "raised", "a shed keeps it");
+});
+
+Deno.test("roof.rafterDepthIn is clamped to 1.5..12 in, kept without a seat, and never defaulted", () => {
+  const depth = (v: unknown, extra: Record<string, unknown> = { seat: "raised" }) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, ...extra, rafterDepthIn: v } });
+    assert(r.ok, "the rafter never fails the spec");
+    return r.ok ? r.d3.roof : {};
+  };
+  assertEquals(depth(5.5).rafterDepthIn, 5.5, "a 2x6");
+  assertEquals(depth(7.25).rafterDepthIn, 7.25, "a 2x8");
+  assertEquals(depth(0.5).rafterDepthIn, 1.5, "under the floor of the band is raised to it");
+  assertEquals(depth(40).rafterDepthIn, 12, "over the top of the band is lowered to it");
+  assertEquals(depth("5.5").rafterDepthIn, 5.5, "a numeric string reads as its number, like every other clamp");
+  assert(!("rafterDepthIn" in depth("abc")), "a word is dropped");
+  // Kept whether or not the roof is raised (the leanToSide posture), so switching back remembers it.
+  assertEquals(depth(5.5, {}).rafterDepthIn, 5.5, "kept with no seat");
+  assertEquals(depth(5.5, { seat: "plate" }).rafterDepthIn, 5.5, "kept on the plate");
+  // Raised with no rafter given: nothing is written. The 3.5 in is the renderer's, at draw time.
+  const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, seat: "raised" } });
+  assert(bare.ok && !("rafterDepthIn" in bare.d3.roof), "no rafter is invented for a raised roof");
+});
+
+Deno.test("a roof with neither seat key round-trips with no new keys", () => {
+  const roof = { type: "gable", pitch: 0.4, overhang: 1, eave: "fascia", overhangStyle: "extended", plateBand: true };
+  const r = sanitizeD3Spec({ roof });
+  assert(r.ok, "the roof is valid");
+  assertEquals(r.ok ? r.d3.roof : null, roof, "nothing added, nothing reordered");
+  // ...and the two keys, when given, land AFTER every key that was there before them, so a stored
+  // spec that gains them keeps its order.
+  const both = sanitizeD3Spec({ roof: { ...roof, seat: "raised", rafterDepthIn: 5.5 } });
+  assert(both.ok, "the roof is valid with both keys");
+  const keys = both.ok ? Object.keys(both.d3.roof) : [];
+  assert(keys.indexOf("rafterDepthIn") > keys.indexOf("overhang"), keys.join(","));
+  assert(keys.indexOf("seat") > keys.indexOf("plateBand"), keys.join(","));
+});
+
+// WHERE THE ROOF SITS SURVIVES AN OLDER DESIGNER'S REDRAFT (carryForwardRoofSeat, 2026-10-06). Beta and
+// production share save_style_d3, and production's designer drops both keys on an AI redraft until the
+// next promotion. A body without `seatAware: true` keeps the stored pair its roof left out; the panels that
+// draw the choice send seatAware, and their "On the plate" and blank rafter box land as the absence they are.
+import { carryForwardRoofSeat } from "./styleD3.ts";
+import { canonicalJson } from "./styleSaveGuard.ts";
+
+Deno.test("a raised roof survives an older designer's redraft, and only a seat-aware save clears it", () => {
+  const STORED = { roof: { type: "gable", pitch: 0.4, overhang: 1, eave: "fascia", seat: "raised", rafterDepthIn: 5.5 }, siding: "panel", colors: { body: "#9B2F2F" }, wallHeightFt: 8 };
+  const save = (sent: Record<string, unknown>, seatAware?: boolean, stored: unknown = STORED) => {
+    const clean = sanitizeD3Spec(sent);
+    assert(clean.ok, JSON.stringify(sent));
+    if (!clean.ok) throw new Error("unreachable");
+    carryForwardRoofSeat(clean.d3, sent, stored, seatAware);
+    return clean.d3.roof as Record<string, unknown>;
+  };
+  // An older designer's typed redraft: a drawn roof with neither key (its calDraftRoof kept only the plate
+  // band and the overhang style).
+  const redraft = { ...STORED, roof: { type: "gable", pitch: 0.4, overhang: 1, eave: "fascia" } };
+  const kept = save(redraft);
+  assertEquals([kept.seat, kept.rafterDepthIn], ["raised", 5.5], "no seatAware: the stored pair is carried");
+  // ...so its re-save of an unchanged style is the duplicate it is, by the guard's own comparison.
+  assert(canonicalJson(kept) === canonicalJson(STORED.roof), "it compares equal to what is stored");
+  // The current panel's "On the plate" with a blank rafter box: both keys go.
+  const cleared = save(redraft, true);
+  assert(!("seat" in cleared) && !("rafterDepthIn" in cleared), "seatAware: the absence lands");
+  // ...and its raised-on-a-blank-box clears just the rafter.
+  const blank = save({ ...STORED, roof: { ...redraft.roof, seat: "raised" } }, true);
+  assertEquals([blank.seat, "rafterDepthIn" in blank], ["raised", false], "seatAware: a blank box clears the rafter");
+  // What a request DID send wins either way: an older plain save spreads the roof it loaded.
+  const sent = save({ ...STORED, roof: { ...redraft.roof, seat: "plate", rafterDepthIn: 7.25 } });
+  assertEquals([sent.seat, sent.rafterDepthIn], ["plate", 7.25], "sent keys are never overwritten");
+  // Carried values are held to the sanitiser's rule again: the exact word, the band.
+  const odd = save(redraft, undefined, { roof: { type: "gable", seat: "Raised", rafterDepthIn: 40 } });
+  assertEquals(["seat" in odd, odd.rafterDepthIn], [false, 12], "a stored oddity is re-held, not copied");
+  const word = save(redraft, undefined, { roof: { type: "gable", rafterDepthIn: "abc" } });
+  assert(!("rafterDepthIn" in word), "a stored word is not carried");
+  // Nothing stored, nothing carried: an ordinary style round-trips with no new keys.
+  const plain = save(redraft, undefined, { roof: { type: "gable", pitch: 0.4 } });
+  assertEquals(plain, redraft.roof, "no keys invented");
+  for (const stored of [null, "x", { roof: null }, { roof: "gable" }]) {
+    assertEquals(save(redraft, undefined, stored), redraft.roof, `stored ${JSON.stringify(stored)}`);
+  }
+});
+
 Deno.test("colors.wood keeps a hex and drops anything else without failing the spec", () => {
   const wood = (v: unknown) => {
     const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, colors: { body: "#EEEBE0", wood: v } });

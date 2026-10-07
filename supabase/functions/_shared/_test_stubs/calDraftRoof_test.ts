@@ -207,6 +207,9 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "shed", highSide: "front" }, { type: "gable", front: "eave" }],
     [{ type: "gable", front: "eave", wingSide: "both", wingWidthFt: 8 }, { pitch: 0.4 }],
     [{ type: "gable", dormerWidthFt: 6, dormerRiseFt: 4, plateBand: true, overhangStyle: "notched" }, { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 11 }],
+    // Where the roof sits on the wall (2026-10-06) is the builder's, kept by a typed draft like the band.
+    [{ type: "gable", pitch: 0.4, seat: "raised", rafterDepthIn: 5.5, dormerWidthFt: 6 }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", pitch: 0.4, rafterDepthIn: 7.25 }, { type: "shed", pitch: 0.25 }],
     // Where a lean-to / the wings meet the building (2026-09-28) is the builder's, but a typed draft
     // replaces the roof: a stale attach must never override the wing pitch the draft measured.
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "roof", wingAttachFt: 2 }, { type: "gable", pitch: 0.5 }],
@@ -264,6 +267,21 @@ Deno.test("⚠️ A TYPED DRAFT REPLACES THE ROOF: no stale dormer or lean-to, t
   assertEquals([noWings.wingAttach, noWings.wingAttachFt], ["roof", 2], "an untyped draft clears nothing");
   // A draft that reports a dormer keeps its own.
   assertEquals(calDraftRoof(stored, { type: "gable", dormerWidthFt: 5 }).dormerWidthFt, 5);
+});
+
+Deno.test("⚠️ A TYPED REDRAFT KEEPS WHERE THE ROOF SITS (roof.seat / roof.rafterDepthIn, 2026-10-06)", () => {
+  // The walk-around never sees the heel, so the model is never asked: the builder's pick survives a
+  // shape read that replaces everything else on the roof, and an untyped draft keeps it as it keeps all.
+  const stored = { type: "gable", pitch: 0.4, seat: "raised", rafterDepthIn: 5.5, dormerWidthFt: 6 };
+  const out = calDraftRoof(stored, { type: "gable", front: "gable", pitch: 0.5 });
+  assertEquals([out.seat, out.rafterDepthIn, out.pitch], ["raised", 5.5, 0.5]);
+  assert(!has(out, "dormerWidthFt"), "the rest of the roof is still replaced");
+  // A rafter stored without a seat is remembered too (the leanToSide posture).
+  assertEquals(calDraftRoof({ type: "gable", rafterDepthIn: 7.25 }, { type: "shed" }).rafterDepthIn, 7.25);
+  // Absent stays absent: nothing is invented for a roof that never had it.
+  const plain = calDraftRoof({ type: "gable", pitch: 0.4 }, { type: "gable", pitch: 0.5 });
+  assert(!has(plain, "seat") && !has(plain, "rafterDepthIn"), JSON.stringify(plain));
+  assertEquals(calDraftRoof(stored, { pitch: 0.45 }).seat, "raised", "an untyped draft clears nothing");
 });
 
 Deno.test("⚠️ the lean-to list (roof.leanTos, 2026-09-29) goes with a typed draft and stays without one", () => {

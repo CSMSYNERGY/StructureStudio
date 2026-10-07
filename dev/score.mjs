@@ -154,8 +154,8 @@ export function mergeDraft(prior, draft, source = "video") {
   // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
   // cannot turn the scored building a quarter turn away from what the draft measured.
   // A draft that reports a roof TYPE replaces the roof (2026-09-25), keeping only the builder's own
-  // plateBand / overhangStyle — calDraftRoof's rule, so a stale dormer is never scored either.
-  const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+  // plateBand / overhangStyle / seat / rafterDepthIn — calDraftRoof's rule, so a stale dormer is never scored either.
+  const BUILDER_ONLY = ["plateBand", "overhangStyle", "seat", "rafterDepthIn"];
   const base = {};
   if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
   const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };

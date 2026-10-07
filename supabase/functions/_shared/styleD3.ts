@@ -158,6 +158,14 @@ const CLAMPS: Record<string, [number, number]> = {
   // readout already says ("3 steps"). Absent is the renderer's own count, one per 7.5 inches of
   // height. A WHOLE number, rounded after the clamp like porchPosts. Kept only with porchSteps.
   porchStepCount: [1, 12],
+  // ── THE ROOF RAISED BY THE RAFTER (2026-10-06, Carolyn's Q28) ──────────────────────────────────
+  // How deep the rafter is, in INCHES, the unit a builder reads off the lumber: a 2x4 is 3.5, a 2x6
+  // 5.5, a 2x8 7.25. With roof.seat "raised" the whole shell, the walls and the roof together, stands
+  // this much above the wall plate (d3SeatLiftFt in both designer twins). Absent is the renderer's
+  // 3.5 at draw time, never written here. Stored whether or not seat is "raised", like leanToSide,
+  // so switching back remembers it. 1.5 is a flat 2x lying down; 12 is past any rafter a portable
+  // building carries. ⚠️ LOCK-STEP with the literals inside d3SeatLiftFt in both twins.
+  rafterDepthIn: [1.5, 12],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -482,7 +490,9 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
                    // 2026-09-28, the roof step, appended for the same reason.
                    "rearStepFt", "rearEaveRiseFt",
                    // 2026-09-28, appended for the same reason.
-                   "leanToAttachFt", "wingAttachFt", "porchStepCount"]) {
+                   "leanToAttachFt", "wingAttachFt", "porchStepCount",
+                   // appended 2026-10-06, the rafter under a raised roof, for the same reason.
+                   "rafterDepthIn"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
@@ -573,6 +583,16 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if (typeof rawRoof.plateBand === "boolean") {
     roof.plateBand = rawRoof.plateBand;
   }
+  // WHERE THE ROOF SITS ON THE WALL (2026-10-06, Carolyn's Q28: "roof on the plate, or raised by the
+  // rafter height", per design). "plate" is today's roof, its rafters seated on the top plate;
+  // "raised" stands the whole shell roof.rafterDepthIn above it. Only the exact word is stored, and a
+  // builder's pick in the calibration panel is the only thing that ever writes it.
+  //
+  // ABSENT MEANS ON THE PLATE; never emit a default. The renderer tests `=== "raised"`, so every row
+  // saved before this key existed keeps its exact render, and the deep-equal on `roof` in
+  // styleD3.test.ts keeps passing. Out of the numeric loop because clamped() destructures
+  // CLAMPS[key] and would throw on a key with no entry.
+  if (rawRoof.seat === "raised" || rawRoof.seat === "plate") roof.seat = rawRoof.seat;
   // A porch is ONE kind or the other. With a projecting porch on, the recessed porch's depth
   // and its truss are dropped, because storing both would make the production renderer, which
   // knows only porchDepthFt, draw a recessed porch into a building that has a projecting one.
@@ -883,6 +903,34 @@ export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unk
   if (!("gradeFallFt" in s) && gf !== null && gf > 0) clean.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
   if (!("gradeFallToward" in s) && (D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(was.gradeFallToward)) {
     clean.gradeFallToward = was.gradeFallToward as string;
+  }
+}
+
+// ── WHERE THE ROOF SITS SURVIVES AN OLDER DESIGNER'S REDRAFT (roof.seat / roof.rafterDepthIn, 2026-10-06) ──
+// Beta and production share these functions, so the sanitiser keeps both keys for both the moment it is
+// deployed, while production's designer has never heard of them until the next promotion. Its plain save
+// keeps them (its editor spreads the roof it loaded), but its AI redraft does not: calDraftRoof there keeps
+// only the plate band and the overhang style over a drawn roof. So Generate and then Save on production
+// would put a style a builder raised on beta back on the plate, with an HTTP 200 and no warning. That
+// designer can neither set nor clear either key, so its silence is never a choice.
+//
+// The slabGround rule (carryForwardFoundation). A request that says it knows them, `seatAware: true`, which
+// the panels that draw the choice put in the body (12-shell's onSaveSpec, the operator page's save), gets
+// exactly what it sent: its "On the plate" and its blank rafter box land as the absence they are. From any
+// other request, a key its roof does not carry keeps the stored value, re-held to the sanitiser's rule (the
+// exact word; the band). Run before the save guard, so an older designer's re-save compares as the
+// duplicate it is. Mutates `clean`.
+export function carryForwardRoofSeat(clean: D3Spec, sent: unknown, stored: unknown, seatAware?: boolean): void {
+  if (seatAware === true || !sent || typeof sent !== "object" || !clean.roof) return;
+  const wasRoof = (stored && typeof stored === "object") ? (stored as Record<string, unknown>).roof : null;
+  if (!wasRoof || typeof wasRoof !== "object") return;
+  const was = wasRoof as Record<string, unknown>;
+  const sentRoof = (sent as Record<string, unknown>).roof;
+  const s = (sentRoof && typeof sentRoof === "object") ? sentRoof as Record<string, unknown> : {};
+  if (!("seat" in s) && (was.seat === "raised" || was.seat === "plate")) clean.roof.seat = was.seat;
+  if (!("rafterDepthIn" in s)) {
+    const d = clamped("rafterDepthIn", was.rafterDepthIn);
+    if (d !== null) clean.roof.rafterDepthIn = d;
   }
 }
 
