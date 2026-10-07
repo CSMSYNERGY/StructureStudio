@@ -2104,7 +2104,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // face is not a wall, so the designer sends `wall: null` and `dormer: true` rather than
       // inventing a fifth value (2026-09-07). A client that predates the flag sends neither and
       // reads exactly as it always did.
-      const place = w && w.dormer ? "in the dormer" : (w && w.wall ? `${w.wall} wall` : null);
+      //
+      // A WINDOW IN A DOOR (migration 289) sends `inDoor: true` and the door's name instead. It is the
+      // window's OWN line at the window's catalog price, one entry per leaf (two on a double), never
+      // folded into the door's line: an included door nets its whole grouped price, which would give
+      // the window away with it. The name is display text only (the price is re-read from
+      // fixture_items above), trimmed and capped so a forged body cannot write an essay on the quote.
+      const doorName = w && w.inDoor ? (String(w.doorName || "Door").trim().slice(0, 80) || "Door") : null;
+      const place = w && w.dormer ? "in the dormer" : doorName ? `Window in door: ${doorName}` : (w && w.wall ? `${w.wall} wall` : null);
       const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
       // The dressing joins the group key for the same reason the colour does: two otherwise
       // identical windows, one with shutters and one without, are two different products to
@@ -2120,7 +2127,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // payload), so it never takes a wall window's price even when it shares that row's key.
       const rowKey = w && w.dormer ? null
         : ssPriceRowKey("win", ssPriceGroupId(w.fixtureItemId, w.name || "Window", w.price != null ? Number(w.price) : 0), w.colorId || "");
-      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`
+      // A window in a door joins the key with its door's name, for the dormer's reason: folded into an
+      // identical wall window's group it would be described as on that window's wall (and the other
+      // way round), and two doors' windows would both be named after whichever door came first. It
+      // KEEPS the win: row key, unlike the dormer: the designer's Details folds it into that very row
+      // (computeLayoutPricingRows' customWindows), so a rep's price on the row re-prices it too.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : doorName ? `door:${doorName}` : ""}`
         + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null), rowKey };
       if (g.rowKey !== rowKey) g.rowKey = null;
