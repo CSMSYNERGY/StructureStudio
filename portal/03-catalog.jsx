@@ -5418,7 +5418,7 @@ const D3_DOOR_STYLE_HINT = {
   zbrace: "The same board-and-batten door with a single diagonal brace, rising from the hinge side.",
   xbrace: "The same board-and-batten door with a crossed X brace across the lower panel.",
   rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The door's photo is still used on the estimate, but not in 3D.",
-  american: "A trim frame with a mid rail and four pickets across the lower panel, panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
+  american: "A trim frame with a mid rail and vertical pickets across the lower panel (as many as the door's width spaces like the real door), panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
   basic: "A trim frame with a mid rail and plain panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
   classic: "A trim frame with an octagon and a diamond in the upper panel and an X in the lower one; a window, if the customer picks one, takes the octagon's place.",
   dutch: "A trim frame with a mid rail and a small dark louvred vent in the lower panel, with a window in the upper panel if the customer picks one.",
