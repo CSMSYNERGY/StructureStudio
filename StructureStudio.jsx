@@ -3176,7 +3176,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (Array.isArray(items)) {
     for (const it of items) {
       if (!it) continue;
-      if (it.type === "fixtureDoor") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); continue; }
+      if (it.type === "fixtureDoor") {
+        if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId));
+        // A window drawn in the door is a placed window (migration 289): the edge's placedKeys takes
+        // every windows[] line's fixture id, the in-door ones included, and gives it no credit.
+        if (ssDoorWindowCount(it, ssDoorLookOf(C && C.fixtures, it)) > 0) placedKeys.add(String(it.doorWindowId));
+        continue;
+      }
       if (it.type === "window") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); else placedKeys.add("window"); continue; }
       if (it.type === "ramp") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); placedKeys.add("ramp"); continue; }
       if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "shelf" || it.type === "doubleShelf" || ssIsRO(it.type)) placedKeys.add(it.type);
@@ -3633,6 +3639,24 @@ function ssDoorWindowLines(items, fixtures) {
     }
   });
   return out;
+}
+// Does a placed item put the included key `k` on the plan? An instance of the item, or of a fixture
+// that is it -- or a door whose DRAWN window is that window. submit-estimate's placedKeys takes the
+// fixture id of every windows[] line, the in-door ones too, so for the estimate a window in a door is
+// placed: no decline credit for it, and the size's inclusion nets it. The submit gate, the Included
+// chip and the Options step read this, so none of them pushes the customer to decline a window that
+// is already on the door, or to put a second one on a wall.
+function ssItemPlacesKey(it, k, fixtures) {
+  if (!it) return false;
+  if (it.type === k || it.fixtureItemId === k) return true;
+  return it.type === "fixtureDoor" && it.doorWindowId != null && String(it.doorWindowId) === String(k)
+    && ssDoorWindowCount(it, ssDoorLookOf(fixtures, it)) > 0;
+}
+// What taking one matched item off a Details row does to it: a door matched by a WINDOW row (the
+// in-door branch of priceRowMatcher) keeps its place and loses that window; anything else goes.
+// Returns the item to keep, patched, or null to remove it.
+function ssRemoveFromRow(key, it) {
+  return (it && it.type === "fixtureDoor" && String(key).indexOf("win:") === 0) ? { ...it, ...doorWindowStamps(null) } : null;
 }
 // ── END WINDOWS IN DOORS ──
 
@@ -4132,8 +4156,10 @@ function ssPriceOverrideList(sel, items, customOptions, C, paintColors) {
 // The row's × button and pick-one-to-remove mode both need this mapping; matching on
 // `i.type === key` made the × a silent no-op for every catalog row — the customer could not
 // remove a charged item from Details and might submit believing they had (audit 2026-08-20).
-// Mirrors the grouping in computeLayoutPricingRows above — keep the two in sync.
-function priceRowMatcher(key) {
+// Mirrors the grouping in computeLayoutPricingRows above — keep the two in sync. `fixtures` (the
+// get_fixtures list) is what tells a window row which doors draw a window in them; without it no door
+// matches a window row.
+function priceRowMatcher(key, fixtures) {
   const isCatalog = (i) => !!i.fixtureItemId && i.price != null;   // same test the grouping uses
   if (key === "window") return (i) => i.type === "window" && !isCatalog(i);
   if (key === "ramp" || key === "ramp:simple") return (i) => i.type === "ramp" && !isCatalog(i);
@@ -4162,8 +4188,14 @@ function priceRowMatcher(key) {
   if (kind === "win") {
     const p1 = fid.lastIndexOf("|");
     const gfid = fid.slice(0, p1), cId = fid.slice(p1 + 1);
-    return (i) => i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === gfid
-      && String(i.colorId || "") === cId;
+    // A window IN A DOOR prices on this row too: computeLayoutPricingRows adds ssDoorWindowLines to
+    // customWindows, colourless, at the stamped price, only where ssDoorWindowCount draws one. So the
+    // door that carries it matches here on the same terms, and the row's × reaches it (removePlaced
+    // takes the window out of the door; ssRemoveFromRow).
+    return (i) => (i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === gfid
+      && String(i.colorId || "") === cId)
+      || (i.type === "fixtureDoor" && cId === "" && i.doorWindowId != null && i.doorWindowPrice != null
+        && String(i.doorWindowId) === gfid && ssDoorWindowCount(i, ssDoorLookOf(fixtures, i)) > 0);
   }
   if (kind === "ramp") return (i) => i.type === "ramp" && isCatalog(i) && gid(i, i.rampName || "Ramp") === fid;
   return () => false;
@@ -10784,7 +10816,8 @@ function buildShed3DModel(THREE, p) {
   // Measured off the real doors: two full-height stiles and rails between them, all one board F
   // wide (ssTrimDoorFields), a mid rail centred at 42% of the leaf, and then per look --
   //   basic     nothing more;
-  //   american  four pickets F wide, evenly spaced across the lower panel (five equal gaps);
+  //   american  pickets F wide across the lower panel, equal gaps each about 1.3 pickets wide
+  //             (three on a 36 in leaf, two on a 60 in double's);
   //   classic   an octagon (four corner braces, each cutting ~22% of the panel's width and 25% of
   //             its height) round a solid diamond in the upper panel, and an X in the lower one;
   //   dutch     one small dark louvred vent centred in the lower panel.
@@ -10835,14 +10868,20 @@ function buildShed3DModel(THREE, p) {
       put(bm, part);
     };
     if (look === "american" && lh > 0.3) {
-      // Four pickets the frame's own board, in the lower panel only: five equal gaps between them and
-      // the stiles. Flush with the frame (0.13) and stopping exactly on the rails, so nothing overlaps.
-      const pk = Math.min(F, fw * 0.16), gap = (fw - 4 * pk) / 5;
-      if (gap > 0.03) {
-        for (let k = 0; k < 4; k++) {
-          const x = lo.x0 + gap + k * (pk + gap);
-          put(wallBox(frameMat, wf, x, x + pk, lo.y0, lo.y1, 0.13, 0.06), "picket");
-        }
+      // Pickets the frame's own board F wide, in the lower panel only, with equal gaps between them and
+      // the stiles. Every frame of the real door has three to a leaf, each gap about 1.3 pickets wide,
+      // so the panel reads about one-third solid: the count is the one whose gaps come nearest that --
+      // three on a 36 in leaf (and a 72 in double's), two on the narrower leaf of a 60 in double. Flush
+      // with the frame (0.13) and stopping exactly on the rails, so nothing overlaps.
+      const pk = F;
+      let n = 0, gap = 0;
+      for (let k = 1; k <= 6; k++) {
+        const g = (fw - k * pk) / (k + 1);
+        if (g > 0.03 && (!n || Math.abs(g / pk - 1.3) < Math.abs(gap / pk - 1.3))) { n = k; gap = g; }
+      }
+      for (let k = 0; k < n; k++) {
+        const x = lo.x0 + gap + k * (pk + gap);
+        put(wallBox(frameMat, wf, x, x + pk, lo.y0, lo.y1, 0.13, 0.06), "picket");
       }
     } else if (look === "classic") {
       if (!hole && fw > 0.6 && uh > 0.6) {
@@ -10935,16 +10974,53 @@ function buildShed3DModel(THREE, p) {
     return { rect, it: { type: "window", fixtureItemId: it.doorWindowId, colorHex: null } };
   };
   // What goes round one of these doors and round no other (migration 289): the HEADER BOARD over the
-  // opening -- the frame's board F tall, 0.12 ft past the casing each side, sitting on the head casing
-  // and standing just proud of it as the drip cap it is, kept under the wall's own top -- and the
-  // aluminium THRESHOLD filling the SS_TRIM_DOOR_SILL_FT the leaves stand above. `header` false is a
-  // partition's door, which has the threshold and no siding to cap.
-  const trimDoorSurround = (og, wf, o, frameMat, F, header) => {
+  // opening -- a drip cap 0.4 of the frame's board F tall (on the real doors it is a third to a half of
+  // a rail), 0.12 ft past the casing each side, sitting on the head casing and standing 0.04 ft proud
+  // of it -- and the aluminium THRESHOLD filling the SS_TRIM_DOOR_SILL_FT the leaves stand above.
+  // `header` false is a partition's door, which has the threshold and no siding to cap.
+  //
+  // The header is the one part of these doors that reaches past their own casing, so it is fitted to
+  // what is round it on the wall (`others`, buildOneWall's openings):
+  //   - under the wall's own top;
+  //   - under any opening ABOVE the door, a transom or a loft door stacked flush (placement allows
+  //     both on purpose), and dropped when that leaves it no room;
+  //   - short of a CORNER BOARD's inner edge: on panel siding its face lands exactly on the board's
+  //     face, and the two z-fight; on lap it would stand over the board;
+  //   - at the midpoint toward an opening BESIDE it, or at that opening's trim where that is further
+  //     off, so two close doors' headers never share a face.
+  const trimDoorSurround = (og, wf, o, frameMat, F, header, others) => {
     const f = D3_CASE_F;
     if (header && F > 0) {
-      const x0 = Math.max(0, o.a0 - f - 0.12), x1 = Math.min(wf.len != null ? wf.len : Infinity, o.a1 + f + 0.12);
-      const top = Math.min(o.y1 + f * 0.5 + F, topOver(wf, x0, x1) - 0.02), bot = Math.max(o.y1, top - F);
-      if (top - bot > 0.04) {
+      let x0 = Math.max(0, o.a0 - f - 0.12), x1 = Math.min(wf.len != null ? wf.len : Infinity, o.a1 + f + 0.12);
+      // The four corner boards, as their loop below stands them: centred on the footprint's corners.
+      const cHalf = Math.max(T / 2 + 0.07, trimFace);
+      [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
+        const dx = c[0] - wf.O[0], dz = c[1] - wf.O[1];
+        if (Math.abs(dx * wf.N[0] + dz * wf.N[1]) > 1e-6) return;   // not on this wall's line
+        const at = dx * wf.U[0] + dz * wf.U[1];
+        if (at <= o.a0) x0 = Math.max(x0, at + cHalf);
+        else if (at >= o.a1) x1 = Math.min(x1, at - cHalf);
+      });
+      // Another opening's trim: its casing, a window's sill nose 0.03 past it, from its sill board up
+      // (a door's casing and threshold start at its opening) to just over its head casing.
+      const trimOf = (ob) => {
+        const door = ob.it.type === "fixtureDoor" || ob.it.type === "singleDoor" || ob.it.type === "doubleDoor";
+        return { x0: ob.a0 - f - 0.03, x1: ob.a1 + f + 0.03, y0: door ? ob.y0 : ob.y0 - f, y1: ob.y1 + f + 0.06 };
+      };
+      const near = (others || []).filter((ob) => ob !== o);
+      let top = Math.min(o.y1 + f * 0.5 + 0.4 * F, topOver(wf, x0, x1) - 0.02);
+      near.forEach((ob) => {
+        const t = trimOf(ob);
+        if (ob.y0 >= o.y1 - 1e-6 && t.x1 > o.a0 - f && t.x0 < o.a1 + f) top = Math.min(top, t.y0);
+      });
+      const bot = Math.max(o.y1, top - 0.4 * F);
+      near.forEach((ob) => {
+        const t = trimOf(ob);
+        if (t.y1 <= bot || t.y0 >= top) return;                    // clear of the header's band
+        if (ob.a0 >= o.a1 - 1e-6) x1 = Math.min(x1, Math.max((o.a1 + ob.a0) / 2, t.x0));
+        else if (ob.a1 <= o.a0 + 1e-6) x0 = Math.max(x0, Math.min((ob.a1 + o.a0) / 2, t.x1));
+      });
+      if (top - bot > 0.04 && x1 - x0 > 0.1) {
         const hb = wallBox(frameMat, wf, x0, x1, bot, top, trimFace - 0.005, 0.09);
         hb.userData.ssDoorPart = "header";
         og.add(hb);
@@ -11541,7 +11617,7 @@ function buildShed3DModel(THREE, p) {
             : [[o.a0 + 0.05, o.a1 - 0.05, o.it.operation === "right" ? "a1" : "a0", true]];
           legs.forEach(([la0, la1, hg, lt]) => trimDoorLeaf(og, wf, infillMat, frameMat, ironMat, la0, la1, ty0, y1d, hg, lt, dStyle,
             winOn ? trimDoorWindowOf(o.it, la1 - la0, y1d - ty0) : null));
-          trimDoorSurround(og, wf, o, frameMat, ssTrimDoorBoardFt(legs[0][1] - legs[0][0], y1d - ty0), true);
+          trimDoorSurround(og, wf, o, frameMat, ssTrimDoorBoardFt(legs[0][1] - legs[0][0], y1d - ty0), true, ops);
         } else if (plank) {
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           // A two-tone catalog door frames itself in the SAME trim colour its casing already
@@ -22861,8 +22937,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // not a type compare: pendingRemoval.type is a Details ROW key, and catalog rows carry
     // fx:/win:/ramp: keys that match no item's type — the type compare exited pick mode
     // instantly for those rows (audit 2026-08-20).
-    if (pendingRemoval && !items.some(priceRowMatcher(pendingRemoval.type))) setPendingRemoval(null);
-  }, [items, pendingRemoval]);
+    if (pendingRemoval && !items.some(priceRowMatcher(pendingRemoval.type, C.fixtures))) setPendingRemoval(null);
+  }, [items, pendingRemoval, C.fixtures]);
   const [dragging, setDragging] = useState(null);
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
@@ -28854,7 +28930,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Every included item must be placed on the layout, or explicitly declined.
     const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
-    const unplacedIncluded = actionableIncludedKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
+    const unplacedIncluded = actionableIncludedKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => ssItemPlacesKey(it, k, C.fixtures)));
     if (unplacedIncluded.length > 0) {
       const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
       setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
@@ -34007,7 +34083,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     || visibleOptions.some((o) => o !== paintOpt);
   const ssDeclined = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
   // The same test submitQuote runs before "Please place all included items…".
-  const ssIncludedOpen = actionableIncludedKeys.some((k) => !ssDeclined.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
+  const ssIncludedOpen = actionableIncludedKeys.some((k) => !ssDeclined.includes(k) && !items.some((it) => ssItemPlacesKey(it, k, C.fixtures)));
   const ssStyleDone = Boolean(sel.style);
   const ssSizeDone = Boolean(sel.size) && (roofTypes.length === 0 || Boolean(sel.roofType));
   const ssDoneOf = {
@@ -34544,9 +34620,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               // submit-estimate index.ts:1063. Don't drop that guard on the strength of this cleanup:
               // without it a decline-then-place leaves the Details subtotal one credit BELOW the
               // estimate the customer is emailed.
+              // A window that is in a door comes out of the door (the door stays): it is on the plan
+              // as surely as a wall window is (ssItemPlacesKey).
               setItems((its) => {
                 const removedIds = new Set(its.filter((it) => it.type === key || it.fixtureItemId === key).map((it) => it.id));
-                return its.filter((it) => !(it.type === key || it.fixtureItemId === key) && !(it.type === "ramp" && removedIds.has(it.snapDoorId)));
+                return its.filter((it) => !(it.type === key || it.fixtureItemId === key) && !(it.type === "ramp" && removedIds.has(it.snapDoorId)))
+                  .map((it) => (it.type === "fixtureDoor" && it.doorWindowId != null && String(it.doorWindowId) === String(key) ? { ...it, ...doorWindowStamps(null) } : it));
               });
               setActiveTool((t) => (t === key ? null : t));
               setSelectedId(null);
@@ -34576,7 +34655,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           };
           // Placed = the submit gate's own test (an instance of the item, or of a fixture that is it, is on
           // the plan). Presentation only: the chip shows "✓" and a wash; the gate itself is untouched.
-          const inclPlaced = (key) => items.some((it) => it.type === key || it.fixtureItemId === key);
+          const inclPlaced = (key) => items.some((it) => ssItemPlacesKey(it, key, C.fixtures));
           const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
             ? (
               <span key={key} className="ssd-incl-chip is-declined" title="You declined this included item — it'll show as a deduction on your estimate unless you place it again">
@@ -35581,7 +35660,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               Rendered last so the rings (and their click targets) sit above everything else.
               priceRowMatcher: the pending type is a Details ROW key, and catalog rows' keys
               match no item's type (audit 2026-08-20). */}
-          {pendingRemoval && items.filter(priceRowMatcher(pendingRemoval.type)).map((it) => {
+          {pendingRemoval && items.filter(priceRowMatcher(pendingRemoval.type, C.fixtures)).map((it) => {
             const c = ITEMS[it.type]; if (!c || ssIsPartition(it)) return null;
             const iwFt = it.widthFt || c.width, ihFt = it.heightFt || c.height;
             const iw = iwFt * scale, ih = ihFt * scale;
@@ -35591,7 +35670,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <rect key={`pr-${it.id}`} x={it.x - hw - 5} y={it.y - hh - 5} width={hw * 2 + 10} height={hh * 2 + 10} rx={5}
                 fill="rgba(220,38,38,0.10)" stroke="#DC2626" strokeWidth={2.5} style={{ cursor: "pointer" }}
                 onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); setItems((p) => p.filter((x) => x.id !== it.id && !(x.type === "ramp" && x.snapDoorId === it.id))); setPendingRemoval(null); setSelectedId(null); }}>
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // A door picked off a window row loses its window and stays (ssRemoveFromRow).
+                  const key = pendingRemoval.type;
+                  setItems((p) => (ssRemoveFromRow(key, it)
+                    ? p.map((x) => (x.id === it.id ? ssRemoveFromRow(key, x) : x))
+                    : p.filter((x) => x.id !== it.id && !(x.type === "ramp" && x.snapDoorId === it.id))));
+                  setPendingRemoval(null); setSelectedId(null);
+                }}>
                 <animate attributeName="stroke-opacity" values="1;0.25;1" dur="1.1s" repeatCount="indefinite" />
               </rect>
             );
@@ -36005,16 +36092,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   setSelOpening(null);
                   return;
                 }
-                const match = priceRowMatcher(r.key);
+                const match = priceRowMatcher(r.key, C.fixtures);
                 const placed = items.filter(match);
                 if (r.method === "each" && placed.length > 1) {
                   setPendingRemoval({ type: r.key, label: r.label });
                   setSelectedId(null); setActiveTool(null);
                   setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
                 } else {
-                  // Cascade like delSel: removing a door also removes its snapped ramp.
-                  const removedIds = new Set(placed.map((i) => i.id));
-                  setItems((p) => p.filter((i) => !match(i) && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
+                  // Cascade like delSel: removing a door also removes its snapped ramp. A door this row
+                  // matched for the window IN it (a win: row) keeps its place, and its ramp, and loses
+                  // the window (ssRemoveFromRow).
+                  const removedIds = new Set(placed.filter((i) => !ssRemoveFromRow(r.key, i)).map((i) => i.id));
+                  setItems((p) => p.map((i) => (match(i) ? ssRemoveFromRow(r.key, i) : i))
+                    .filter((i) => i && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
                   setSelectedId(null);
                 }
               };

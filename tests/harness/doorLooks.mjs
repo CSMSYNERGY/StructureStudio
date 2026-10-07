@@ -4,7 +4,7 @@
 // Dutch. They share one build -- a trim-coloured frame (two stiles, top and bottom rails, a mid
 // rail at 42% of the leaf), an infill of grooved siding in the door colour, black T-strap hinges,
 // a header board over the opening and an aluminium threshold -- and differ only in what sits in
-// the panels: nothing (Basic), four pickets below the mid rail (American), an octagon and a
+// the panels: nothing (Basic), pickets below the mid rail (American), an octagon and a
 // diamond above it and an X below (Classic), a small dark louvred vent below (Dutch). A window
 // the builder ticked "Can be used inside a door" may go in the upper panel of every leaf.
 //
@@ -24,6 +24,16 @@
 //   D. a window in a door: one per leaf (two on a double), glass inside the upper panel, the Classic's
 //      octagon and diamond gone; and on every built door nothing stands proud of the casing face but
 //      the latch lever (and the header board, a drip cap ON the casing)
+//   A2. the American's pickets: three on a 36 in leaf and two on a 60 in double's, the gaps between
+//      them about 1.3 pickets wide, as on every frame of the real door
+//   H. the header board: a thin drip cap (0.4 of a rail, not a whole one); dropped under a transom
+//      and under a loft door stacked flush; stopped short of the corner board; and two doors 0.25 ft
+//      apart do not share a header face
+//   X. Details: the × on a window row reaches a window that is only in a door -- the door stays and
+//      the window comes out of it -- and on a row with a wall window too, the pick-one mode offers the
+//      door and taking it leaves the wall window
+//   I. a size that includes the window: the window in a door counts as placed for the Included chip
+//      and the submit gate, and declining it takes it out of the door
 //   G. live paint: a body swatch moves the colourless door's panels with the walls and a trim swatch
 //      its frame; a scoped rebuild after that (adding a window through recolorItems3, the 3D footer's
 //      path) keeps the live colour and draws the window; the footer's Window row takes it out again
@@ -88,6 +98,12 @@ const FIX = [
   win("w-big", "Big lite", 30, 40, 150, true),
   // A wall window the builder did not tick for doors: never offered in a door.
   win("w-wall", "Wall window", 18, 24, 120, false),
+  // H: a shorter Basic under a transom, and a Basic walk door with a Basic loft door stacked flush over
+  // it -- both sized to fit the 8 ft wall.
+  { ...base, id: "d-basic76", category: "door", name: "basic 76", planLabel: "B76", price: 450, widthIn: 36, heightIn: 76, sortOrder: 9, opRight: true, opLeft: true, opDefault: "right", doorStyle: "basic" },
+  { ...base, id: "d-basic72", category: "door", name: "basic 72", planLabel: "B72", price: 440, widthIn: 36, heightIn: 72, sortOrder: 10, opRight: true, opLeft: true, opDefault: "right", doorStyle: "basic" },
+  { ...base, id: "d-loft", category: "door", name: "loft basic", planLabel: "LOFT", price: 300, widthIn: 36, heightIn: 18, sortOrder: 11, opRight: true, opLeft: true, opDefault: "right", sillIn: 72, doorStyle: "basic" },
+  { ...win("w-transom", "Transom", 36, 12, 90, false), sillIn: 78 },
 ];
 const FIXTURES = { items: FIX, windowColors: [], ramp: { mode: "simple", price: 0, method: "each", enabled: false, imageUrl: null, showImage: false } };
 const fxOf = (id) => FIX.find((f) => f.id === id);
@@ -119,6 +135,40 @@ const PLAN = [
 const lookOf = (d) => fxOf(d.fx).doorStyle;
 const leavesOf = (d) => (d.op === "double" ? 2 : 1);
 
+// H. Doors whose HEADER has to fit what is round it, and the openings round them. North wall (x across
+// the 12 ft width): a Basic flush to the west corner, and a shorter Basic under a transom flush to the
+// east one. South wall: an American 0.25 ft from americanWin2 (and 0.25 ft from the west corner), and
+// a walk door with a loft door stacked flush over it.
+const HPLAN = [
+  { key: "hCorner", fx: "d-basic", wall: "north", at: 1.5, op: "right" },
+  { key: "hTransom", fx: "d-basic76", wall: "north", at: 10.5, op: "left" },
+  { key: "hTransomWin", win: "w-transom", wall: "north", at: 10.5, sillFt: 78 / 12 },
+  { key: "hAdj", fx: "d-american", wall: "south", at: 1.75, op: "left", c: { ...NO_COLOR, ...BLACK } },
+  { key: "hWalk", fx: "d-basic72", wall: "south", at: 10.5, op: "right" },
+  { key: "hLoft", fx: "d-loft", wall: "south", at: 10.5, op: "right", sillFt: 72 / 12 },
+];
+function planPos(rect, d) {
+  const s = rect.w / W, mgX = rect.x, mgY = rect.y, pW = rect.w, pH = rect.h;
+  return d.wall === "north" ? { x: mgX + d.at * s, y: mgY, rotation: 0 }
+    : d.wall === "south" ? { x: mgX + d.at * s, y: mgY + pH, rotation: 0 }
+    : d.wall === "west" ? { x: mgX, y: mgY + d.at * s, rotation: 90 }
+    : { x: mgX + pW, y: mgY + d.at * s, rotation: 90 };
+}
+function hItemsFor(rect, plan = HPLAN, idBase = 200) {
+  return plan.map((d, i) => {
+    const pos = planPos(rect, d);
+    if (d.win) {
+      const fx = fxOf(d.win);
+      return { id: idBase + i, type: "window", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name,
+        price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, sillFt: d.sillFt, sillMode: "fixed", colorId: null, colorLabel: null, colorHex: null };
+    }
+    const fx = fxOf(d.fx);
+    return { id: idBase + i, type: "fixtureDoor", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name,
+      planLabel: fx.planLabel, price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, swing: "out", operation: d.op, ...NO_COLOR, ...(d.c || {}),
+      sillFt: d.sillFt, sillMode: "fixed", ...NO_WIN, ...(d.dw || {}) };
+  });
+}
+
 function itemsFor(rect) {
   const s = rect.w / W, mgX = rect.x, mgY = rect.y, pW = rect.w, pH = rect.h;
   return PLAN.map((d, i) => {
@@ -138,7 +188,8 @@ function itemsFor(rect) {
 // What each built door is made of, by ssDoorPart, from the look (trimDoorLeaf):
 //   every leaf  infill 1 (4 round a window), frame 4, midRail 1, hinge 3 rows x 3 pieces;
 //               a latch (2 pieces) on one leaf only
-//   american    picket 4 per leaf
+//   american    picket 3 per leaf on the 36 in single, 2 per leaf on the 60 in double (whose leaf is
+//               about 29 in): the count whose gaps come nearest 1.3 pickets wide
 //   classic     octagon 4 + diamond 1 per leaf (none where a window is), x 2 per leaf
 //   dutch       vent 9 per leaf (4 frame + 1 field + 4 slats at these sizes)
 //   window      windowCasing 4 + window 7 per leaf (sash 4, glass 1, a 2-pane grille: 2 bars)
@@ -146,7 +197,7 @@ function itemsFor(rect) {
 function expectedParts(d) {
   const n = leavesOf(d), look = lookOf(d), w = !!d.win;
   const e = { infill: (w ? 4 : 1) * n, frame: 4 * n, midRail: n, hinge: 9 * n, latch: 2, header: 1, threshold: 1 };
-  if (look === "american") e.picket = 4 * n;
+  if (look === "american") e.picket = (n === 2 ? 2 : 3) * n;
   if (look === "classic") { if (!w) { e.octagon = 4 * n; e.diamond = n; } e.x = 2 * n; }
   if (look === "dutch") e.vent = 9 * n;
   if (w) { e.windowCasing = 4 * n; e.window = 7 * n; }
@@ -285,17 +336,147 @@ async function runPicker(browser) {
   return rect;
 }
 
+// X and I. The money side of a window in a door, on the real Details panel and the real chips.
+/** Open Details if it is closed (the public page shows a call-to-action bar; the portal a toggle). */
+async function openDetails(page) {
+  for (let i = 0; i < 3; i++) {
+    if (await page.locator(".ssd-dt").count()) return;
+    const cta = page.locator(".ssd-dt-cta").first();
+    if (await cta.count() && await cta.isVisible().catch(() => false)) { await cta.click(); await settle(page); continue; }
+    const tog = page.locator(".ssd-dt-tog").first();
+    if (await tog.count() && await tog.isVisible().catch(() => false)) { await tog.click(); await settle(page); continue; }
+    await settle(page, 800);
+  }
+}
+async function openSaved(browser, items, config) {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  const code = "SS-HARNDOORM";
+  const row = {
+    short_code: code, status: "draft", selections: { style: "doors", size: SIZE }, items,
+    contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
+    paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
+  };
+  const calls = await stubSupabase(page, { config, fixtures: FIXTURES, rpc: { load_design: [row] } });
+  await page.route(`**/${REF}.supabase.co/storage/v1/**`, (route) => {
+    const hdr = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" };
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: hdr, body: "" });
+    return route.fulfill({ status: 200, contentType: "application/json", headers: hdr, body: JSON.stringify({ Key: "floor-plans/harness.pdf", Id: "1" }) });
+  });
+  await bypassGate(page, config.clientId);
+  await page.goto(`${BASE}/?client=${encodeURIComponent(config.clientId)}&id=${code}`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+  for (let k = 0; k < 60; k++) { await settle(page, 500); if ((((await readItems(page)) || []).length) >= items.length) break; }
+  await settle(page, 800);
+  return { ctx, page, errors, calls };
+}
+const dtRow = (page, label) => page.locator(".ssd-dt-row").filter({ has: page.locator(".ssd-dt-n", { hasText: label }) });
+const brief = (its) => JSON.stringify(its.map((i) => [i.id, i.type, i.doorWindowId || null]));
+async function runMoney(browser, rect) {
+  const LITE_DOOR = { key: "x-door", fx: "d-classic", wall: "north", at: 6, op: "right", dw: LITE };
+  const WALL_LITE = { key: "x-wall", win: "w-door", wall: "west", at: 10, sillFt: 4 };
+  // X1. The only Door lite on the plan is in a door: the row's × takes it out of the door.
+  {
+    const items = hItemsFor(rect, [LITE_DOOR], 300);
+    const { ctx, page, errors } = await openSaved(browser, items, CONFIG);
+    await openDetails(page);
+    const r = dtRow(page, /^Door lite/);
+    ok("X a window that is only in a door has its Details row, with a ×", (await r.count()) === 1 && (await r.locator(".ssd-dt-x").count()) === 1, String(await r.count()));
+    if (await r.count()) await r.locator(".ssd-dt-x").first().click();
+    await settle(page, 800);
+    const after = (await readItems(page)) || [];
+    const dd = after.find((i) => i.id === items[0].id);
+    ok("X ...and the × keeps the door and takes the window out of it", !!dd && dd.type === "fixtureDoor" && dd.doorWindowId === null && dd.doorWindowPrice === null, brief(after));
+    ok("X ...and the row is gone", (await dtRow(page, /^Door lite/).count()) === 0);
+    await page.screenshot({ path: join(shots, "x-details.png") });
+    ok("X no page errors (the ×)", errors.length === 0, errors.slice(0, 3).join(" | "));
+    await ctx.close();
+  }
+  // X2. One Door lite on a wall and one in a door: the row's × asks which, and the door can be picked.
+  {
+    const items = hItemsFor(rect, [LITE_DOOR, WALL_LITE], 300);
+    const { ctx, page, errors } = await openSaved(browser, items, CONFIG);
+    await openDetails(page);
+    const r = dtRow(page, /^Door lite/);
+    if (await r.count()) await r.locator(".ssd-dt-x").first().click();
+    await settle(page, 600);
+    const rings = page.locator('svg rect[stroke="#DC2626"]');
+    const n = await rings.count();
+    ok("X with a wall lite too, the × asks which one: both are offered", n === 2, `${n} rings`);
+    const doorIt = ((await readItems(page)) || []).find((i) => i.id === items[0].id);
+    const cs = await rings.evaluateAll((rs) => rs.map((q) => ({ x: +q.getAttribute("x") + +q.getAttribute("width") / 2, y: +q.getAttribute("y") + +q.getAttribute("height") / 2 })));
+    const dist = (c) => (doorIt ? Math.hypot(c.x - doorIt.x, c.y - doorIt.y) : 0);
+    const k = cs.reduce((best, c, i) => (dist(c) < dist(cs[best]) ? i : best), 0);
+    if (n) await rings.nth(k).click({ force: true });
+    await settle(page, 800);
+    let after = (await readItems(page)) || [];
+    const dd = after.find((i) => i.id === items[0].id), ww = after.find((i) => i.id === items[1].id);
+    ok("X ...picking the door keeps the door, takes its window out, and leaves the wall lite", !!dd && dd.doorWindowId === null && !!ww && ww.type === "window", brief(after));
+    const r2 = dtRow(page, /^Door lite/);
+    if (await r2.count()) await r2.locator(".ssd-dt-x").first().click();
+    await settle(page, 800);
+    after = (await readItems(page)) || [];
+    ok("X ...and the row's × then removes the wall lite", !after.some((i) => i.id === items[1].id) && after.some((i) => i.id === items[0].id), brief(after));
+    ok("X no page errors (pick one)", errors.length === 0, errors.slice(0, 3).join(" | "));
+    await ctx.close();
+  }
+  // I. The size includes one Door lite, and the customer put it in a door.
+  const INCL = { ...CONFIG, buildingStyles: CONFIG.buildingStyles.map((st) => ({ ...st, sizeInclusionQty: { [SIZE]: { "w-door": 1 } } })) };
+  {
+    const items = hItemsFor(rect, [LITE_DOOR], 300);
+    const { ctx, page, errors, calls } = await openSaved(browser, items, INCL);
+    const chip = page.locator(".ssd-incl-chip").filter({ hasText: "Door lite" });
+    const cls = (await chip.count()) ? ((await chip.first().getAttribute("class")) || "") : "no chip";
+    ok("I the Included chip counts the window in the door as placed", /is-placed/.test(cls), cls);
+    await page.screenshot({ path: join(shots, "i-chip.png") });
+    const before = calls.length;
+    const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+    let payload = null;
+    if (await submit.count()) {
+      await submit.click().catch(() => {});
+      for (let i = 0; i < 60 && !payload; i++) {
+        await settle(page, 250);
+        const hit = calls.slice(before).find((cl) => cl.path && cl.path.endsWith("/functions/v1/submit-estimate"));
+        if (hit) payload = hit.body;
+      }
+    }
+    const gateMsg = await page.getByText(/Please place all included items/).count();
+    ok("I ...and the submit gate lets the quote through, with nothing declined", !!payload && gateMsg === 0 && !(payload.declinedItems || []).length
+      && (payload.windows || []).filter((w) => w.inDoor && w.fixtureItemId === "w-door").length === 1, payload ? JSON.stringify(payload.declinedItems) : `no payload; gate message ${gateMsg}`);
+    ok("I no page errors (submit)", errors.length === 0, errors.slice(0, 3).join(" | "));
+    await ctx.close();
+  }
+  {
+    const items = hItemsFor(rect, [LITE_DOOR], 300);
+    const { ctx, page, errors } = await openSaved(browser, items, INCL);
+    const x = page.getByRole("button", { name: "Decline Door lite" });
+    if (await x.count()) await x.first().click();
+    await settle(page, 800);
+    const after = (await readItems(page)) || [];
+    const dd = after.find((i) => i.id === items[0].id);
+    ok("I declining it takes the window out of the door and keeps the door", !!dd && dd.doorWindowId === null, brief(after));
+    ok("I ...and the chip reads declined", (await page.locator(".ssd-incl-chip.is-declined").filter({ hasText: "Door lite" }).count()) === 1);
+    ok("I no page errors (decline)", errors.length === 0, errors.slice(0, 3).join(" | "));
+    await ctx.close();
+  }
+}
+
 async function main() {
   const { browser } = await launch({ width: 1280, height: 900 });
   const rect = await runPicker(browser);
   const items = itemsFor(rect);
+  // H's doors and the openings round them ride in the same design (not in BASELINE: PLANK_DIGEST was
+  // recorded on a design without them).
+  const hItems = BASELINE ? [] : hItemsFor(rect);
+  const nDoors = items.length + hItems.filter((i) => i.type === "fixtureDoor").length;
   const CODE = "SS-HARNDOOR";
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
   const row = {
-    short_code: CODE, status: "draft", selections: { style: "doors", size: SIZE }, items,
+    short_code: CODE, status: "draft", selections: { style: "doors", size: SIZE }, items: items.concat(hItems),
     contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
     paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
   };
@@ -310,8 +491,8 @@ async function main() {
   await page.goto(`${BASE}/?client=${encodeURIComponent(CONFIG.clientId)}&id=${CODE}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   let loaded = [];
-  for (let k = 0; k < 60 && loaded.length < items.length; k++) { await settle(page, 500); loaded = ((await readItems(page)) || []).filter((i) => i.type === "fixtureDoor"); }
-  ok("the saved design opens with every door", loaded.length === items.length, `${loaded.length}/${items.length}`);
+  for (let k = 0; k < 60 && loaded.length < nDoors; k++) { await settle(page, 500); loaded = ((await readItems(page)) || []).filter((i) => i.type === "fixtureDoor"); }
+  ok("the saved design opens with every door", loaded.length === nDoors, `${loaded.length}/${nDoors}`);
   await openEditor(page);
 
   const byKey = {};
@@ -366,12 +547,55 @@ async function main() {
     const proud = ms.filter((m) => m.part && m.part !== "header" && outOf(m, f, plane) > face + 1e-3);
     ok(`D ${d.key}: nothing past the casing face but the latch lever`, casing.length >= 2 && proud.length === 1 && proud[0].part === "latch",
       `face ${face.toFixed(3)}; proud: ${proud.map((m) => m.part + "@" + outOf(m, f, plane).toFixed(3)).join(",")}`);
+    // H0. The header is a thin drip cap: 0.4 of a rail (the real doors' is a third to a half of one).
+    const rails = ms.filter((m) => m.part === "frame" && m.max[1] - m.min[1] < 1), hdrs = ms.filter((m) => m.part === "header");
+    const railH = rails.length ? rails[0].max[1] - rails[0].min[1] : 0, hdrH = hdrs.length ? hdrs[0].max[1] - hdrs[0].min[1] : 0;
+    ok(`H ${d.key}: the header is 0.4 of a rail tall`, railH > 0 && near(hdrH / railH, 0.4, 0.01), `${hdrH.toFixed(3)} / ${railH.toFixed(3)}`);
+    // A2. The American's pickets: gaps about 1.3 pickets wide, leaf by leaf (a double's split at its centre).
+    if (lookOf(d) === "american") {
+      const pks = ms.filter((m) => m.part === "picket");
+      const leaves = d.op === "double" ? [pks.filter((m) => ctr(m, f.along) < c), pks.filter((m) => ctr(m, f.along) > c)] : [pks];
+      const ratios = leaves.map((lf) => {
+        const sorted = lf.slice().sort((a, b) => a.min[f.along] - b.min[f.along]);
+        const pw = sorted.reduce((sum, m) => sum + (m.max[f.along] - m.min[f.along]), 0) / Math.max(1, sorted.length);
+        const gaps = sorted.slice(1).map((m, k) => m.min[f.along] - sorted[k].max[f.along]);
+        return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length / pw : 0;
+      });
+      ok(`A2 ${d.key}: the pickets' gaps are about 1.3 pickets wide`, ratios.every((r) => r >= 1.1 && r <= 1.6), ratios.map((r) => r.toFixed(2)).join(","));
+    }
     if (d.win) {
       const glass = ms.filter((m) => m.part === "window" && m.transparent);
       const ups = mids.map((m) => m.max[1]);
       const ok1 = glass.length === leavesOf(d) && glass.every((g) => g.min[1] > Math.min(...ups) + 0.1 && g.max[1] < leafHi - 0.2);
       ok(`D ${d.key}: one pane of glass per leaf, inside the upper panel`, ok1, glass.map((g) => `${g.min[1].toFixed(2)}..${g.max[1].toFixed(2)}`).join(" "));
     }
+  }
+
+  // H. The header fitted to what is round it.
+  const hMs = {};
+  for (let i = 0; i < HPLAN.length; i++) if (HPLAN[i].fx) hMs[HPLAN[i].key] = await doorMeshes(page, hItems[i].id);
+  const hdrOf = (ms) => (ms || []).filter((m) => m.part === "header");
+  // The corner boards stand centred on the footprint's corners, max(T/2 + 0.07, trimFace) = 0.22 ft
+  // each side on panel siding; the walls here run along x (north, south).
+  const cornerIn = -W / 2 + 0.22;
+  {
+    const h = hdrOf(hMs.hCorner);
+    ok("H a door flush to the corner: its header stops at the corner board's inner edge", h.length === 1 && h[0].min[0] >= cornerIn - 1e-3,
+      h.length ? `header x ${h[0].min[0].toFixed(3)}..${h[0].max[0].toFixed(3)}, corner board to ${cornerIn.toFixed(3)}` : "no header");
+    const t = hMs.hTransom || [];
+    ok("H a door under a transom draws no header over the transom's sill", hdrOf(t).length === 0 && t.some((m) => m.part === "threshold"), JSON.stringify(countParts(t)));
+    ok("H a walk door with a loft door stacked flush over it draws no header over the loft door", hdrOf(hMs.hWalk).length === 0, JSON.stringify(countParts(hMs.hWalk || [])));
+    const a = hdrOf(hMs.hAdj), b = hdrOf(byKey.americanWin2);
+    ok("H two doors 0.25 ft apart: their headers do not overlap", a.length === 1 && b.length === 1 && a[0].max[0] <= b[0].min[0] + 1e-4,
+      a.length && b.length ? `${a[0].min[0].toFixed(3)}..${a[0].max[0].toFixed(3)} | ${b[0].min[0].toFixed(3)}..${b[0].max[0].toFixed(3)}` : "missing");
+    ok("H ...and the nearer one stops at the corner board too", a.length === 1 && a[0].min[0] >= cornerIn - 1e-3, a.length ? a[0].min[0].toFixed(3) : "");
+  }
+  for (const key of ["hTransom", "hWalk", "hAdj", "hCorner"]) {
+    const i = HPLAN.findIndex((d) => d.key === key);
+    const clip = await aimAt(page, hItems[i].id, HPLAN[i].wall, 2.2);
+    await settle(page, 200);
+    await page.evaluate(() => window.__ss3dEngine.render());
+    await page.screenshot({ path: join(shots, `header-${key}.png`), clip });
   }
 
   // F. Screenshots: every door straight on.
@@ -444,9 +668,11 @@ async function main() {
       dw.length === 3 && dw.every((w) => w.fixtureItemId === "w-door" && w.price === 95 && w.name === "Door lite" && w.widthIn === 18 && w.heightIn === 24),
       JSON.stringify(dw.map((w) => [w.name, w.price, w.doorName, w.wall])));
     ok("Q ...each naming its door", dw.filter((w) => w.doorName === "classic single").length === 1 && dw.filter((w) => w.doorName === "american double").length === 2);
-    ok("Q ...and the doors' own lines are unchanged (no window folded in)", (payload.doors || []).length === items.length && (payload.doors || []).every((dd) => !("doorWindowId" in dd)));
+    ok("Q ...and the doors' own lines are unchanged (no window folded in)", (payload.doors || []).length === nDoors && (payload.doors || []).every((dd) => !("doorWindowId" in dd)));
   }
   ok("F no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
+  await runMoney(browser, rect);
   await browser.close();
   const fl = failed();
   console.log(fl.length ? `${fl.length} FAILED` : "ALL CHECKS PASSED");

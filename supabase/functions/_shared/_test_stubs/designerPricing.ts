@@ -47,7 +47,7 @@ const REGIONS: Array<[string, string]> = [
   // From the wall-height helpers through computeSelectionRows, computeLayoutPricingRows and the
   // price-override helpers beside it.
   ["function d3BaseWallHeightFt(C, styleCfg) {", "// Which placed items does a Details"],
-  ["function priceRowMatcher(key) {", "let idCounter = 1;"],
+  ["function priceRowMatcher(key, fixtures) {", "let idCounter = 1;"],
   // Partition walls (migration 278): the price rows and priceRowMatcher call into this block.
   ["// ── PARTITION WALLS ──\n", "// ── END PARTITION WALLS ──\n"],
 ];
@@ -66,7 +66,7 @@ export type Designer = {
   ssRoRateOf: (C: any, sel: any, key: string) => number;
   ssPriceRowKey: (kind?: string, id?: any, a?: any, b?: any) => string;
   ssPriceGroupId: (fixtureItemId?: any, name?: string, price?: number) => string;
-  priceRowMatcher: (key: string) => (item: any) => boolean;
+  priceRowMatcher: (key: string, fixtures?: any[]) => (item: any) => boolean;
   ssPartitionSummary: (items: any[], wallFt: number) => any[];
   pricedWallHeightFt: (C: any, styleCfg: any, styleKey: string, sel: any, widthFt: number) => number;
   ssIsRO: (t: string) => boolean;

@@ -59,7 +59,7 @@ Deno.test("the lifted door-window helpers and payload block are byte-identical i
   assertEquals(R_JSX.pay, R_CMP.pay);
 });
 const W = new Function(`${R_CMP.help}\n${R_CMP.label}\n; return {
-  ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps,
+  ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps, ssItemPlacesKey, ssRemoveFromRow,
   payload: (items, C, frontWall) => ${R_CMP.pay}\n          }),
 };`)() as {
   ssDoorWindowCount: (it: any, look: string) => number;
@@ -67,6 +67,8 @@ const W = new Function(`${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorLeafFt: (wi: any, hi: any, dbl: boolean) => { w: number; h: number } | null;
   ssDoorWindowLines: (items: any[], fixtures: any[]) => any[];
   doorWindowStamps: (w: any) => Record<string, unknown>;
+  ssItemPlacesKey: (it: any, k: string, fixtures: any[]) => boolean;
+  ssRemoveFromRow: (key: string, it: any) => any;
   payload: (items: any[], C: any, frontWall: string | null) => any[];
 };
 
@@ -334,4 +336,68 @@ Deno.test("doors with no window, and doors from before the stamps, produce the e
   assertEquals(a.estimate.items, b.estimate.items);
   assertEquals(named(a.snap, "Door lite").map((l: any) => [l.qty, l.desc]), [[1, "1'6\"×2' · front wall"]]);
   assertEquals(linesTotal(a.estimate.items), r2(detailsSubtotal(D, SEL, bare, [], C({}), PAINT).subtotal));
+});
+
+// ─── 5. A window in a door IS a placed window (review 2026-10-07) ────────────────────────────────
+// submit-estimate's placedKeys takes the fixture id of every windows[] line, the in-door ones too, so
+// a size's included lite that the customer declined and then put in a door is kept and netted, never
+// credited. Details used to count only wall windows as placed: it credited the decline AND netted the
+// door's lite, one credit below the estimate.
+Deno.test("PARITY: an included lite declined and placed only in a door -- no credit on either side", async () => {
+  const w: World = { inclusion: true };
+  const items = [door(2, fx("fx-classic"), "south", "right", LITE)];
+  const sel = { ...SEL, declinedItems: ["fx-lite"] };
+  const client = detailsSubtotal(D, sel, items, [], C(w), PAINT);
+  const r = await submit(payloadFor(items, w, { declinedItems: [{ key: "fx-lite", label: "Door lite" }] }), w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(linesTotal(r.estimate.items), 3600, "the estimate: building 3000 + Classic 600 + the lite included at 0");
+  assertEquals(r2(client.subtotal), 3600, "Details: the same, with no decline credit");
+  assertFalse(JSON.stringify(client.selRows).includes("declined"), JSON.stringify(client.selRows));
+  // The same decline with the lite on a PLANK door (not drawn there) is a real decline: credited on both sides.
+  const plank = [door(4, fx("fx-plank"), "west", "right", LITE)];
+  const c2 = detailsSubtotal(D, sel, plank, [], C(w), PAINT);
+  const r2b = await submit(payloadFor(plank, w, { declinedItems: [{ key: "fx-lite", label: "Door lite" }] }), w);
+  assertEquals(r2b.status, 200, JSON.stringify(r2b.body));
+  assertEquals(linesTotal(r2b.estimate.items), r2(c2.subtotal));
+  assertEquals(r2(c2.subtotal), 3000 - 95 + 450);
+});
+
+Deno.test("the Included chip and the submit gate count a drawn door window as the window placed", () => {
+  const F = DESIGNER_FIXTURES;
+  assert(W.ssItemPlacesKey(ITEMS[0], "fx-lite", F), "a Classic single drawing the lite places it");
+  assert(W.ssItemPlacesKey(ITEMS[1], "fx-lite", F), "so does an American double");
+  assertFalse(W.ssItemPlacesKey(ITEMS[2], "fx-lite", F), "a plank door does not draw it");
+  assertFalse(W.ssItemPlacesKey(ITEMS[3], "fx-big", F), "nor does a door the window is too big for");
+  assertFalse(W.ssItemPlacesKey(ITEMS[4], "fx-lite", F), "nor a slide-up");
+  assertFalse(W.ssItemPlacesKey({ ...ITEMS[0], ...NONE }, "fx-lite", F), "nor a door with no window");
+  // The tests it replaced still hold: the item's type, and the fixture it is.
+  assert(W.ssItemPlacesKey(ITEMS[0], "fx-classic", F) && W.ssItemPlacesKey(WALL_LITE, "fx-lite", F) && W.ssItemPlacesKey({ type: "loft" }, "loft", F));
+  assertFalse(W.ssItemPlacesKey(WALL_LITE, "fx-big", F));
+});
+
+// The Details row's × for a window row: computeLayoutPricingRows folds door windows into the
+// win:<fid>|<colour> row, so the row's matcher has to reach the door, and taking it off the row takes
+// the window out of the door and leaves the door.
+Deno.test("the window row's × reaches the door that carries the window, and keeps the door", () => {
+  const F = DESIGNER_FIXTURES;
+  const only = [door(2, fx("fx-classic"), "south", "right", LITE)];
+  const row = detailsSubtotal(D, SEL, only, [], C({}), PAINT).priceRows.find((x: any) => x.key === "win:fx-lite|");
+  assertEquals([row.qty, row.total, row.method], [1, 95, "each"]);
+  assertEquals(only.filter(D.priceRowMatcher("win:fx-lite|", F)).map((i) => i.id), [2]);
+  // Without the catalog no door matches, as before; and a door that does not draw its window never does.
+  assertEquals(only.filter(D.priceRowMatcher("win:fx-lite|")).length, 0);
+  assertEquals(ITEMS.filter(D.priceRowMatcher("win:fx-lite|", F)).map((i) => i.id), [2, 3, 1], "the Classic, the American double and the wall lite; not the plank or the slide-up");
+  assertEquals(ITEMS.filter(D.priceRowMatcher("win:fx-big|", F)).length, 0, "the too-big window is on no row and matches nothing");
+  // A coloured window row is a wall window's only: door windows are colourless.
+  assertEquals(ITEMS.filter(D.priceRowMatcher("win:fx-lite|c-black", F)).length, 0);
+  // The door rows still match the doors and nothing else.
+  assertEquals(ITEMS.filter(D.priceRowMatcher("fx:fx-classic||", F)).map((i) => i.id), [2, 5, 6]);
+  // Taking the door off the window row: the door stays, without its window.
+  const kept = W.ssRemoveFromRow("win:fx-lite|", only[0]);
+  assertEquals([kept.id, kept.type, kept.fixtureItemId, kept.doorWindowId, kept.doorWindowPrice], [2, "fixtureDoor", "fx-classic", null, null]);
+  assertEquals(W.ssRemoveFromRow("win:fx-lite|", WALL_LITE), null, "a wall window is removed");
+  assertEquals(W.ssRemoveFromRow("fx:fx-classic||", only[0]), null, "a door off its own row is removed");
+  // ...and the row it leaves is gone.
+  const after = detailsSubtotal(D, SEL, [kept], [], C({}), PAINT);
+  assertEquals(after.priceRows.filter((x: any) => x.key === "win:fx-lite|"), []);
 });
