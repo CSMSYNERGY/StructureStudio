@@ -836,6 +836,19 @@ async function main() {
   r.ok("...and What we drew says \"steps off its right side\"", /\bsteps off its right side/.test(await spanLine()), await spanLine());
   r.ok("...and the treads line says the same for steps down a side", await fixWhatSays(), await fixWhatText());
   await fixPorch.screenshot({ path: join(shots, "05a-porch-fix-treads-right-side.png") }).catch(() => {});
+  // A RECESSED porch (2026-10-07) is open at its two sides and takes a flight down either: cut into the end, the
+  // right-side flight stays picked and What we drew says it; back in front of the end, the deck's flight again.
+  const fixOpts = async () => (await fixSteps.locator("option").evaluateAll((os) => os.map((o) => `${o.value}${o.disabled ? "(off)" : ""}`))).join("|");
+  await fixPorch.getByRole("button", { name: /^Cut into the end/ }).click();
+  await page.waitForTimeout(300);
+  r.ok("cut into the end, the fix panel offers the recessed porch's two open sides as well, the right-side flight kept",
+    (await fixOpts()) === "|left|center|right|leftSide|rightSide" && (await fixSteps.inputValue()) === "rightSide", `${await fixOpts()} = ${await fixSteps.inputValue()}`);
+  r.ok("...and What we drew says the recessed porch has steps off its right side", /is cut 6 ft 6 in into the front end\. It has steps off its right side\./.test(await spanLine()), await spanLine());
+  await fixPorch.screenshot({ path: join(shots, "05a-porch-fix-recessed-right-side.png") }).catch(() => {});
+  await fixPorch.getByRole("button", { name: /^In front of the end/ }).click();
+  await page.waitForTimeout(300);
+  r.ok("...and back in front of the end, the deck's flight off its right side", /stands 6 ft 6 in out from the front end[^.]*\. It has steps off its right side\./.test(await spanLine())
+    && (await fixSteps.inputValue()) === "rightSide", await spanLine());
   await fixSteps.selectOption("left");
   await page.waitForTimeout(300);
 

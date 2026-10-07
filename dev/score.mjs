@@ -172,11 +172,14 @@ export function mergeDraft(prior, draft, source = "video") {
   } else if ((dr.porchDepthFt || 0) > 0.5) {
     delete roof.porchOutFt;
     // A recessed porch's steps along its front, and their count, stay (calDraftRoof, 2026-10-03), taken
-    // back by a typed draft from a stored recessed porch only (2026-10-04).
+    // back by a typed draft from a stored recessed porch only (2026-10-04). A flight off one of its open
+    // sides (2026-10-07) stays the same way, never one off a stored projecting deck's end.
     if (!("porchSteps" in dr) && was && !((Number(was.porchOutFt) || 0) > 0.5) && (Number(was.porchDepthFt) || 0) > 0.5) {
       for (const k of ["porchSteps", "porchStepCount"]) if (k in was) roof[k] = was[k];
     }
-    const keepSteps = ["left", "center", "right"].indexOf(roof.porchSteps) >= 0;
+    const offDeck = !("porchSteps" in dr) && !!was && (Number(was.porchOutFt) || 0) > 0.5;
+    const keepSteps = ["left", "center", "right"].indexOf(roof.porchSteps) >= 0
+      || ((roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide") && !offDeck);
     for (const k of own) if (!(keepSteps && (k === "porchSteps" || k === "porchStepCount"))) delete roof[k];
   }
   if (dr.type) {

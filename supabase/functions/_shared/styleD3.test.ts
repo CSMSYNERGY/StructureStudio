@@ -1862,6 +1862,11 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
     assert(p.includes("Read it from a side frame, where the porch roof's edge is seen square-on"), `${name}: read from the side`);
     assert(p.includes("PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge"), `${name}: the steps paragraph`);
     assert(p.includes("Leave it out when the porch has no steps"), `${name}: absent is no steps`);
+    // A recessed porch's open sides (2026-10-07): a flight off one is "leftSide" / "rightSide"; a projecting
+    // porch's flight off an end of its deck is still left out.
+    assert(p.includes('"porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide"'), `${name}: the side words are in the schema`);
+    assert(p.includes('A RECESSED porch is open at its two sides as well') && p.includes('answer "leftSide" or "rightSide" for the side they leave from'), `${name}: a recessed porch's side flight`);
+    assert(p.includes("when a projecting porch's steps leave its deck from one of its ends rather than its front edge"), `${name}: a projecting porch's end flight is left out`);
     // Generic numbers only: the two test buildings are a 4-post porch, not a 3.
     assert(p.includes("A porch with a post at each corner and one in the middle is 3."), `${name}: a generic post count`);
     // Counting, not recall (2026-09-25): the first live Farmstand draft said 3 for its 4 posts. The
@@ -2217,7 +2222,7 @@ Deno.test("porchPosts, porchPitch and porchSteps round-trip, clamp, and exist on
     for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!(k in x), `porchOutFt ${porchOutFt} drops ${k}`);
   }
   // A RECESSED porch (2026-10-03) has no posts row or roof of its own, but it has steps along its front:
-  // the three front words stay, with their count; a flight off an end of a deck it does not have goes.
+  // the three front words stay, with their count, and (2026-10-07) a flight off either of its open sides.
   const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchPosts: 4, porchPitch: 0.25, porchSteps: "center", porchStepCount: 3 });
   for (const k of ["porchPosts", "porchPitch"]) assert(!(k in recessed), `a recessed porch drops ${k}`);
   assertEquals([recessed.porchSteps, recessed.porchStepCount], ["center", 3], "a recessed porch keeps its front steps and their count");
@@ -2225,7 +2230,14 @@ Deno.test("porchPosts, porchPitch and porchSteps round-trip, clamp, and exist on
   for (const v of ["left", "right"]) assertEquals(roofOf({ type: "gable", porchDepthFt: 6, porchSteps: v }).porchSteps, v, `recessed "${v}"`);
   for (const v of ["leftSide", "rightSide"]) {
     const x = roofOf({ type: "gable", porchDepthFt: 6, porchSteps: v, porchStepCount: 3 });
-    assert(!("porchSteps" in x) && !("porchStepCount" in x), `a recessed porch drops "${v}" and its count`);
+    assertEquals([x.porchSteps, x.porchStepCount], [v, 3], `a recessed porch keeps "${v}" and its count`);
+    // ...on an eave wall too (its ends are its sides), and on a porch too shallow to draw it (the renderer's
+    // call, by the size): the word is the builder's and is kept, the porchSteps posture on a shallow deck.
+    assertEquals(roofOf({ type: "gable", front: "eave", porchDepthFt: 4, porchSteps: v }).porchSteps, v, `an eave-wall recessed porch keeps "${v}"`);
+    assertEquals(roofOf({ type: "gable", porchDepthFt: 2, porchSteps: v }).porchSteps, v, `a 2 ft recessed porch keeps "${v}"`);
+  }
+  for (const junk of ["Left", "LeftSide", "left side", "side", "frontSide", "", 1, null, true]) {
+    assert(!("porchSteps" in roofOf({ type: "gable", porchDepthFt: 6, porchSteps: junk })), `recessed: steps ${JSON.stringify(junk)} is dropped`);
   }
   // At or under 0.5 ft a recessed porch is off, and its steps with it.
   assert(!("porchSteps" in roofOf({ type: "gable", porchDepthFt: 0.5, porchSteps: "left" })), "no recessed porch, no steps");
@@ -2350,9 +2362,11 @@ Deno.test("porchStepCount rounds, clamps, and exists only with a projecting porc
     const x = roofOf({ type: "gable", pitch: 0.4, porchOutFt, porchSteps: "left", porchStepCount: 3 });
     assert(!("porchStepCount" in x) && !("porchSteps" in x), `porchOutFt ${porchOutFt} drops both`);
   }
-  // A recessed porch's front steps keep their count (2026-10-03); a side word, which it cannot have, takes it.
+  // A recessed porch's front steps keep their count (2026-10-03), and since 2026-10-07 a flight off a side does;
+  // a word it cannot read takes the count with it.
   assertEquals(roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "left", porchStepCount: 3 }).porchStepCount, 3, "a recessed porch keeps it");
-  assert(!("porchStepCount" in roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "leftSide", porchStepCount: 3 })), "a side word on a recessed porch drops it");
+  assertEquals(roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "leftSide", porchStepCount: 3 }).porchStepCount, 3, "a side word on a recessed porch keeps it");
+  assert(!("porchStepCount" in roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "sideways", porchStepCount: 3 })), "junk drops it");
   assert(!("porchStepCount" in roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchStepCount: 3 })), "a recessed porch without steps drops it");
   // A side flight's count on a projecting porch is kept like any other.
   assertEquals(roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, porchSteps: "rightSide", porchStepCount: 4 }).porchStepCount, 4, "side steps keep it");
@@ -3789,8 +3803,8 @@ Deno.test("⚠️ v2: porch placement only lands on a projecting porch, and is c
 });
 
 Deno.test("⚠️ v2: the porch's posts, pitch and steps land on a projecting porch only, clamped and rounded", () => {
-  // A recessed porch has no posts row, roof or deck of its own, so a flight off a deck's end cannot land
-  // on it either; steps along its front can (2026-10-03), below.
+  // A recessed porch has no posts row or roof of its own; steps along its front can land (2026-10-03), below,
+  // and since 2026-10-07 a flight off one of its open sides.
   const onRecessed = applySelfCheck(DRAFT, readOf({
     verdict: "corrections",
     corrections: { roof: { porchPosts: 4, porchPitch: 0.25, porchSteps: "leftSide" } },
@@ -3798,8 +3812,8 @@ Deno.test("⚠️ v2: the porch's posts, pitch and steps land on a projecting po
   }));
   assert(onRecessed.ok, "usable");
   if (!onRecessed.ok) return;
-  assertEquals(onRecessed.verdict, "matches", "a recessed porch has no posts row, roof or deck of its own");
-  assertEquals(onRecessed.dropped, ["roof.porchPosts", "roof.porchPitch", "roof.porchSteps"]);
+  assertEquals(onRecessed.verdict, "corrections", "a side flight lands on a recessed porch's open side");
+  assertEquals([onRecessed.d3.roof.porchSteps, onRecessed.dropped], ["leftSide", ["roof.porchPosts", "roof.porchPitch"]]);
   const frontOnRecessed = applySelfCheck(DRAFT, readOf({
     verdict: "corrections",
     corrections: { roof: { porchPosts: 4, porchSteps: "left" } },
@@ -7992,6 +8006,42 @@ Deno.test("self-check: roof.porchGable on the v2 allow-list only; 'sided' takes 
   }));
   assert(swap.ok && swap.verdict === "corrections", "the swap lands");
   if (swap.ok) assert(!("porchGable" in swap.d3.roof) && !("porchDepthFt" in swap.d3.roof), JSON.stringify(swap.d3.roof));
+});
+
+Deno.test("consensusDrafts: a recessed porch's steps are voted among the recessed reads, side flights included (2026-10-07)", () => {
+  const RECESSED = { ...NO_PORCH, porchDepthFt: 6, porchEnd: "front", porchTruss: true };
+  const recSaid = { ...SAID, porch: "recessed" };
+  const rec = (steps: string | null) => read({ ...RECESSED, porchSteps: steps }, {}, recSaid);
+  // Two of three say off the left side: the result has it, 2/3. Before, a recessed porch's steps left every consensus.
+  const r = consensusDrafts([rec("leftSide"), rec("center"), rec("leftSide")]);
+  assertEquals(r.d3.roof.porchSteps, "leftSide");
+  assertEquals(r.report.discreteAgreement.porchSteps, "2/3");
+  // Front words the same way, and two reads with none win: no key.
+  assertEquals(consensusDrafts([rec("right"), rec("right"), rec("rightSide")]).d3.roof.porchSteps, "right");
+  const none = consensusDrafts([rec(null), rec("rightSide"), rec(null)]);
+  assert(!("porchSteps" in none.d3.roof), JSON.stringify(none.d3.roof));
+  assertEquals(none.report.discreteAgreement.porchSteps, "2/3");
+  // One read keeps its own, through the sanitiser.
+  assertEquals(consensusDrafts([rec("rightSide")]).d3.roof.porchSteps, "rightSide");
+  // Only the reads of the chosen kind vote: two projecting reads and a recessed one leave the projecting answer,
+  // voted 2/2, exactly as before.
+  const mixed = consensusDrafts([read({ porchSteps: "right" }), rec("leftSide"), read({ porchSteps: "right" })]);
+  assertEquals([mixed.d3.roof.porchSteps, mixed.report.discreteAgreement.porchSteps, mixed.report.discreteAgreement.porch], ["right", "2/2", "2/3"]);
+  // ...and the medoid never moves for it: recessed reads' step answers count toward no disagreement. Three recessed
+  // reads alike but for their steps tie on every other field, so send order picks the first, whatever the steps say.
+  for (const order of [["center", "leftSide", "leftSide"], ["leftSide", "center", "rightSide"]]) {
+    assertEquals(consensusDrafts(order.map((s) => rec(s))).medoid, 0, order.join(" "));
+  }
+});
+
+Deno.test("parseModelSpec: a recessed porch's side flight is read from the reply, and kept (2026-10-07)", () => {
+  for (const v of ["leftSide", "rightSide"]) {
+    const m = parseModelSpec(`{ "roof": { "type": "gable", "pitch": 0.42, "porchDepthFt": 8, "porchEnd": "front", "porchTruss": true, "porchSteps": "${v}" }, "colors": {}, "wallHeightFt": 7.75 }`);
+    assert(m.ok, "parsed");
+    if (m.ok) assertEquals([m.d3.roof.porchSteps, m.d3.roof.porchDepthFt], [v, 8]);
+  }
+  const junk = parseModelSpec(`{ "roof": { "type": "gable", "pitch": 0.42, "porchDepthFt": 8, "porchSteps": "off the left side" }, "colors": {}, "wallHeightFt": 7.75 }`);
+  assert(junk.ok && !("porchSteps" in junk.d3.roof), "a word it cannot read is dropped");
 });
 
 Deno.test("consensusDrafts: porchGable is voted among the recessed reads, like the truss", () => {

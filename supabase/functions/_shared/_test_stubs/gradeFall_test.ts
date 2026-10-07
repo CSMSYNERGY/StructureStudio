@@ -76,11 +76,14 @@ const F = new Function(
     `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation, ` +
     `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT, d3PorchBlankStepCount, d3PorchAutoStepCount, ` +
     `D3_GRADE_CORNERS, d3GradeCornersGiven, d3GradeCorners, d3GradeDropAt, d3GradeEaseFt, d3SlopeFoundation, d3PorchStepsOnGround, ` +
-    `d3RecessedPorch, d3RecessedPorchFrame, d3RecessedPorchToRoot, d3RecessedStepsOnGround, d3RecessedPorchReadout, D3_PORCH_SIDE_STEPS_MIN_FT };`,
+    `d3RecessedPorch, d3RecessedPorchFrame, d3RecessedPorchToRoot, d3RecessedStepsOnGround, d3RecessedPorchReadout, D3_PORCH_SIDE_STEPS_MIN_FT, ` +
+    `D3_RECESSED_SIDE_STEPS_MIN_FT, d3CornerFaceFt };`,
 )() as Record<string, Any>;
-// "What we drew" reads the porch region's shallowest deck for a side flight (2026-10-04), handed in here.
+// "What we drew" reads the porch region's shallowest deck for a side flight (2026-10-04), and its shallowest
+// recessed porch for one off an open side (2026-10-07), handed in here.
 const P = new Function(
-  `const D3_PORCH_SIDE_STEPS_MIN_FT = ${F.D3_PORCH_SIDE_STEPS_MIN_FT};\n${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`,
+  `const D3_PORCH_SIDE_STEPS_MIN_FT = ${F.D3_PORCH_SIDE_STEPS_MIN_FT};\nconst D3_RECESSED_SIDE_STEPS_MIN_FT = ${F.D3_RECESSED_SIDE_STEPS_MIN_FT};\n` +
+    `${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`,
 )() as Record<string, Any>;
 // calDraftRoof is the roof half of the merge (calDraftRoof_test's); a plain spread stands in for it.
 // bldgW x bldgH is the calibration preview's footprint, the component's own state.
@@ -431,12 +434,46 @@ Deno.test("a recessed porch's steps: off the footprint's edge, on the deepest gr
   const sc = rr(gc).steps;
   assertAlmostEquals(-sc.grade, groundUnder(gc, toRoot, sc), 1e-12);
   assert(-sc.grade > F.d3GradeFt(gc) + 0.5, JSON.stringify(sc));
-  // No recessed porch, no steps: a side word, no depth, wings, or a projecting porch beside it.
-  assertEquals(rr({ ...PIERS, roof: { ...roof, porchSteps: "leftSide" } }).steps, null);
+  // No recessed porch, no steps: no depth, wings, or a projecting porch beside it. A side word (2026-10-07)
+  // is a flight off that open side, below; on a porch too shallow for one, none.
+  assertEquals(rr({ ...PIERS, roof: { ...roof, porchDepthFt: 3.5, porchSteps: "leftSide" } }).steps, null);
   assertEquals(rr({ ...PIERS, roof: { type: "gable", pitch: 0.4, porchSteps: "left" } }), null);
   assertEquals(rr({ ...PIERS, roof: { ...roof, porchOutFt: 6 } }), null);
   assertEquals(rr({ ...PIERS, roof: { ...roof, wingSide: "both", wingWidthFt: 6 } }), null);
   assertEquals(F.d3RecessedStepsOnGround({ ...PIERS, roof: { ...roof, porchOutFt: 6 } }, W, L), null);
+});
+
+// ── A RECESSED PORCH'S FLIGHT OFF AN OPEN SIDE (2026-10-07) ─────────────────────────────────────
+// The projecting deck's end flight, turned a quarter onto the recessed porch's open side, centred along it,
+// and on the deepest ground under it through d3RecessedPorchToRoot and the same turn.
+Deno.test("a recessed porch's flight off an open side: turned onto it, on the deepest ground under it", () => {
+  const roof = { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 6, porchSteps: "leftSide" };
+  const rr = (spec: Any) => F.d3RecessedPorchReadout(spec, `${W}x${L}`).steps;
+  const toRoot = F.d3RecessedPorchToRoot(roof, W, L);
+  const g = F.d3RecessedPorchFrame(roof, W, L, 8, F.d3CornerFaceFt(null));
+  // Level: the grade and the front flight's count, off the west side line (the wall's face) of a south porch.
+  const flat = rr({ ...PIERS, roof });
+  const front = rr({ ...PIERS, roof: { ...roof, porchSteps: "left" } });
+  assertEquals([flat.where, flat.turn, flat.x, flat.d0, -flat.grade, flat.count, flat.rise], ["leftSide", -1, 0, 0, F.d3GradeFt(PIERS), front.count, front.rise]);
+  assertAlmostEquals(flat.edgeX, -(W / 2 + F.D3.WALL_T / 2), 1e-12);
+  assertAlmostEquals(flat.atD, (g.face - 6 + g.face - 0.29) / 2, 1e-12);
+  const q = toRoot(flat.edgeX, flat.atD);
+  assertAlmostEquals(q[0], -W / 2 - F.D3.WALL_T / 2, 1e-12);
+  assert(q[1] > L / 2 - 6 && q[1] < L / 2, `the flight's middle beside the porch: z ${q[1]}`);
+  // The ground falling to the left: the left flight on its own ground through the turn, deeper than the right.
+  const spec = { ...PIERS, roof, gradeFallFt: 2, gradeFallToward: "left" };
+  const s = rr(spec);
+  assertAlmostEquals(-s.grade, groundUnder(spec, toRoot, s), 1e-12, "its own ground");
+  assert(s.count >= Math.ceil(-s.grade / 0.625 - 1e-9) && s.rise <= 7.5 / 12 + 1e-12, JSON.stringify(s));
+  const right = rr({ ...spec, roof: { ...roof, porchSteps: "rightSide" } });
+  assertEquals([right.turn, right.edgeX], [1, -s.edgeX]);
+  assertAlmostEquals(-right.grade, groundUnder(spec, toRoot, right), 1e-12);
+  assert(-s.grade > -right.grade + 1, `off the downhill side, deeper (${-s.grade} vs ${-right.grade})`);
+  // Toward the back: the ground under the flight's back end (nearer the set-back wall) is what it stands on.
+  const back = { ...PIERS, roof, gradeCornersFt: { fl: 0, fr: 0, bl: 2, br: 0 } };
+  const sb = rr(back);
+  assertAlmostEquals(-sb.grade, groundUnder(back, toRoot, sb), 1e-12);
+  assert(Math.abs(-sb.grade - groundUnder(back, toRoot, { ...sb, turn: 0 })) > 1e-6, "the turn matters");
 });
 
 Deno.test("What we drew: steps off a side of the deck, and a recessed porch's steps, in plain words", () => {
@@ -452,8 +489,16 @@ Deno.test("What we drew: steps off a side of the deck, and a recessed porch's st
   const raised = { ...PIERS, roof: { ...cut, porchSteps: "left" } };
   const n = F.d3RecessedPorchReadout(raised, `${W}x${L}`).steps.count;
   assertStringIncludes(P.ssDrewWords(raised, F.d3RecessedPorchReadout(raised, `${W}x${L}`)), `It has ${n} steps on the left.`);
-  // A side word on a recessed porch draws nothing and says nothing.
-  assertEquals(P.ssDrewWords({ roof: { ...cut, porchSteps: "leftSide" } }), "The porch is cut 4 ft into the front end.");
+  // A side word on a recessed porch (2026-10-07) is a flight off that open side, said where it is drawn: a porch
+  // 4 ft deep, or the readout's flight. Too shallow, or refused by the readout (a lean-to there), it says nothing.
+  assertEquals(P.ssDrewWords({ roof: { ...cut, porchSteps: "leftSide" } }), "The porch is cut 4 ft into the front end. It has steps off its left side.");
+  const sideRaised = { ...PIERS, roof: { ...cut, porchSteps: "rightSide" } };
+  const nSide = F.d3RecessedPorchReadout(sideRaised, `${W}x${L}`).steps.count;
+  assertStringIncludes(P.ssDrewWords(sideRaised, F.d3RecessedPorchReadout(sideRaised, `${W}x${L}`)), `It has ${nSide} steps off its right side.`);
+  assertEquals(P.ssDrewWords({ roof: { ...cut, porchDepthFt: 3.5, porchSteps: "leftSide" } }), "The porch is cut 3 ft 6 in into the front end.");
+  const leaned = { roof: { ...cut, porchSteps: "leftSide", leanTos: [{ wall: "left", widthFt: 8 }] } };
+  assertEquals(F.d3RecessedPorchReadout(leaned, `${W}x${L}`).steps, null, "a lean-to on that side: no flight");
+  assert(!/steps? off its/.test(P.ssDrewWords(leaned, F.d3RecessedPorchReadout(leaned, `${W}x${L}`))), "and nothing said");
   // ⚠️ Nor on a deck under 2.5 ft (2026-10-04), where none is drawn: with the readout or without one.
   const shallow = { ...PIERS, roof: { ...deck, porchOutFt: 2, porchSteps: "rightSide", porchStepCount: 2 } };
   for (const said of [P.ssDrewWords(shallow), P.ssDrewWords(shallow, F.d3PorchReadout(shallow, `${W}x${L}`))]) {

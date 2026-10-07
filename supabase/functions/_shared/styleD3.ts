@@ -254,9 +254,11 @@ function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
 // "leftSide" / "rightSide" (2026-10-03): one flight off the deck's left or right END instead, centred
-// along it, as seen from the same spot; a projecting porch only, since a recessed porch has no deck
-// end to leave by. A recessed porch takes the three front words (2026-10-03), off the floor's edge
-// in its opening. The production designer before these reads an unknown word as no steps.
+// along it, as seen from the same spot. A recessed porch takes the three front words (2026-10-03), off
+// the floor's edge in its opening, and since 2026-10-07 the two side words too: one flight off that OPEN
+// side of the porch (no wall from the front post back to the set-back wall), centred along it, on a gable
+// end and on an eave wall alike (its two ends are its sides there). The production designer before these
+// reads an unknown word as no steps.
 export const D3_PORCH_STEPS_FRONT = ["left", "center", "right"] as const;
 export const D3_PORCH_STEPS = [...D3_PORCH_STEPS_FRONT, "leftSide", "rightSide"] as const;
 // roof.porchGable (2026-10-07): the gable over a RECESSED porch at a gable end. "open" is no siding over the
@@ -669,13 +671,14 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   }
   // Where the porch's steps leave its deck (2026-09-25). The enum posture above, and the porch
   // rule porchAttachFt follows: steps come off a porch, so without one they describe nothing and
-  // are dropped rather than stored for later. A PROJECTING porch takes any of the five; a RECESSED
-  // one (2026-10-03) only the three along its front, since its sides are the building's walls.
+  // are dropped rather than stored for later. Either kind takes any of the five: a PROJECTING porch
+  // off its deck's front edge or one of its ends; a RECESSED one (2026-10-03) off the floor's edge in
+  // its opening, or (2026-10-07) off one of its two open sides. Whether a side has room for a flight
+  // depends on the size, so the renderer decides that and the panels say it; the word is kept.
   const projecting = typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5;
   const recessed = !projecting && typeof roof.porchDepthFt === "number" && roof.porchDepthFt > 0.5;
   const stepsWord = String(rawRoof.porchSteps);
-  if ((projecting && (D3_PORCH_STEPS as readonly string[]).includes(stepsWord))
-      || (recessed && (D3_PORCH_STEPS_FRONT as readonly string[]).includes(stepsWord))) {
+  if ((projecting || recessed) && (D3_PORCH_STEPS as readonly string[]).includes(stepsWord)) {
     roof.porchSteps = stepsWord;
   }
   // A step COUNT needs steps to count (2026-09-28). Without porchSteps it describes nothing, and it
@@ -1285,7 +1288,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>,
     "porchPosts": <projecting porch only: how many posts stand along the porch's front edge, the corner posts included>,
     "porchPitch": <projecting porch only: the porch roof's own rise over run>,
-    "porchSteps": "left" | "center" | "right"
+    "porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide"
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab" | "blocks" | "piers",
@@ -1364,7 +1367,7 @@ PORCH POSTS, porchPosts: count the posts standing along the porch's FRONT edge, 
 
 PORCH ROOF PITCH, porchPitch: the porch roof's OWN slope as rise over run, never the main roof's. Read it from a side frame, where the porch roof's edge is seen square-on: it runs from where the roof meets the wall down to its front edge, so compare how far it drops with how far it runs out from the wall. A porch roof that drops 1 ft over 5 ft of run is 0.2. Build it from two heights rather than judging the angle by eye: the drop is porchAttachFt minus the height of the porch roof's FRONT edge above the floor (read that edge against the posts and the known wall height in the same frame), and the run is porchOutFt, so porchPitch is the drop divided by porchOutFt. A porch roof that meets the wall at 9 ft and whose front edge is 8 ft up, 5 ft out, is (9 - 8) / 5 = 0.2. Leave it out when no frame shows that edge square-on.
 
-PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Decide it in the frame most square-on to the front, by where the MIDDLE of the steps falls between the porch's two front corner posts: in the left third of that span is "left", the middle third "center", the right third "right". When a post stands at the middle of the front edge (an odd number of posts), the steps are never "center": answer "left" or "right" for the side of that middle post they are on. Judge it against the corner posts, never against the door or the middle of the building; steps in front of an off-centre door are still read by the thirds. Leave it out when the porch has no steps, and when its steps leave the deck from one of its sides rather than its front edge.
+PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Decide it in the frame most square-on to the front, by where the MIDDLE of the steps falls between the porch's two front corner posts: in the left third of that span is "left", the middle third "center", the right third "right". When a post stands at the middle of the front edge (an odd number of posts), the steps are never "center": answer "left" or "right" for the side of that middle post they are on. Judge it against the corner posts, never against the door or the middle of the building; steps in front of an off-centre door are still read by the thirds. A RECESSED porch is open at its two sides as well, from each front corner post back to the wall the door is in: when its steps come down off one of those open sides instead of its front edge, answer "leftSide" or "rightSide" for the side they leave from, left and right as seen standing in front of the porch facing it. Leave it out when the porch has no steps, and when a projecting porch's steps leave its deck from one of its ends rather than its front edge.
 
 PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of the front wall under its own lower roof, "recessed" for one cut into the building under the main roof, "none" for a building with no porch. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
 
@@ -5217,6 +5220,9 @@ type ConsensusField = {
   // Writes the chosen answer into the result, copied from `rep` (the best-ranked read that gave it);
   // `rep` null means nobody voted, so the key goes. Fields without one are carried by the numbers.
   apply?: (out: D3Spec, rep: D3Spec | null) => void;
+  // A read whose answer here still votes but never counts toward the pairwise disagreement that picks
+  // the medoid (2026-10-07: a recessed porch's steps). Absent, every answer counts.
+  unscored?: (d: D3Spec) => boolean;
 };
 const copyRoofKey = (k: string) => (out: D3Spec, rep: D3Spec | null) => {
   const from = rep ? cRoof(rep) : null;
@@ -5237,7 +5243,12 @@ const CONSENSUS_FIELDS: readonly ConsensusField[] = [
   { name: "porchTruss", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? String(cRoof(d).porchTruss === true) : null), apply: copyRoofKey("porchTruss") },
   // Voted among the recessed reads, like the truss (2026-10-07): "open", or "sided" for a read that left it out.
   { name: "porchGable", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? (cRoof(d).porchGable === "open" ? "open" : "sided") : null), apply: copyRoofKey("porchGable") },
-  { name: "porchSteps", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (cStr(cRoof(d).porchSteps) ?? "none") : null), apply: copyRoofKey("porchSteps") },
+  // Voted among the projecting reads and, since 2026-10-07, among the recessed ones too (the porch kind is its
+  // parent, so each kind votes its own words): before, a recessed porch's steps left every consensus. Only the
+  // projecting reads' answers count toward the disagreement that picks the medoid (unscored), as before, so
+  // no medoid moves and no projecting outcome changes.
+  { name: "porchSteps", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) !== "none" ? (cStr(cRoof(d).porchSteps) ?? "none") : null),
+    unscored: (d) => consensusPorchKind(cRoof(d)) === "recessed", apply: copyRoofKey("porchSteps") },
   { name: "porchAttach", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchAttachFt) !== null ? "given" : "wall top") : null) },
   { name: "porchWidth", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchWidthFt) !== null ? "part" : "full") : null) },
   { name: "wings", key: (d) => (cWings(cRoof(d)) ? "yes" : "no") },
@@ -5353,6 +5364,7 @@ export function consensusDrafts(drafts: readonly ConsensusDraft[]): ConsensusRes
     CONSENSUS_FIELDS.forEach((f, i) => {
       const ka = keys[a][i], kb = keys[b][i];
       if (ka === null || kb === null) return;
+      if (f.unscored && (f.unscored(drafts[a].d3) || f.unscored(drafts[b].d3))) return;
       if (f.parent) {
         const p = fieldAt.get(f.parent)!;
         if (keys[a][p] !== keys[b][p]) return;

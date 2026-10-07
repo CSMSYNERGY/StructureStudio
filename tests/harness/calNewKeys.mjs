@@ -22,8 +22,8 @@
 //      rise/run, the steps as their word; the readout line ends with the posts and pitch built, and
 //      a pitch the wall cannot carry says it was lowered and to what; clearing deletes each key, and
 //      switching the porch to recessed deletes the posts and the pitch -- and since 2026-10-03 keeps
-//      centre steps, which a recessed porch offers (left, center, right, no side flights), saving them
-//      beside porchDepthFt; a projecting porch offers steps down either side too
+//      centre steps, which a recessed porch offers (left, center, right, and since 2026-10-07 a flight down
+//      either open side), saving them beside porchDepthFt; a projecting porch offers steps down either side too
 //   4. corner and fascia: "Same as walls" / "Same as roof" store that hex, "Same as trim" deletes
 //   5. switching to a gable drops highSide and offers "Front wall"; "Long side" saves front "eave"
 //   6. wings: a width with no side says so (and that blank draws both); "Both sides" saves width
@@ -210,10 +210,11 @@ export async function main() {
     await settle(page);
     ok("a recessed porch offers neither", (await field(page, "Porch roof meets the wall at (ft up)").count()) === 0 && (await field(page, "Porch width (ft)").count()) === 0);
     ok("...nor posts or a roof pitch of its own", (await field(page, /^Porch posts/).count()) === 0 && (await field(page, /^Porch roof pitch/).count()) === 0);
-    // A RECESSED PORCH HAS STEPS (2026-10-03): along its front only, and the centre steps carried over.
+    // A RECESSED PORCH HAS STEPS (2026-10-03): along its front, and (2026-10-07) down either open side; the
+    // centre steps carried over.
     const rSteps = field(page, /^Porch steps/).locator("select");
-    ok("...but it offers steps along its front, and keeps the centre steps it had",
-      (await rSteps.count()) === 1 && (await rSteps.locator("option").evaluateAll((os) => os.map((o) => o.value))).join("|") === "|left|center|right"
+    ok("...but it offers steps along its front and down either open side, and keeps the centre steps it had",
+      (await rSteps.count()) === 1 && (await rSteps.locator("option").evaluateAll((os) => os.map((o) => o.value))).join("|") === "|left|center|right|leftSide|rightSide"
         && (await rSteps.inputValue()) === "center");
     d3 = await save(page, calls);
     ok("⚠️ AND SAVES NEITHER — they belong to a projecting porch only",

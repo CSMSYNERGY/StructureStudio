@@ -129,6 +129,15 @@ Deno.test("⚠️ a recessed porch keeps its steps along its front, and their co
   // Never a projecting porch's front steps, which the draft was asked about, nor a flight off a deck's end.
   assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "right", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }), { type: "gable", porchDepthFt: 4 });
   assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }), { type: "gable", porchDepthFt: 4 });
+  // A flight off one of a RECESSED porch's open sides (2026-10-07): a draft's own is kept (the v2 prompt asks
+  // for it), and a stored recessed porch's comes back under a draft silent on its steps, typed or not; one
+  // off a stored projecting deck's end never lands on a recessed draft.
+  assertEquals(calDraftRoof(stored, { type: "gable", porchDepthFt: 4, porchSteps: "leftSide" }), { type: "gable", porchDepthFt: 4, porchSteps: "leftSide" });
+  assertEquals(calDraftRoof(stored, { porchDepthFt: 5, porchSteps: "rightSide" }).porchSteps, "rightSide");
+  const recSide = { type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 };
+  assertEquals(calDraftRoof(recSide, { type: "gable", porchDepthFt: 5 }), { type: "gable", porchDepthFt: 5, porchSteps: "rightSide", porchStepCount: 2 });
+  assertEquals(calDraftRoof(recSide, { porchDepthFt: 5 }), { type: "gable", porchDepthFt: 5, porchSteps: "rightSide", porchStepCount: 2 });
+  assertEquals(calDraftRoof(recSide, { porchDepthFt: 5, porchSteps: "center" }), { type: "gable", porchDepthFt: 5, porchSteps: "center", porchStepCount: 2 });
 });
 
 Deno.test("⚠️ a flight off an end of the deck, and its count, survive a draft silent on the steps (2026-10-04)", () => {
@@ -211,6 +220,10 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "gable", porchDepthFt: 4, porchSteps: "center", porchStepCount: 3 }, { type: "gable", porchDepthFt: 5 }],
     [{ type: "gable", porchOutFt: 6, porchSteps: "right", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }],
     [{ type: "gable", porchOutFt: 6, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 4 }],
+    // A flight off a recessed porch's open side (2026-10-07): the draft's own, or a stored recessed porch's.
+    [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { porchDepthFt: 5 }],
+    [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 5 }],
+    [{ type: "gable", porchDepthFt: 4, porchSteps: "center" }, { type: "gable", porchDepthFt: 4, porchSteps: "leftSide" }],
     // A flight off an end of a deck stays under a draft silent on the steps, typed or not (2026-10-04).
     [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchOutFt: 6 }],
     [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { porchOutFt: 5 }],

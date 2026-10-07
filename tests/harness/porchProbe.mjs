@@ -50,7 +50,15 @@
 //      (cases R*): one flight in a holder in root (not the roof), its first tread 0.15 ft past the
 //      footprint's edge, inside the opening and clear of every post, on the grass, climbing a raised
 //      floor's whole height; centre steps on an even eave count add a bay (d3RecessedPorchFrame); a
-//      ramp run out over them hides them, and a live rebuild without it brings them back
+//      ramp run out over them hides them, and a live rebuild without it brings them back.
+//      OFF AN OPEN SIDE of a recessed porch (leftSide / rightSide, 2026-10-07; cases RS*), on a portrait and a
+//      landscape gable end, a back end and an eave wall (its ends), at grade and on a raised floor, with and
+//      without the wood colour: one flight turned a quarter onto that side, its first tread on the side's edge
+//      (the deck rim's outer face with wood, butting it; the wall's face line without), every tread at right
+//      angles to the side, centred along it between the inside corner board and the corner post and 0.1 ft
+//      clear of each, outside the building on that side, on the grass, the readout's flight; refused (nothing
+//      drawn, the readout saying why) on a porch under 4 ft deep and beside a lean-to on that side, while the
+//      other side beside the lean-to is drawn
 //  19. A LEAN-TO THAT MEETS THE PORCH (roof.leanTos[i].meetPorch, d3PorchJoins, 2026-10-05; cases PJ*): the
 //      porch is built from its readout's numbers (never lowered by the scan), and on the joined side its sheet,
 //      ceiling, board and drip run on to the lean-to's eave and stop on the hip; that side's cheek, corner fill
@@ -215,6 +223,30 @@ const STEP_CASES = [
     d3: { roof: { ...SIDE_GABLE, porchEnd: "left", porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
   { id: "PS2", label: "Harness Side Porch Gable Steps", size: "24x16", wall: "east", steps: "rightSide",
     d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 6, porchEnd: "right", porchSteps: "rightSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  // 18b. OFF AN OPEN SIDE OF A RECESSED PORCH (2026-10-07). `out` is the wall the side opens through.
+  // sideRamp: a ramp on the west wall run out over the flight hides it, one further along leaves it (porchStepsVsRamps).
+  { id: "RS1", label: "Harness Recessed Side Left", size: "12x16", wall: "south", out: "west", steps: "leftSide", recessed: true, posts: 2, sideRamp: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 6, porchTruss: true, porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "RS2", label: "Harness Recessed Side Right Wood Piers", size: "12x16", wall: "south", out: "east", steps: "rightSide", recessed: true, posts: 2, wood: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 6, porchTruss: true, porchSteps: "rightSide" }, siding: "batten", colors: { ...COLORS, wood: "#9A4530" }, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // A landscape footprint: the old frame's front gable end is west, so its left side opens north.
+  { id: "RS3", label: "Harness Recessed Side Landscape", size: "24x12", wall: "west", out: "north", steps: "leftSide", recessed: true, posts: 2, wood: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 5, porchSteps: "leftSide" }, siding: "lap", colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
+  // The back end, seen from behind: its right side is the west wall.
+  { id: "RS4", label: "Harness Recessed Side Back", size: "12x16", wall: "north", out: "west", steps: "rightSide", recessed: true, posts: 2,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.6, eave: "fascia", porchDepthFt: 5, porchEnd: "back", porchSteps: "rightSide" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // An EAVE wall's recessed porch: its two ends are its open sides (posts along the eave, a bay every 10 ft).
+  { id: "RS5", label: "Harness Recessed Side Eave", size: "20x12", wall: "south", out: "west", steps: "leftSide", recessed: true, eave: true, posts: 3, wood: true,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchSteps: "leftSide" }, siding: "batten", colors: { ...COLORS, wood: "#8A5A36" }, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "RS6", label: "Harness Recessed Side Eave Back Raised", size: "16x12", wall: "north", out: "west", steps: "rightSide", recessed: true, eave: true, posts: 3,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchDepthFt: 4.5, porchEnd: "back", porchSteps: "rightSide" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
+  // Refused: a porch under 4 ft deep, and a lean-to on the side it would leave through. The other side is free.
+  { id: "RS7", label: "Harness Recessed Side Shallow", size: "12x16", wall: "south", out: "west", steps: "leftSide", recessed: true, posts: 2, none: "shallow",
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 3.5, porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "RS8", label: "Harness Recessed Side Lean-To", size: "12x16", wall: "south", out: "west", steps: "leftSide", recessed: true, posts: 2, none: "leanTo",
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 6, porchSteps: "leftSide", leanTos: [{ wall: "left", widthFt: 8 }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "RS9", label: "Harness Recessed Side Free Of Lean-To", size: "12x16", wall: "south", out: "east", steps: "rightSide", recessed: true, posts: 2, wood: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 6, porchSteps: "rightSide", leanTos: [{ wall: "left", widthFt: 8 }] }, siding: "batten", colors: { ...COLORS, wood: "#9A4530" }, wallHeightFt: 8, roofMaterial: "metal" } },
 ];
 
 // 19. THE PORCH A LEAN-TO MEETS (d3PorchJoins, 2026-10-05). Each lean-to's boxes are set to what its card says
@@ -595,6 +627,16 @@ async function measureSteps(page, W, L, H) {
       frame.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "deckSupport") { const b = boxIn(q, inv); out.deckSupports.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]); } });
       M.roofGroup.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "post") { const b = boxIn(q, inv); out.deckPosts.push([(b.mn[0] + b.mx[0]) / 2, b.mn[2], b.mx[2]]); } });
     }
+    // A recessed porch's frame as built (model.recessedFrame), its deck rims (ssPorchFrame "deckRim", in root
+    // with the deck), the inside corner boards where the set-back wall meets each open side (ssPorchCorner
+    // "inside"), and each tread's box, all in the steps holder's frame (2026-10-07, the side flights).
+    out.frame = M.recessedFrame || null;
+    out.recRims = []; out.recCorners = []; out.treadBoxes = [];
+    if (frame.userData.ssPorch === "recessedSteps") {
+      M.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssPorchFrame === "deckRim") { const b = boxIn(q, inv); out.recRims.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2], b.mn[1], b.mx[1]]); } });
+      M.roofGroup.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssPorchCorner === "inside") { const b = boxIn(q, inv); out.recCorners.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]); } });
+      st.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "stepTread") { const b = boxIn(q, inv); out.treadBoxes.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]); } });
+    }
     // A recessed porch's posts, in the holder's frame, by their tag (userData.ssPorchFrame "post", 2026-10-07):
     // the porch frame's 4x6s, the corner posts standing in the corner boards' place, and on an eave wall the
     // posts between them. Every other upright at the corners (a corner board) is no post.
@@ -625,10 +667,20 @@ async function stepsRun(ctx, c, ok, shots) {
     await pickStyle(page, c.label);
     await chooseSize(page, c.size);
     if (c.place) await placeOnPorchWall(page, ok, W, L, c.at);
+    const plan = c.sideRamp ? await buildingRect(page) : null;
     await openEditor(page);
     const H = c.d3.wallHeightFt;
     const m = await measureSteps(page, W, L, H);
     const g = c.recessed ? m.recessedSteps : m.porch && m.porch.steps;
+    if (c.none) {
+      // REFUSED (2026-10-07): nothing drawn, no flight in the model, and the readout says why, on that side only.
+      const why = PURE.d3RecessedSideStepsWhy(c.d3, c.size);
+      ok(`${tag}: no flight is drawn off that side`, m.n === 0 && !m.recessedSteps, JSON.stringify({ n: m.n, model: m.recessedSteps }));
+      ok(`${tag}: the readout's flight is none, and the menus are told why ("${c.none}")`, !PURE.d3RecessedPorchReadout(c.d3, c.size).steps && why && why[c.steps] === c.none,
+        JSON.stringify(why));
+      ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
+      return;
+    }
     ok(`${tag}: one flight of steps, "${c.steps}"`, m.n === 1 && m.where === c.steps && !!g && g.where === c.steps, JSON.stringify({ n: m.n, where: m.where, model: g && g.where }));
     if (!g || m.n !== 1) return;
     console.log(`   ${tag}: count ${g.count} rise ${f3(g.rise)} w ${f3(g.w)} grade ${f3(-g.grade)} local x ${m.local.x.map(f3)} z ${m.local.z.map(f3)}`);
@@ -670,6 +722,51 @@ async function stepsRun(ctx, c, ok, shots) {
       const got = m.deckPosts.map((q) => q[0]).sort((a, b) => a - b);
       ok(`${tag}: the posts are the ones the porch builds without steps (${plain.posts})`, P.posts === plain.posts && got.length === want.length && got.every((x, k) => Math.abs(x - want[k]) < 0.005),
         `drawn ${got.map(f3).join(" ")} want ${want.map(f3).join(" ")}`);
+    } else if (/Side$/.test(c.steps)) {
+      // OFF AN OPEN SIDE OF A RECESSED PORCH (2026-10-07), in the holder's frame: x along the porch wall to the right
+      // of someone standing in front of it, z out from the footprint line (into the building is negative).
+      const F = m.frame, turn = c.steps === "rightSide" ? 1 : -1;
+      const fr = PURE.d3RecessedPorchFrame(c.d3.roof, W, L, H);
+      ok(`${tag}: the pure frame is this porch (${c.wall}${c.eave ? ", an eave wall" : ""}, ${c.posts} posts)`, !!fr && fr.wall === c.wall && fr.onEave === !!c.eave && fr.posts === c.posts && g.wall === c.wall,
+        JSON.stringify(fr && { wall: fr.wall, onEave: fr.onEave, posts: fr.posts, model: g.wall }));
+      ok(`${tag}: in its own holder in root, not in the roof (look-inside keeps it)`, m.frameTag === "recessedSteps" && m.frameInRoot && !m.inRoofGroup);
+      ok(`${tag}: ${c.posts} posts stand in the opening (a side flight adds no bay)`, m.recPosts.length === c.posts, `found ${m.recPosts.length}`);
+      ok(`${tag}: model.recessedSteps is turned onto the ${turn > 0 ? "right" : "left"} side`, g.turn === turn && !!F && F.wood === !!c.wood, JSON.stringify({ turn: g.turn, wood: F && F.wood }));
+      // Its edge: the deck rim's outer face (the posts' outer faces) with the wood colour, the side wall's face line without.
+      const edge = c.wood ? F.side : F.side - F.face + 0.15;
+      const inner = turn > 0 ? m.local.x[0] : m.local.x[1], outer = turn > 0 ? m.local.x[1] : m.local.x[0];
+      ok(`${tag}: its first tread starts at the side's edge (${c.wood ? "the deck rim's outer face" : "the wall's face line"})`,
+        Math.abs(g.edgeX - turn * edge) < 1e-9 && Math.abs(inner - turn * (edge + 0.005)) < 0.005, `inner ${f3(inner)} edge ${f3(turn * edge)} model ${f3(g.edgeX)}`);
+      ok(`${tag}: ...and runs straight out from it, count x tread`, Math.abs(turn * (outer - inner) - g.count * g.tread) < 0.01, `${f3(turn * (outer - inner))} vs ${f3(g.count * g.tread)}`);
+      // Every tread at right angles to the side: a tread deep across x, the flight's width along the side.
+      ok(`${tag}: every tread runs along the side (${f3(g.tread)} deep out from it, ${f3(g.w)} along it)`, m.treadBoxes.length === g.count
+        && m.treadBoxes.every((b) => Math.abs(b[1] - b[0] - g.tread) < 0.005 && Math.abs(b[3] - b[2] - g.w) < 0.005), JSON.stringify(m.treadBoxes.map((b) => b.map(f3))));
+      // Along the side: centred between the inside corner board's front face and the corner post's back face, 0.1 clear of each.
+      const sideCorner = m.recCorners.filter((b) => turn * (b[0] + b[1]) > 0);
+      const sidePost = m.recPosts.filter((b) => turn * (b[0] + b[1]) > 0).sort((a, b) => turn * (b[0] - a[0]))[0];
+      const cornerFront = sideCorner.length ? Math.max(...sideCorner.map((b) => b[3])) : null;
+      const postBack = sidePost ? sidePost[2] : null;
+      ok(`${tag}: along the side between the inside corner board and the corner post, 0.1 ft clear of each`,
+        cornerFront != null && postBack != null && m.local.z[0] >= cornerFront + 0.1 - 0.006 && m.local.z[1] <= postBack - 0.1 + 0.006,
+        `flight z ${m.local.z.map(f3)} corner ${f3(cornerFront)} post ${f3(postBack)}`);
+      ok(`${tag}: ...centred on that run, ${f3(g.w)} ft wide`, cornerFront != null && postBack != null && Math.abs((m.local.z[0] + m.local.z[1]) / 2 - (cornerFront + postBack) / 2) < 0.006
+        && Math.abs((m.local.z[0] + m.local.z[1]) / 2 - g.atD) < 0.006 && Math.abs(m.local.z[1] - m.local.z[0] - g.w) < 0.01, `mid ${f3((m.local.z[0] + m.local.z[1]) / 2)} atD ${f3(g.atD)}`);
+      // Through nothing: no post, inside corner board or deck rim overlaps it in plan.
+      const hits = (b) => b[0] < m.local.x[1] - 1e-6 && b[1] > m.local.x[0] + 1e-6 && b[2] < m.local.z[1] - 1e-6 && b[3] > m.local.z[0] + 1e-6;
+      ok(`${tag}: clear of every post, inside corner board and deck rim`, ![...m.recPosts, ...m.recCorners, ...m.recRims].some(hits),
+        JSON.stringify([...m.recPosts, ...m.recCorners, ...m.recRims].filter(hits).map((b) => b.map(f3))));
+      if (c.wood) {
+        // THE RIM ON THAT SIDE: its outer face is the flight's edge, and the top tread is under its top.
+        const rim = m.recRims.filter((b) => b[3] - b[2] > 1 && turn * (b[0] + b[1]) > 0)[0];
+        const rimFace = rim ? (turn > 0 ? rim[1] : rim[0]) : null;
+        ok(`${tag}: it butts the side's deck rim: the rim's outer face is its edge, the top tread a rise under the rim's top`,
+          rimFace != null && Math.abs(rimFace - turn * edge) < 0.005 && m.treads[0] < rim[5] && m.treads[0] > rim[4],
+          `rim face ${f3(rimFace)} edge ${f3(turn * edge)} top tread ${f3(m.treads[0])} rim y ${rim ? `${f3(rim[4])}..${f3(rim[5])}` : "none"}`);
+      } else ok(`${tag}: no deck rim without the wood colour`, m.recRims.length === 0, `found ${m.recRims.length}`);
+      // In the world: wholly outside the building on that side, beside the porch.
+      ok(`${tag}: outside the ${c.out} wall's line, on the porch's ${turn > 0 ? "right" : "left"}`, m.near[c.out] > 0.1, `out past the ${c.out} line ${f3(m.near[c.out])}`);
+      const pr = PURE.d3RecessedPorchReadout(c.d3, c.size);
+      ok(`${tag}: model.recessedSteps is the readout's flight`, !!pr && JSON.stringify(pr.steps) === JSON.stringify({ ...g, wall: undefined }), JSON.stringify({ pure: pr && pr.steps, model: g }));
     } else {
       const fr = PURE.d3RecessedPorchFrame(c.d3.roof, W, L, H);
       ok(`${tag}: the pure frame is this porch (${c.wall}${c.eave ? ", an eave wall" : ""}, ${c.posts} posts)`, !!fr && fr.wall === c.wall && fr.onEave === !!c.eave && fr.posts === c.posts && g.wall === c.wall,
@@ -689,6 +786,34 @@ async function stepsRun(ctx, c, ok, shots) {
       // The holder's x runs to the right of someone standing in front of it: on the north wall that is -x.
       const pr = PURE.d3RecessedPorchReadout(c.d3, c.size);
       ok(`${tag}: model.recessedSteps is the readout's flight`, !!pr && JSON.stringify(pr.steps) === JSON.stringify({ ...g, wall: undefined }), JSON.stringify({ pure: pr && pr.steps, model: g }));
+    }
+    if (c.sideRamp) {
+      // A RAMP ON THE WALL THE SIDE OPENS THROUGH (2026-10-07): built live (rebuildInterior) from a ramp item on that wall,
+      // in the plan's own units (the building rect: mgX, mgY, and feet x scale), `along` feet from the wall's north or
+      // west end. At 12 ft along a 16 ft west wall it stands 4 ft from the middle toward the front, over the flight.
+      const items = (await readItems(page)) || [];
+      const sc = plan.w / W;
+      const ramp = (along) => ({ id: `h-ramp-${along}`, type: "ramp", wall: c.out, widthFt: 3,
+        x: c.out === "west" ? plan.x : c.out === "east" ? plan.x + plan.w : plan.x + along * sc,
+        y: c.out === "north" ? plan.y : c.out === "south" ? plan.y + plan.h : plan.y + along * sc });
+      const shownWith = (list) => page.evaluate((list) => {
+        const M = window.__ss3dEngine.model;
+        M.rebuildInterior(list);
+        let vis = null, why = null;
+        M.root.traverse((q) => {
+          if (!(q.userData && q.userData.ssPorchPart === "steps")) return;
+          let n = q, v = true;
+          while (n) { if (!n.visible) v = false; n = n.parent; }
+          vis = v; why = q.userData.ssHiddenBy || null;
+        });
+        return { vis, why };
+      }, list);
+      const over = await shownWith([...items, ramp(12)]);
+      ok(`${tag}: a ramp on the ${c.out} wall run out over the side flight hides it, saying the ramp did it`, over.vis === false && over.why === "ramp", JSON.stringify(over));
+      const clear = await shownWith([...items, ramp(5)]);
+      ok(`${tag}: ...one further back along that wall leaves it drawn`, clear.vis === true && clear.why === null, JSON.stringify(clear));
+      const back = await shownWith(items);
+      ok(`${tag}: ...and without a ramp it is drawn`, back.vis === true, JSON.stringify(back));
     }
     if (c.stepsHidden) {
       ok(`${tag}: a ramp run out over them hides them, saying the ramp did it`, m.visible === false && m.hiddenBy === "ramp", JSON.stringify({ visible: m.visible, hiddenBy: m.hiddenBy }));
@@ -713,6 +838,12 @@ async function stepsRun(ctx, c, ok, shots) {
     // From in front, off to the side the steps are on, so a flight off an end is in the frame.
     const sg = /left/i.test(c.steps) ? -1 : 1, r = [sg * n[1], -sg * n[0]];
     await shot(page, `${shots}/${c.id}-steps.png`, [n[0] * (W / 2 + reach + 10) + r[0] * 11, H * 0.7, n[1] * (L / 2 + reach + 10) + r[1] * 11], [n[0] * (W / 2 + reach * 0.6) + r[0] * 4, 0, n[1] * (L / 2 + reach * 0.6) + r[1] * 4]);
+    // A recessed porch's side flight from out on that side, square-on to it.
+    if (c.recessed && /Side$/.test(c.steps)) {
+      const half = (r[0] ? W : L) / 2;
+      await shot(page, `${shots}/${c.id}-side.png`, [n[0] * (W / 2 + 4) + r[0] * (half + 12), H * 0.5, n[1] * (L / 2 + 4) + r[1] * (half + 12)],
+        [n[0] * (W / 2 - 2) + r[0] * half, 0.5, n[1] * (L / 2 - 2) + r[1] * half]);
+    }
     ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
   } catch (e) {
     ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));

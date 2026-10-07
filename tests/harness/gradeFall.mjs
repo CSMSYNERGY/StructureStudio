@@ -79,7 +79,8 @@
 //      corners, front, back, eave and old-frame walls, raised and on a slab. ⚠️ The placed flight's own
 //      matrix is the pure map: a point (x, d) of the flight lands where d3PorchToRoot puts
 //      (edgeX + turn d, atD - turn x) off a deck's end, and where d3RecessedPorchToRoot puts (x, d) in a
-//      recessed porch's opening; its foot is on the drawn grass; its treads rise evenly in risers of
+//      recessed porch's opening, and (2026-10-07, F9 / F10) at (edgeX + turn d, atD - turn x) off one of a
+//      recessed porch's open sides, turned the same way; its foot is on the drawn grass; its treads rise evenly in risers of
 //      7.5 in or less; and the panel's readout (d3PorchReadout / d3RecessedPorchReadout) counts the same
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
@@ -240,6 +241,12 @@ const FLIGHT_CASES = [
     d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, porchSteps: "right" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1, gradeFallFt: 1.5, gradeFallToward: "right" } },
   { id: "F8", label: "Flight Recessed Back Slab", size: "12x16", wall: "north", recessed: true,
     d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, porchEnd: "back", porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1.5, br: 2 } } },
+  // Off an OPEN SIDE of a recessed porch (2026-10-07): turned onto that side, on the downhill side of a fall, and an
+  // eave wall's end on corners.
+  { id: "F9", label: "Flight Recessed Side Left Fall", size: "16x24", wall: "south", recessed: true, side: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, porchDepthFt: 6, porchSteps: "leftSide" }, siding: "batten", colors: { ...PLAIN, wood: "#9A4530" }, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "left" } },
+  { id: "F10", label: "Flight Recessed Eave Side Corners", size: "16x12", wall: "south", recessed: true, side: true,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, porchDepthFt: 4.5, porchSteps: "rightSide" }, siding: "panel", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1, gradeCornersFt: { fl: 0, fr: 1.5, bl: 0, br: 0.5 } } },
 ];
 
 const configFor = (c) => {
@@ -1069,7 +1076,7 @@ async function runFlightCase(ctx, c, ok, shots) {
     const pureAt = (x, d) => (b.turn ? toRoot(b.edgeX + b.turn * d, b.atD - b.turn * x) : toRoot(x, d));
     const mapBad = b ? st.map.filter((q) => { const w = pureAt(q.x, q.d); return !(near(w[0], q.at[0], 1e-6) && near(w[1], q.at[1], 1e-6)); }) : [];
     ok(`${tag}: ⚠️ THE PLACED FLIGHT LANDS WHERE ${c.recessed ? "d3RecessedPorchToRoot" : "d3PorchToRoot, TURNED ONTO THE DECK'S END,"} PUTS IT`,
-      !!b && !!toRoot && mapBad.length === 0 && (c.recessed ? !b.turn : !!b.turn && b.turn === s.turn && near(Math.abs(b.edgeX), Math.abs(s.edgeX), 0.1)),
+      !!b && !!toRoot && mapBad.length === 0 && (c.recessed && !c.side ? !b.turn : !!b.turn && b.turn === s.turn && near(Math.abs(b.edgeX), Math.abs(s.edgeX), 0.1)),
       b ? mapBad.slice(0, 2).map((q) => `(${q.x},${q.d}) drawn ${q.at.map(f3)} pure ${pureAt(q.x, q.d).map(f3)}`).join(" | ") : "no model steps");
     const count = st.treads, h = -st.bottom, rise = h / (count + 1);
     ok(`${tag}: ⚠️ THE STEPS' FOOT IS ON THE GRASS: at the lowest grass under the flight, nothing floating`,

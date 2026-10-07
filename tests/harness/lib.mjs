@@ -262,5 +262,6 @@ export function purePorch() {
     ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
   ];
   const body = regions.map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan, d3RecessedPorchFrame, d3RecessedPorchReadout, d3LeanTosReadout, d3PorchJoins };`)();
+  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan, d3RecessedPorchFrame, d3RecessedPorchReadout, d3LeanTosReadout, d3PorchJoins, ` +
+    `d3RecessedSideStepsWhy, D3_RECESSED_SIDE_STEPS_MIN_FT };`)();
 }

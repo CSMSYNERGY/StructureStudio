@@ -27,9 +27,13 @@
 //  11. the steps by porch kind (2026-10-03): a projecting porch offers left / centre / right and a
 //      flight down either side, those two greyed out (and the hint saying why) on a deck under
 //      2' 6"; a side flight saves its word, and made shallower than that it stays picked with the hint
-//      saying it is not drawn (2026-10-04); switching to recessed offers the front three only, drops
-//      the side flight and saves without steps; centre steps save beside porchDepthFt with the step
-//      count box showing the drawn count; switching back to projecting keeps them
+//      saying it is not drawn (2026-10-04); switching to recessed (2026-10-07) offers the front three and
+//      a flight down either open side, keeps the side flight and saves it beside porchDepthFt; on a
+//      recessed porch under 4 ft both sides grey out and the hint says why, the pick staying; no steps
+//      saves without them; centre steps save beside porchDepthFt with the step count box showing the
+//      drawn count; switching back to projecting keeps them
+//  12. a recessed porch with a lean-to on its left wall (2026-10-07): the left side is greyed out, the
+//      right offered, and the hint names the lean-to
 //
 // The public ?admin=1 operator page, with Supabase stubbed at the network layer (lib.mjs): no login,
 // and nothing leaves the machine, so no save ever reaches a database. It exercises the COMPILED
@@ -48,8 +52,11 @@ const COLORS = { body: "#eeebe0", trim: "#686c70", roof: "#5f6266" };
 // and the truss and keep the end.
 const PORCH_ROOF = { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, porchTruss: true, porchEnd: "back" };
 const PLAIN_ROOF = { type: "gambrel", pitch: 0.4, overhang: 0.5, kneeU: 0.6, kneeRise: 0.6, ridgeRise: 0.9 };
+// A recessed front porch with a lean-to along the whole left wall: its left side opens under the lean-to.
+const LEAN_PORCH_ROOF = { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 6, porchEnd: "front", leanTos: [{ wall: "left", widthFt: 8 }] };
 const STYLES = [
   { value: "porchbarn", label: "Harness Porch Barn", d3: { roof: PORCH_ROOF, siding: "lap", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { value: "leanporch", label: "Harness Lean Porch", d3: { roof: LEAN_PORCH_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
   { value: "plainbarn", label: "Harness Plain Barn", d3: { roof: PLAIN_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "shingle" } },
 ].map((s) => ({ ...s, img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {} }));
 const CONFIG = {
@@ -311,9 +318,23 @@ export async function main() {
       && /down one of its sides/.test((await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ")));
     await porchSelect(page).selectOption("recessed");
     await settle(page);
-    ok("⚠️ a recessed porch offers the front three only, and drops the side flight", (await optVals()) === "|left|center|right" && (await stepsSel().inputValue()) === "", `${await optVals()} = ${await stepsSel().inputValue()}`);
+    // 2026-10-07: a recessed porch's two sides are open, so it takes a flight down either, and keeps this one.
+    ok("⚠️ a recessed porch offers the front three and both open sides, and keeps the side flight", (await optVals()) === "|left|center|right|leftSide|rightSide" && (await stepsSel().inputValue()) === "leftSide", `${await optVals()} = ${await stepsSel().inputValue()}`);
+    ok("...the hint says steps go off the floor's edge or down an open side", /Off the floor's edge in the opening, or down one of its open sides, as seen standing in front of the porch\./.test(
+      (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ")));
     d3 = (await save(page, calls)).d3;
-    ok("save 11b: recessed, no steps", d3.roof.porchDepthFt === 6 && !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount"), keys(d3.roof));
+    ok("save 11b: recessed, its side flight: porchSteps leftSide beside porchDepthFt 6", d3.roof.porchDepthFt === 6 && d3.roof.porchSteps === "leftSide" && !has(d3.roof, "porchOutFt"), JSON.stringify(d3.roof));
+    await typeNumber(page, depthInput(page), 3);
+    const recCut = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("⚠️ on a 3 ft recessed porch both sides grey out, the pick stays, and the hint says it is not drawn",
+      (await optVals()) === "|left|center|right|leftSide(off)|rightSide(off)" && (await stepsSel().inputValue()) === "leftSide"
+        && /Steps down a side are not drawn until the porch is at least 4 ft deep\. Make it deeper, or pick steps off its front edge\./.test(recCut), `${await optVals()} | ${recCut}`);
+    await typeNumber(page, depthInput(page), 6);
+    ok("...and at 6 ft both are offered again", (await optVals()) === "|left|center|right|leftSide|rightSide", await optVals());
+    await stepsSel().selectOption("");
+    await settle(page);
+    d3 = (await save(page, calls)).d3;
+    ok("save 11b2: recessed, no steps", d3.roof.porchDepthFt === 6 && !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount"), keys(d3.roof));
     await stepsSel().selectOption("center");
     await settle(page);
     ok("recessed centre steps show the step count box, the one step a porch at grade draws", (await countBox().count()) === 1 && (await countBox().getAttribute("placeholder")) === "blank = 1");
@@ -326,6 +347,13 @@ export async function main() {
     ok("switching back to projecting keeps the centre steps", (await stepsSel().inputValue()) === "center");
     d3 = (await save(page, calls)).d3;
     ok("save 11d: porchSteps center beside porchOutFt 6", d3.roof.porchSteps === "center" && d3.roof.porchOutFt === 6 && !has(d3.roof, "porchDepthFt"), JSON.stringify(d3.roof));
+
+    // ── 12. A lean-to on the left wall (2026-10-07): the porch's left side opens under it, so no flight there ──
+    await openStyle(page, "Harness Lean Porch");
+    const leanHint = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("12: beside a lean-to on the left wall, the left side is greyed out and the right offered",
+      (await optVals()) === "|left|center|right|leftSide(off)|rightSide", await optVals());
+    ok("12: ...and the hint names the lean-to", /or down its right side, as seen standing in front of the porch\. A lean-to stands on its left side\./.test(leanHint), leanHint);
 
     // ── 6. A style with no porch, saved untouched ──
     await openStyle(page, "Harness Plain Barn");

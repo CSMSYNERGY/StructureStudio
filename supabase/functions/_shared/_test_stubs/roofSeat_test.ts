@@ -267,7 +267,8 @@ const PLATE_READS: Array<[string, string]> = [
 ];
 // "What we drew" says how tall the WALLS are, and then, raised, where the roof sits above them.
 const WHAT_WE_DREW = "<b>What we drew:</b>";
-const SHELL_READS = 26;
+// 27 since 2026-10-07: d3RecessedSideStepsWhy reads the shell, as the recessed porch readout beside it does.
+const SHELL_READS = 27;
 
 Deno.test("⚠️ every wall-height read is on one side of the seam: wrapped in d3ShellFt, or a listed plate read", () => {
   const re = /wallHeightFt\)*\s*\|\|\s*(?:D3\.WALL_H|8|0)\b/;

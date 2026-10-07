@@ -24,7 +24,9 @@
 //      3c (2026-10-03): a projecting porch's steps go down either side too, greyed out (saying why) on a
 //      deck under 2' 6"; one picked on a deeper deck stays picked there but is not drawn, the note saying
 //      so, and is drawn again once the deck is deepened (2026-10-04); a recessed porch offers the three
-//      front ones only and builds its steps;
+//      front ones and (2026-10-07) one down either open side, keeping the side flight it is switched to
+//      with and building it turned onto that side, the two greyed out (saying why) on a porch under 4 ft,
+//      one picked there staying picked, not drawn, the note saying so; and builds its front steps;
 //      3e (2026-10-05): with no front set the porch end is a gable end, front or back, the note saying to set the
 //      front first; with the front a gable end it offers the left and right walls, which build the porch there,
 //      and a recessed porch on the left wall (an eave wall there) offers no timber truss, where the front gable does;
@@ -439,8 +441,34 @@ try {
   await shot(page, "ask-porch-side-steps.png");
   await radio(page, "Porch", "Recessed").click();
   await page.waitForTimeout(200);
-  ok("3c: a recessed porch offers the three front steps only, the side flight gone", (await segOpts()) === "None|Left|Center|Right"
-    && (await segBtn(page, "Porch steps", "None").getAttribute("aria-pressed")) === "true", await segOpts());
+  // Since 2026-10-07 a recessed porch's sides are open and take a flight too: the side flight carries over,
+  // built off that open side of the porch, turned onto it. The lean-to section 3 put on the right wall stands
+  // along the porch's right side, so that one is greyed out, saying why.
+  ok("3c: a recessed porch offers the three front steps and its open left side, keeping the side flight; the right side has the lean-to",
+    (await segOpts()) === "None|Left|Center|Right|Left side|Right side(off)" && (await segBtn(page, "Porch steps", "Left side").getAttribute("aria-pressed")) === "true"
+      && (await segBtn(page, "Porch steps", "Right side").getAttribute("title")) === "A lean-to is on that side", await segOpts());
+  await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "leftSide" && M.recessedSteps.turn === -1 && !M.porch));
+  ok("3c: …and builds it off the recessed porch's left side", true);
+  const recNote = (await page.locator('[data-ss-adv-f="porchSteps"]').innerText()).replace(/\s+/g, " ");
+  ok("3c: …the note says where steps can go, and which side has the lean-to",
+    /Off the floor's edge in the opening, or down its left side, as seen from in front\. A lean-to stands on its right side\./.test(recNote), recNote);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-recessed-side-steps.png");
+  // Under 4 ft deep there is no room between the inside corner and the post: greyed out, saying why; the pick stays and is not drawn.
+  await byLabel(page, "Depth (ft)").fill("3");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => { let n = 0; M.root.traverse((o) => { if (o.userData && o.userData.ssPorchSteps) n++; }); return !!M.recessedFrame && !M.recessedSteps && n === 0; });
+  const recShallow = (await page.locator('[data-ss-adv-f="porchSteps"]').innerText()).replace(/\s+/g, " ");
+  ok("3c: ⚠️ on a 3 ft recessed porch both sides are greyed out, saying why, and the picked one is not drawn",
+    (await segOpts()) === "None|Left|Center|Right|Left side(off)|Right side(off)" && (await segBtn(page, "Porch steps", "Right side").getAttribute("title")) === "Needs a porch 4' 0\" deep"
+      && (await segBtn(page, "Porch steps", "Left side").getAttribute("aria-pressed")) === "true"
+      && /Steps down a side are not drawn until the porch is at least 4' 0" deep\. Make it deeper, or pick steps off its front edge\./.test(recShallow), `${await segOpts()} | ${recShallow}`);
+  await byLabel(page, "Depth (ft)").fill("6");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "leftSide"));
+  ok("3c: …and at 6 ft it is drawn again", true);
+  await segBtn(page, "Porch steps", "None").click();
+  await panelModel(page, (M) => !M.recessedSteps && !!M.recessedFrame);
   // Its frame and deck are built of the porch wood since 2026-10-07, so the picker shows with no steps too.
   ok("3c: …and with no steps, the wood colour its frame is built in", (await page.locator('[data-ss-adv-f="wood"]').count()) === 1
     && /Wood color \(posts, beams, truss, deck\)/.test(await page.locator('[data-ss-adv-f="wood"]').innerText()));
