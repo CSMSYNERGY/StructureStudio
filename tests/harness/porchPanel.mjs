@@ -199,6 +199,9 @@ export async function main() {
       (await trussBox(page).count()) === 1 && (await woodInput(page).count()) === 0 && (await readout(page).count()) === 0);
     ok("...and the open-gable box beside it, unticked, and the wood box for its frame and deck",
       (await gableBox(page).count()) === 1 && !(await gableBox(page).isChecked()) && (await recWood(page).count()) === 1);
+    // Blank there is NOT natural wood (2026-10-07 review): the frame is the trim colour, only the steps natural.
+    ok("...its placeholder says what blank draws there: the trim colour, natural steps",
+      (await recWood(page).getAttribute("placeholder")) === "blank = trim colour, steps natural", await recWood(page).getAttribute("placeholder"));
     // The truss is a gable roof's: a gambrel hides the box, and gable brings it back.
     const roofType = field(page, /^Roof type/).locator("select");
     await roofType.selectOption("gambrel");

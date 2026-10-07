@@ -162,7 +162,7 @@ export function mergeDraft(prior, draft, source = "video") {
   const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
   const was = p.roof || null;
   if ((dr.porchOutFt || 0) > 0.5) {
-    delete roof.porchDepthFt; delete roof.porchTruss;
+    delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
     for (const k of own) if (!(k in dr)) delete roof[k];
     // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04).
     if (!("porchSteps" in dr) && was && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
@@ -334,6 +334,12 @@ const FIELDS = [
   { id: "roof.porchTruss", group: G.PORCH, w: 2, kind: "cat",
     live: (t, ctx) => porchKind(roofOf(t)) === "recessed" && ctx.kindMatches,
     get: (s) => (roofOf(s).porchTruss === true ? "yes" : "no"), stated: (d) => typeof roofOf(d).porchTruss === "boolean" },
+  // The gable over a recessed porch, open framing or sided (roof.porchGable, 2026-10-07): absent is sided,
+  // so only "open" is ever stated. Recessed porches only, like the truss; the sanitiser and both merges
+  // delete it beside a projecting porch.
+  { id: "roof.porchGable", group: G.PORCH, w: 2, kind: "cat",
+    live: (t, ctx) => porchKind(roofOf(t)) === "recessed" && ctx.kindMatches,
+    get: (s) => (roofOf(s).porchGable === "open" ? "open" : "sided"), stated: (d) => roofOf(d).porchGable != null },
 
   // ── C. eave and trim ─────────────────────────────────────────────────────────────────
   // AND THE EAVE, THE SAME WAY, THE DAY THE BUILDER PRESSES AN OVERHANG CHIP. Since the chip

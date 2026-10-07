@@ -374,6 +374,38 @@ export function openGableChecks(ok, tag, meshes, e, sb, H, depth) {
   ok(`[${tag}] open: the porch floor is decking in the wood colour, set-back wall to the slab's edge`, deck.length > 5 && deck.every((m) => m.color === WOOD)
     && Math.abs(Math.min(...deck.map((m) => m.min[2])) - (L / 2 - depth + 0.15)) <= 0.05 && Math.abs(Math.max(...deck.map((m) => m.max[2])) - (L / 2 + 0.1)) <= 0.05,
     `${deck.length} boards z ${deck.length ? f3(Math.min(...deck.map((m) => m.min[2]))) : "?"}..${deck.length ? f3(Math.max(...deck.map((m) => m.max[2]))) : "?"}`);
+  // As on the real cabin (the 2026-10-07 review): the boards run front to back, at right angles to the porch
+  // wall, each the deck's whole depth, side by side across the opening.
+  ok(`[${tag}] open: the deck boards run front to back, at right angles to the porch wall`,
+    deck.length > 5 && deck.every((m) => m.size[0] < 0.5 && Math.abs(m.size[2] - (depth - 0.05)) <= 0.01),
+    deck.slice(0, 2).map((m) => `${f3(m.size[0])} across x ${f3(m.size[2])} deep`).join("; "));
+  // ...and a wood rim board edges its open front and both open sides, over the floor band's edge from its
+  // underside to the deck's top, flush with the posts' front and outer faces, the sides back to the inside
+  // corner boards: no light band of slab under the deck.
+  const rim = meshes.filter((m) => m.tag === "deckRim");
+  const rimF = rim.filter((m) => m.size[0] > W), rimS = rim.filter((m) => m.size[0] < 1);
+  ok(`[${tag}] open: a wood rim board along the deck's front and both open sides`, rim.length === 3 && rimF.length === 1 && rimS.length === 2 && rim.every((m) => m.color === WOOD),
+    rim.map((m) => `${m.color} ${m.size.join("x")}`).join("; "));
+  const floor = meshes.filter((m) => m.group === "root" && m.geom === "BoxGeometry" && m.color === "#b7ac99")
+    .sort((a, b) => b.size[0] * b.size[2] - a.size[0] * a.size[2])[0];
+  const inside = meshes.filter((m) => m.corner === "inside");
+  if (rimF.length === 1 && rimS.length === 2 && floor && deck.length && e.posts.length === 2 && inside.length === 2) {
+    const deckTop = Math.max(...deck.map((m) => m.max[1]));
+    const pF = Math.max(...e.posts.map((m) => m.max[2])), pL = Math.min(...e.posts.map((m) => m.min[0])), pR = Math.max(...e.posts.map((m) => m.max[0]));
+    ok(`[${tag}] open: the rim covers the floor band's edge, from its underside to the deck's top`,
+      rim.every((m) => Math.abs(m.min[1] - floor.min[1]) <= 0.005 && Math.abs(m.max[1] - deckTop) <= 0.005) && Math.abs(rimF[0].min[2] - floor.max[2]) <= 0.005,
+      `rim y ${f3(rimF[0].min[1])}..${f3(rimF[0].max[1])} (floor ${f3(floor.min[1])}, deck top ${f3(deckTop)}), back z ${f3(rimF[0].min[2])} (slab edge ${f3(floor.max[2])})`);
+    ok(`[${tag}] open: the front rim is flush with the posts' front faces, out to their outer side faces`,
+      Math.abs(rimF[0].max[2] - pF) <= 0.01 && Math.abs(rimF[0].min[0] - pL) <= 0.01 && Math.abs(rimF[0].max[0] - pR) <= 0.01,
+      `rim z ..${f3(rimF[0].max[2])} x ${f3(rimF[0].min[0])}..${f3(rimF[0].max[0])}; posts z ..${f3(pF)} x ${f3(pL)}..${f3(pR)}`);
+    for (const r of rimS) {
+      const s = Math.sign(r.ctr[0]), board = inside.find((m) => Math.sign(m.ctr[0]) === s);
+      ok(`[${tag}] open: the ${s > 0 ? "right" : "left"} side rim runs from the inside corner board to the front rim, flush with the post`,
+        !!board && Math.abs(r.min[2] - board.max[2]) <= 0.01 && Math.abs(r.max[2] - rimF[0].min[2]) <= 0.01
+          && Math.abs((s > 0 ? r.max[0] - pR : r.min[0] - pL)) <= 0.01 && Math.abs((s > 0 ? r.min[0] - floor.max[0] : r.max[0] - floor.min[0])) <= 0.01,
+        `z ${f3(r.min[2])}..${f3(r.max[2])} (board front ${board && f3(board.max[2])}) x ${f3(r.min[0])}..${f3(r.max[0])}`);
+    }
+  }
 }
 
 // Aim, render synchronously, screenshot the canvas. `tint` maps mesh index -> hex.

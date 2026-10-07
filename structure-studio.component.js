@@ -12447,29 +12447,50 @@ function buildShed3DModel(THREE, p) {
     }
   }
   // ── THE PORCH FLOOR AS A DECK (2026-10-07) ──
-  // With the style's wood colour the porch floor is decking in it, as on the real cabin: boards parallel to
-  // the porch wall with 0.03 ft gaps over a dark strip, on the floor slab from the set-back wall's face to
-  // the slab's edge and across the whole opening. In root with the floor, so look-inside keeps it, in a
-  // holder on the footprint's edge turned like the recessed steps'. Without colors.wood the floor is the
-  // slab it always was.
+  // With the style's wood colour the porch floor is decking in it, as on the real cabin: boards running
+  // front to back, at right angles to the porch wall, from the set-back wall's face to the floor slab's
+  // edge, 0.03 ft apart over a dark strip, side by side across the whole opening. A RIM BOARD in the same
+  // wood edges the open front and both open sides, as the real deck's does: from the floor band's underside
+  // (the skirt's bottom on a raised floor, as far down as the posts go) up to the deck's top, its faces
+  // flush with the posts' front and outer faces, the side ones running back to the inside corner boards.
+  // So the deck reads as wood all round and the slab's light edge no longer shows under it. In root with
+  // the floor, so look-inside keeps it, in a holder on the footprint's edge turned like the recessed
+  // steps': local x along the wall from the opening's middle, local z out from the footprint line.
+  // Without colors.wood the floor is the slab it always was.
   if (porchOn && porchWoodHex && PF) {
     const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[porchWall];
     const run = (porchWall === "south" || porchWall === "north") ? bldgW : bldgH;
     const DECK_T = 0.045, BOARD = 0.46, GAP = 0.03, VOID = 0.005;
-    const d0 = T / 2 - porchDepth, d1 = 0.1;
-    const nB = Math.max(1, Math.round((d1 - d0) / (BOARD + GAP))), step = (d1 - d0) / nB;
+    const d0 = T / 2 - porchDepth, d1 = 0.1, across = run + 0.2;
+    const nB = Math.max(1, Math.round(across / (BOARD + GAP))), step = across / nB;
     const deckHolder = new THREE.Group();
     deckHolder.userData.ssPorch = "recessedDeck";
     deckHolder.position.set((n[0] * bldgW) / 2, 0, (n[1] * bldgH) / 2);
     deckHolder.rotation.y = Math.atan2(n[0], n[1]);
     for (let i = 0; i < nB; i++) {
-      const b = box(porchFrameMat, run + 0.2, DECK_T, step - GAP);
-      b.position.set(0, VOID + DECK_T / 2, d0 + (i + 0.5) * step);
+      const b = box(porchFrameMat, step - GAP, DECK_T, d1 - d0);
+      b.position.set(-across / 2 + (i + 0.5) * step, VOID + DECK_T / 2, (d0 + d1) / 2);
       deckHolder.add(pfTag(b, "deck"));
     }
-    const voidB = box(mat("#3B3024", { roughness: 1 }), run + 0.2, VOID, d1 - d0);
+    const voidB = box(mat("#3B3024", { roughness: 1 }), across, VOID, d1 - d0);
     voidB.position.set(0, VOID / 2, (d0 + d1) / 2);
     deckHolder.add(pfTag(voidB, "deckVoid"));
+    // The rim. Front: across the opening to the posts' outer side faces (PF.face out from each end), from the
+    // slab's edge out to the posts' front face. Sides: from the inside corner board's front face (the side
+    // beams' back end) to the front rim, out to the posts' outer side faces.
+    const rimTop = VOID + DECK_T, rimBot = Math.min(pfBot, -floor.geometry.parameters.height);
+    const rimH = rimTop - rimBot, rimY = (rimTop + rimBot) / 2;
+    const rimF = Math.max(d1 + 0.05, pfFront), rimS = run / 2 + PF.face, zS0 = PF.face - porchDepth;
+    const rimFront = box(porchFrameMat, 2 * rimS, rimH, rimF - d1);
+    rimFront.position.set(0, rimY, (d1 + rimF) / 2);
+    deckHolder.add(pfTag(rimFront, "deckRim"));
+    if (d1 - zS0 > 0.05) {
+      for (const s of [-1, 1]) {
+        const rimSide = box(porchFrameMat, rimS - across / 2, rimH, d1 - zS0);
+        rimSide.position.set((s * (rimS + across / 2)) / 2, rimY, (zS0 + d1) / 2);
+        deckHolder.add(pfTag(rimSide, "deckRim"));
+      }
+    }
     root.add(deckHolder);
   }
 
@@ -26240,9 +26261,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     else delete roof.plateBand;
     return { ...p, spec: { ...p.spec, roof } };
   });
-  // colors.wood, the projecting porch's lumber, and a recessed porch's steps' (2026-10-03). A blank box
-  // DELETES the key and the renderer falls back to natural wood (D3_COLORS.wood), which is never
-  // written into a row.
+  // colors.wood, the projecting porch's lumber, and a recessed porch's steps' (2026-10-03) and frame and
+  // deck (2026-10-07). A blank box DELETES the key. The renderer then falls back to natural wood
+  // (D3_COLORS.wood) on a projecting porch and a recessed porch's steps, but draws a recessed porch's
+  // frame in the trim colour with no decking, as every stored style was drawn: so the Advanced page's
+  // Natural tile on a recessed porch writes D3_COLORS.wood itself, the one place it is written.
   const calSetWood = (v) => setAdminCal((p) => {
     const colors = { ...p.spec.colors };
     if (String(v || "").trim()) colors.wood = v;
@@ -28505,16 +28528,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </label>
           ))}
-          {/* The porch's own lumber. No prompt in this pipeline ever asks for it, so on a
-              projecting porch it will always need setting by hand — surfaced here rather than
-              hidden in a colour loop for exactly that reason. A recessed porch's steps are built
-              of it too (2026-10-04), so it is here for them, named for what it colours there. */}
-          {(calPorchKind(roof) === "projecting" || (calPorchKind(roof) === "recessed" && roof.porchSteps)) && (
-            <label style={calFixLabel}>{calPorchKind(roof) === "projecting" ? "Porch wood" : "Porch steps wood"}
+          {/* The porch's own lumber. Only the v2 draft reads it, and only where the porch timber
+              shows a colour of its own, so it often needs setting by hand -- surfaced here rather
+              than hidden in a colour loop for exactly that reason. A recessed porch's steps are
+              built of it (2026-10-04) and, since 2026-10-07, its posts, beams, truss and deck, so it
+              is here for every recessed porch, named for what it colours there. Blank there is the
+              frame in the trim colour with no decking, only the steps natural wood, which the
+              placeholder and the swatch say. */}
+          {(calPorchKind(roof) === "projecting" || calPorchKind(roof) === "recessed") && (
+            <label style={calFixLabel}>{calPorchKind(roof) === "projecting" ? "Porch wood" : "Porch wood (posts, beams, truss, deck)"}
               <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                <input type="text" placeholder="blank = natural wood" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)}
+                <input type="text" placeholder={calPorchKind(roof) === "projecting" ? "blank = natural wood" : "blank = trim colour, steps natural"} value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)}
                   style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors.wood || "#B08A5A", flexShrink: 0 }} />
+                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors.wood || (calPorchKind(roof) === "projecting" ? "#B08A5A" : adminCal.spec.colors.trim || "#EEE"), flexShrink: 0 }} />
               </div>
             </label>
           )}
@@ -31621,14 +31647,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       )}
                       {/* Its own box, NOT a fourth entry in the colour loop below: that loop offers the
                           catalog, and for any key but body or trim the catalog is ROOFING, so a pick
-                          would write a metal roof colour as lumber. Blank means natural wood, and blank
-                          is what is stored (calSetWood deletes the key). A recessed porch's steps are
-                          built of it too (2026-10-04), so it shows for them, named for them. */}
+                          would write a metal roof colour as lumber. Blank is what is stored (calSetWood
+                          deletes the key): natural wood on a projecting porch. A recessed porch's steps
+                          are built of it (2026-10-04) and its posts, beams, truss and deck (2026-10-07),
+                          so it shows for every recessed porch, named for them; blank there draws the frame
+                          in the trim colour with no decking, only the steps natural wood, and the
+                          placeholder and the swatch say so. */}
                       {(kind === "projecting" || kind === "recessed") && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{kind === "projecting" ? "Wood colour (posts, deck, ceiling)" : "Wood colour (posts, beams, truss, deck)"}
                           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                            <input type="text" placeholder="#C4965A (natural)" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                            <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors.wood || D3_COLORS.wood, flexShrink: 0 }} />
+                            <input type="text" placeholder={kind === "projecting" ? "#C4965A (natural)" : "blank = trim colour, steps natural"} value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                            <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors.wood || (kind === "projecting" ? D3_COLORS.wood : adminCal.spec.colors.trim || D3_COLORS.trim), flexShrink: 0 }} />
                           </div>
                         </label>
                       )}
@@ -33370,7 +33399,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const steep = riseIn != null && riseIn > 8 && st.count < 12;
       const shallow = riseIn != null && riseIn < 4 && st.count > 1;
       const pastBox = autoSteps != null && autoSteps > 12 && !(Number(roof.porchStepCount) >= 1);
-      const woods = [["", "Natural", D3_COLORS.wood], ["#8A5A36", "Cedar stain", "#8A5A36"], ["#5C4033", "Walnut stain", "#5C4033"], ["#8C8C84", "Weathered gray", "#8C8C84"], ["#F2F1EA", "Painted white", "#F2F1EA"]];
+      // The wood tiles. Blank (no colors.wood) is natural wood on a projecting porch, but on a recessed one
+      // (2026-10-07) the frame in the trim colour with no decking, only the steps natural wood, as every
+      // stored style was drawn. So there blank is a tile of its own, "Trim color", and Natural writes
+      // D3_COLORS.wood: the only way to natural-wood porch timber from a tile.
+      const woods = [...(kind === "recessed" ? [["", "Trim color", spec.colors.trim || D3_COLORS.trim], [D3_COLORS.wood, "Natural", D3_COLORS.wood]] : [["", "Natural", D3_COLORS.wood]]),
+        ["#8A5A36", "Cedar stain", "#8A5A36"], ["#5C4033", "Walnut stain", "#5C4033"], ["#8C8C84", "Weathered gray", "#8C8C84"], ["#F2F1EA", "Painted white", "#F2F1EA"]];
       const wood = String(spec.colors.wood || "");
       const porchW = Math.max(bldgW, bldgH);
       out.push(
@@ -33443,13 +33477,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
           {/* A recessed porch's steps are built of the porch wood too (2026-10-04), and its posts, beams, truss and
-              deck (2026-10-07). */}
+              deck (2026-10-07). Blank there says what it draws: the trim colour, no decking, natural-wood steps. */}
           {(kind === "projecting" || kind === "recessed") && (
             <div key="wood" className="ss-adv-f is-full" data-ss-adv-f="wood">
               <div className="ss-adv-fh"><span className="ssd-fld-l">{kind === "projecting" ? "Wood color (posts, deck, ceiling)" : "Wood color (posts, beams, truss, deck)"}</span></div>
               <div className="ss-adv-pick">
-                <span className="ssd-cs-swatch" style={{ background: advHexOk(wood) ? wood : D3_COLORS.wood }} />
-                <span className="ssd-tb-read">{!wood ? "Natural wood" : (woods.find((w) => w[0] && w[0].toLowerCase() === wood.toLowerCase()) || [0, `Custom ${wood}`])[1]}</span>
+                <span className="ssd-cs-swatch" style={{ background: advHexOk(wood) ? wood : woods[0][2] }} />
+                <span className="ssd-tb-read" data-ss-wood-read="">{!wood ? (kind === "recessed" ? "Not set: frame in the trim color, no decking, steps in natural wood" : "Natural wood") : (woods.find((w) => w[0] && w[0].toLowerCase() === wood.toLowerCase()) || [0, `Custom ${wood}`])[1]}</span>
               </div>
               <div className="ss-adv-sws" role="group" aria-label="Wood color" style={{ maxWidth: 240 }}>
                 {woods.map(([v, l, css]) => {
@@ -33460,7 +33494,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               <div className="ss-adv-hex">
                 <span className="ssd-fld-l" style={{ margin: 0 }}>Custom</span>
-                <input type="text" className="ssd-input ssd-field" aria-label="Wood color hex" placeholder={D3_COLORS.wood} value={wood} maxLength={7} spellCheck={false}
+                <input type="text" className="ssd-input ssd-field" aria-label="Wood color hex" placeholder={kind === "recessed" ? "Blank: trim color" : D3_COLORS.wood} value={wood} maxLength={7} spellCheck={false}
                   onChange={(e) => calSetWood(e.target.value)} />
                 <input type="color" aria-label="Wood color picker" value={advHexOk(wood) ? wood : D3_COLORS.wood} onChange={(e) => calSetWood(e.target.value)} />
               </div>
