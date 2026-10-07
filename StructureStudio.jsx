@@ -5998,6 +5998,31 @@ function d3WingListOn(roofCfg) {
 // "Wings exist" for every gate that used to read m.wings.length: side wings or end wings drawn. The same
 // answer as m.wings.length on every massing without a list (it has no ends).
 function d3WingsOn(m) { return !!(m && (m.wings.length || (m.ends && m.ends.length))); }
+// ── THE ROOF RAISED BY THE RAFTER (roof.seat, 2026-10-06) ────────────────────────────────────────────
+// Carolyn's Q28: "make it an option in the designer setup for each design: roof on the plate, or raised
+// by the rafter height". ON THE PLATE (absent, today's roof) the rafters sit on the top plate, so the roof
+// line passes through the plate at the wall (d3RoofProfile) and a 12 in overhang at 4.8:12 ends the top of
+// its deck 2 in below the plate. RAISED stands the whole SHELL, the walls and the roof together, one
+// rafter higher: the builder's tape from the top plate to the underside of the deck, at the wall line.
+//
+// ONE SEAM. Every place that turns the wall height into wall, roof, vent or appendage geometry reads it
+// through d3ShellFt. Only the inside of the building (partition walls, ceiling fittings, lofts), the price
+// and the wall-height boxes and words keep the true plate. With nothing set d3ShellFt hands back its own
+// argument, the same value of the same type, so every stored style draws exactly as it did.
+//
+// v1: a style with wings stays on the plate (d3SeatApplies), because wing roofs meet the middle at set
+// heights. A blank rafter is a 2x4's 3.5 in, applied HERE at draw time and never written down.
+// ⚠️ LOCK-STEP: the 1.5 .. 12 in band is CLAMPS.rafterDepthIn in supabase/functions/_shared/styleD3.ts.
+// Literals inside the functions, not a module const: tests and the stored-style digest evaluate this
+// region with nothing else in scope.
+function d3SeatApplies(roofCfg) { const r = roofCfg || {}; return !(Number(r.wingWidthFt) > 0.5) && !d3WingListOn(r); }
+function d3SeatLiftFt(roofCfg) {
+  const r = roofCfg || {};
+  if (r.seat !== "raised" || !d3SeatApplies(r)) return 0;
+  const n = r.rafterDepthIn == null || r.rafterDepthIn === "" ? NaN : Number(r.rafterDepthIn);
+  return (isFinite(n) ? Math.max(1.5, Math.min(12, n)) : 3.5) / 12;
+}
+function d3ShellFt(roofCfg, plateFt) { const lift = d3SeatLiftFt(roofCfg); return lift > 0 ? Number(plateFt) + lift : plateFt; }
 // The massing holds something the legacy readers cannot express: a wing on a wing, or an end wing. Only
 // then does a reader take its list branch; one wing per side from a list is read by today's code, whose
 // records it carries field for field.
@@ -7469,7 +7494,7 @@ function d3PorchStepsOnGround(spec, W, L, g, D, where) {
 function d3RecessedStepsOnGround(spec, W, L) {
   const roof = (spec && spec.roof) || {};
   if (D3_PORCH_STEP_FRONT.indexOf(roof.porchSteps) < 0) return null;
-  const H = (spec && spec.wallHeightFt) || D3.WALL_H;
+  const H = d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H);
   const g = d3RecessedPorchFrame(roof, W, L, H, d3CornerFaceFt(d3CladdingFor(spec && spec.siding, spec && spec.sidingExposureIn).relief));
   if (!g) return null;
   const at = (h) => d3PorchStepsGeom(g, D3.WALL_T / 2, roof.porchSteps, h, roof.porchStepCount);
@@ -7479,7 +7504,7 @@ function d3RecessedStepsOnGround(spec, W, L) {
 // roof's own peak otherwise.
 function d3ModelTopFt(spec, W, L) {
   const roof = (spec && spec.roof) || {};
-  const m = d3Massing(roof, W, L, Number(spec && spec.wallHeightFt) || D3.WALL_H);
+  const m = d3Massing(roof, W, L, d3ShellFt(roof, Number(spec && spec.wallHeightFt) || D3.WALL_H));
   let top = m.Hc;
   m.prof.forEach((p) => { if (p[1] > top) top = p[1]; });
   return top;
@@ -7639,7 +7664,7 @@ function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
   if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
-  const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, (spec && spec.wallHeightFt) || 8);
+  const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, d3ShellFt(roof, (spec && spec.wallHeightFt) || 8));
   return d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands).face;
 }
 
@@ -7703,7 +7728,7 @@ function d3DormerReadout(spec, sizeLabel) {
   if (roof.type === "shed" || roof.dormerType !== "transom" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
+  const r = d3DormerRoof(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || 8));
   return d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands);
 }
 // A DORMER UNDER A ROOF THAT LANDS ON ITS ROOF (review, 2026-09-29), for a spec + a size label: a lean-to or
@@ -7723,7 +7748,7 @@ function d3DormerCovered(spec, sizeLabel) {
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
   const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
-  const H = (spec && spec.wallHeightFt) || 8;
+  const H = d3ShellFt(roof, (spec && spec.wallHeightFt) || 8);
   const r = d3DormerRoof(roof, w, d, H);
   if (!r.lands) return null;
   const fr = Math.max(-0.85, Math.min(0.85, roof.dormerOffsetU != null ? roof.dormerOffsetU : 0.45));
@@ -8275,7 +8300,7 @@ function d3PorchReadout(spec, sizeLabel) {
   // new frame is taller than H, a raised centre's gable end is Hc), exactly as buildShed3DModel reads them. Outside the new frame and
   // without porchWidthFt / porchAttachFt these are S, H and H - 0.2: today's readout.
   const S = d3PorchSpan(roof, w, d).span;
-  const H = (spec && spec.wallHeightFt) || D3.WALL_H;
+  const H = d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H);
   const top = d3PorchWallTopFt(roof, w, d, H);
   const attachFt = Number(roof.porchAttachFt) || 0;
   const trimFace = D3.WALL_T / 2 + 0.03;
@@ -8312,7 +8337,7 @@ function d3RecessedPorchReadout(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  const g = d3RecessedPorchFrame(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
+  const g = d3RecessedPorchFrame(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H));
   if (!g) return null;
   return { wall: g.wall, onEave: g.onEave, posts: g.posts, steps: d3RecessedStepsOnGround(spec, w, d) };
 }
@@ -8348,7 +8373,7 @@ function d3LeanToReadout(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
   const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
-  const g = d3LeanToGeom(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
+  const g = d3LeanToGeom(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H));
   if (!g) return null;
   return d3LeanToFascia(roof, g);
 }
@@ -8392,10 +8417,10 @@ function d3LeanTosReadout(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
   const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
-  const gs = d3LeanTosGeom(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
+  const gs = d3LeanTosGeom(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H));
   if (!gs) return null;
-  const cj = d3CornerJoins(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H, gs);
-  const pjn = d3PorchJoins(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H, gs, cj);
+  const cj = d3CornerJoins(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H), gs);
+  const pjn = d3PorchJoins(roof, w, d, d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H), gs, cj);
   // The porch on each wall, in the lean-to's own run coordinates: a projecting porch's span (d3PorchSpan:
   // building u on a gable end, down the ridge on an eave wall), a recessed one across its whole end.
   const compass = { south: "front", north: "back", west: "left", east: "right" };
@@ -8432,7 +8457,7 @@ function d3LeanTosReadout(spec, sizeLabel) {
       if (J) return { at: J.at, asked: true, joined: true, why: [] };
       const N = pjn.near.find((x) => x.i === g.i);
       if (!N) return null;
-      const Hn = (spec && spec.wallHeightFt) || D3.WALL_H;
+      const Hn = d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H);
       const yP = pjn.porch.ya, y1P = yP - pjn.porch.pitch * g.w;
       const keep = Math.abs(N.dy) <= D3_LT_CORNER_TOL;
       const onWall = keep ? g.mode === "wall" : true;
@@ -8487,7 +8512,12 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
   const ax = d3RoofAxes(roof, w, d);
   const S = ax.S;
   const NEW_FRAME = d3NewFrame(roof);
-  const H = (spec && spec.wallHeightFt) || 8;
+  // A ROOF RAISED BY THE RAFTER (roof.seat, d3ShellFt): the drawing is the 3D's shell, walls and roof
+  // together up to H, one rafter above the plate. The "wall" dimension still measures the plate, the
+  // number a builder frames to, and a dashed line at the plate with a short "rafter" dimension above it
+  // names the band between. On the plate H IS Hplate and the drawing is the one it always was.
+  const Hplate = (spec && spec.wallHeightFt) || 8;
+  const H = d3ShellFt(roof, Hplate);
   const OV = roof.overhang != null ? roof.overhang : 0.6;
   // THE DRAWING LEARNS THE EAVE FINISH TOO -- from d3EaveFinishDrop, the same function the 3D
   // hangs its boards at, because this drawing exists so a builder can trust it against the 3D
@@ -8588,12 +8618,28 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
 
       {/* WALL HEIGHT, left -- or, with a lean-to drawn on the left (roof.leanToAttach), just inside the
           building's own left wall, so it measures that wall and not the lean-to's shorter posts. */}
-      {tick(WX, Y(0), Y(H), "wallHeightFt")}
-      <line x1={WX - 4} y1={Y(H)} x2={WX + 4} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      {tick(WX, Y(0), Y(Hplate), "wallHeightFt")}
+      <line x1={WX - 4} y1={Y(Hplate)} x2={WX + 4} y2={Y(Hplate)} {...dimStroke("wallHeightFt")} />
       <line x1={WX - 4} y1={Y(0)} x2={WX + 4} y2={Y(0)} {...dimStroke("wallHeightFt")} />
       {ltLeft
-        ? label(WX + 6, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "start")
-        : label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+        ? label(WX + 6, (Y(0) + Y(Hplate)) / 2, d3FtIn(Hplate), "wall", "wallHeightFt", "start")
+        : label(PL - 30, (Y(0) + Y(Hplate)) / 2, d3FtIn(Hplate), "wall", "wallHeightFt", "end")}
+      {/* THE RAFTER UNDER A RAISED ROOF (roof.seat): the plate as a dashed line across the wall, and the
+          rafter's own depth from it up to where the roof now sits, in inches, at the top of the wall's
+          dimension. Only when raised: on the plate there is no band to name. With a lean-to drawn on the
+          left the dimension stands just inside the wall, where the main roof's slope runs through the
+          space above the shell top, so its words sit just under the plate line instead (review,
+          2026-10-07: above the shell top the roof line struck through them). */}
+      {H !== Hplate && (
+        <g data-ss-elev-rafter="1">
+          <line x1={X(-s2)} y1={Y(Hplate)} x2={X(s2)} y2={Y(Hplate)} stroke={INK} strokeWidth="1" strokeDasharray="3 3" />
+          {tick(WX, Y(Hplate), Y(H), "rafterDepthIn")}
+          <line x1={WX - 4} y1={Y(H)} x2={WX + 4} y2={Y(H)} {...dimStroke("rafterDepthIn")} />
+          {ltLeft
+            ? label(WX + 6, Y(Hplate) + 12, `${Math.round((H - Hplate) * 1200) / 100}"`, "rafter", "rafterDepthIn", "start")
+            : label(PL - 30, Y(H) - 12, `${Math.round((H - Hplate) * 1200) / 100}"`, "rafter", "rafterDepthIn", "end")}
+        </g>
+      )}
 
       {/* PEAK, right -- read-only, the number a builder actually measures against */}
       {tick(VW - PR + 22, Y(0), Y(peak), null)}
@@ -10183,7 +10229,13 @@ function buildShed3DModel(THREE, p) {
   // Wall height: config-driven when the tenant sets it (per-style wallHeightFt
   // in the config blob / building_sizes.wall_height_ft once 016 is applied),
   // else the D3 default (plan §6 gap #1).
-  const H = p.wallHeightFt || D3.WALL_H, T = D3.WALL_T;
+  // ⚠️ H IS THE SHELL, Hplate THE WALL PLATE (roof.seat, 2026-10-06). A roof raised by the rafter stands
+  // the walls and the roof together d3SeatLiftFt above the plate, so every wall, roof, vent, porch, lean-to
+  // and dormer below reads H and they all move as one. Only the inside of the building reads Hplate: the
+  // partition walls, the ceiling fittings and the lofts, which stand on the plate, not under the roof.
+  // On the plate (absent) d3ShellFt hands Hplate back untouched and H IS Hplate.
+  const Hplate = p.wallHeightFt || D3.WALL_H, T = D3.WALL_T;
+  const H = d3ShellFt((p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF, Hplate);
   const root = new THREE.Group();
   // Standard (PBR) materials, not Lambert: with the ACES tone mapping the viewer
   // sets, they are what makes painted siding read as PAINT and a metal roof as
@@ -15043,9 +15095,15 @@ function buildShed3DModel(THREE, p) {
       const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
       // The wall's own top where the device hangs (wings: Hc across a raised centre; H otherwise).
       const wTop = topOver(wf, along, along);
+      // ...and the PLATE under it. Under a roof raised by the rafter (roof.seat) every wall stands a rafter
+      // above its plate, but "within 3 in of the plate" and "never above the plate line" mean the plate a
+      // builder framed: a light stamped at 96 in on an 8 ft wall is still the lamp under the eave, and a
+      // cover plate inside never climbs into the rafter band. The lamp's cap stays on the shell (EAVE_CAP),
+      // under the eave that moved up with it. On the plate H IS Hplate and wPlate IS wTop.
+      const wPlate = wTop - (H - Hplate);
       g.rotation.y = Math.atan2(wf.N[0], wf.N[1]);   // local +z -> exterior, local x -> along
       g.position.set(wf.O[0] + wf.U[0] * along, 0, wf.O[1] + wf.U[1] * along);
-      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= wTop - 0.25);
+      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= wPlate - 0.25);
       if (exterior) {
         // Profile u is the along-wall world coordinate on a gable end: world x when the ridge
         // runs along z (north/south are the ends), world z otherwise (see the cap UV comment).
@@ -15092,7 +15150,7 @@ function buildShed3DModel(THREE, p) {
         const pd = breaker ? 0.25 : 0.04;
         // Kept on the wall whatever the stored height says: the centre may not put the plate
         // through the floor or above the plate line.
-        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, wTop - ph / 2 - 0.05));
+        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, wPlate - ph / 2 - 0.05));
         const zBack = -(T / 2);                        // the interior face
         const plate = add(g, box(mat(breaker ? "#9CA3AF" : "#F1F0EA", breaker ? { roughness: 0.5, metalness: 0.4 } : { roughness: 0.55 }), pw, ph, pd));
         plate.position.set(0, y, zBack - pd / 2);
@@ -15106,8 +15164,9 @@ function buildShed3DModel(THREE, p) {
       }
     } else {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
-      // The LOCAL ceiling (wings: the centre's plate under the raised centre, H under a wing).
-      const cH0 = d3CeilingFt(roofCfg, bldgW, bldgH, H, g.position.x, g.position.z);
+      // The LOCAL ceiling (wings: the centre's plate under the raised centre, H under a wing). The PLATE,
+      // not the shell: under a roof raised by the rafter the ceiling is still the top of the walls.
+      const cH0 = d3CeilingFt(roofCfg, bldgW, bldgH, Hplate, g.position.x, g.position.z);
       // UNDER A LOFT (LOFT HEIGHT) the loft's underside is the ceiling. A loft on the plate has its
       // floor top 0.02 ft under it, so a light hung at the plate was drawn wholly inside the platform:
       // hidden from below, flickering on the loft floor in Look-inside, and behind the platform for
@@ -15200,7 +15259,7 @@ function buildShed3DModel(THREE, p) {
   const buildPartition3D = (it) => {
     const horiz = it.axis !== "y";
     const at = Number(it.atFt) || 0, from = Number(it.fromFt) || 0;
-    const Hp = ssPartitionHeightFt(it, H), PT = SS_PARTITION_T_FT;
+    const Hp = ssPartitionHeightFt(it, Hplate), PT = SS_PARTITION_T_FT;
     const wf = horiz
       ? { O: [from - bldgW / 2, at - bldgH / 2], U: [1, 0], N: [0, 1] }
       : { O: [at - bldgW / 2, from - bldgH / 2], U: [0, 1], N: [1, 0] };
@@ -15256,11 +15315,11 @@ function buildShed3DModel(THREE, p) {
   // D3_LOFT_PLATE_GAP under it, so it never shares the wall tops' plane. model.loftElevFt hands this
   // same function to the viewer's highlight box and its drag plane: the platform, the box and the plane
   // are one computation and cannot disagree.
-  // ⚠️ THE PLATE READ: H here is the wall plate. A roof raised on its rafters (a shell top above the
-  // plate) must keep handing ssLoftPlateFt the plate, not the shell.
+  // ⚠️ THE PLATE READ: Hplate, the wall plate. A roof raised on its rafters (roof.seat: H, the shell, a
+  // rafter above the plate) must keep handing ssLoftPlateFt the plate, not the shell.
   const loftElevOf = (it) => {
     const c = itemTypes[it.type] || {};
-    const plate = ssLoftPlateFt(roofCfg, bldgW, bldgH, H, ftX(it.x), ftZ(it.y), it.widthFt || c.width || 6, it.heightFt || c.height || 4);
+    const plate = ssLoftPlateFt(roofCfg, bldgW, bldgH, Hplate, ftX(it.x), ftZ(it.y), it.widthFt || c.width || 6, it.heightFt || c.height || 4);
     const e0 = ssLoftElevFt(it, plate);
     return e0 >= plate - 1e-6 ? plate - D3_LOFT_PLATE_GAP : e0;
   };
@@ -16089,7 +16148,7 @@ function ssSelfCheckCameras(p, frameMap) {
   const L = Math.max(1, Number(p.bldgH) || 0);
   const spec = p.style3d || {};
   const roof = spec.roof || null;
-  const H = Math.max(1, Number(spec.wallHeightFt) || D3.WALL_H);
+  const H = d3ShellFt(roof, Math.max(1, Number(spec.wallHeightFt) || D3.WALL_H));
   const off = D3_WALL_AZIMUTH[d3FrontGableWall(roof, W, L)] || 0;
   // The top of the roof, generously: 0.62 of the profile span above the wall covers a 12:12
   // gable and every gambrel the sanitiser will pass. Over-estimating costs a little air above
@@ -16766,14 +16825,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const gableFit3 = (it) => {
         if (!ssIsGableVent(it) || !it.wall) return null;
         const along = ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
-        return ssGableVentFit(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, it.wall, spec.wallHeightFt || D3.WALL_H, it, along, it.ventRiseFt);
+        return ssGableVentFit(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, it.wall, d3ShellFt(spec.roof, spec.wallHeightFt || D3.WALL_H), it, along, it.ventRiseFt);
       };
       // The wall's LOCAL top over an item (d3WallTopFt, wings 2026-09-24) — what the renderer's
       // openingSpan clamps it under: Hc across a raised centre, H on a wing's end wall, the high eave
       // on a new-frame shed's tall wall. On every wall of any other building it is the plate height,
       // as before.
       const wallTop3 = (it) => {
-        const Hn = spec.wallHeightFt || D3.WALL_H;
+        const Hn = d3ShellFt(spec.roof, spec.wallHeightFt || D3.WALL_H);
         if (!it || !it.wall) return Hn;
         const w = it.widthFt || (itemTypes[it.type] || {}).width || 0;
         const ns = it.wall === "north" || it.wall === "south";
@@ -17128,7 +17187,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             ...ventStamps(fx) };
           // Into the gable when this is a gable end (Carolyn, 2026-09-14) — ssVentGableDefault, the
           // one rule both placement paths call.
-          const vd = ssVentGableDefault(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H, ni, liveItems, itemTypes, scale, mgX, mgY);
+          const vd = ssVentGableDefault(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, d3ShellFt(spec.roof, spec.wallHeightFt || D3.WALL_H), ni, liveItems, itemTypes, scale, mgX, mgY);
           ni = vd.ni; gableNote = vd.note;
         } else if (type === "window") {
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
@@ -17526,7 +17585,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const ventMove = isVentItem(it);
             let sn = sn0;
             if (ventMove) {
-              const Hv = spec.wallHeightFt || D3.WALL_H, roofV = spec.roof || D3_DEFAULT_ROOF;
+              const roofV = spec.roof || D3_DEFAULT_ROOF, Hv = d3ShellFt(roofV, spec.wallHeightFt || D3.WALL_H);
               const now = ssVentWhere(roofV, bldgW, bldgH, Hv, it, scale, mgX, mgY);
               if (dragging3.ventGrab == null) {
                 dragging3.ventGrab = Math.max(0, Math.min(p.y - now.bottomFt, sp[1] - sp[0]));
@@ -17553,7 +17612,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const dCand3 = { ...it, ...sn, widthFt: wFt };
             // Against the viewer's own plate, which is what a vent was just moved on (only a vent's
             // band reads it; review 2026-09-15, a vent dragged into a window on a 10 ft wall).
-            const dH3 = spec.wallHeightFt || D3.WALL_H;
+            const dH3 = d3ShellFt(spec.roof, spec.wallHeightFt || D3.WALL_H);
             if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale, dH3)) { flash3(SS_REFUSE_WALL); return; }
             if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3, dH3)) { flash3(SS_REFUSE_SLAB); return; }
             if (ventMove) {
@@ -24754,7 +24813,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //
   // Against the LOADED design's own wall height (its style, wall-height pick and foundation — the
   // same resolver ventRoof2D reads for the design on screen), or a legal window under a top-spot
-  // vent on a 10 ft wall reads as a collision and is moved every time the design is opened.
+  // vent on a 10 ft wall reads as a collision and is moved every time the design is opened. And
+  // against its SHELL (d3ShellFt, roof.seat), the height ventRoof2D's H and the 3D measure a vent and
+  // an opening's band against, or a raised style's top-spot vent would be checked a rafter too low.
   const repairLoaded = (loaded, sizeLabel, selections) => {
     const d = parseSize(sizeLabel);
     if (!d || !loaded.length) return loaded;
@@ -24762,7 +24823,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const s = selections || {};
       const styleCfg = C.buildingStyles.find((x) => x.value === s.style);
       const spec = d3ResolveStyleSpec(styleCfg, s.style, C.wallHeightFt, d3SidingOverride(C, s), d3CustomerWallHeightFt(C, styleCfg, s.style, s, d.w), d3CustomerFoundation(C, s));
-      return reflowItems(loaded, d, d, ITEMS, undefined, (spec && spec.wallHeightFt) || D3.WALL_H).items;
+      return reflowItems(loaded, d, d, ITEMS, undefined, d3ShellFt(spec && spec.roof, (spec && spec.wallHeightFt) || D3.WALL_H)).items;
     } catch (_e) { return loaded; }
   };
 
@@ -25164,9 +25225,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // (2026-09-15). A function, not a value: it is read when a vent is placed, dragged, reflowed or
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
+  // H is the SHELL the 3D builds (d3ShellFt: a rafter above the plate on a roof raised by the rafter), the
+  // height every vent, opening band and collision here is measured against, as the 3D's are. Hplate is
+  // the wall plate itself, for the one thing in the plan that stands on it: a loft (loftPlate2D).
   const ventRoof2D = () => {
     const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel));
-    return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
+    const roof = (s && s.roof) || D3_DEFAULT_ROOF, Hplate = (s && s.wallHeightFt) || D3.WALL_H;
+    return { roof, H: d3ShellFt(roof, Hplate), Hplate };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
   const frontWall = getFrontWall(items);
@@ -26574,12 +26639,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   };
   // A selected LOFT's height (SSLoftBar, LOFT HEIGHT). Its plate is the one the 3D draws it on: the same
   // resolver call (ventRoof2D) and the same footprint read (ssLoftPlateFt) as buildShed3DModel.
-  // ⚠️ THE PLATE READ, the one place the plan asks for it: ventRoof2D().H is the wall plate. A roof
-  // raised on its rafters must keep this the plate, not the shell top.
+  // ⚠️ THE PLATE READ, the one place the plan asks for it: ventRoof2D().Hplate, the wall plate. A roof
+  // raised on its rafters (roof.seat) makes ventRoof2D().H the shell top, a rafter above it.
   const loftPlate2D = (it) => {
     const vr = ventRoof2D();
     const c = ITEMS.loft || {};
-    return ssLoftPlateFt(vr.roof, bldgW, bldgH, vr.H, (it.x - mgX) / scale - bldgW / 2, (it.y - mgY) / scale - bldgH / 2,
+    return ssLoftPlateFt(vr.roof, bldgW, bldgH, vr.Hplate, (it.x - mgX) / scale - bldgW / 2, (it.y - mgY) / scale - bldgH / 2,
       it.widthFt || c.width || 6, it.heightFt || c.height || 4);
   };
   // null puts the loft on the plate. A number of inches at or over the plate puts it ON the plate, and
@@ -27654,11 +27719,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // one appendage at a time and missed the rest: a regenerated Tri Home saved the old style's 6 ft
   // dormer, which its draft and all three check rounds had never drawn, because nothing cleared
   // dormer keys. Only the builder's own roof settings the model is never asked about survive a
-  // redraft: the plate band and the overhang style. A draft with no type (not a shape read) still
+  // redraft: the plate band, the overhang style, and where the roof sits on the wall (seat and
+  // rafterDepthIn, 2026-10-06: a walk-around never sees the heel). A draft with no type (not a shape read) still
   // merges key by key, and the porch-kind rule below still covers raw data holding both porches.
   const calDraftRoof = (stored, drafted) => {
     const dr = drafted || {};
-    const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+    const BUILDER_ONLY = ["plateBand", "overhangStyle", "seat", "rafterDepthIn"];
     const base = {};
     if (dr.type) { for (const k of BUILDER_ONLY) if (stored && k in stored) base[k] = stored[k]; }
     const roof = dr.type ? { ...base, ...dr } : { ...stored, ...dr };
@@ -29035,7 +29101,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // WITH WINGS (d3Massing) the roof those sentences describe is the middle section's: its span
   // Sc, above its own walls (ssRoofInFeet's `centre`), exactly as the renderer builds it.
   const calReadoutMass = (adminCal && adminCal.spec && calReadoutL > 0)
-    ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)
+    ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, d3ShellFt(adminCal.spec.roof, Number(adminCal.spec.wallHeightFt) || D3.WALL_H))
     : null;
   const calReadoutCentre = !!(calReadoutMass && d3WingsOn(calReadoutMass));
   const calReadoutSpan = calReadoutMass
@@ -29047,7 +29113,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calDrewPorch = calReadoutMass ? (d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) || d3RecessedPorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`)) : null;
   // ...and the roof step as DRAWN at that size (d3RoofStep): null where the renderer draws none there,
   // so the line says nothing about a step that is not on screen.
-  const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : undefined;
+  const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, d3ShellFt(adminCal.spec.roof, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)) : undefined;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -29059,7 +29125,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList, roof.wingCornersMeet]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList, roof.wingCornersMeet, roof.seat, roof.rafterDepthIn]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchGable, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward, spec.gradeCornersFt]);
@@ -29533,7 +29599,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // ground's fall goes as two explicit keys, null included (calSpecToSend). `slabGround: true`
         // (2026-10-03) says this editor draws a slab's corners too, so its null clears them on a slab
         // (carryForwardFoundation keeps them over an older panel's null, which only knew raised floors).
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec), d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true },
+        // `seatAware: true` (2026-10-06) says this editor draws where the roof sits on the wall (roof.seat,
+        // roof.rafterDepthIn), so a roof without them clears them; an older panel never knew them, and the
+        // server keeps the stored pair over its silence (carryForwardRoofSeat).
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec), d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true, seatAware: true },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
@@ -31570,7 +31639,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             are true at once, so the number stays a ratio on the wire and becomes
             feet here. */}
         <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-          <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep, calReadoutMass)}
+          <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}.{d3SeatLiftFt(adminCal.spec.roof) > 0 ? ` The roof sits ${Math.round(d3SeatLiftFt(adminCal.spec.roof) * 1200) / 100} in above the top of the walls, raised by the rafter.` : ""} {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep, calReadoutMass)}
         </div>
         {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
             ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -31964,6 +32033,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </label>
                   );
                 })()}
+                {/* WHERE THE ROOF SITS ON THE WALL (roof.seat, 2026-10-06, Carolyn's Q28): on the plate, today's
+                    roof, or raised by the rafter height, walls and roof together (d3ShellFt). "On the plate"
+                    DELETES the key rather than storing the word, the overhang style's rule: the column records
+                    only the exception. The rafter box shows only while raised; blank is a 2x4's 3.5 in, drawn
+                    and never written (calOptNumProps clears the key). DISABLED WITH WINGS, not hidden, with the
+                    reason, the overhang style's posture: v1 keeps a winged style's roof on the plate
+                    (d3SeatApplies), and a disabled <select> fires no change, so nothing inert is written. */}
+                {(() => {
+                  const seatLive = d3SeatApplies(adminCal.spec.roof);
+                  const raisedOn = seatLive && adminCal.spec.roof.seat === "raised";
+                  const hint = { display: "block", fontWeight: 400, marginTop: 2 };
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof on the wall
+                        <select value={raisedOn ? "raised" : "plate"} disabled={!seatLive} aria-disabled={!seatLive || undefined} data-ss-roof-seat="seat"
+                          onChange={(e) => calSetRoofOpt("seat", e.target.value === "raised" ? "raised" : null)}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box", opacity: seatLive ? 1 : 0.55, cursor: seatLive ? "pointer" : "not-allowed" }}>
+                          <option value="plate">On the plate</option>
+                          <option value="raised">Raised by the rafter height</option>
+                        </select>
+                        <span style={hint}>{!seatLive
+                          ? "Not with wings: the wing roofs meet the middle at set heights, so this style's roof stays on the top of the wall."
+                          : raisedOn ? "The roof sits one rafter above the top of the wall." : "The roof sits right on the top of the wall."}</span>
+                      </label>
+                      {raisedOn && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Rafter height (in)
+                          <input type="number" step="0.25" min="1.5" max="12" placeholder="3.5" data-ss-roof-seat="rafter"
+                            {...calOptNumProps("rafterDepthIn", adminCal.spec.roof.rafterDepthIn, [1.5, 12], (n) => calSetRoofOpt("rafterDepthIn", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <span style={hint}>A 2x4 is 3.5, a 2x6 is 5.5, a 2x8 is 7.25. Blank is a 2x4.</span>
+                        </label>
+                      )}
+                    </>
+                  );
+                })()}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
@@ -31979,7 +32083,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const hint = { display: "block", fontWeight: 400, marginTop: 2 };
                   const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
                   const hasRise = roof.rearEaveRiseFt != null && roof.rearEaveRiseFt !== "";
-                  const st = d3RoofStep(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H);
+                  const st = d3RoofStep(roof, bldgW, bldgH, d3ShellFt(roof, Number(adminCal.spec.wallHeightFt) || D3.WALL_H));
                   const riseIn = (ft) => Math.round(Math.abs(ft) * 120) / 10;
                   const why = !hasStep && !hasRise ? "Blank: one roof from the front to the back."
                     : !(hasStep && hasRise) ? "Give both numbers. One without the other is not drawn or saved."
@@ -32101,7 +32205,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // Unset, the lean-to hangs at the outside walls' height: the eave, except on a shed's high
                   // side or the middle section's tall wall beside one wing. The option says which it builds.
                   const at0 = d3LeanToReadout({ ...adminCal.spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel.size);
-                  const underEave = at0 ? at0.E - ((adminCal.spec.wallHeightFt) || D3.WALL_H) : 0;
+                  const underEave = at0 ? at0.E - d3ShellFt(roof, (adminCal.spec.wallHeightFt) || D3.WALL_H) : 0;
                   // The roof edge above hanging into it is said the same on the wall and on a shed's high side,
                   // where "On the roof" meets at the eave, the wall's 0 (review, 2026-09-29).
                   const fasciaFix = lr && lr.fasciaCuts ? (lr.fasciaAt != null
@@ -33169,7 +33273,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // ── the building, as the sections read it ──
     const spec = adminCal ? adminCal.spec : null;
     const roof = (spec && spec.roof) || {};
-    const wallH = (spec && Number(spec.wallHeightFt)) || D3.WALL_H;
+    // The SHELL (d3ShellFt), which is what every massing, step and lean-to on this page is drawn from.
+    const wallH = d3ShellFt(roof, (spec && Number(spec.wallHeightFt)) || D3.WALL_H);
     const sizeWords = sel.size || "this size";
 
     // THE END VIEW, the page's live measurement drawing: in the sticky 3D column when docked, at the end of
@@ -33222,6 +33327,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const gamSl = ssGambrelSliders(roof);
     const ohLive = d3OverhangStyleApplies(roof);
     const ohIn = Math.round((roof.overhang != null ? roof.overhang : 0.6) * 1200) / 100;
+    // Where the roof sits on the wall (roof.seat): live unless the style has wings (d3SeatApplies).
+    const seatLive = d3SeatApplies(roof);
+    const seatRaised = seatLive && roof.seat === "raised";
     const roofStepWhy = (() => {
       if (!(roof.type === "gable" && roof.front !== "eave")) return null;
       const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
@@ -33353,6 +33461,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               note: ohLive
                 ? [d3OverhangStyle(roof) === "notched" ? "The underside steps back to the wall." : "The whole rafter runs out.", "Notched keeps one straight roof plane and steps the underside back to the wall; extended carries the whole rafter out. Left alone, an overhang over 6\" is notched."]
                 : ["Off with rafter tails: there is nothing to notch.", "The tails are the finished edge, so there is no underside to step back. Box the edge in and it comes back."] })}
+            {/* WHERE THE ROOF SITS ON THE WALL (roof.seat, 2026-10-06): the calibration grid's choice and
+                rules. "On the plate" deletes the key; the rafter box shows only while raised, and a blank
+                box deletes its key too (the 3.5 in is drawn, never stored). Greyed with wings. */}
+            {advSeg({ f: "seat", label: "Roof on the wall", value: seatRaised ? "raised" : "plate", full: true,
+              pick: (v) => calSetRoofOpt("seat", v === "raised" ? "raised" : null),
+              opts: [["plate", "On the plate", !seatLive, seatLive ? undefined : "Not with wings"], ["raised", "Raised by the rafter height", !seatLive, seatLive ? undefined : "Not with wings"]],
+              note: !seatLive
+                ? ["Not with wings: the roof sits on the top of the wall.", "The wing roofs meet the middle at set heights, so a style with wings keeps its roof right on the top of the wall."]
+                : seatRaised ? "The roof sits one rafter above the top of the wall." : "The roof sits right on the top of the wall." })}
+            {seatRaised && advNum({ k: "rafterDepthIn", label: "Rafter height", unit: "in", value: roof.rafterDepthIn, min: 1.5, max: 12, step: 0.25,
+              band: [1.5, 12], write: (n) => calSetRoofOpt("rafterDepthIn", n), placeholder: "3.5", fallback: 3.5, full: true,
+              note: "How deep the rafters are. Blank is a 2x4.",
+              children: (
+                <div className="ss-adv-chips" role="group" aria-label="Rafter sizes">
+                  {[[3.5, "2x4 3.5″"], [5.5, "2x6 5.5″"], [7.25, "2x8 7.25″"]].map(([n, l]) => {
+                    const on = Math.abs((roof.rafterDepthIn == null || roof.rafterDepthIn === "" ? 3.5 : Number(roof.rafterDepthIn)) - n) < 0.01;
+                    return (
+                      <button key={n} type="button" aria-pressed={on} onClick={() => calSetRoofOpt("rafterDepthIn", n)}
+                        className={on ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>{l}</button>
+                    );
+                  })}
+                </div>
+              ) })}
           </div>
         </div>
         {/* STACKED, the End view is here, at the end of the section whose measurements it draws; docked,
@@ -33574,7 +33705,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // With no attach it hangs at wall height (d3LeanTosGeom), which is the eave unless the eave stands
         // higher: a shed's high side, or the centre's own wall beside a single wing. It is then named for
         // what it is, the single lean-to panel's words (review, 2026-09-30).
-        const eaveGap = !gable && r && r.kind === "eave" ? r.E - ((spec && spec.wallHeightFt) || D3.WALL_H) : 0;
+        const eaveGap = !gable && r && r.kind === "eave" ? r.E - d3ShellFt(roof, (spec && spec.wallHeightFt) || D3.WALL_H) : 0;
         const underEave = eaveGap > 0.01;
         // "On the wall" starts at half the drop, the single lean-to's rule (calLeanWallSeed), and on an eave
         // wall where the roof edge above needs it lower, at that clearance; "On the roof" at 1 ft.
@@ -34525,7 +34656,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               key={`${bldgW}x${bldgH}`}
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               style3d={adminCal.spec}
-              fitHeightFt={adminCal.spec.wallHeightFt || 0}
+              fitHeightFt={d3ShellFt(adminCal.spec.roof, adminCal.spec.wallHeightFt || 0)}
               painted={false} paintBody="" paintTrim=""
               roofType="" roofColorHex=""
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
@@ -35709,6 +35840,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!si || !isVentItem(si) || !si.wall) return null;
             const vr = ventRoof2D();
             const w = ssVentWhere(vr.roof, bldgW, bldgH, vr.H, si, scale, mgX, mgY);
+            // "above the plate" in the readout is the PLATE's. ssVentWhere measures a gable vent's rise from
+            // the shell top it is drawn on (vr.H), a rafter above the plate under a roof raised by the rafter
+            // (roof.seat), so the words add that rafter back, as the End view's dashed plate line shows it.
+            // On the plate vr.H IS vr.Hplate and they add nothing.
             // A segmented control (the two zones) + the neutral ▲ ▼, at the bar's height. The labels stay
             // the buttons' last child: ventGable_test greps the markup for ">In the gable</button>".
             const chip = (on) => (on ? "ssd-seg-b is-on" : "ssd-seg-b");
@@ -35720,7 +35855,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={() => ventNudgeSel(1)} aria-label="Raise the vent 3 inches" title="Up 3 in" className="ssd-tb-btn is-arrow">▲</button>
               <button onClick={() => ventNudgeSel(-1)} aria-label="Lower the vent 3 inches" title="Down 3 in" className="ssd-tb-btn is-arrow">▼</button>
               <span data-vent-readout="1" className="ssd-tb-read">
-                {w.zone === "gable" ? `${fmtDimFtIn(w.riseFt)} above the plate` : `${fmtDimFtIn(w.bottomFt)} off the floor`}
+                {w.zone === "gable" ? `${fmtDimFtIn(w.riseFt + (vr.H - vr.Hplate))} above the plate` : `${fmtDimFtIn(w.bottomFt)} off the floor`}
               </span>
             </>;
           })()}
