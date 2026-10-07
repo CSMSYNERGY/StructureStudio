@@ -5406,13 +5406,22 @@ function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number"
 // a value written by a NEWER portal than this one can then only ever mean "draw it the way you
 // always did" — never a blank door. Keep this list in step with the CHECK constraint in 187
 // and with FIXTURE_CATEGORIES' door branch in portal-settings.
-const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup"];
+//
+// Migration 289 adds the generator's four looks (american, basic, classic, dutch): the four hinged
+// doors builders sell, drawn in 3D with the frame in the door's trim colour and the panels in its
+// door colour, each able to take a window ticked "Can be used inside a door". A double is the row's
+// own Double operation, so "American double" is an american row with Double ticked.
+const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"];
 const D3_DOOR_STYLE_HINT = {
-  auto: "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed.",
-  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D.",
+  auto: "The door's photo is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to one of the built looks if this door looks skewed.",
+  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The door's photo is still used on the estimate, but not in 3D.",
   zbrace: "The same board-and-batten door with a single diagonal brace, rising from the hinge side.",
   xbrace: "The same board-and-batten door with a crossed X brace across the lower panel.",
-  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The photo above is still used on the estimate, but not in 3D.",
+  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The door's photo is still used on the estimate, but not in 3D.",
+  american: "A trim frame with a mid rail and four pickets across the lower panel, panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
+  basic: "A trim frame with a mid rail and plain panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
+  classic: "A trim frame with an octagon and a diamond in the upper panel and an X in the lower one; a window, if the customer picks one, takes the octagon's place.",
+  dutch: "A trim frame with a mid rail and a small dark louvred vent in the lower panel, with a window in the upper panel if the customer picks one.",
 };
 
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
@@ -5463,6 +5472,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // Can go inside a door (289): windows only; absent reads as no, the column's default.
+    in_door: d.in_door === true,
     // null = offered on EVERY building style (the living default); an array = only those (272).
     style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
     // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
@@ -5522,6 +5533,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    // Can be used inside a door (289). WINDOW-ONLY on the wire, like the colour list: portal-settings
+    // forces it off for every other category, so sending it for a door would be a value it throws away.
+    ...(isWindowCat ? { inDoor: r.in_door === true } : {}),
     // Offered on (272), every category, the same collapse: every style ticked, hidden ones
     // included, goes over as null ("every style"), so a style added later offers this item
     // without a visit here.
@@ -5818,7 +5832,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -5885,6 +5899,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
       parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
+    // Can go inside a door (289): said on the row, only when ticked.
+    if (isWindowCat && r.in_door) parts.push("can go in a door");
     // A raised DOOR says so on its row. It is the one field that separates a loft door from a
     // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
     // one they got wrong should not have to open each row to find it. Only when set, so an
@@ -6013,6 +6029,20 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           )}
         </div>
       )}
+      {/* Can be used inside a door (migration 289; asked for on 2026-10-06: the window settings get
+          "a can be used inside a door option"). The customer then sees it in the door picker for the four
+          built door looks, but only where it fits the upper panel of one door leaf, and it is priced
+          as its own window line, once per leaf. Windows only. */}
+      {isWindowCat && (
+        <div style={{ marginBottom: 12 }}>
+          {dCbx("in_door", "Can be used inside a door", "Offer this window in the upper panel of the American, Basic, Classic and Dutch doors")}
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {edit.draft.in_door
+              ? "Offered in the door picker for the American, Basic, Classic and Dutch doors it fits. Each one is charged as a window, one per door (two on a double door)."
+              : "Only on the walls. Tick to offer it inside the American, Basic, Classic and Dutch doors as well."}
+          </div>
+        </div>
+      )}
       {/* Offered on (272), for every category: the styles a customer can add this item to. A
           builder asked for louvered vents on greenhouses only (2026-10-02); the same ticks keep a
           garage door off a style sold without one. Only with two or more styles, since one style
@@ -6062,11 +6092,15 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           <select value={D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto"}
             onChange={(e) => setDraft({ door_style: e.target.value })}
             style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
-            <option value="auto">Use the photo above</option>
+            <option value="auto">Use the door's photo</option>
             <option value="plank">Board-and-batten (built in 3D)</option>
             <option value="zbrace">Board-and-batten with a Z brace</option>
             <option value="xbrace">Board-and-batten with an X brace</option>
             <option value="rollup">Roll-up / garage door</option>
+            <option value="american">American (built in 3D)</option>
+            <option value="basic">Basic (built in 3D)</option>
+            <option value="classic">Classic (built in 3D)</option>
+            <option value="dutch">Dutch (built in 3D)</option>
           </select>
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
             {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
