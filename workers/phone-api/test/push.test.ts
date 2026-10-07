@@ -133,6 +133,47 @@ describe("/push/text", () => {
     expect(fcmTokens(net)).not.toContain("fcm-d");
   });
 
+  // contacts:'own_view' (migration 286): own customers, view only. Reading a text is not a write, so
+  // someone on Own · View still hears about their own customers, under exactly the 'own' rule.
+  describe("contacts own_view", () => {
+    const USER_E = "00000000-0000-4000-8000-0000000000e5";
+    async function withOwnView(opts: Parameters<typeof setup>[0]) {
+      const s = await setup(opts);
+      s.net.rest("GET", "client_users", () => [...TEAM, { user_id: USER_E, role: "user", title: "sales_rep", access: { phone: "own", contacts: "own_view" } }]);
+      s.net.rest("GET", "phone_devices", (q) => {
+        const users = (q.url.searchParams.get("user_id") ?? "").replace(/^in\.\(|\)$/g, "").split(",");
+        const all = [
+          { id: "dA", user_id: USER_A, platform: "android", build_type: "prod", push_token: "fcm-a", push_kind: "fcm" },
+          { id: "dC", user_id: USER_C, platform: "android", build_type: "prod", push_token: "fcm-c", push_kind: "fcm" },
+          { id: "dE", user_id: USER_E, platform: "android", build_type: "prod", push_token: "fcm-e", push_kind: "fcm" },
+        ];
+        return all.filter((d) => users.includes(d.user_id));
+      });
+      return s;
+    }
+
+    it("a follower of an unowned customer gets the text alert", async () => {
+      const { net, env } = await withOwnView({ contact: { name: "Jordan Demo", owner_user_id: null }, followers: [USER_E] });
+      await call(env, hook(env, inbound()));
+      expect(fcmTokens(net)).toContain("fcm-e");
+      // Asked about through the same predicate as RLS, for this person and this contact.
+      expect(net.rpcCalls("crm_visible_contact_ids").some((s) => s.json.p_user_id === USER_E && s.json.p_ids[0] === CONTACT_1)).toBe(true);
+    });
+
+    it("a non-follower of an unowned customer does not", async () => {
+      const { net, env } = await withOwnView({ contact: { name: "Jordan Demo", owner_user_id: null }, followers: [] });
+      await call(env, hook(env, inbound()));
+      expect(fcmTokens(net)).not.toContain("fcm-e");
+      expect(fcmTokens(net)).toContain("fcm-a");
+    });
+
+    it("an unknown number never alerts them (unknown numbers are for view and edit)", async () => {
+      const { net, env } = await withOwnView({});
+      await call(env, hook(env, inbound({ contact_id: null })));
+      expect(fcmTokens(net)).not.toContain("fcm-e");
+    });
+  });
+
   it("an unknown number alerts phone users with contacts view or edit, titled with the number", async () => {
     const { net, env } = await setup();
     await call(env, hook(env, inbound({ contact_id: null })));

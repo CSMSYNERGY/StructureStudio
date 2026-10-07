@@ -2493,12 +2493,13 @@ function ssSignedTaxText(a) {
 // ⚠️ `batten` was MISSING from this list, and it was not cosmetic. stage_order_attribute_change
 // validated against the matching server list and `next.cladding` defaults to the design's
 // CURRENT value — so a design saved as Board & Batten made every attribute change on its order
-// fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
-const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
-const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
+// fail with "That cladding isn't offered", including a pure roof-colour edit. All five now: vinyl
+// joined on 2026-10-06 (migration 285), the day lap's built-in name became 7" LP Lap Siding.
+const SS_CLADDING_NAMES = { lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
+const SS_CLADDING_ORDER = ["panel", "lap", "vinyl", "batten", "agpanel"];
 // `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
 // null. An empty/absent list means "this tenant has not configured cladding", which reads as
-// all four under our own names — the behaviour before 207.
+// all five under our own names — the behaviour before 207.
 const ssCladdingOpts = (offered, current) => {
   const rows = (Array.isArray(offered) && offered.length)
     ? offered.map((o) => [String(o.id), (o.label && String(o.label).trim()) || SS_CLADDING_NAMES[String(o.id)] || String(o.id)])
@@ -2819,7 +2820,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const biz = (paperwork && paperwork.business) || {};
   const colors = (paperwork && paperwork.colors) || [];
   // What this design's STYLE offers, from order_paperwork (207). Empty means the tenant has
-  // configured none, which reads as all four under our built-in names — the behaviour this
+  // configured none, which reads as all five under our built-in names — the behaviour this
   // screen had before cladding was configurable.
   const cladOffered = (paperwork && paperwork.cladding) || [];
   const invoice = (paperwork && paperwork.invoice) || null;

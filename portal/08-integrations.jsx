@@ -1885,7 +1885,9 @@ function CommissionStructure({ clientId }) {
 // day someone adds an area, and a permission screen that disagrees with the server is worse
 // than no screen at all, because people believe what it shows them.
 
-const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
+// own_view (contacts, migration 286) reads like own and view. Rank says nothing about writes; canGrant
+// asks that separately, the way mayGrant does on the server.
+const LEVEL_RANK = { none: 0, own_view: 1, own: 1, view: 1, edit: 2 };
 
 // Commissions speaks a different language from the rest: its three settings are about WHOSE
 // payouts you see, not how much you can change. "Everyone's" is the honest word for the top
@@ -1896,10 +1898,12 @@ const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
 // this line landed.
 function ssLevelLabel(areaKey, lv) {
   if (areaKey === "commissions") return ({ none: "No access", own: "Own only", edit: "Everyone's" })[lv] || lv;
-  // Contacts reads all four: 'own' narrows which CUSTOMERS a person sees, and unlike
-  // commissions it sits alongside a real 'view' rather than replacing it — dropping 'view'
-  // would have silently demoted everyone already stored on it.
-  if (areaKey === "contacts") return ({ none: "No access", own: "Own only", view: "View", edit: "Edit" })[lv] || lv;
+  // Contacts reads all five, as two questions in one row: WHOSE customers (Own = the ones they are
+  // assigned to or follow, All = everyone's) and WHAT they may do (View or Edit). 'own_view' arrived
+  // 2026-10-06 (Carolyn: "a per-user setting the builder controls: edit or view only"); 'own'
+  // writes since 09-07 and is "Own · Edit" — the Dealer preset, unchanged. 'view' stays beside them
+  // rather than being replaced — dropping it would have silently demoted everyone stored on it.
+  if (areaKey === "contacts") return ({ none: "No access", own_view: "Own · View", own: "Own · Edit", view: "All · View", edit: "All · Edit" })[lv] || lv;
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
@@ -2011,10 +2015,12 @@ function ssAccessSummary(m, meta) {
   }
   const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
   const parts = [];
-  const e = names("edit"), v = names("view"), o = names("own");
+  const e = names("edit"), v = names("view"), o = names("own"), ov = names("own_view");
   if (e.length) parts.push(e.join(", ") + " Edit");
   if (v.length) parts.push(v.join(", ") + " View");
   if (o.length) parts.push(o.join(", ") + " own only");
+  // Own · View (contacts, migration 286): their own customers, and look only.
+  if (ov.length) parts.push(ov.join(", ") + " own, view only");
   const n = Object.keys(m.access || {}).length;
   const base = parts.length ? parts.join(" · ") : "No access yet";
   return n ? base + " (+" + n + " changed)" : base;
@@ -2039,12 +2045,22 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
   const pickTitle = (t) => { setTitle(t); setMap({ ...(presets[t] || {}) }); };
 
   // What may THIS granter hand out? Never above their own level. The server enforces the
-  // same rule (mayGrantMap); this only keeps the UI from offering a click that will 403.
+  // same rules (mayGrant in _shared/access.ts, through mayGrantMap); this only keeps the UI from
+  // offering a click that will 403. Rules 3 and 4 are mirrored too, because rank alone ties
+  // own_view, own and view:
+  //   3. someone limited to their own customers (own or own_view) passes on only an own level;
+  //   4. nobody passes on a WRITE they do not hold (edit, or own where the area says own writes),
+  //      so an Own · View or All · View holder can hand out Own · View but never Own · Edit.
   const canGrant = (area, level) => {
     if (ssSwitchLock(area, isOwner, title)) return false;
     if (level === "none") return true;                      // taking away is always allowed
     if (isOwner) return true;
-    return LEVEL_RANK[level] <= LEVEL_RANK[(myAccess || {})[area.key] || "none"];
+    const held = (myAccess || {})[area.key] || "none";
+    const ownScope = (lv) => lv === "own" || lv === "own_view";
+    if (ownScope(held) && !ownScope(level)) return false;
+    const writes = (lv) => lv === "edit" || (lv === "own" && !!area.ownWrites);
+    if (writes(level) && !writes(held)) return false;
+    return LEVEL_RANK[level] <= LEVEL_RANK[held];
   };
 
   const preset = presets[title] || {};
@@ -2059,8 +2075,14 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
     const lockLabel = ssSwitchLock(a, isOwner, title);
     const locked = !!lockLabel;
     const changed = !a.byTitleOnly && (preset[a.key] || "none") !== cur;
+    // WRAPS, and only when it has to. Contacts has five buttons since migration 286 (Own · View
+    // joined the row), about 400px, which overflowed the card on a 768px screen. The hint's flex
+    // basis is 0 (`flex: 1`), so the wrap decision counts only the label, the badges and the
+    // buttons: wherever the row fit before it lays out exactly as before (the hint still takes
+    // what is left), and where it does not, the buttons drop to a line of their own instead of
+    // running off the card.
     return (
-      <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
+      <div key={a.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 14, rowGap: 8, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
         <div style={{ width: 190, flexShrink: 0, fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : "#1E293B" }}>{a.label}</div>
         <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "#94A3B8" }}>{a.hint}</div>
         {changed && <div style={{ fontSize: 11, fontWeight: 700, color: ACCENT, whiteSpace: "nowrap" }}>changed from title</div>}
@@ -2077,7 +2099,9 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
                     ? (title !== "admin"
                       ? a.label + " can only be held by an Admin — change their job title first."
                       : "Only an owner can grant " + a.label + ".")
-                    : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
+                    : ((myAccess || {})[a.key] || "none") !== "none"
+                      ? "You can't give more " + a.label + " access than you have yourself."
+                      : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
                 onClick={() => setMap((prev) => ({ ...prev, [a.key]: lv }))}
                 style={{
                   border: "none", borderLeft: a.levels[0] === lv ? "none" : "1px solid #E2E8F0",

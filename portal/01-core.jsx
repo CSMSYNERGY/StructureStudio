@@ -814,12 +814,13 @@ const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_bra
 
 // 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
 // commissions ("your own payouts") and, since migration 193, contacts ("the customers you
-// own or follow"). Kept deliberately tiny and mirrored rather than imported: portal.html has
-// no module loader, and the SERVER is the enforcement point, so a drift here costs a wrong
-// tab and never wrong access.
+// own or follow"). Contacts' 'own_view' (migration 286, 2026-10-06: own customers, view only)
+// reads too. Kept deliberately tiny and mirrored rather than imported: portal.html has no
+// module loader, and the SERVER is the enforcement point, so a drift here costs a wrong tab and
+// never wrong access.
 function ssCanRead(access, area) {
   const v = access && access[area];
-  return v === "view" || v === "edit" || v === "own";
+  return v === "view" || v === "edit" || v === "own" || v === "own_view";
 }
 // The write half. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead
 // is — and it has to mirror the ownWrites rule too, not just the 'edit' comparison.
@@ -831,6 +832,9 @@ function ssCanRead(access, area) {
 //                 (portal-settings' CONTACT_ROW_SCOPE); this only decides what is offered.
 //   commissions — no. 'own' there is "see your own payout", and a rep editing their own
 //                 commission is what the whole feature exists to prevent.
+// Contacts' 'own_view' (migration 286) never writes: it is the same rows as 'own' with this
+// answer reversed, so it is deliberately NOT in the test below, and every write tab on a
+// customer record greys out with the permission reason (CrmRecord's canEdit, 12-shell).
 //
 // OWN_WRITE_AREAS is the browser's copy of that flag. It is small enough to be worth the
 // duplication and dangerous enough to be worth naming: adding an area to it without the
@@ -1664,13 +1668,14 @@ const ROW_SCOPE_AREA = {
 };
 
 // Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
-// _shared/access.ts, and the only place the literal 'own' is compared for a row scope here.
+// _shared/access.ts, and the only place the own-scope literals are compared for a row scope here:
+// 'own' (own customers, can edit) and, since migration 286, 'own_view' (own customers, view only).
 //
 // Owners can never be narrowed and no check for that is needed at this altitude either: the
 // server resolves an owner to 'edit' on every area before consulting their stored map, so
 // `access.contacts` is never 'own' in a map the portal was handed.
 function ssOwnRowsOnly(access, area) {
-  return !!access && access[area] === "own";
+  return !!access && (access[area] === "own" || access[area] === "own_view");
 }
 
 // Is the list on this tab currently showing only the caller's own rows?
@@ -1685,9 +1690,13 @@ function ssRowScoped(access, tab) {
 // It names the RULE ("assigned to you or following") rather than a count, deliberately: a
 // count would have to come from a second, unscoped read, which is the leak this whole
 // feature exists to close.
+//
+// Own · View (migration 286) adds what they may do with them, because it is the first thing a
+// rep on it will wonder about: every write on a customer record is greyed out for them.
 function ssRowScopeNote(access, tab) {
   if (!ssRowScoped(access, tab)) return null;
   return "You're seeing the customers assigned to you or that you're following. "
+    + (access[ROW_SCOPE_AREA[tab]] === "own_view" ? "You can view their details but not change them. " : "")
     + "Ask an owner or admin if you need to see everyone's.";
 }
 function ssCanSeeTab(tab, access) {

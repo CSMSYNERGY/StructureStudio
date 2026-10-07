@@ -339,6 +339,19 @@ describe("GET /threads", () => {
     expect(json.threads.map((t: { key: string }) => t.key)).toEqual([CONTACT_1]);
   });
 
+  it("own_view contacts (own customers, view only): narrowed exactly like own, and no unknown numbers", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view", contacts_level: "own_view", own_contacts_only: true }), [CONTACT_1]);
+    net.rest("GET", "sms_messages", () => [
+      msg("m1", { contact_id: CONTACT_1 }),
+      msg("m2", { contact_id: CONTACT_2 }),
+      msg("m3", { contact_id: null, from_number: "+15555550150" }),
+    ]);
+    contacts(net, [{ id: CONTACT_1, name: "Jordan", owner_user_id: USER_A }, { id: CONTACT_2, name: "Casey", owner_user_id: null }]);
+    const { json } = await call(env, appRequest("GET", "/threads", token));
+    expect(json.threads.map((t: { key: string }) => t.key)).toEqual([CONTACT_1]);
+    expect(net.rpcCalls("crm_visible_contact_ids").length).toBeGreaterThan(0);
+  });
+
   it("contacts none sees no threads at all", async () => {
     const { net, token, env } = await setup(callerCtx({ contacts_level: "none" }));
     const { json } = await call(env, appRequest("GET", "/threads", token));
@@ -851,6 +864,8 @@ describe("GET /threads/:key email (emails and compose)", () => {
       ["everything in place", {}, { email_to: "jordan@example.test", email_block: null }],
       ["the address is trimmed", { email: "  jordan@example.test " }, { email_to: "jordan@example.test", email_block: null }],
       ["contacts view: no_edit", { ctx: { contacts_level: "view" } }, { email_to: "jordan@example.test", email_block: "no_edit" }],
+      // Own · View (migration 286): their own customer, but view only, so no emailing.
+      ["contacts own_view on their own customer: no_edit", { ctx: { contacts_level: "own_view", own_contacts_only: true } }, { email_to: "jordan@example.test", email_block: "no_edit" }],
       ["no CRM on the plan: no_crm", { subs: [] }, { email_to: "jordan@example.test", email_block: "no_crm" }],
       ["email still goes through the old CRM: not_set_up", { settings: [{ ...READY, email_provider: "ghl" }] }, { email_to: "jordan@example.test", email_block: "not_set_up" }],
       ["the domain isn't verified yet: not_set_up", { settings: [{ ...READY, email_domain_status: "pending" }] }, { email_to: "jordan@example.test", email_block: "not_set_up" }],

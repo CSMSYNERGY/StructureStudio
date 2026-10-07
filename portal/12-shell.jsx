@@ -3213,8 +3213,13 @@ function Dashboard({ session }) {
                 /* ssCanWrite, not `contacts === "edit"`: since 2026-09-07 contacts:'own' WRITES
                    (a Dealer edits their own customers — OWN_WRITE_AREAS in 01-core), and the
                    literal compare left every write tab on a dealer's own record greyed with
-                   "You don't have permission" while the server would have taken the write. */
-                canEdit={canAdmin || ssCanWrite(myAccess, "contacts")}
+                   "You don't have permission" while the server would have taken the write.
+                   The RESOLVED map, not the role (2026-10-07): an owner can narrow an ADMIN to
+                   contacts 'own_view' (migration 286), and `canAdmin ||` kept every write tab live
+                   for that admin while the server's gate keyed on the map refused each one. Owners
+                   and un-narrowed admins resolve 'edit' here anyway; canAdmin stays only for a
+                   platform operator in view-as, who has no map (priceCanOverride's rule). */
+                canEdit={(viewing && canAdmin) || ssCanWrite(myAccess, "contacts")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
                    Pipeline list opens and it has to keep working. Its READ is exempt from the
@@ -3342,6 +3347,19 @@ function Dashboard({ session }) {
                 visible (like Build Schedule) so the locked card can do the selling. */}
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               crmUnlocked ? (
+                <>
+                {/* WHY THE LIST IS SHORT, for someone limited to their own customers (contacts
+                    'own' or, since migration 286, 'own_view' — which also says they may look but
+                    not change). ssRowScopeNote existed for exactly this sentence and was never
+                    rendered; null for everyone else, so nobody else sees a thing. Not gated on
+                    the role: an admin narrowed to own_view gets the same short list and needs the
+                    same sentence, and a platform operator's mirrorAccess is null. */}
+                {ssRowScopeNote(mirrorAccess, "contacts") && (
+                  <div data-ss-row-scope-note="" style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8,
+                    padding: "9px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.45, marginBottom: 12 }}>
+                    {ssRowScopeNote(mirrorAccess, "contacts")}
+                  </div>
+                )}
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                   fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
                   onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
@@ -3354,6 +3372,7 @@ function Dashboard({ session }) {
                   userId={session.user ? session.user.id : null}
                   canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
                   phoneOn={phoneOffered && effPhoneStatus === "on"} />
+                </>
               ) : (
                 <ComingSoon
                   title="Contacts"

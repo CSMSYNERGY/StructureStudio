@@ -352,6 +352,20 @@ function slabDepthFt(cfg, it) {
   return (cfg && Number(cfg.height)) || 2;
 }
 
+// The catalog stamps a placed item takes from its tool: the builder's electrical item id, and the
+// height off the floor (a device's, or a shelf's own). WITHOUT electricalItemId A DEVICE DRAWS AS
+// NOTHING in the 3D and PRICES AT $0: the quote and submit-estimate count devices by that id. Without
+// heightOffFloorIn it is not at the builder's height. So every placement path spreads this, the plan's
+// wall and floor clicks and the 3D editor's (place3) alike; spelling the two keys out at each site is
+// how one of them gets missed. A config carrying neither (a door, a loft) gets {}.
+function ssElecStamps(cfg) {
+  const c = cfg || {};
+  return {
+    ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
+    ...(c.heightOffFloorIn != null ? { heightOffFloorIn: c.heightOffFloorIn } : {}),
+  };
+}
+
 // Does an item at `sn` overlap a wall slab on the same wall? checkDoorCollision above
 // deliberately only compares wallOnly items to each other, and a slab is wallSnap, so it is
 // skipped there — which meant the invariant was enforced in one direction only: dragging a
@@ -2042,6 +2056,44 @@ function SSPartitionBar({ p, wallFt, canDoor, canWindow, opening, onHeight, onAd
     {opening && <button onClick={onRemoveOpening} className="ssd-tb-btn is-danger">{opening.kind === "window" ? "Remove window" : "Remove door"}</button>}
   </>);
 }
+// The selection toolbar's control for a LOFT, in the rep designer (LOFT HEIGHT): "On the plate", where
+// the top of the loft floor is the top of the walls and follows them, or "Custom", a number of inches
+// off the floor; the readout says where the floor is. The field shows what was APPLIED, not what was
+// typed (SSPartitionBar's rule): the designer's loftHeightSel puts anything at or over the walls on the
+// plate and raises anything under 4' to it, and says so in a toast. A loft from before 2026-10 (neither
+// key) reads as Custom at its 5'6" until a rep moves it.
+function SSLoftBar({ it, plateFt, onHeight }) {
+  const onPlate = it.onPlate === true;
+  const elevFt = ssLoftElevFt(it, plateFt);
+  const shown = onPlate ? "" : String(Math.round(elevFt * 12));
+  const [draft, setDraft] = useState(shown);
+  useEffect(() => { setDraft(shown); }, [it.id, shown]);
+  const commit = () => {
+    const t = String(draft).trim();
+    if (t === "" || !isFinite(Number(t))) { setDraft(shown); return; }
+    const h = onHeight(Math.round(Number(t)));
+    setDraft(h === undefined ? shown : h === null ? "" : String(h));
+  };
+  const plateIn = Math.round(plateFt * 12);
+  const chip = (on) => (on ? "ssd-seg-b is-on" : "ssd-seg-b");
+  return (<>
+    <div className="ssd-seg is-tb" role="group" aria-label="Loft floor height">
+      <button onClick={() => onHeight(null)} aria-pressed={onPlate} title={"The loft floor on top of the walls (" + fmtDimFtIn(plateFt) + ")"} className={chip(onPlate)}>On the plate</button>
+      <button onClick={() => { if (onPlate) onHeight(Math.max(SS_LOFT_MIN_IN, plateIn - 12)); }} aria-pressed={!onPlate} title="Set the loft floor's own height" className={chip(!onPlate)}>Custom</button>
+    </div>
+    {!onPlate && (
+      <span className="ssd-tb-read">
+        <input type="number" min={SS_LOFT_MIN_IN} step={1} value={draft} data-ss-loft-height="1" aria-label="Loft floor height in inches"
+          onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }}
+          style={{ width: 56, font: "inherit", padding: "2px 4px", border: "1px solid #CBD5E1", borderRadius: 4 }} /> in off the floor
+      </span>
+    )}
+    <span className="ssd-tb-read" data-ss-loft-readout="1">
+      {"Loft floor at " + fmtDimFtIn(elevFt) + (elevFt >= plateFt - 1e-6 ? " (top of the walls)" : "")}
+    </span>
+  </>);
+}
 // Door sizes are stored in inches; show them as feet/inches on the plan + in the picker.
 function fmtFtIn(inches) {
   const n = Number(inches);
@@ -2890,9 +2942,10 @@ function wallHeightOptionsFor(C, styleKey, widthFt, includeInternal) {
 // This replaces the per-style `d3.claddingChoices` whitelist: the offered set is a builder's
 // Options rows now, not a checkbox grid buried in the 3D calibration spec.
 //
-// ⛔ THE IDS ARE UNCHANGED AND STILL CLOSED — get_config only ever emits the four D3_CLADDING
-// keys — so sel.cladding, every saved design, d3SidingOverride and the whole 3D chain are
-// untouched by this. Only WHICH of the four are offered, and what they are called, moved.
+// ⛔ THE IDS ARE STILL CLOSED — get_config only ever emits D3_CLADDING keys, five of them since
+// "vinyl" joined on 2026-10-06 (migration 285) — so sel.cladding, every saved design,
+// d3SidingOverride and the whole 3D chain are untouched by this. Only WHICH of them are offered,
+// and what they are called, moved.
 function claddingOptionsFor(C, styleKey, includeInternal) {
   const m = (C && C.claddingOptions) || {};
   const list = styleKey ? m[styleKey] : null;
@@ -2910,8 +2963,8 @@ function resolveCladding(C, styleKey, claddingId) {
   // includeInternal TRUE, for the same reason resolveWallHeight does it: this resolves a PRICE.
   return claddingOptionsFor(C, styleKey, true).find((o) => o.id === id) || null;
 }
-// DISPLAY ONLY. The built-in name is the fallback, so one place owns those four strings and a
-// tenant who renamed nothing reads exactly as they always did.
+// DISPLAY ONLY. The built-in name is the fallback, so one place owns those five strings and a
+// tenant who renamed nothing reads them there (lap's became 7" LP Lap Siding on 2026-10-06).
 // ⛔ This must NEVER feed d3NormalizeCladding — that resolves geometry, and it resolves it from
 // the id. A renamed cladding is still the same cladding to the renderer.
 function claddingLabelOf(opt, id) {
@@ -3495,7 +3548,16 @@ function computeSelectionRows(sel, paintColors, C, items) {
     if (rt) {
       const rc = pick(sel && sel.roofColor, (c) => (rt === "Metal" ? c.metal : c.shingle));
       rTotal = charge(rc);
-      rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
+      // THE METAL PROFILE (2026-10-06), worded as the quote words it (_shared/roofProfile.ts
+      // roofLineDesc): "Metal (Standing Seam) — Black" for a metal roof on standing seam, today's words
+      // for every other roof, and never a different amount. The design's own pick, else its style's
+      // starting value, else AG Panel. Spelled out here rather than through d3CustomerRoofProfile:
+      // designerPricing.ts lifts this function on its own.
+      const rpOf = (v) => { const s = String(v == null ? "" : v).toLowerCase().replace(/[\s_-]+/g, ""); return s === "agpanel" || s === "standingseam" ? s : null; };
+      const stR = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
+      const rProfile = rpOf(sel && sel.roofProfile) || rpOf(stR && stR.d3 && stR.d3.roofProfile) || "agpanel";
+      const rtShown = rProfile === "standingseam" && rt.toLowerCase().replace(/\s+/g, "") === "metal" ? `${rt} (Standing Seam)` : rt;
+      rDetail = (sel && sel.roofColor) ? `${rtShown} — ${sel.roofColor}` : `${rtShown} — (color TBD)`;
     }
     rows.push({ key: ssPriceRowKey("roof"), label: "Roof", detail: rDetail, total: showP ? rTotal : null,
       ...(showP ? ssPriceable(rTotal, 1) : {}) });
@@ -5096,7 +5158,7 @@ const D3 = {
   RO_WINDOW_SILL: 3.5, // window rough-opening sill elevation
   WINDOW_H: 3,        // window opening height
   WINDOW_SILL: 3.5,   // window sill elevation
-  LOFT_ELEV: 5.5,     // loft platform top elevation
+  LOFT_ELEV: 5.5,     // legacy: a loft saved before 2026-10 with neither onPlate nor elevationFt (LOFT HEIGHT)
   LOFT_T: 0.35,       // loft platform thickness
   BENCH_H: 3,         // workbench top height
   WALL_T: 0.3,        // wall thickness
@@ -5131,8 +5193,11 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // The customer-facing exterior material. Carolyn's direction (2026-08-18): call it
 // CLADDING, not siding, and offer three genuinely different products rather than one
 // texture rotated:
-//   lap     horizontal boards, each course overlapping the one below (~6in exposure; a
-//           builder's own size per style since 275, see d3CladdingFor)
+//   lap     horizontal boards, each course overlapping the one below. "7in LP Lap Siding" since
+//           2026-10-06, drawn exactly as it always was (a ~7in board showing ~6in); a builder's
+//           own size per style since 275, see d3CladdingFor
+//   vinyl   the same boards at 4.5/7 of lap's course, "4.5in Vinyl Siding" (2026-10-06): a
+//           customer pick only, never a style's own standard siding
 //   panel   vertical 4ft x 8ft sheets with grooves cut INTO the face (T1-11 / EWGWG)
 //   agpanel metal sheets whose ribs stand OUT, overlapping at the rib (Panel-Loc Plus)
 // `batten` is kept as a FOURTH, non-customer-facing id so the tenants whose styles
@@ -5146,7 +5211,22 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // tileFtU/tileFtV are how many FEET one 512px texture tile covers, so the pattern is
 // anchored to the BUILDING rather than to each wall's own 0..1 UV span.
 const D3_CLADDING = {
-  lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
+  // "7\" LP Lap Siding", not "Lap Siding", since 2026-10-06. Carolyn (Q20): rename lap "and keep
+  // its profile, treating the current lap as 7"". So ONLY THE NAME CHANGED. The 6 in course drawn
+  // here was always the exposure of a ~7 in board, and it is now simply what "7 in" means in the 3D
+  // (D3_LAP_NOMINAL_IN below). The id never changed, a builder's own label_override still wins
+  // everywhere it is set, and a signed order keeps the name it was agreed under
+  // (claddingLineName.ts), so the rename raises no change orders. ASCII quote, never the inch prime:
+  // the quote PDF's standard fonts are WinAnsi only.
+  lap:     { id: "lap",     label: "7\" LP Lap Siding",  tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
+  // 4.5" VINYL (2026-10-06, the same answer): "the same profile at 4.5" spacing". Lap's own texture,
+  // relief, tile width and bump, at 4.5/7 of lap's course on the same nominal scale: stepFt and
+  // tileFtV both times 4.5/7, which keeps lap's 8 boards a tile, so the raster lands on the relief
+  // courses. Bit for bit what d3CladdingFor("lap", 4.5) draws. Written as numbers, not through
+  // D3_LAP_NOMINAL_IN, because designerPricing.ts lifts this literal on its own.
+  // ITS OWN ID, not a lap size: style_cladding holds one row per style per id, and a builder sells
+  // the 7 in lap and the 4.5 in vinyl side by side, each priced on its own (migration 285).
+  vinyl:   { id: "vinyl",   label: "4.5\" Vinyl Siding", tex: "lap",     relief: "lap",    stepFt: 0.5 * 4.5 / 7, tileFtU: 8.0, tileFtV: 4.0 * 4.5 / 7, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   // "AG Panel", not "Metal", since 2026-09-15. Carolyn 09-11 @07:30: "You don't have to call it
   // metal. You can just call it agpanel because they can type in here metal". The id never
@@ -5180,37 +5260,52 @@ const D3_CLADDING = {
 // beside resolveWallHeight. Migration 207 seeded those rows from d3.claddingChoices, so no
 // builder lost a narrowing they had set.
 //
-// The IDS above did not change and are still closed: get_config only ever emits keys of
-// D3_CLADDING, because we ship a texture and a relief profile per type and the renderer keys
-// on them. What moved is WHICH of them are offered, not what they are.
+// The IDS above are still closed: get_config only ever emits keys of D3_CLADDING, because we
+// ship a texture and a relief profile per type and the renderer keys on them. What moved is
+// WHICH of them are offered, not what they are. The one id added since is "vinyl" (2026-10-06),
+// together with style_cladding's CHECK (migration 285); a designer older than that drops it from
+// the dropdown (claddingOptionsFor), so it never reaches a renderer that has no entry for it.
+
+// THE NOMINAL LAP (2026-10-06). The inches a lap course size is written in: the scale of the
+// built-in names, on which lap's own drawing above IS 7 in (Carolyn: "treating the current lap as
+// 7""). The 275 Course box reads on this scale too: blank or 7 draws lap exactly as it always
+// was, and 4.5 draws the courses 4.5" Vinyl Siding has. Reading lap as a TRUE 7 in course instead
+// would change lap's two literals and vinyl's, and every lap wall with them; this number would not.
+const D3_LAP_NOMINAL_IN = 7;
 
 // Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
 // This is the whole backward-compatibility story and it needs NO migration: today `null`
 // and `"batten"` differ only in relief, and `panel` carries no relief, so every existing
-// tenant renders exactly as it does now.
+// tenant renders exactly as it does now. "vinyl" (2026-10-06) only ever arrives as the
+// customer's own pick (d3SidingOverride): no style stores it, and styleD3's sanitizer refuses it.
 function d3NormalizeCladding(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase();
   if (s === "lap" || s === "lapsiding" || s === "lap-siding") return "lap";
+  if (s === "vinyl") return "vinyl";
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
 }
 
 // THE CLADDING THE RENDERER DRAWS (275, 2026-10-05). A builder asked for "an option for 4.5" vinyl
-// siding": their lap row already sells it, renamed, but every lap wall was drawn in D3_CLADDING's 6 in
-// courses. exposureIn is that builder's own size for the lap row (style_cladding.exposure_in, inches,
-// 3..12), carried here as spec.sidingExposureIn. Every other case returns the D3_CLADDING entry
-// ITSELF, the very object the renderer has always used, so a building with no size draws exactly as
-// it did. With a size, lap's two vertical measures scale together: stepFt (the relief courses, and
-// the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV, which keeps
-// the raster's 8 boards per tile on the same courses. Both count from y = 0, so the texture and the
-// proud course lines stay in phase. The width of a tile (tileFtU) is grain, not courses, and stays.
+// siding": their lap row already sold it, renamed, but every lap wall was drawn in lap's one course.
+// exposureIn is a builder's own size for the LAP row (style_cladding.exposure_in, 3..12), carried
+// here as spec.sidingExposureIn, in inches on the nominal scale (D3_LAP_NOMINAL_IN, 2026-10-06):
+// 7 is lap's own drawing and 4.5 is 4.5" Vinyl Siding's. Every other case returns the D3_CLADDING
+// entry ITSELF, the very object the renderer has always used, so a building with no size draws
+// exactly as it did. With a size, lap's two vertical measures scale together: stepFt (the relief
+// courses, and the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV,
+// which keeps the raster's 8 boards per tile on the same courses. Both count from y = 0, so the
+// texture and the proud course lines stay in phase. The width of a tile (tileFtU) is grain, not
+// courses, and stays.
+// Keyed on the ID, not on relief "lap": vinyl shares lap's relief, and it is fixed at 4.5 (its name
+// says so), so a size never reaches it.
 function d3CladdingFor(siding, exposureIn) {
-  const base = D3_CLADDING[d3NormalizeCladding(siding)] || D3_CLADDING.panel;
+  const id = d3NormalizeCladding(siding);
+  const base = D3_CLADDING[id] || D3_CLADDING.panel;
   const n = exposureIn == null || exposureIn === "" ? NaN : Number(exposureIn);
-  if (base.relief !== "lap" || !(n >= 3 && n <= 12)) return base;
-  const stepFt = n / 12;
-  return { ...base, stepFt, tileFtV: base.tileFtV * stepFt / base.stepFt };
+  if (id !== "lap" || !(n >= 3 && n <= 12)) return base;
+  return { ...base, stepFt: base.stepFt * n / D3_LAP_NOMINAL_IN, tileFtV: base.tileFtV * n / D3_LAP_NOMINAL_IN };
 }
 
 // ── METAL ROOF PROFILE ────────────────────────────────────────────────────────────
@@ -5226,8 +5321,15 @@ function d3CladdingFor(siding, exposureIn) {
 // back into standing seam with d3.roofProfile = "standingseam". The default is never written to a
 // row, so the column only ever records the exception.
 //
-// A PROPERTY OF THE STYLE, never the customer's pick. The customer chooses Shingle or Metal and a
-// colour; a builder does not sell both profiles on one building. So only styleSpec is read.
+// PER DESIGN since 2026-10-06, the style's value only the STARTING one. Until then this was a property
+// of the style alone, on the premise that a builder does not sell both profiles on one building.
+// Carolyn, 10-06: "there is no standard it is per individual design". So a design carries its own
+// pick (sel.roofProfile, which a rep sets in the portal Designer's Roof options card), and
+// d3CustomerRoofProfile below hands it to d3ResolveStyleSpec, whose roofProfile the renderer has
+// always read. A design that has not picked draws its style's value (d3.roofProfile, labelled
+// "Default metal roof profile" in Settings), and a style that says nothing draws AG Panel, as before.
+// The quote's Roof line, the order screen and the crew card follow the same rule on the server
+// (_shared/roofProfile.ts).
 //
 // AG Panel draws the "agroof" raster: the Advantage Panel profile Ahsan sent (36 in coverage,
 // trapezoid major ribs 9 in apart and 3/4 in tall, two low stiffening ribs between, a lap at the
@@ -5248,6 +5350,19 @@ const D3_METAL_ROOF_PROFILES = {
 function d3NormalizeRoofProfile(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase().replace(/[\s_-]+/g, "");
   return s === "standingseam" ? "standingseam" : "agpanel";
+}
+// THE DESIGN'S OWN METAL PROFILE (2026-10-06): "agpanel" or "standingseam" when the design's roof is
+// Metal and it has picked one (sel.roofProfile, spelled as loosely as above), else null, and the
+// style's starting value stands. Junk is null, never AG Panel, so it cannot override a standing seam
+// style. A pick on a Shingle roof is ignored but kept, so a rep who switches the roof to shingle and
+// back finds it again. d3ResolveStyleSpec's 8th argument, passed by the five customer-facing calls
+// only: never by openCalEditor or the Advanced page's seed, whose object is saved as the STYLE, and
+// one design's pick must never become every design's. Named apart from d3RoofProfile (the roof
+// SHAPE's geometry) and styleD3's "roofProfile" self-check key (the AI's read of that shape).
+function d3CustomerRoofProfile(sel) {
+  if (!sel || sel.roofType !== "Metal") return null;
+  const s = String(sel.roofProfile == null ? "" : sel.roofProfile).trim().toLowerCase().replace(/[\s_-]+/g, "");
+  return s === "agpanel" || s === "standingseam" ? s : null;
 }
 
 // The ONE rule for roof orientation, and it is GEOMETRY -- never the door.
@@ -6853,6 +6968,67 @@ function d3CeilingFt(roofCfg, W, L, H, x, z) {
   const u = m.uAxisIsX ? x : z;
   return Math.abs(u - m.uc) <= m.Sc / 2 + 1e-6 ? m.Hc : H;
 }
+// ── LOFT HEIGHT ──
+// Carolyn, 2026-10-06: by default a loft sits ON THE TOP PLATE of the walls, following the design's
+// own wall height, and a rep can change it per design. Until then every loft was a fixed 5'6".
+//
+// The placed loft says which, with two keys that are never both on it (the wallHeightDeltaIn vs
+// wallHeight rule: writing one removes the other):
+//   onPlate: true      the top of the loft floor is the wall plate over its footprint. Not a number,
+//                      so it follows a taller-wall upgrade, a raised centre and a roof step.
+//   elevationFt: <ft>  a height a rep set: the TOP of the loft floor, what elevationFt always meant.
+//   neither            a loft saved before 2026-10, drawn where it always was (D3.LOFT_ELEV, 5'6").
+// A set height never goes above the plate: taking a wall upgrade back off must not leave the loft up
+// in the roof (ssPartitionHeightFt's rule). The plan, the PDF and the estimate read none of this.
+//
+// ⚠️ THE TOP AT THE PLATE, NEVER THE UNDERSIDE. The roof's underside runs through the plate line at the
+// wall centreline (d3RoofProfile), so a platform whose underside sat on the plate would come out through
+// both eaves of a wall-to-wall loft. A top at the plate never does, but it would share a plane with the
+// wall tops and flicker in Look-inside, so the renderer draws it D3_LOFT_PLATE_GAP under. The gap is
+// drawing only: the item, the toolbar and its readout all say the plate.
+//
+// Literals only at the top level: shedProfile_test, ventGable_test, porchGeom_test and the stored-style
+// digest evaluate this region with nothing else in scope.
+const SS_LOFT_MIN_IN = 48;
+const D3_LOFT_PLATE_GAP = 0.02;
+// The plate a loft rests on: the LOWEST local ceiling (d3CeilingFt) over its footprint's four corners,
+// each set in a twentieth of a foot so an edge on a section line reads the section it covers, and its
+// centre. World feet centred on the building, as the renderer's ftX/ftZ give them. The lowest, so a
+// loft reaching under a lower wing or a lower rear section never rises into that roof.
+// ⚠️ H IS THE WALL PLATE. A caller that knows a shell top above the plate (a roof raised on its
+// rafters) still hands this the plate: the loft sits on the walls, not under the roof.
+function ssLoftPlateFt(roofCfg, W, L, H, cx, cz, w, d) {
+  const hx = Math.max(0, w / 2 - 0.05), hz = Math.max(0, d / 2 - 0.05);
+  let t = Infinity;
+  [[cx, cz], [cx - hx, cz - hz], [cx + hx, cz - hz], [cx - hx, cz + hz], [cx + hx, cz + hz]].forEach(([x, z]) => {
+    const c = d3CeilingFt(roofCfg, W, L, H, x, z);
+    if (isFinite(c)) t = Math.min(t, c);
+  });
+  return isFinite(t) ? t : H;
+}
+// Where the top of a loft's floor is, in feet off the floor, under a plate of plateFt.
+function ssLoftElevFt(it, plateFt) {
+  if (it && it.onPlate === true) return plateFt;
+  const e = Number(it && it.elevationFt);
+  return Math.min(e > 0 ? e : D3.LOFT_ELEV, plateFt);
+}
+// A rep's height pick as { item, note }: `item` is a NEW loft carrying exactly one of the two keys, and
+// `note` the sentence to show when the pick was corrected (else null). No height, or one at or over the
+// plate, is on the plate; under SS_LOFT_MIN_IN is raised to it; anything else is that many inches.
+function ssLoftWithHeight(it, heightIn, plateFt) {
+  const rest = { ...(it || {}) };
+  delete rest.onPlate;
+  delete rest.elevationFt;
+  const h = heightIn == null ? NaN : Math.round(Number(heightIn));
+  if (!isFinite(h) || h >= Math.round(plateFt * 12)) {
+    return { item: { ...rest, onPlate: true }, note: isFinite(h) ? `The walls are ${fmtDimFtIn(plateFt)} tall, so the loft sits on the plate.` : null };
+  }
+  if (h < SS_LOFT_MIN_IN) {
+    return { item: { ...rest, elevationFt: SS_LOFT_MIN_IN / 12 }, note: `A loft floor is at least ${fmtDimFtIn(SS_LOFT_MIN_IN / 12)} off the floor.` };
+  }
+  return { item: { ...rest, elevationFt: h / 12 }, note: null };
+}
+// ── END LOFT HEIGHT ──
 // ⚠️ MERGE HOOK FOR THE PROJECTING PORCH (2026-09-24). With wings a porch on a gable end stands in
 // front of the CENTRE only: this returns that span, where its middle sits in profile u, and the
 // centre wall's top — or null when the style has no wings. d3PorchSpan (the porch-width branch)
@@ -8810,8 +8986,9 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
 // d3CustomerFoundation, 2026-09-28) is the customer's foundation pick: "piers" stands
 // the building on piers whatever the style's own foundation is (see the end).
 // sidingExposureIn (from d3CladdingExposureIn, 275) is the lap course size, in inches, the
-// builder set on the lap siding the customer picked (see the end too).
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn) {
+// builder set on the lap siding the customer picked (see the end too). customerRoofProfile (from
+// d3CustomerRoofProfile, 2026-10-06) is the design's own metal profile, which beats the style's.
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn, customerRoofProfile) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -8837,7 +9014,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // Which metal a metal roof draws (D3_METAL_ROOF_PROFILES). Named here for the gableVent
     // reason below: the calibration panel round-trips through this resolver, and a key the
     // literal omits is erased from the column the first time a builder saves. null = AG Panel.
-    roofProfile: o.roofProfile === "agpanel" || o.roofProfile === "standingseam" ? o.roofProfile : (base.roofProfile || null),
+    // The design's own pick wins (2026-10-06, d3CustomerRoofProfile). Only the customer-facing calls
+    // pass it, so the object openCalEditor posts back is still the style's own.
+    roofProfile: customerRoofProfile === "agpanel" || customerRoofProfile === "standingseam" ? customerRoofProfile
+      : (o.roofProfile === "agpanel" || o.roofProfile === "standingseam" ? o.roofProfile : (base.roofProfile || null)),
     // A louvered gable vent, tenant override over the built-in default. This MUST be
     // named here: the literal drops what it does not list, and because openCalEditor
     // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
@@ -8930,10 +9110,11 @@ function d3SidingOverride(config, sel) {
 // THE LAP COURSE THE BUILDER SELLS (275, 2026-10-05). The size, in inches, a builder set on this
 // style's Lap Siding row (Settings → Options → Cladding, "Course (in)"; get_config emits it as the
 // entry's exposureIn only where set), when the customer picked that lap siding. null otherwise,
-// which draws the 6 in courses lap has always had: no pick, another cladding, a style or a tenant
-// without the row or the size, or a size outside 3..12 (the column's own CHECK, held here too so a
-// stray value can never reach the renderer). resolveCladding is the pricing lookup, internal-only
-// rows included, so a rep's pick draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
+// which draws the courses lap has always had (the 7 in): no pick, another cladding (4.5" Vinyl
+// Siding included: it is fixed at its size), a style or a tenant without the row or the size, or a
+// size outside 3..12 (the column's own CHECK, held here too so a stray value can never reach the
+// renderer). resolveCladding is the pricing lookup, internal-only rows included, so a rep's pick
+// draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
 function d3CladdingExposureIn(config, sel) {
   if (!config || !sel || sel.cladding !== "lap") return null;
   const o = resolveCladding(config, sel.style, "lap");
@@ -12642,8 +12823,9 @@ function buildShed3DModel(THREE, p) {
   // sky reflection when the renderer passes p.metalEnv. Without it the roof is
   // matte paint, never the near-black that metalness with nothing to reflect gave.
   //
-  // WHICH metal is the style's alone (D3_METAL_ROOF_PROFILES): AG Panel unless the style says
-  // standing seam. The customer's pick only decides metal vs shingle, exactly as before.
+  // WHICH metal (D3_METAL_ROOF_PROFILES) is the DESIGN's since 2026-10-06: d3ResolveStyleSpec puts the
+  // design's own pick in styleSpec.roofProfile, else the style's starting value, and AG Panel when
+  // neither says. The roof-type pick still decides metal vs shingle, exactly as before.
   const roofIsMetal = p.roofType === "Metal" ? true
     : p.roofType === "Shingle" ? false
     : !!(p.styleSpec && p.styleSpec.roofMaterial === "metal");
@@ -14153,16 +14335,19 @@ function buildShed3DModel(THREE, p) {
   // Same isolation as buildOneWall: rebuildInterior repopulates this group
   // alone when a loft/workbench/ramp moves during a live drag.
   const interiorGroup = new THREE.Group();
-  // ── Electrical devices: drawn, never picked (2026-09-15) ──
+  // ── Electrical devices: drawn, and picked like any other item (2026-09-15, 2026-10-06) ──
   // Carolyn, 2026-09-14, on the expo build: she added a Flood Light and a Ceiling Fan from "Add
   // an electrical item", the plan showed them, and the 3D showed an empty building. No branch
   // below drew an electrical item at all, so a customer who paid for the package saw none of it.
   //
-  // Drawn now, and deliberately INERT:
-  //   · NO itemId on the group. pickItem3 walks past a hit without one, so a click on an outlet
-  //     selects nothing (or whatever stands behind it). Electrical is placed and moved in 2D
-  //     only -- place3 refuses it and the 3D Add row leaves it out -- and a device you could
-  //     grab here but not place here would be half a feature.
+  // They were drawn INERT at first, placed and moved on the plan only. Since 2026-10-06 the 3D
+  // editor places them as well, from its own Electrical Items chooser (Carolyn: "yes, customers
+  // add outlets, lights and fans in the 3D view"), so they are selected, dragged and removed there
+  // like every other item:
+  //   · itemId on the group, but ONLY while the device's tool is in itemTypes (`c` below): the
+  //     tool is what tells the viewer how to drag it (on a wall or not) and what to call it. A
+  //     device whose tool has left ITEMS, because the package was switched off, still draws and
+  //     stays inert: pickItem3 walks past a hit without itemId.
   //   · No shadows (userData.noShadow, honoured by setShadowFlags): a 3-in cover plate throwing
   //     a sun shadow reads as a smudge on the wall, and the shadow map has no resolution for it.
   //   · userData.ssElec = the electrical item id, ssElecFor = the placed item's id. Nothing in
@@ -14178,14 +14363,15 @@ function buildShed3DModel(THREE, p) {
   //   wall, outside  /flood|exterior|outdoor/ or mounted within 3 in of the plate: a lamp on the
   //                  cladding's proudest face (trimFace). Capped under the eave on an eave wall;
   //                  on a gable end it may rise into the gable, to half a foot under the roof.
-  //   ceiling        a light disc just under the plate line, or a fan (hub + 4 blades) 0.6 ft down
-  const buildElectrical3D = (it, c) => {
+  //   ceiling        a light disc just under the plate line, or a fan (hub + 4 blades) 0.6 ft down;
+  //                  under a loft whose floor reaches it, from the loft's underside (itemsNow)
+  const buildElectrical3D = (it, c, itemsNow) => {
     const name = String((c && c.label) || it.name || "");
     const hIn = Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : (c && c.heightOffFloorIn));
     const hFt = Number.isFinite(hIn) && hIn > 0 ? hIn / 12 : null;
     const onWall = c ? !!c.wallSnap : !!it.wall;
     const g = new THREE.Group();
-    g.userData = { ssElec: String(it.electricalItemId), ssElecFor: it.id };   // NO itemId -- see above
+    g.userData = { ...(c && c.electricalItemId ? { itemId: it.id } : {}), ssElec: String(it.electricalItemId), ssElecFor: it.id };   // itemId only with a tool -- see above
     const add = (parent, m) => { m.userData.noShadow = true; parent.add(m); return m; };
     const glow = () => mat("#FFF6DC", { emissive: "#FFE7A3", emissiveIntensity: 0.85, roughness: 0.4 });
     if (onWall) {
@@ -14260,8 +14446,25 @@ function buildShed3DModel(THREE, p) {
     } else {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       // The LOCAL ceiling (wings: the centre's plate under the raised centre, H under a wing).
-      const cH = d3CeilingFt(roofCfg, bldgW, bldgH, H, g.position.x, g.position.z);
-      if (/fan/i.test(name)) {
+      const cH0 = d3CeilingFt(roofCfg, bldgW, bldgH, H, g.position.x, g.position.z);
+      // UNDER A LOFT (LOFT HEIGHT) the loft's underside is the ceiling. A loft on the plate has its
+      // floor top 0.02 ft under it, so a light hung at the plate was drawn wholly inside the platform:
+      // hidden from below, flickering on the loft floor in Look-inside, and behind the platform for
+      // pickItem3. Only a loft whose floor comes down past the fitting's own reach under cH0 (`drop`:
+      // the disc 0.12, the fan 0.75) moves it, so a light over a saved 5'6" loft hangs where it always
+      // did. The footprint is widened by what meets the ceiling (the disc's radius, the fan's rod), so
+      // a light just off the loft's edge does not hang half inside it.
+      const fan = /fan/i.test(name), drop = fan ? 0.75 : 0.12, reach = fan ? 0.03 : 0.45;
+      let cH = cH0;
+      (itemsNow || []).forEach((lf) => {
+        if (lf.type !== "loft") return;
+        const lc = itemTypes[lf.type] || {};
+        const lw = lf.widthFt || lc.width || 6, ld = lf.heightFt || lc.height || 4;
+        if (Math.abs(g.position.x - ftX(lf.x)) > lw / 2 + reach || Math.abs(g.position.z - ftZ(lf.y)) > ld / 2 + reach) return;
+        const top = loftElevOf(lf);
+        if (top > cH0 - drop) cH = Math.min(cH, top - D3.LOFT_T);
+      });
+      if (fan) {
         const Y = cH - 0.6;
         const hubMat = mat("#374151", { roughness: 0.5, metalness: 0.3 });
         const rod = add(g, cyl(hubMat, 0.03, 0.6));
@@ -14372,10 +14575,24 @@ function buildShed3DModel(THREE, p) {
     g.traverse((o) => { if (o.isMesh && o.material === trimMat) o.material = pTrim; });
     interiorGroup.add(g);
   };
+  // Where a loft's floor top is DRAWN (LOFT HEIGHT): on the plate over its footprint, a rep's height
+  // capped at that plate, or a loft saved before 2026-10 at D3.LOFT_ELEV. A floor at the plate is drawn
+  // D3_LOFT_PLATE_GAP under it, so it never shares the wall tops' plane. model.loftElevFt hands this
+  // same function to the viewer's highlight box and its drag plane: the platform, the box and the plane
+  // are one computation and cannot disagree.
+  // ⚠️ THE PLATE READ: H here is the wall plate. A roof raised on its rafters (a shell top above the
+  // plate) must keep handing ssLoftPlateFt the plate, not the shell.
+  const loftElevOf = (it) => {
+    const c = itemTypes[it.type] || {};
+    const plate = ssLoftPlateFt(roofCfg, bldgW, bldgH, H, ftX(it.x), ftZ(it.y), it.widthFt || c.width || 6, it.heightFt || c.height || 4);
+    const e0 = ssLoftElevFt(it, plate);
+    return e0 >= plate - 1e-6 ? plate - D3_LOFT_PLATE_GAP : e0;
+  };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
     // Before the tool check on purpose: a device whose tool left ITEMS still draws (see above).
-    if (it.electricalItemId) { buildElectrical3D(it, c); return; }
+    // The whole list goes with it: a ceiling fitting under a loft hangs from the loft (UNDER A LOFT).
+    if (it.electricalItemId) { buildElectrical3D(it, c, itemsNow); return; }
     if (!c) return;
     // Plan annotations, one more view of them: the note's text as a plaque
     // lying at its plan position, the line as a thin strip between its
@@ -14407,7 +14624,7 @@ function buildShed3DModel(THREE, p) {
     }
     if (it.type === "loft") {
       const w = it.widthFt || c.width, d = it.heightFt || c.height;
-      const elev = it.elevationFt || D3.LOFT_ELEV; // Phase 5 field, D3 fallback
+      const elev = loftElevOf(it); // LOFT HEIGHT: on the plate, a rep's height, or a legacy 5'6"
       const cx = ftX(it.x), cz = ftZ(it.y);
       const lg = new THREE.Group();
       lg.userData = { itemId: it.id, floorItem: true };
@@ -14707,6 +14924,8 @@ function buildShed3DModel(THREE, p) {
       built.ogs.forEach((og) => { setShadowFlags(og); openingsGroup.add(og); });
     });
   };
+  // A loft's drawn floor top for any item (loftElevOf): the viewer's highlight and drag plane read it.
+  model.loftElevFt = loftElevOf;
   model.rebuildInterior = (itemsNow) => {
     Array.from(interiorGroup.children).forEach((g) => { interiorGroup.remove(g); disposeSubtree(g, null); });
     buildInterior(itemsNow);
@@ -15321,7 +15540,7 @@ function disposeShed3DModel(model) {
 // (3D on and `quoteCornerViews: true`). Then page 2 is the four-corner sheet, drawn off-screen at
 // submit, and the shot taken here is only the quote's picture (the order screen's card and the
 // customer's quote thumbnail), so the button says that and never "in my quote".
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false, quoteCorners = false }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, placeableElec, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false, quoteCorners = false }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -15622,6 +15841,20 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); }
         }
       };
+      // Where buildElectrical3D DREW a device: the world box of its group (userData.ssElecFor), or null
+      // before there is one. The renderer, not the item, settles a device's height: a cover plate is
+      // kept on its wall, a flood light asked for at 120 in hangs under the eave of an 8 ft wall, and a
+      // ceiling fitting hangs from the LOCAL ceiling. So the outline, the dimension run and the drag
+      // plane take the height from what was drawn, as a loft's take model.loftElevFt. The box is the
+      // last build's (a drag re-draws it a frame later), so callers take only its height from it.
+      const elecBox3 = (it) => {
+        const e = engineRef.current;
+        const g = e && it ? e.model.interiorGroup.children.find((x) => x.userData && x.userData.ssElecFor === it.id) : null;
+        if (!g) return null;
+        g.updateWorldMatrix(true, true);
+        const b = new THREE.Box3().setFromObject(g);
+        return b.isEmpty() ? null : b;
+      };
       const placeDims = (it) => {
         clearDims();
         const cfg = it && itemTypes[it.type];
@@ -15632,7 +15865,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // where it sits vertically; bench height then, which only positions the line and is
         // never itself printed.
         const band = ssItemVBand(it, cfg, itemTypes);
-        const y = band ? (band.bottomFt + band.topFt) / 2 : D3.BENCH_H / 2;
+        // A device's run goes at its DRAWN height (elecBox3): a flood light's band is the height it
+        // was asked for, which can be feet above the eave it is drawn under.
+        const eb = it.electricalItemId ? elecBox3(it) : null;
+        const y = eb ? (eb.min.y + eb.max.y) / 2 : band ? (band.bottomFt + band.topFt) / 2 : D3.BENCH_H / 2;
         const ink = d.centered ? "#059669" : "#1E293B";     // the plan's two inks, exactly
         const lineMat = new THREE.LineBasicMaterial({ color: ink, transparent: true, opacity: 0.8, depthTest: false });
         // Proud of the siding, on the OUTSIDE face of this item's own wall.
@@ -15881,6 +16117,45 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
       const placeHighlight = (it) => {
         const c = itemTypes[it.type] || {};
+        // An ELECTRICAL device (2026-10-06): along its wall the way an opening is outlined, or around
+        // a ceiling fitting, at the height buildElectrical3D drew it (elecBox3). The position comes
+        // from the item, so the box follows a drag before the re-draw lands.
+        if (it.electricalItemId && c.electricalItemId) {
+          const bb = elecBox3(it);
+          if (c.wallSnap) {
+            const w = Math.max(it.widthFt || c.width || 0.5, 0.6);
+            const ns = it.wall === "north" || it.wall === "south";
+            const len = ns ? bldgW : bldgH;
+            const along = ns ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+            const a = Math.max(w / 2, Math.min(along, len - w / 2)) - len / 2;
+            const wallAt = ns ? (it.wall === "north" ? -bldgH / 2 : bldgH / 2) : (it.wall === "west" ? -bldgW / 2 : bldgW / 2);
+            // The drawn box speaks for the device only while it stands on this item's wall: dragged
+            // round a corner it is re-drawn a frame later, and until then the catalog height does.
+            const k = ns ? "z" : "x";
+            const own = !!bb && Math.abs((bb.min[k] + bb.max[k]) / 2 - wallAt) < 1.5;
+            const band = ssItemVBand(it, c, itemTypes);
+            const hOff = Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : c.heightOffFloorIn);
+            const yMid = isFinite(hOff) ? hOff / 12 : 1.5;
+            const y0 = own ? bb.min.y - 0.15 : band ? band.bottomFt - 0.15 : yMid - 0.3;
+            const y1 = own ? bb.max.y + 0.15 : band ? band.topFt + 0.15 : yMid + 0.3;
+            // Through the wall and round whatever stands proud of it: a plate inside, a lamp outside.
+            const half = D3.WALL_T / 2 + 0.2;
+            const n0 = own ? Math.min(bb.min[k] - 0.1, wallAt - half) : wallAt - half;
+            const n1 = own ? Math.max(bb.max[k] + 0.1, wallAt + half) : wallAt + half;
+            highlight.scale.set(w + 0.3, y1 - y0, n1 - n0);
+            highlight.rotation.y = ns ? 0 : Math.PI / 2;
+            highlight.position.set(ns ? a : (n0 + n1) / 2, (y0 + y1) / 2, ns ? (n0 + n1) / 2 : a);
+          } else {
+            const cx = (it.x - mgX) / scale - bldgW / 2, cz = (it.y - mgY) / scale - bldgH / 2;
+            const s = /fan/i.test(String(c.label || "")) ? 3.6 : 1.2;
+            const Hn = spec.wallHeightFt || D3.WALL_H;
+            const y0 = bb ? bb.min.y - 0.15 : Hn - 0.65, y1 = bb ? bb.max.y + 0.15 : Hn - 0.15;
+            highlight.scale.set(s, y1 - y0, s);
+            highlight.rotation.y = 0;
+            highlight.position.set(cx, (y0 + y1) / 2, cz);
+          }
+          return;
+        }
         if (c.wallOnly) {
           const w = it.widthFt || c.width || 3;
           const ns = it.wall === "north" || it.wall === "south";
@@ -15906,7 +16181,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const cz = (it.y - mgY) / scale - bldgH / 2;
         highlight.rotation.y = 0;
         if (it.type === "loft") {
-          const elev = it.elevationFt || D3.LOFT_ELEV;
+          // The platform's own drawn height (model.loftElevFt, LOFT HEIGHT), so the box sits on it.
+          const e = engineRef.current;
+          if (!e) return;
+          const elev = e.model.loftElevFt(it);
           highlight.scale.set(w + 0.3, D3.LOFT_T + 0.3, d0 + 0.3);
           highlight.position.set(cx, elev - D3.LOFT_T / 2, cz);
         } else if (c.propType) {
@@ -16213,11 +16491,11 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // Refusing here closes the class. The tools themselves are re-admitted to the 3D palette
         // (see paletteKeys), so shelving is placed from 3D by its real buttons.
         //
-        // Electrical has no real buttons to re-admit: a device is placed on the plan only. So
-        // paletteKeys leaves its picker out of the Add row (2026-10-05) and this refusal stays
-        // as the guard rail. 3D placement would need a chooser sheet like the door/window one,
-        // and a placement that skips the electricalItemId/heightOffFloorIn stamps the 2D click
-        // writes is drawn as nothing and priced at $0.
+        // Electrical has no real buttons to re-admit, so paletteKeys leaves its picker out of the
+        // Add row (2026-10-05). Since 2026-10-06 the row has its own Electrical Items button, which
+        // opens the viewer's chooser sheet (pick3 kind "elec"); a card there arms THAT ITEM'S tool,
+        // never this stand-in, and the branches below stamp it as the 2D click does (ssElecStamps).
+        // Nothing reaches this refusal for electrical any more; it stays as the guard rail.
         if (cfg.isShelfPicker || cfg.isElecItemPicker || cfg.isVentPicker) {
           flash3("Pick which one from the palette beside the plan, then place it here.");
           setTool3(null);
@@ -16274,10 +16552,30 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           commitPlaced3({ id: idCounter++, type: tool, ...rp, widthFt: closest.widthFt || (doorCfg ? doorCfg.width : 3), heightFt: rampDepth, snapDoorId: closest.id });
           return;
         }
+        // A CEILING electrical device (2026-10-06): the 2D free branch, field for field, from a click
+        // on the floor under where it hangs (onPtr3Down skips the wall pick for it). Held inside the
+        // footprint by its own size and stamped by ssElecStamps, so it draws, prices and saves the way
+        // one clicked on the plan does. Outside the building it is refused rather than clamped: a
+        // click on the plan is on the plan, but this one can land out on the lawn.
+        if (cfg.electricalItemId && !cfg.wallSnap) {
+          const fx = (pageX - mgX) / scale, fy = (pageY - mgY) / scale;
+          if (!(fx >= 0 && fx <= bldgW && fy >= 0 && fy <= bldgH)) {
+            flash3("Click the floor inside the building, under where it should hang.");
+            return;
+          }
+          const iw = cfg.width * scale, ih = slabDepthFt(cfg) * scale;
+          const x = Math.max(mgX + iw / 2, Math.min(pageX, mgX + pWpx - iw / 2));
+          const y = Math.max(mgY + ih / 2, Math.min(pageY, mgY + pHpx - ih / 2));
+          commitPlaced3({ id: idCounter++, type: tool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height, ...ssElecStamps(cfg) });
+          return;
+        }
         if (cfg.wallSnap) {
           const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
           const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, slabDepthFt(cfg) * scale, pWpx, pHpx, mgX, mgY);
-          const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: slabDepthFt(cfg) };
+          // The 2D wallSnap branch's candidate, depthIn and stamps included: a wall device placed
+          // without its stamps would draw as nothing and price at $0 (ssElecStamps).
+          const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: slabDepthFt(cfg),
+            ...(cfg.depthIn != null ? { depthIn: cfg.depthIn } : {}), ...ssElecStamps(cfg) };
           if (checkDoorCollision(candidate, cfg, liveItems, itemTypes, scale)) {
             flash3("A door is blocking this wall — try a different wall, or move the door first.");
             return;
@@ -16305,7 +16603,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               return;
             }
           }
-          commitPlaced3({ id: idCounter++, type: "loft", x: mgX + (bldgW / 2) * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, elevationFt: D3.LOFT_ELEV });
+          // On the top plate (LOFT HEIGHT): onPlate, never a number, so it follows the walls. The 2D rule too.
+          commitPlaced3({ id: idCounter++, type: "loft", x: mgX + (bldgW / 2) * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, onPlate: true });
           return;
         }
         // wallOnly built-ins (config window/roughOpeningDoor/roughOpeningWindow)
@@ -16333,7 +16632,11 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (tool) {
           const cfg = itemTypes[tool];
           if (!cfg) return;
-          const hitW = pickWall3(ev);
+          // A CEILING electrical device is aimed at the FLOOR under where it hangs (2026-10-06), so the
+          // wall pick is skipped for it: in Look-inside a ghosted near wall stands in front of much of
+          // the floor, and its hit would hang the fitting at the foot of that wall. The floor plane
+          // below is the one every floor item lands on, with the same reach.
+          const hitW = cfg.electricalItemId && !cfg.wallSnap ? null : pickWall3(ev);
           let pageX = null, pageY = null;
           if (hitW) {
             pageX = mgX + (hitW.point.x + bldgW / 2) * scale;
@@ -16573,13 +16876,19 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               }
               commitLive(it, sn, { walls: [it.wall, sn.wall], interior: rampMoved });
             }
-          } else if (ssSlabModel(it.type, itemTypes)) {
+          } else if (ssSlabModel(it.type, itemTypes) || (c.wallSnap && it.electricalItemId)) {
             // Same rules as the 2D wallSnap drag: snap to the nearest wall's interior, blocked
             // by doors and by other slabs on that wall WHOSE HEIGHT BAND OVERLAPS this one.
             // The drag plane sits at the item's own height so the pointer ray meets the thing
             // being dragged — a shelf at 48 in does not grab on the bench's plane.
+            // A WALL-MOUNTED ELECTRICAL DEVICE drags here too (2026-10-06). It is no slab (its
+            // modelKey "electrical" is not an SS_SLAB_BANDS key), but the plan drags every wallSnap
+            // item by this one rule, refusals included. Its plane is at its DRAWN height (elecBox3):
+            // a flood light asked for at 120 in hangs under the eave, where a 10 ft plane misses it.
             const slabC = itemTypes[it.type] || {};
-            const slabY = slabC.modelKey && slabC.modelKey !== "wallBench"
+            const elecB = it.electricalItemId ? elecBox3(it) : null;
+            const slabY = elecB ? (elecB.min.y + elecB.max.y) / 2
+              : slabC.modelKey && slabC.modelKey !== "wallBench"
               ? (Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : slabC.heightOffFloorIn) || 48) / 12
               : D3.BENCH_H / 2;
             dragPlane.set(new THREE.Vector3(0, 1, 0), -slabY);
@@ -16604,8 +16913,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // Same rules as the 2D free drag: integer-foot rounding, wall +
             // loft edge snapping, overlap reject; unattached positions are
             // allowed mid-drag (the 2D banner warns about them).
-            const elev = it.elevationFt || D3.LOFT_ELEV;
-            dragPlane.set(new THREE.Vector3(0, 1, 0), -elev);
+            // The plane at the platform's own drawn height (model.loftElevFt, LOFT HEIGHT), taken ONCE
+            // per gesture (the vent's grab). A plate loft's height is the plate over its footprint, so it
+            // changes as the loft crosses a raised centre's or a roof step's line; re-read every move,
+            // the plane jumped with it and the loft flipped between the two sides on each pointermove.
+            const e = engineRef.current;
+            if (!e) return;
+            if (dragging3.loftY == null) dragging3.loftY = e.model.loftElevFt(it);
+            dragPlane.set(new THREE.Vector3(0, 1, 0), -dragging3.loftY);
             const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
             if (!p) return;
             const wFt = it.widthFt || c.width || 6, hFt = it.heightFt || c.height || 4;
@@ -16672,6 +16987,25 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // No quantisation. Carolyn: "I want them to be able to drag it exactly where they
             // want it and to not snap to anything." The clamp stays — it holds the item
             // inside the building, which is a wall, not a grid.
+            const cxFt = Math.max(halfW, Math.min(p.x + bldgW / 2, bldgW - halfW));
+            const cyFt = Math.max(halfH, Math.min(p.z + bldgH / 2, bldgH - halfH));
+            const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
+            if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
+          } else if (it.electricalItemId && !c.wallSnap) {
+            // A CEILING ELECTRICAL DEVICE (2026-10-06): the plan's free drag, held inside the footprint
+            // by half its own size and not quantised (the prop rule above). The plane is at the fitting's
+            // DRAWN height (elecBox3), not the floor it was placed from: a fan grabbed 7 ft up and dragged
+            // on the floor plane would leap to where the pointer ray meets the floor, feet beyond it.
+            // Taken ONCE per gesture, as the loft's is: dragged in or out from under a loft (UNDER A LOFT)
+            // the fitting is re-hung, and a plane that followed it would flip it across the loft's edge.
+            if (dragging3.elecY == null) {
+              const eb = elecBox3(it);
+              dragging3.elecY = eb ? (eb.min.y + eb.max.y) / 2 : (spec.wallHeightFt || D3.WALL_H) - 0.5;
+            }
+            dragPlane.set(new THREE.Vector3(0, 1, 0), -dragging3.elecY);
+            const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            if (!p) return;
+            const halfW = (it.widthFt || c.width || 0.8) / 2, halfH = (it.heightFt || c.height || 0.8) / 2;
             const cxFt = Math.max(halfW, Math.min(p.x + bldgW / 2, bldgW - halfW));
             const cyFt = Math.max(halfH, Math.min(p.z + bldgH / 2, bldgH - halfH));
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
@@ -16966,12 +17300,30 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <div style={{ position: "absolute", left: "50%", bottom: 14, transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 12, padding: 12, zIndex: 40, width: "min(540px, 92%)", maxHeight: 300, overflowY: "auto", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ color: "#E2E8F0", fontSize: 13, fontWeight: 800 }}>
-                {pick3.kind === "door" ? "Pick a door" : pick3.kind === "window" ? "Pick a window" : "Pick a ramp"}
+                {pick3.kind === "door" ? "Pick a door" : pick3.kind === "window" ? "Pick a window" : pick3.kind === "elec" ? "Pick an electrical item" : "Pick a ramp"}
               </span>
               <button onClick={() => setPick3(null)} style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 18, cursor: "pointer", lineHeight: 1 }}>✕</button>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
-              {(pick3.kind === "door" ? (placeableDoors || []) : pick3.kind === "window" ? (placeableWindows || []) : (placeableRamps || [])).map((fx) => (
+              {/* Electrical (2026-10-06): a card per item the 2D picker offers, with its wording and,
+                  like it, NO PRICE (prices are on the quote). A card arms that item's own tool and
+                  closes; the next click places it (place3). Look inside goes on with it: the plates
+                  are on the inside faces, and the roof would hide a ceiling fitting. */}
+              {pick3.kind === "elec" && (placeableElec || []).filter((k) => itemTypes[k]).map((k) => {
+                const ec = itemTypes[k];
+                const bits = [ec.wallSnap ? "wall mounted" : "ceiling",
+                  ec.heightOffFloorIn != null ? `${Math.round(Number(ec.heightOffFloorIn))}″ up` : null].filter(Boolean);
+                return (
+                  <button key={k} data-ss-elec3d-card={k}
+                    onClick={() => { setPick3(null); setTool3(k); if (!interior) setInterior(true); }}
+                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "#1E293B", border: "1px solid #334155", borderRadius: 8, padding: 8, cursor: "pointer", width: 108 }}>
+                    <span style={{ fontSize: 28 }}>{ec.icon || ELEC_ITEM_PICKER_CFG.icon}</span>
+                    <span style={{ color: "#CBD5E1", fontSize: 11, fontWeight: 700, textAlign: "center" }}>{ec.label}</span>
+                    <span style={{ color: "#64748B", fontSize: 10, textAlign: "center" }}>{bits.join(" · ")}</span>
+                  </button>
+                );
+              })}
+              {pick3.kind !== "elec" && (pick3.kind === "door" ? (placeableDoors || []) : pick3.kind === "window" ? (placeableWindows || []) : (placeableRamps || [])).map((fx) => (
                 <button key={fx.id}
                   onClick={() => {
                     const e = engineRef.current;
@@ -16990,7 +17342,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                 </button>
               ))}
               {/* The pickers' "Rough opening" tile, here too (Carolyn 2026-09-16). */}
-              {pick3.kind !== "ramp" && roOffer && roOffer[pick3.kind] && (
+              {pick3.kind !== "ramp" && pick3.kind !== "elec" && roOffer && roOffer[pick3.kind] && (
                 <button key="ro" data-ss-ro-tile3={pick3.kind}
                   onClick={() => {
                     const e = engineRef.current;
@@ -17046,7 +17398,26 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
             </button>
           ))}
-          {tool3 && !msg3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← {itemTypes[tool3] && itemTypes[tool3].doorSnap ? "click near a door" : itemTypes[tool3] && (itemTypes[tool3].wallOnly || itemTypes[tool3].wallSnap) ? "click a wall" : "click the floor"}</span>}
+          {/* ONE Electrical Items button, the 2D palette's (2026-10-06, Carolyn: "yes, customers add
+              outlets, lights and fans in the 3D view"). It opens the chooser sheet above (pick3 kind
+              "elec"); while a device is armed it carries that device's name and a click disarms it.
+              It never arms the picker key itself, which place3 still refuses. Only where the parent
+              hands in placeableElec: the calibration preview keeps nothing placed in it, so it gets none. */}
+          {placeableElec && placeableElec.length > 0 && (() => {
+            const armed = tool3 && itemTypes[tool3] && itemTypes[tool3].electricalItemId ? tool3 : null;
+            const on = !!armed || !!(pick3 && pick3.kind === "elec");
+            return (
+              <button data-ss-elec3d="1" onClick={() => {
+                if (armed) { setTool3(null); return; }
+                setTool3(null);
+                setPick3((p) => (p && p.kind === "elec" ? null : { kind: "elec" }));
+              }} disabled={phase !== "ready"}
+                style={{ background: on ? accent : "#1E293B", color: on ? ssOnFill(accent) : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+                {ELEC_ITEM_PICKER_CFG.icon} {armed ? itemTypes[armed].label : ELEC_ITEM_PICKER_CFG.label}
+              </button>
+            );
+          })()}
+          {tool3 && !msg3 && <span style={{ color: accent, fontSize: 12, fontWeight: 700 }}>← {itemTypes[tool3] && itemTypes[tool3].doorSnap ? "click near a door" : itemTypes[tool3] && itemTypes[tool3].electricalItemId && !itemTypes[tool3].wallSnap ? "click the floor under where it hangs" : itemTypes[tool3] && (itemTypes[tool3].wallOnly || itemTypes[tool3].wallSnap) ? "click a wall" : "click the floor"}</span>}
           {msg3 && <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>{msg3}</span>}
           {sel3d && !tool3 && (
             <button onClick={() => { const e = engineRef.current; if (e && e.delete3) e.delete3(sel3d.id); }}
@@ -18008,7 +18379,8 @@ const SSD_CSS = [
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
   '.ssd-frame{--ssd-select-h:26px}',
   // One wrapping flex row of cards, each sized by the number of FIELDS it holds (Ahsan 2026-09-16, "i need
-  // uniformity in this bar"). --ssd-n on a card is its field count: Building size 1, Roof options 2,
+  // uniformity in this bar"). --ssd-n on a card is its field count: Building size 1, Roof options 2 (3 with
+  // the portal's metal Profile),
   // Cladding 1–3 (Siding when the style sells a cladding, Body and Trim when paint is on). A card grows by
   // its n from a basis of its fixed chrome: the 9px gaps between its fields plus 13px padding and 1px
   // border each side. So the spare width is shared out per field, not per card, and every field on a line
@@ -21964,7 +22336,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const rampEnabled = !!(C.rampSettings && C.rampSettings.enabled);
   const rampCustom = rampMode === "custom" && placeableRamps.length > 0;
   const [sel, setSel] = useState(() => {
-    const init = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+    const init = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
@@ -22247,9 +22619,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
-  // Cladding is still a fixed FOUR (we ship a texture and a relief profile for each; a tenant
-  // cannot invent a fifth) -- but WHICH of them a builder sells, what they call each one and
-  // what it costs is theirs now, per style, from Settings -> Options -> Cladding (207).
+  // Cladding is still a fixed set, FIVE since vinyl joined on 2026-10-06 (we ship a texture and a
+  // relief profile for each; a tenant cannot invent a sixth) -- but WHICH of them a builder sells,
+  // what they call each one and what it costs is theirs now, per style, from Settings -> Options ->
+  // Cladding (207).
   // Empty string = "builder's standard", i.e. fall through to the style's own d3.siding,
   // which is what every existing design does today.
   //
@@ -23744,7 +24117,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // from before roofType/roofColor shipped) must not inherit the previously opened
     // design's values for those keys. Mirrors the sel useState initializer.
     setSel(() => {
-      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+      const base = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
       C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
       return { ...base, ...(design.selections || {}) };
     });
@@ -23947,7 +24320,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // picked five clicks ago in the current session -- the same rule the design-load
     // path already follows (audit 2026-08-19).
     setSel(() => {
-      const base = { style: "", size: "", roofType: "", roofColor: "", cladding: "" };
+      const base = { style: "", size: "", roofType: "", roofColor: "", roofProfile: "", cladding: "" };
       C.options.forEach((o) => { base[o.id] = o.type === "counter" ? o.options[0] : ""; });
       return { ...base, ...vsel };
     });
@@ -24058,7 +24431,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
   const ventRoof2D = () => {
-    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel));
     return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -24413,8 +24786,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ...(cfg.depthIn != null ? { depthIn: cfg.depthIn } : {}),
         // Named explicitly rather than inferred from `type` later: the catalog row can be
         // renamed or retired, and a saved design must still say what was actually placed.
-        ...(cfg.electricalItemId ? { electricalItemId: cfg.electricalItemId } : {}),
-        ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
+        ...ssElecStamps(cfg) };
       const others = items.filter((i) => i.id !== candidate.id);
       if (checkDoorCollision(candidate, cfg, others, ITEMS, scale)) {
         setToast("A door is blocking this wall! Try clicking a different wall, or move the door first.");
@@ -24446,8 +24818,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           return;
         }
       }
-      ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, elevationFt: D3.LOFT_ELEV };
-    } else if (wall) {
+      // On the top plate (LOFT HEIGHT): onPlate, never a number, so it follows the walls.
+      ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, onPlate: true };
+    } else if (wall && !cfg.electricalItemId) {
+      // Never a ceiling device, however near a wall it was clicked: see the free branch below.
       const r = ssWallItemAt(activeTool, wall, pt.x, pt.y);
       if (r.refusal) { setToast(r.refusal); setTimeout(() => setToast(null), 4000); return; }
       ni = r.item;
@@ -24457,9 +24831,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // The same two stamps the wallSnap branch makes. A ceiling-mounted electrical item lands
       // HERE, not there, and without its catalog id it would render on the plan and reach the
       // quote as nothing at all — placed, visible, and free.
+      // HERE EVEN WHEN CLICKED BESIDE A WALL (2026-10-06). A click within getWallFromClick's 80 px of
+      // one (about 3.6 ft on a 12x24) used to take the wall branch above, and ssWallItemAt writes
+      // neither stamp: a Light placed there sat on the wall, free on the quote and never drawn as a
+      // light in 3D. A ceiling device has no wall to snap to. The 3D editor's floor click (place3) is
+      // this branch, field for field.
       ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height,
-        ...(cfg.electricalItemId ? { electricalItemId: cfg.electricalItemId } : {}),
-        ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
+        ...ssElecStamps(cfg) };
     }
     setItems((p) => [...p, ni]);
     // SELECT WHAT WAS JUST PLACED. Four other placement paths already did this (the included
@@ -25452,6 +25830,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setItems((prev) => prev.map((i) => (i.id === pid ? { ...i, heightIn: h } : i)));
     return h;
   };
+  // A selected LOFT's height (SSLoftBar, LOFT HEIGHT). Its plate is the one the 3D draws it on: the same
+  // resolver call (ventRoof2D) and the same footprint read (ssLoftPlateFt) as buildShed3DModel.
+  // ⚠️ THE PLATE READ, the one place the plan asks for it: ventRoof2D().H is the wall plate. A roof
+  // raised on its rafters must keep this the plate, not the shell top.
+  const loftPlate2D = (it) => {
+    const vr = ventRoof2D();
+    const c = ITEMS.loft || {};
+    return ssLoftPlateFt(vr.roof, bldgW, bldgH, vr.H, (it.x - mgX) / scale - bldgW / 2, (it.y - mgY) / scale - bldgH / 2,
+      it.widthFt || c.width || 6, it.heightFt || c.height || 4);
+  };
+  // null puts the loft on the plate. A number of inches at or over the plate puts it ON the plate, and
+  // one under 4' is raised to 4'; each correction says what it did. Returns the inches it ends up at,
+  // null on the plate, or undefined when nothing was done, for the bar's field.
+  const loftHeightSel = (id, heightIn) => {
+    const it = items.find((i) => i.id === id);
+    if (!it || it.type !== "loft" || planLocked) return;
+    const plate = loftPlate2D(it);
+    const r = ssLoftWithHeight(it, heightIn, plate);
+    if (r.note) refuseDrag(r.note);
+    const applied = r.item.onPlate === true ? null : Math.round(r.item.elevationFt * 12);
+    if ((it.onPlate === true) === (r.item.onPlate === true) && it.elevationFt === r.item.elevationFt) return applied;
+    setItems((prev) => prev.map((i) => (i.id === id ? ssLoftWithHeight(i, heightIn, plate).item : i)));
+    return applied;
+  };
   const partitionOpeningSel = (patchOrNull) => {
     if (!selOpening || selOpening.pid !== selectedId || planLocked) return;
     const { pid, oid } = selOpening;
@@ -25691,7 +26093,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const body = paintColors.body || "TBD"; const trim = paintColors.trim || "TBD";
       bullets.push(`Painted — Body: ${body}, Trim: ${trim}`);
     } else { bullets.push("Unpainted"); }
-    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
+    // A metal roof on standing seam is named, as on the quote (2026-10-06): "Roof — Metal (Standing Seam): Black".
+    const roofStd = sel.roofType === "Metal"
+      && (d3CustomerRoofProfile(sel) || d3NormalizeRoofProfile(selectedStyle && selectedStyle.d3 && selectedStyle.d3.roofProfile)) === "standingseam";
+    if (sel.roofType) bullets.push(`Roof — ${sel.roofType}${roofStd ? " (Standing Seam)" : ""}${sel.roofColor ? `: ${sel.roofColor}` : ""}`);
     const sdCount = items.filter((i) => i.type === "singleDoor").length;
     const ddCount = items.filter((i) => i.type === "doubleDoor").length;
     if (sdCount > 0) bullets.push(`Single Door${sdCount > 1 ? " ×" + sdCount : ""}`);
@@ -28519,7 +28924,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
         painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
         scale, mgX, mgY,
-        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel)),
+        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel)),
         roofType: sel.roofType,
         roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
         fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
@@ -28706,7 +29111,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
           // unselected, so the estimate always shows the Roof line in order.
-          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "" } : {}),
+          // roofProfile (2026-10-06) is the design's own metal profile, ALWAYS named here, so "" is a
+          // real clear: submit-estimate falls back to the stored design's pick only when a body (from a
+          // designer older than this) does not name the key at all.
+          ...((Array.isArray(C.colors) && C.colors.some((c) => c.shingle || c.metal)) ? { roofType: sel.roofType || "", roofColor: sel.roofColor || "", roofProfile: sel.roofProfile || "" } : {}),
           // Cladding (Carolyn 2026-08-18). VISUAL ONLY in v1 -- it is recorded on the design
           // and reported here so the estimate template can surface it, but it carries no
           // price and adds no line to the estimate. Pricing bolts on later the way Roof and
@@ -28857,7 +29265,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // them back into the modal, and billing for a window that is nowhere on the drawing is
           // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
           // back the moment the dormer can hold it again.
-          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel));
           const dRoof = (dSpec && dSpec.roof) || {};
           if (!d3DormerWindowFit(fx, d3DormerWidthFt(dRoof, d3RoofAxes(dRoof, bldgW, bldgH).L), d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
@@ -30679,6 +31087,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     for sheds, Standing Seam for post-frame (Carolyn 09-11 @07:30: "standing seam
                     is used in the post frame ... but we need this for sheds").
 
+                    THE STYLE'S DEFAULT since 2026-10-06 (Carolyn: "there is no standard it is per
+                    individual design"): each design can pick its own in the Designer's Roof options,
+                    and this is where a design that has not picked starts. Relabelled to say so, without
+                    the sheds / post-frame wording. What it stores is unchanged.
+
                     Only "standingseam" is ever stored. AG Panel is the renderer's default, so
                     picking it writes null and the style goes on saying nothing, exactly like every
                     row that predates the field.
@@ -30689,14 +31102,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     with no control to see or clear it (review 2026-09-15). Both previews on this
                     panel pin the customer's pick to nothing and so only draw the profile once Roof
                     material is Metal; the hint says that rather than letting the choice look broken. */}
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Metal roof profile
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Default metal roof profile
                   <select value={d3NormalizeRoofProfile(adminCal.spec.roofProfile)} onChange={(e) => calSet({ roofProfile: e.target.value === "standingseam" ? "standingseam" : null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                    <option value="agpanel">AG Panel (sheds)</option>
-                    <option value="standingseam">Standing Seam (post-frame)</option>
+                    <option value="agpanel">AG Panel</option>
+                    <option value="standingseam">Standing Seam</option>
                   </select>
-                  {adminCal.spec.roofMaterial !== "metal" && (
-                    <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
-                  )}
+                  <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>New designs start with this; each design can change it in the Designer.{adminCal.spec.roofMaterial !== "metal" ? " The preview shows it once Roof material is Metal." : ""}</span>
                 </label>
                 </>)}
                 {/* WHAT IT STANDS ON (2026-09-25). A top-level key with NO control until today: the
@@ -31542,10 +31953,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
-             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
-             placed on the plan only (the 3D draws them but has no chooser), so the button could
-             only ever flash place3's "pick from the palette" refusal. A Partition Wall is left out
-             for the same reason: it is placed and moved on the plan only. */
+             Electrical Items is left out too, and this preview is handed no placeableElec either:
+             nothing placed in it is kept (it has no onItemAdd), so it has no electrical chooser. A
+             Partition Wall is left out because it is placed and moved on the plan only. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].partitionType && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
@@ -32124,11 +32534,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               note: spec.roofMaterial ? null : "Not set, the customer chooses.", unset: true })}
             {/* ALWAYS SHOWN, as the calibration grid shows it: a customer can pick Metal whatever this
                 style's own material is, and a copied style's Standing seam is carried and saved, so it must
-                be visible. The preview only draws it once the material is Metal, and the hint says so. */}
-            {advSeg({ f: "roofProfile", label: "Metal profile", value: d3NormalizeRoofProfile(spec.roofProfile),
+                be visible. The preview only draws it once the material is Metal, and the hint says so.
+                The style's DEFAULT since 2026-10-06: each design can pick its own in the Designer. */}
+            {advSeg({ f: "roofProfile", label: "Default metal profile", value: d3NormalizeRoofProfile(spec.roofProfile),
               pick: (v) => calSet({ roofProfile: v === "standingseam" ? "standingseam" : null }),
-              opts: [["agpanel", "AG Panel"], ["standingseam", "Standing seam"]],
-              note: spec.roofMaterial === "metal" ? null : ["Shown once Material is Metal.", "Used when a customer picks a metal roof, whatever this style's own material is."] })}
+              opts: [["agpanel", "AG Panel"], ["standingseam", "Standing Seam"]],
+              note: spec.roofMaterial === "metal" ? "New designs start with this; each design can change it in the Designer."
+                : ["Shown once Material is Metal.", "New designs start with this; each design can change it in the Designer."] })}
             {advSeg({ f: "eave", label: "Roof edge", value: roof.eave === "open" ? "open" : "fascia", pick: (v) => calSetRoofOpt("eave", v === "open" ? "open" : null),
               opts: [["fascia", "Boxed in"], ["open", "Rafter tails"]] })}
             {advNum({ k: "overhang", label: "Overhang", unit: "in", value: ohIn, min: 0, max: 24, step: 1,
@@ -33609,11 +34021,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const ssLockStyle = { display: "block", border: "none", padding: 0, margin: 0, minWidth: 0,
     ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) };
   // Section 02's cards are sized by how many fields each holds (--ssd-n, read by .ssd-s2 in SSD_CSS), and
-  // SSSizeCards gives every field in the section one width. Building size holds 1 and Roof options 2.
+  // SSSizeCards gives every field in the section one width. Building size holds 1 and Roof options 2, or
+  // 3 on a Metal roof in the portal, where the metal Profile sits between Type and Color (2026-10-06).
   // ssS2CladN counts the Cladding card's: Siding when the style sells a cladding, then Body and Trim as a
   // pair. ssS2Key is the fit key: which cards render, as their field counts.
+  const ssRoofProfileShown = embedded && roofTypes.length > 0 && sel.roofType === "Metal";
   const ssS2CladN = (claddingChoices.length > 0 ? 1 : 0) + (paintOpt ? 2 : 0);
-  const ssS2Key = [sizeOpts.length > 0 ? 1 : 0, roofTypes.length > 0 ? 2 : 0, ssS2CladN].join("-");
+  const ssS2Key = [sizeOpts.length > 0 ? 1 : 0, roofTypes.length > 0 ? (ssRoofProfileShown ? 3 : 2) : 0, ssS2CladN].join("-");
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
@@ -33960,8 +34374,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 };
                 // One card, Type then Color. Before a type is picked the Color field shows a greyed
                 // box the height of a select, so the row's controls still line up.
+                //
+                // PROFILE (2026-10-06, Carolyn: "there is no standard it is per individual design"). On a
+                // Metal roof in the PORTAL, AG Panel or Standing Seam between the two, starting at the
+                // style's default. A rep's pick: the public page never shows it, though a design a rep set
+                // still draws and quotes it there. v1 adds no charge, so the note under Standing Seam says
+                // to adjust the price. onRoofType leaves the pick alone: it is ignored until the roof is
+                // Metal again (d3CustomerRoofProfile), so switching to Shingle and back keeps it.
+                const rProfile = d3CustomerRoofProfile(sel) || d3NormalizeRoofProfile(selectedStyle && selectedStyle.d3 && selectedStyle.d3.roofProfile);
                 return (
-                  <div className="ssd-card" style={{ "--ssd-n": "2" }}>
+                  <div className="ssd-card" style={{ "--ssd-n": ssRoofProfileShown ? "3" : "2" }}>
                     <span className="ssd-card-t">Roof options</span>
                     <div className="ssd-flds">
                       <div className="ssd-fld">
@@ -33972,6 +34394,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
                       </div>
+                      {ssRoofProfileShown && (
+                        <div className="ssd-fld">
+                          <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Profile</span>
+                          <select value={rProfile} onChange={(e) => setSel((p) => ({ ...p, roofProfile: e.target.value }))}
+                            className="ssd-select ssd-field" data-ss-roof-profile="">
+                            <option value="agpanel">AG Panel</option>
+                            <option value="standingseam">Standing Seam</option>
+                          </select>
+                          {/* Only someone holding "Override prices" (migration 277) can adjust it, so a rep
+                              without that permission is sent to someone who can (review 2026-10-07). */}
+                          {rProfile === "standingseam" && (
+                            <span className="ssd-dlv-note" style={{ display: "block", marginTop: 4 }}>{canOverridePrice
+                              ? "No extra charge is added; adjust the price if needed."
+                              : "No extra charge is added; ask an owner or admin to adjust the price if needed."}</span>
+                          )}
+                        </div>
+                      )}
                       <div className="ssd-fld">
                         <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Color</span>
                         {sel.roofType
@@ -34492,6 +34931,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               onAddWindow={() => { setWindowPick({ partitionId: si.id }); setActiveTool(null); setToast(null); }}
               onFlip={() => partitionOpeningSel((o) => ({ swing: o.swing === "in" ? "out" : "in" }))}
               onRemoveOpening={() => partitionOpeningSel(null)} />;
+          })()}
+          {/* A selected LOFT (LOFT HEIGHT): on the plate, or a rep's own height. The rep designer only;
+              on the public page a new loft simply sits on the plate. */}
+          {selectedId && !planLocked && embedded && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            if (!si || si.type !== "loft") return null;
+            return <SSLoftBar it={si} plateFt={loftPlate2D(si)} onHeight={(h) => loftHeightSel(si.id, h)} />;
           })()}
           {/* Center, and the centred READOUT, only for an item that actually has a wall to be
               centred on. Rotate beside it is shown for everything and silently no-ops on wall
@@ -35167,7 +35613,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -36362,10 +36808,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {show3D && (
         <Structure3DViewer
           bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+          placeableElec={Object.keys(elecItemTools)}
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -36374,10 +36821,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
-             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
-             placed on the plan only (the 3D draws them but has no chooser), so the button could
-             only ever flash place3's "pick from the palette" refusal. A Partition Wall is left out
-             for the same reason: it is placed and moved on the plan only. */
+             Electrical Items is left out too. Devices are placed from 3D through the viewer's own
+             chooser, which is handed the item tools themselves (placeableElec, under the size line),
+             never through this stand-in, which place3 refuses. A Partition Wall is left out because
+             it is placed and moved on the plan only. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].partitionType && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}

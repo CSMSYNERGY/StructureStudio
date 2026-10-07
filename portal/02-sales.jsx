@@ -912,13 +912,16 @@ function diffVersionSelections(va, vb) {
   // selections.cladding holds the designer's stable id; show the label the customer
   // picked (mirrors D3_CLADDING in structure-studio.component.js). Unknown ids pass
   // through raw — a cryptic diff beats a silent one.
-  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
-  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["cladding", "cladding"]];
+  const CLADDING_LABELS = { lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
+  // The metal roof profile, a design's own pick since 2026-10-06 (the Designer's Roof options card).
+  const ROOF_PROFILE_LABELS = { agpanel: "AG Panel", standingseam: "Standing Seam" };
+  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["roofProfile", "roof profile"], ["cladding", "cladding"]];
   const parts = [];
   const push = (lbl, av, bv) => { if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`); };
   for (const [k, lbl] of KEYS) {
     let av = String(a[k] || ""), bv = String(b[k] || "");
     if (k === "cladding") { av = CLADDING_LABELS[av] || av; bv = CLADDING_LABELS[bv] || bv; }
+    if (k === "roofProfile") { av = ROOF_PROFILE_LABELS[av] || av; bv = ROOF_PROFILE_LABELS[bv] || bv; }
     push(lbl, av, bv);
   }
   const pa = (va && va.paint_colors) || {}, pb = (vb && vb.paint_colors) || {};
@@ -4928,7 +4931,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               <div style={{ marginBottom: 12 }}>
                 {(data.focus || []).map((f) => (
                   <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0" }}>
-                    <input type="checkbox" onChange={async (e) => {
+                    {/* Completing an activity is a contacts:'edit' write (crm_complete_activity), so
+                        it is offered only to someone who may change this customer — not to a
+                        View holder or someone on Own · View (migration 286), who used to get a
+                        live box that 403'd on click. */}
+                    <input type="checkbox" disabled={!canEdit}
+                      title={canEdit ? undefined : (!crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to complete activities.")}
+                      style={canEdit ? undefined : { cursor: "not-allowed" }}
+                      onChange={async (e) => {
                       // The box is uncontrolled, so a failed complete would leave it ticked
                       // while the item stays in Focus — looking done when it isn't. Untick
                       // it and say what happened instead of failing silently.

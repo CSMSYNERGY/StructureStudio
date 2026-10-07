@@ -28,8 +28,10 @@ Deno.test("the Team screen names the phone levels: No access / Own calls / Team 
   const fn = slice(INTEG, "function ssLevelLabel(areaKey, lv) {", "\n}\n", "ssLevelLabel") + "\n}";
   const ssLevelLabel = new Function(`${fn}; return ssLevelLabel;`)() as (a: string, l: string) => string;
   assertEquals(["none", "own", "view", "edit"].map((l) => ssLevelLabel("phone", l)), ["No access", "Own calls", "Team calls", "Edit"]);
-  // Nothing else moved.
-  assertEquals(ssLevelLabel("contacts", "own"), "Own only");
+  // Nothing else moved. (Contacts' own labels changed on 2026-10-06, when it gained own_view —
+  // migration 286: whose customers, then what they may do.)
+  assertEquals(["none", "own_view", "own", "view", "edit"].map((l) => ssLevelLabel("contacts", l)),
+    ["No access", "Own · View", "Own · Edit", "All · View", "All · Edit"]);
   assertEquals(ssLevelLabel("orders", "view"), "View");
 });
 
