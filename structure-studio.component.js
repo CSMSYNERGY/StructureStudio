@@ -13023,7 +13023,9 @@ function buildShed3DModel(THREE, p) {
     // showing in the joints between them as the board lines; each slope's boards stop where the ceiling's
     // underside meets the next slope's, so the two halves close at the ridge (and at a gambrel's knee).
     if (porchOpenGable) {
-      const pineMat = mat("#C98B4F", { roughness: 0.75 });
+      // It faces DOWN, so the sun never reaches it and plain pine read as dark brown beside the photo's
+      // bright golden ceiling. The glow stands in for the light the deck throws back up onto it.
+      const pineMat = mat("#D89A55", { roughness: 0.75, emissive: "#6B4218", emissiveIntensity: 0.55 });
       const CT = 0.05, BW = 0.29, GAP = 0.015, tTop = 0.016, tBot = tTop - CT;
       const zA = porchAtLocalZero ? capZ0 - capCo0 : capZL + capCoL;   // the set-back cap's face
       const zB = zAt(porchTrussOn ? pfBack : pfFront);
