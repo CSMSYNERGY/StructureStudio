@@ -31,6 +31,8 @@ const REGIONS: Array<[string, string]> = [
   // D3.WALL_T and D3.WALL_H: the porch's wall face and the readout's default wall height.
   ["const D3 = {", "// The casing reveal every opening"],
   // d3RoofAxes, d3RoofProfile and d3MakeProfYAt: which ends are gable ends, and the span.
+  // D3_CLADDING and d3CladdingFor: the corner boards' face the recessed porch's posts stand on (2026-10-07).
+  ["const D3_CLADDING = {", "// ── METAL ROOF PROFILE"],
   ["function d3RoofAxes(", "function d3FtIn("],
   // ssPorchTrussWall and d3ProjectingPorch.
   ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
@@ -53,7 +55,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3PorchAutoStepCount, d3LeanToReadout, d3LeanTosReadout, d3RecessedPorch, d3RecessedPorchFrame, d3RecessedPorchReadout, d3PorchBlankStepCount, D3_PORCH_STEP_FRONT, D3_PORCH_STEP_SIDES, D3_PORCH_SIDE_STEPS_MIN_FT };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3PorchAutoStepCount, d3LeanToReadout, d3LeanTosReadout, d3RecessedPorch, d3RecessedPorchFrame, d3CornerFaceFt, d3RecessedStepsOnGround, d3RecessedPorchReadout, d3PorchBlankStepCount, D3_PORCH_STEP_FRONT, D3_PORCH_STEP_SIDES, D3_PORCH_SIDE_STEPS_MIN_FT };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -590,10 +592,18 @@ Deno.test("d3RecessedPorch: the renderer's rule -- which wall, how deep, and whe
 });
 
 Deno.test("d3RecessedPorchFrame: the drawn posts, a bay more for centre steps on an even eave count", () => {
-  // A gable end: the two corner posts, 0.32 ft, their centres 0.4 + 0.16 in from the span's edges.
+  // A gable end: the two corner posts, 4x6 (5.5 in across the front, 3.5 in deep), each in the corner
+  // board's place (2026-10-07): the outer side face on the corner boards' face, S/2 + face, the panel's
+  // 0.22 without a cladding face and the one given with it.
   const gab = F.d3RecessedPorchFrame({ type: "gable", pitch: 0.4, porchDepthFt: 4, porchSteps: "center" }, 12, 16, 8);
-  assertEquals([gab.bays, gab.posts, gab.sizes.POST], [1, 2, 0.32]);
-  assertAlmostEquals(gab.side, 12 / 2 - 0.4, 1e-12);
+  assertEquals([gab.bays, gab.posts, gab.sizes.POST, gab.sizes.DEPTH], [1, 2, 0.46, 0.29]);
+  assertAlmostEquals(gab.side, 12 / 2 + 0.22, 1e-12);
+  assertAlmostEquals(gab.face, 0.22, 1e-12);
+  for (const [relief, face] of [[null, 0.22], ["lap", 0.26], ["batten", 0.26], ["rib", 0.235]] as Array<[string | null, number]>) {
+    assertAlmostEquals(F.d3CornerFaceFt(relief), face, 1e-12, `the corner face on ${relief}`);
+    const g = F.d3RecessedPorchFrame({ type: "gable", pitch: 0.4, porchDepthFt: 4 }, 12, 16, 8, F.d3CornerFaceFt(relief));
+    assertAlmostEquals(g.side, 6 + face, 1e-12, `the posts' outer faces on ${relief}`);
+  }
   // An eave wall: a bay every 10 ft or less along it; centre steps add one where the count is even.
   for (const [Lg, rule, centre] of [[8, 1, 1], [16, 2, 3], [20, 2, 3], [24, 3, 3], [36, 4, 5]]) {
     const roof = { type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 4 };
@@ -602,13 +612,14 @@ Deno.test("d3RecessedPorchFrame: the drawn posts, a bay more for centre steps on
     }
     const c = F.d3RecessedPorchFrame({ ...roof, porchSteps: "center" }, Lg, 12, 8);
     assertEquals([c.bays, c.posts], [centre, centre + 1], `${Lg} ft eave, centre steps`);
-    assertAlmostEquals(c.side, Lg / 2 - 0.4, 1e-12);
-    // No post centre within the centre flight.
+    // The end posts at the corners: their outer faces on the end walls' corner boards.
+    assertAlmostEquals(c.side, Lg / 2 + 0.22, 1e-12);
+    // No post within the centre flight.
     const st = F.d3PorchStepsGeom(c, 0.15, "center");
-    const outer = c.side - 0.16;
+    const outer = c.side - c.sizes.POST / 2;
     for (let k = 0; k <= c.bays; k++) {
       const x = -outer + (2 * outer * k) / c.bays;
-      assert(Math.abs(x) >= st.w / 2 + 0.16 - 1e-9, `${Lg} ft: a post at ${x.toFixed(2)} stands on steps ${st.w} wide`);
+      assert(Math.abs(x) >= st.w / 2 + c.sizes.POST / 2 - 1e-9, `${Lg} ft: a post at ${x.toFixed(2)} stands on steps ${st.w} wide`);
     }
   }
   assertEquals(F.d3RecessedPorchFrame({ type: "gable", pitch: 0.4 }, 12, 16, 8), null);
@@ -629,6 +640,12 @@ Deno.test("d3RecessedPorchReadout: front steps only, between the posts, off the 
     assert(Math.abs(s.x) + s.w / 2 <= g.side - g.sizes.POST + 1e-12, `${w}: ${s.x} ${s.w}`);
   }
   assertEquals(at({ ...roof, porchSteps: "left" }).steps.x, -at({ ...roof, porchSteps: "right" }).steps.x);
+  // The posts stand in the corner boards' place, so on board-and-batten (a 0.26 ft face, not the panel's 0.22)
+  // they stand 0.04 ft further out, and a flight beside one moves out with it (2026-10-07).
+  const gB = F.d3RecessedPorchFrame(roof, 12, 16, 8, F.d3CornerFaceFt("batten"));
+  const sB = F.d3RecessedPorchReadout({ roof: { ...roof, porchSteps: "left" }, siding: "batten", wallHeightFt: 8 }, "12x16").steps;
+  assertAlmostEquals(sB.x - sB.w / 2, -(gB.side - gB.sizes.POST), 1e-12, "left steps against the batten post's inner face");
+  assertAlmostEquals(gB.side - g.side, 0.04, 1e-12);
   // The builder's count, and the blank box's count, read the same flight.
   assertEquals(at({ ...roof, porchSteps: "center", porchStepCount: 3 }).steps.count, 3);
   assertEquals(F.d3PorchBlankStepCount({ roof: { ...roof, porchSteps: "center", porchStepCount: 3 }, foundation: "piers", floorHeightFt: 1.5 }, "12x16"), 3);

@@ -18,7 +18,10 @@
 //   8. the truss box shows only for a recessed porch on a gable roof, at a gable END (2026-10-05: not on
 //      the left wall of a gable front, an eave wall; yes on the left wall of a long-side front, a gable
 //      end); the wood box only for a projecting porch, or (2026-10-04) as "Wood colour (steps)" for a
-//      recessed porch's steps
+//      recessed porch's steps; since 2026-10-07 for every recessed porch, as "Wood colour (posts, beams,
+//      truss, deck)", its frame and deck being built of it. Beside the truss box the open-gable box
+//      (roof.porchGable, 2026-10-07): at a gable END only, a gambrel's too; ticked saves "open", unticked
+//      deletes the key, and None drops it
 //   9. the BUILDER-ONLY cards stay off this surface: no step 1, no step 2, no Generate
 //  10. zero page errors
 //  11. the steps by porch kind (2026-10-03): a projecting porch offers left / centre / right and a
@@ -74,6 +77,8 @@ const porchSelect = (page) => page.locator("label").filter({ has: page.locator('
 const depthInput = (page) => field(page, /^Depth \(ft\)/).locator('input[type="number"]');
 const bandBox = (page) => field(page, "Trim band across both gable ends at the top of the wall").locator('input[type="checkbox"]');
 const trussBox = (page) => field(page, "Timber truss in the porch gable").locator('input[type="checkbox"]');
+const gableBox = (page) => field(page, "Open gable: the ceiling shows, no siding over the porch").locator('input[type="checkbox"]');
+const recWood = (page) => field(page, "Wood colour (posts, beams, truss, deck)").locator('input[type="text"]');
 const woodInput = (page) => field(page, "Wood colour (posts, deck, ceiling)").locator('input[type="text"]');
 const readout = (page) => page.locator("div").filter({ hasText: /^(Posts .* clear, porch roof meets the wall at |Walls this short leave )/ });
 
@@ -192,11 +197,14 @@ export async function main() {
     ok("Recessed carries the depth across (6.5)", (await depthInput(page).inputValue()) === "6.5");
     ok("...shows the truss box again, and hides the wood box and the readout",
       (await trussBox(page).count()) === 1 && (await woodInput(page).count()) === 0 && (await readout(page).count()) === 0);
+    ok("...and the open-gable box beside it, unticked, and the wood box for its frame and deck",
+      (await gableBox(page).count()) === 1 && !(await gableBox(page).isChecked()) && (await recWood(page).count()) === 1);
     // The truss is a gable roof's: a gambrel hides the box, and gable brings it back.
     const roofType = field(page, /^Roof type/).locator("select");
     await roofType.selectOption("gambrel");
     await settle(page);
     ok("...a recessed porch on a gambrel shows no truss box", (await trussBox(page).count()) === 0);
+    ok("...but keeps the open-gable box: a gambrel's gable can be open too", (await gableBox(page).count()) === 1);
     await roofType.selectOption("gable");
     await settle(page);
     // ...and it stands in a gable END (2026-10-05): on the left wall of a gable front the porch runs along an eave
@@ -207,6 +215,7 @@ export async function main() {
     await endSel.selectOption("left");
     await settle(page);
     ok("...a recessed porch on the left wall of a gable front shows no truss box", (await trussBox(page).count()) === 0);
+    ok("...and no open-gable box: an eave wall has no gable over the porch", (await gableBox(page).count()) === 0);
     await frontSel.selectOption("eave");
     await settle(page);
     ok("...on the left wall of a long-side front, a gable end, it shows", (await trussBox(page).count()) === 1);
@@ -219,14 +228,27 @@ export async function main() {
     ok("save 2: the porch is back at the back, and no front is stored", d3.roof.porchEnd === "back" && !has(d3.roof, "front"), JSON.stringify(d3.roof));
     ok("save 2: no porchOutFt", !has(d3.roof, "porchOutFt"), keys(d3.roof));
     ok("save 2: the band stays on", d3.roof.plateBand === true);
+    ok("save 2: no porchGable until it is ticked", !has(d3.roof, "porchGable"), keys(d3.roof));
+    await gableBox(page).check();
+    await settle(page);
+    d3 = (await save(page, calls)).d3;
+    ok("save 2b: ticking the open gable saves porchGable \"open\"", d3.roof.porchGable === "open" && d3.roof.porchDepthFt === 6.5, JSON.stringify(d3.roof));
+    await gableBox(page).uncheck();
+    await settle(page);
+    d3 = (await save(page, calls)).d3;
+    ok("save 2c: unticking it deletes the key, never \"sided\"", !has(d3.roof, "porchGable"), keys(d3.roof));
+    await gableBox(page).check();
+    await settle(page);
 
     // ── 3. None ──
     await porchSelect(page).selectOption("none");
     await settle(page);
     ok("None hides the depth, end, truss and wood controls",
-      (await depthInput(page).count()) === 0 && (await field(page, /^Porch end/).count()) === 0 && (await trussBox(page).count()) === 0 && (await woodInput(page).count()) === 0);
+      (await depthInput(page).count()) === 0 && (await field(page, /^Porch end/).count()) === 0 && (await trussBox(page).count()) === 0 && (await woodInput(page).count()) === 0
+        && (await gableBox(page).count()) === 0 && (await recWood(page).count()) === 0);
     d3 = (await save(page, calls)).d3;
     ok("save 3: no porchDepthFt and no porchOutFt", !has(d3.roof, "porchDepthFt") && !has(d3.roof, "porchOutFt"), keys(d3.roof));
+    ok("save 3: None drops the open gable it had (a recessed porch's alone)", !has(d3.roof, "porchGable"), keys(d3.roof));
     ok("save 3: porchEnd back is kept", d3.roof.porchEnd === "back");
 
     // ── 4. Band off ──
@@ -292,8 +314,8 @@ export async function main() {
     await stepsSel().selectOption("center");
     await settle(page);
     ok("recessed centre steps show the step count box, the one step a porch at grade draws", (await countBox().count()) === 1 && (await countBox().getAttribute("placeholder")) === "blank = 1");
-    // They are built of the porch wood (2026-10-04), so its box shows, named for them.
-    ok("...and the wood colour box, as \"Wood colour (steps)\"", (await field(page, "Wood colour (steps)").locator('input[type="text"]').count()) === 1 && (await woodInput(page).count()) === 0);
+    // They are built of the porch wood (2026-10-04), with the frame and deck (2026-10-07), so its box shows, named for them.
+    ok("...and the wood colour box, as \"Wood colour (posts, beams, truss, deck)\"", (await recWood(page).count()) === 1 && (await woodInput(page).count()) === 0);
     d3 = (await save(page, calls)).d3;
     ok("save 11c: porchSteps center beside porchDepthFt 6", d3.roof.porchSteps === "center" && d3.roof.porchDepthFt === 6 && !has(d3.roof, "porchOutFt"), JSON.stringify(d3.roof));
     await porchSelect(page).selectOption("projecting");

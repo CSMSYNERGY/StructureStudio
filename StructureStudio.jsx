@@ -1613,7 +1613,8 @@ function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, 
   const w = Number(it && it.widthFt) > 0 ? Number(it.widthFt) : (wIn > 0 ? wIn / 12 : 1);
   const h = hIn > 0 ? hIn / 12 : 1;
   const F = SS_GABLE_VENT_TRIM, CLR = SS_GABLE_VENT_RAKE_CLEAR;
-  // Over the truss the sill clears the brace feet (H + 0.2) by 0.1 ft, the style vent's rule.
+  // Over the truss the sill clears the beam's top by 0.3 ft (the renderer's TRUSS_FOOT datum, H + 0.2, by
+  // 0.1 ft), the style vent's rule. The truss's struts stand on the beam itself since 2026-10-07.
   const trussRise = ssPorchTrussWall(roofCfg, bldgW, bldgH) === wall ? Math.max(SS_GABLE_VENT_MIN_RISE, 0.3 + F) : SS_GABLE_VENT_MIN_RISE;
   // Over a plate band it clears the band's top by the same 0.1 ft, on both ends.
   const minRise = roofCfg && roofCfg.plateBand === true ? Math.max(trussRise, SS_PLATE_BAND_TOP + 0.1 + F) : trussRise;
@@ -7137,12 +7138,13 @@ function d3PorchStepsOnGround(spec, W, L, g, D, where) {
 // front words only (its sides are the building's walls), a flight off the footprint's edge in the
 // opening between its posts (d3RecessedPorchFrame), starting D3.WALL_T / 2 out, where the wall's face
 // and a raised floor's skirt are, and counted on the ground under it through d3RecessedPorchToRoot.
-// Null without a recessed porch the 3D draws, or without front steps.
+// Null without a recessed porch the 3D draws, or without front steps. The posts it stands between are
+// the frame's at the cladding's corner face (d3CornerFaceFt, 2026-10-07), the one the renderer builds.
 function d3RecessedStepsOnGround(spec, W, L) {
   const roof = (spec && spec.roof) || {};
   if (D3_PORCH_STEP_FRONT.indexOf(roof.porchSteps) < 0) return null;
   const H = (spec && spec.wallHeightFt) || D3.WALL_H;
-  const g = d3RecessedPorchFrame(roof, W, L, H);
+  const g = d3RecessedPorchFrame(roof, W, L, H, d3CornerFaceFt(d3CladdingFor(spec && spec.siding, spec && spec.sidingExposureIn).relief));
   if (!g) return null;
   const at = (h) => d3PorchStepsGeom(g, D3.WALL_T / 2, roof.porchSteps, h, roof.porchStepCount);
   return at(d3PorchStepsGradeFt(spec, W, L, at, d3RecessedPorchToRoot(roof, W, L, H)));
@@ -7767,22 +7769,45 @@ function d3RecessedPorch(roofCfg, W, L, H) {
   if (d3WingsOn(d3Massing(cfg, W, L, H || D3.WALL_H))) return null;
   return { wall, depth, onEave: d3PorchOnEave(cfg, W, L) };
 }
+// THE RECESSED PORCH'S TIMBER (2026-10-07): every member of its frame -- the posts, the tie beam, the
+// side beams, and over a truss the top chords, the king post and the struts -- is a 4x6, 5.5 in across
+// its face (W, which is what you see) and 3.5 in deep (D, into the frame's plane). The real porch
+// cabin's frame is one size of stained lumber throughout, and one number keeps the joints meeting.
+const D3_PORCH_TIMBER = { W: 0.46, D: 0.29 };
+// Where the corner boards' outer faces stand out from a wall's mid-plane, for a cladding's relief
+// (d3CladdingFor(...).relief: null, "lap", "batten" or "rib"): the renderer's corner-board half,
+// max(T/2 + 0.07, trimFace), with trimFace the cladding's proudest face plus 0.03. 0.22 on panel,
+// 0.235 on AG panel, 0.26 on lap and batten. Pure, so the porch posts the steps stand between are the
+// ones drawn: a recessed porch's corner posts take the corner boards' place (2026-10-07).
+function d3CornerFaceFt(relief) {
+  const T = D3.WALL_T;
+  const reach = relief ? T / 2 + 0.03 + (relief === "rib" ? 0.025 : 0.05) : T / 2;
+  return Math.max(T / 2 + 0.07, reach + 0.03);
+}
 // A RECESSED PORCH'S POSTS AS d3PorchStepsGeom's FRAME (2026-10-03), or null without the porch: the
-// renderer's two 0.32 ft corner posts across a gable end, a single bay, or on an eave wall its posts
-// along the eave line, a bay every 10 ft or less -- and one bay more where that count is even and the
-// steps are "center", so no post stands at the top of them (d3PorchGeom's rule). side is the outer
-// posts' outer faces, from the porch's middle. d3PorchStepsGeom then puts left and right in the
-// outermost bays and center in the middle, as on a projecting porch's front edge.
-//   d3RecessedPorch's { wall, depth, onEave } plus { side, bays, posts, sizes: { POST } }
-function d3RecessedPorchFrame(roofCfg, W, L, H) {
+// renderer's two corner posts across a gable end, a single bay, or on an eave wall its posts along the
+// eave line, a bay every 10 ft or less -- and one bay more where that count is even and the steps are
+// "center", so no post stands at the top of them (d3PorchGeom's rule). side is the outer posts' outer
+// faces, from the porch's middle. d3PorchStepsGeom then puts left and right in the outermost bays and
+// center in the middle, as on a projecting porch's front edge.
+// ONE UPRIGHT AT EACH CORNER (2026-10-07). The posts were 0.32 ft square, 0.4 ft in from the corner,
+// and the building's own corner board still stood at the footprint corner outside each one: two
+// uprights a hand apart, in two colours, at every front corner of the porch. The corner boards on the
+// porch wall are gone now and the corner posts stand where they stood: 4x6 (D3_PORCH_TIMBER), the outer
+// side face and the front face on the corner boards' outer faces, `face` out from the wall's mid-plane
+// (d3CornerFaceFt; the panel's 0.22 when not given). So side is S/2 + face across a gable end and
+// L/2 + face along an eave, and POST is the 5.5 in a post shows across the front.
+//   d3RecessedPorch's { wall, depth, onEave } plus { side, face, bays, posts, sizes: { POST, DEPTH } }
+function d3RecessedPorchFrame(roofCfg, W, L, H, face) {
   const rp = d3RecessedPorch(roofCfg, W, L, H);
   if (!rp) return null;
   const ax = d3RoofAxes(roofCfg, W, L);
-  const POST = 0.32, INSET = 0.4;
-  if (!rp.onEave) return { ...rp, side: Math.max(0.5, ax.S / 2 - INSET - POST / 2) + POST / 2, bays: 1, posts: 2, sizes: { POST } };
+  const F = face > 0 ? face : d3CornerFaceFt(null);
+  const sizes = { POST: D3_PORCH_TIMBER.W, DEPTH: D3_PORCH_TIMBER.D };
+  if (!rp.onEave) return { ...rp, side: ax.S / 2 + F, face: F, bays: 1, posts: 2, sizes };
   const rule = Math.max(1, Math.ceil(ax.L / 10 - 1e-6));
   const bays = roofCfg.porchSteps === "center" && rule % 2 === 0 ? rule + 1 : rule;
-  return { ...rp, side: ax.L / 2 - INSET, bays, posts: bays + 1, sizes: { POST } };
+  return { ...rp, side: ax.L / 2 + F, face: F, bays, posts: bays + 1, sizes };
 }
 // THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
 // the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
@@ -11362,6 +11387,113 @@ function buildShed3DModel(THREE, p) {
       guv.needsUpdate = true;
     }
   }
+  // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
+  // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
+  // vent was "merging with the wood", and an extra 2x4 ran along the top of the header. MEASURED
+  // before anything moved (tests/harness/gableProbe.mjs, scene graph of the real style): the vent
+  // frame stood 0.15-0.25 ft out from the cap and the truss 0.03-0.45, so the king post and both
+  // braces ran straight THROUGH the frame; the battens (0.02-0.12) ran through the truss too; and
+  // the vent's sill board lay 0.05 ft above the porch header's top, which from the front is a
+  // second board laid on the header. Three pieces each placed from its own constant, none of
+  // them from the surface under it.
+  //
+  // So every depth on a gable end now reads one ladder, from the REAL cap plane outward — the way
+  // a wall opening's casing reads trimFace instead of a number of its own:
+  //   capStripOut(co)   centre of a batten/rib strip on a cap standing `co` out from the mid-plane
+  //   capReliefFace(co) the cladding's proudest face on that cap (the bare cap on panel and lap,
+  //                     which carry no proud geometry above the plate)
+  //   capVentFace(co)   the vent frame's front: a 0.10 ft board on the cap, and never less than
+  //                     0.03 in front of the strips that stop at it. That is the door rule —
+  //                     nothing stands proud of its own trim — and on a flush batten cap it lands
+  //                     on 0.26, the wall's own trimFace below the plate.
+  // The truss stands in front of the proudest of them (see the porch block).
+  const capStripDepth = clad.relief === "rib" ? 0.05 : 0.1;
+  const capHasStrips = clad.relief === "batten" || clad.relief === "rib";
+  // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
+  // battens would step back at the plate line exactly as the siding used to. An end that kept
+  // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
+  // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
+  // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
+  // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
+  // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
+  // (Lifted out of addCapReliefStrips' loop on 2026-09-15 so the vent and the truss read it too.)
+  const capStripOut = (co) => {
+    const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + capStripDepth / 2 + 0.02;
+    return Math.max(co + capStripDepth / 2 - 0.02, Math.min(want, OV - 0.01 - capStripDepth / 2));
+  };
+  const capReliefFace = (co) => (capHasStrips ? capStripOut(co) + capStripDepth / 2 : co);
+  const capVentFace = (co) => Math.max(co + 0.1, capReliefFace(co) + 0.03);
+
+  // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
+  // has to clear the truss's feet, and the cap with its vent has to stand behind the truss's frame.
+  // The same test the porch block used to apply inline.
+  const porchTrussOn = porchOn && !porchOnEave && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
+  // The vent-sill datum over a truss end. It was the brace feet, 0.2 ft above the header; since the truss
+  // was cut to fit (2026-10-07) the struts stand ON the beam's top at the king post's foot (H), and a vent
+  // keeps its sill where it was, 0.3 ft above the beam with siding showing between: this datum plus 0.1
+  // here, and ssGableVentFit's 0.3 + F for a placed vent, the same rule.
+  const TRUSS_FOOT = H + 0.2;
+
+  // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
+  // Laid out up here (it used to live inside the drawing block) only so the truss can ask
+  // whether there IS a vent before either is drawn. Null = no vent on this building.
+  // Laid out by a function of the gable it sits in (its profile and its plate) since the roof step
+  // (2026-09-28): the back cap of a stepped roof is the rear section's gable, on its own plate.
+  const layStyleVent = (vDedup, vPlate) => {
+    const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
+    if (!(gv && gv.widthFrac > 0)) return null;
+    let peak = -Infinity;
+    vDedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    if (!(peak > vPlate + 0.9)) return null;
+    // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
+    // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
+    const profSpanAt = (y) => d3ProfSpanAt(vDedup, y);
+    const F = 0.12;                                      // trim board width
+    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
+    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
+    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
+    // shrink by a third to clear the rakes while the same vent on a sill fits at full
+    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
+    //
+    // ON A TRUSS END THE SILL CLEARS THE BRACE FEET (2026-09-15). A porch end's plate line is
+    // the top of the HEADER, so 2 in put the vent's sill board 0.05 ft above that beam — the
+    // "extra 2x4 along the header" Carolyn marked. Its bottom edge now sits 0.1 ft above the
+    // TRUSS_FOOT datum (0.3 ft above the beam, where the struts' feet stand), with siding showing between. Both ends share the one layout (the batten
+    // splitter takes one rect, and a building's two gable vents match), so the far end's vent
+    // rises with it — 3 in more sill on a wall nobody sees beside the first.
+    // Over a PLATE BAND (roof.plateBand) the sill clears the band's top by the same 0.1 ft, on both
+    // ends: ssGableVentFit's rule for a placed vent, so the two vents sit alike.
+    const VENT_SILL0 = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
+    const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
+    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
+    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
+    let vCy = vPlate + VENT_SILL + vH / 2;
+    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
+    // a narrower vent is also shorter and therefore has more room above it.
+    for (let k = 0; k < 3; k++) {
+      const sp = profSpanAt(vCy + vH / 2);
+      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
+      if (vW <= avail) break;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = vPlate + VENT_SILL + vH / 2;
+    }
+    const spC = profSpanAt(vCy);
+    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
+    return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
+  };
+  const styleVent = layStyleVent(dedup, Hr);
+  // ── Vents the CUSTOMER placed in the gable (2026-09-15) ──
+  // Each on the cap end above its wall: local z = 0 is world -Z (north) for a portrait footprint
+  // and world +X (east) for a landscape one, because rg turns a quarter circle in the second case
+  // — the porch block's porchAtLocalZero reasoning. Listed up here, beside the style vent, because
+  // the truss has to stand in front of whichever vent is on its end, and the style vent gives way
+  // on an end that has one of these.
+  const placedGableVents = items.map((it) => {
+    const fit = gableVentFitOf(it);
+    return fit ? { it, fit, atZero: uAxisIsX ? it.wall === "north" : it.wall === "east" } : null;
+  }).filter(Boolean);
+  const gableVentAt0 = placedGableVents.some((v) => v.atZero);
+  const gableVentAtL = placedGableVents.some((v) => !v.atZero);
+
   // FLUSH WITH THE WALL FACE (2026-09-14). The caps are the extrusion's ends at local z = 0 and
   // z = L, which is the wall's MID-plane — but the wall under them is a box T thick, so its face
   // stands T/2 further out. Every gable end therefore showed a lit ledge along the plate (the wall
@@ -11374,7 +11506,8 @@ function buildShed3DModel(THREE, p) {
   // slab, rafter tail and ridge cap is laid against them in local z 0..L. Two ends keep the old
   // plane on purpose:
   //  * A PORCH end has no wall below the cap — the wall sets back and the cap rides the header —
-  //    so there is no face to meet, and the truss is placed proud of the cap as it stands.
+  //    so there is no face to meet. capOut stays 0 there; where the porch frame needs the cap
+  //    somewhere else (behind a truss, or on the set-back wall) capCo / capZ below say so.
   //  * A shallow overhang: the rake board's inner face sits at OV - 0.1 from the cap plane, so the
   //    cap moves out only as far as that allows and can never stand in front of its own trim.
   // A porch recessed into an EAVE wall (new frame) leaves both caps over walls: neither is a porch end.
@@ -11382,6 +11515,50 @@ function buildShed3DModel(THREE, p) {
   const capFlush = Math.max(0, Math.min(T / 2, OV - 0.1));
   const capOut0 = capPorchEnd === 0 ? 0 : capFlush;
   const capOutL = capPorchEnd === L ? 0 : capFlush;
+  // ── THE PORCH FRAME'S PLANE, AND THE GABLE BEHIND IT (2026-10-07) ─────────────────────────────
+  // The 2026-10-06 review, circling the porch end of a dark cabin with an 8 ft recessed porch: the truss
+  // "is not cut to fit", and the header stood in another plane from it. The posts, the tie beam and the
+  // truss over it are now ONE planar timber frame at the porch front (the recessed-porch block), every
+  // member a 4x6 (D3_PORCH_TIMBER), its front face where the corner boards' faces are elsewhere
+  // (d3RecessedPorchFrame's face; never in front of the rake board's inner face on a tight overhang).
+  // pfFront / pfBack are its two faces, out from the footprint line.
+  const PF = porchOn ? d3RecessedPorchFrame(roofCfg, bldgW, bldgH, H, Math.max(T / 2 + 0.07, trimFace)) : null;
+  const pfFront = PF ? Math.min(PF.face, OV - 0.11) : 0;
+  const pfBack = pfFront - D3_PORCH_TIMBER.D;
+  // The porch end's cap: where it stands (capZ0 / capZL, the plane a cap's out is measured from) and how
+  // far out (capCo0 / capCoL). The cap mesh, its relief strips and its vents read these; everything else
+  // on a gable end (a lean-to's gable fill, a roof step's rear prism, the wings) keeps capOut0 / capOutL.
+  // Without a recessed porch at a gable end they ARE 0 / L and capOut0 / capOutL.
+  //  * SIDED (roof.porchGable absent, today's look) with the truss: the cap moves BACK, so its proudest
+  //    relief -- the vent's frame where that end has a vent, else the batten or rib face -- stands 0.02 ft
+  //    behind the frame's back face. The truss is applied over the siding, as on the real building, and
+  //    posts, beam and truss share one plane. It used to be the other way round: the truss pushed out
+  //    in front of the cap (trussBackOut) while the header stayed behind it.
+  //  * OPEN (roof.porchGable "open"): no siding over the porch. The cap goes to the SET-BACK wall,
+  //    flush with its face like any other cap on a wall, and carries the style's siding and vent there:
+  //    the building's real front gable, seen through the frame. The prism's sides stop there too, so
+  //    the porch has no flat ceiling at the plate; the boarded ceiling under the slopes is drawn in the
+  //    recessed-porch block. Gable and gambrel only (a single slant's tall band is the porch's side), and
+  //    never behind a roof step's joint.
+  // A roof step's rear prism owns local z 0, so a porch at that end keeps its cap where it is.
+  const capPorchMoves = capPorchEnd !== null && !!PF && !(STEP && capPorchEnd === 0);
+  const porchOpenGable = capPorchMoves && roofCfg.porchGable === "open" && (roofCfg.type || "gable") !== "shed"
+    && (L - porchDepth) - (STEP ? STEP.stepFt : 0) > 0.5;
+  let capZ0 = 0, capZL = L, capCo0 = capOut0, capCoL = capOutL;
+  if (porchOpenGable) {
+    if (capPorchEnd === 0) { capZ0 = porchDepth; capCo0 = T / 2; }
+    else { capZL = L - porchDepth; capCoL = T / 2; }
+  } else if (capPorchMoves && porchTrussOn) {
+    const ventHere = !!styleVent || (capPorchEnd === 0 ? gableVentAt0 : gableVentAtL);
+    const faceOf = (co) => (ventHere ? capVentFace(co) : capReliefFace(co));
+    const want = pfBack - 0.02;
+    let co = want;
+    // The ladder is a shift of the cap plane (slope 1) away from its clamps, so this settles at once;
+    // the repeats only guard a clamp.
+    for (let k = 0; k < 3; k++) co += want - faceOf(co);
+    if (capPorchEnd === 0) capCo0 = co;
+    else capCoL = co;
+  }
   // Run AFTER the single-slant pass below, not here. A shed profile has a VERTICAL swept side —
   // the tall band above the high eave wall — and moving only the caps opened a 0.15 ft slot at both
   // tall-wall corners between the cap's edge and the band's end (review wf_a6073b91-18a, upheld
@@ -11389,7 +11566,9 @@ function buildShed3DModel(THREE, p) {
   // shed whose band could not be identified keeps today's plane rather than grow a slot.
   let shedBandExtended = false;
   const moveCapsFlush = () => {
-    if (!(capOut0 > 0 || capOutL > 0)) return;
+    // The porch end's cap may move back (capCo below 0) or to the set-back wall (capZ), so "moved" is
+    // any difference; every other cap's out is capFlush >= 0, where this is the old `> 0` exactly.
+    if (!(capCo0 !== 0 || capCoL !== 0)) return;
     const isShed = (roofCfg && roofCfg.type) === "shed";
     if (isShed && !shedBandExtended) return;
     // Same guard as the material groups: exactly caps + sides, except a shed whose groups the pass
@@ -11403,8 +11582,18 @@ function buildShed3DModel(THREE, p) {
       if (hasEnds) {
         if (Math.abs(z - mass.zA) < 1e-6) gpos0.setZ(i, mass.zA - capOut0);
         else if (Math.abs(z - mass.zB) < 1e-6) gpos0.setZ(i, mass.zB + capOutL);
-      } else if (Math.abs(z) < 1e-6) gpos0.setZ(i, -capOut0);
-      else if (Math.abs(z - L) < 1e-6) gpos0.setZ(i, L + capOutL);
+      } else if (Math.abs(z) < 1e-6) gpos0.setZ(i, capZ0 ? capZ0 - capCo0 : -capCo0);
+      else if (Math.abs(z - L) < 1e-6) gpos0.setZ(i, capZL + capCoL);
+    }
+    // An OPEN porch gable: the swept sides stop at the set-back wall with the cap, so no flat ceiling
+    // at the plate and no prism stands over the porch (the slab, rakes and eaves are their own meshes).
+    if (capZ0 !== 0 || capZL !== L) {
+      const sideGroup = gableGeom.groups[1];
+      for (let i = sideGroup.start; i < sideGroup.start + sideGroup.count; i++) {
+        const z = gpos0.getZ(i);
+        if (capZ0 !== 0 && Math.abs(z) < 1e-6) gpos0.setZ(i, capZ0);
+        else if (capZL !== L && Math.abs(z - L) < 1e-6) gpos0.setZ(i, capZL);
+      }
     }
     gpos0.needsUpdate = true;
     gableGeom.computeBoundingBox();
@@ -11528,111 +11717,9 @@ function buildShed3DModel(THREE, p) {
     return { H: STEP.Hb, dedup: rp.dedup, slopes: rp.slopes, yAt: d3MakeProfYAt(rp.dedup, STEP.Hb), peak };
   })();
 
-  // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
-  // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
-  // vent was "merging with the wood", and an extra 2x4 ran along the top of the header. MEASURED
-  // before anything moved (tests/harness/gableProbe.mjs, scene graph of the real style): the vent
-  // frame stood 0.15-0.25 ft out from the cap and the truss 0.03-0.45, so the king post and both
-  // braces ran straight THROUGH the frame; the battens (0.02-0.12) ran through the truss too; and
-  // the vent's sill board lay 0.05 ft above the porch header's top, which from the front is a
-  // second board laid on the header. Three pieces each placed from its own constant, none of
-  // them from the surface under it.
-  //
-  // So every depth on a gable end now reads one ladder, from the REAL cap plane outward — the way
-  // a wall opening's casing reads trimFace instead of a number of its own:
-  //   capStripOut(co)   centre of a batten/rib strip on a cap standing `co` out from the mid-plane
-  //   capReliefFace(co) the cladding's proudest face on that cap (the bare cap on panel and lap,
-  //                     which carry no proud geometry above the plate)
-  //   capVentFace(co)   the vent frame's front: a 0.10 ft board on the cap, and never less than
-  //                     0.03 in front of the strips that stop at it. That is the door rule —
-  //                     nothing stands proud of its own trim — and on a flush batten cap it lands
-  //                     on 0.26, the wall's own trimFace below the plate.
-  // The truss stands in front of the proudest of them (see the porch block).
-  const capStripDepth = clad.relief === "rib" ? 0.05 : 0.1;
-  const capHasStrips = clad.relief === "batten" || clad.relief === "rib";
-  // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
-  // battens would step back at the plate line exactly as the siding used to. An end that kept
-  // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
-  // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
-  // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
-  // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
-  // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
-  // (Lifted out of addCapReliefStrips' loop on 2026-09-15 so the vent and the truss read it too.)
-  const capStripOut = (co) => {
-    const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + capStripDepth / 2 + 0.02;
-    return Math.max(co + capStripDepth / 2 - 0.02, Math.min(want, OV - 0.01 - capStripDepth / 2));
-  };
-  const capReliefFace = (co) => (capHasStrips ? capStripOut(co) + capStripDepth / 2 : co);
-  const capVentFace = (co) => Math.max(co + 0.1, capReliefFace(co) + 0.03);
-
-  // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
-  // has to clear the truss's brace feet, and the truss has to stand in front of the vent's frame.
-  // The same test the porch block used to apply inline.
-  const porchTrussOn = porchOn && !porchOnEave && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
-  const TRUSS_FOOT = H + 0.2;                    // brace feet, sitting on the header beside the king post
-
-  // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
-  // Laid out up here (it used to live inside the drawing block) only so the truss can ask
-  // whether there IS a vent before either is drawn. Null = no vent on this building.
-  // Laid out by a function of the gable it sits in (its profile and its plate) since the roof step
-  // (2026-09-28): the back cap of a stepped roof is the rear section's gable, on its own plate.
-  const layStyleVent = (vDedup, vPlate) => {
-    const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
-    if (!(gv && gv.widthFrac > 0)) return null;
-    let peak = -Infinity;
-    vDedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
-    if (!(peak > vPlate + 0.9)) return null;
-    // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
-    // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
-    const profSpanAt = (y) => d3ProfSpanAt(vDedup, y);
-    const F = 0.12;                                      // trim board width
-    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
-    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
-    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
-    // shrink by a third to clear the rakes while the same vent on a sill fits at full
-    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
-    //
-    // ON A TRUSS END THE SILL CLEARS THE BRACE FEET (2026-09-15). A porch end's plate line is
-    // the top of the HEADER, so 2 in put the vent's sill board 0.05 ft above that beam — the
-    // "extra 2x4 along the header" Carolyn marked. Its bottom edge now sits 0.1 ft above the
-    // brace feet, with siding showing between. Both ends share the one layout (the batten
-    // splitter takes one rect, and a building's two gable vents match), so the far end's vent
-    // rises with it — 3 in more sill on a wall nobody sees beside the first.
-    // Over a PLATE BAND (roof.plateBand) the sill clears the band's top by the same 0.1 ft, on both
-    // ends: ssGableVentFit's rule for a placed vent, so the two vents sit alike.
-    const VENT_SILL0 = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
-    const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
-    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
-    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = vPlate + VENT_SILL + vH / 2;
-    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
-    // a narrower vent is also shorter and therefore has more room above it.
-    for (let k = 0; k < 3; k++) {
-      const sp = profSpanAt(vCy + vH / 2);
-      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
-      if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = vPlate + VENT_SILL + vH / 2;
-    }
-    const spC = profSpanAt(vCy);
-    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
-    return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
-  };
-  const styleVent = layStyleVent(dedup, Hr);
   // A ROOF STEP's back cap: the same vent laid out in the rear section's own gable (null when that
   // gable has no room for one). Without a step it IS styleVent.
   const styleVentBack = rearProf ? layStyleVent(rearProf.dedup, rearProf.H) : styleVent;
-  // ── Vents the CUSTOMER placed in the gable (2026-09-15) ──
-  // Each on the cap end above its wall: local z = 0 is world -Z (north) for a portrait footprint
-  // and world +X (east) for a landscape one, because rg turns a quarter circle in the second case
-  // — the porch block's porchAtLocalZero reasoning. Listed up here, beside the style vent, because
-  // the truss has to stand in front of whichever vent is on its end, and the style vent gives way
-  // on an end that has one of these.
-  const placedGableVents = items.map((it) => {
-    const fit = gableVentFitOf(it);
-    return fit ? { it, fit, atZero: uAxisIsX ? it.wall === "north" : it.wall === "east" } : null;
-  }).filter(Boolean);
-  const gableVentAt0 = placedGableVents.some((v) => v.atZero);
-  const gableVentAtL = placedGableVents.some((v) => !v.atZero);
 
   // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
   // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
@@ -12132,9 +12219,10 @@ function buildShed3DModel(THREE, p) {
 
   // ── RECESSED PORCH: what stands in the opening ────────────────────────────────────────
   // The walls already set back (see the WALLS table). All that is left is what holds the roof
-  // up over the gap: a post at each outer corner and a header between them. No deck is drawn
+  // up over the gap: a post at each outer corner and a beam between them. No deck is drawn
   // because there already is one — the floor slab spans the full footprint and always did,
-  // which is exactly right for a porch INSIDE the footprint.
+  // which is exactly right for a porch INSIDE the footprint. (With the style's wood colour the
+  // porch floor is laid as decking on it, 2026-10-07, below.)
   //
   // Built in rg-LOCAL space, like the lean-to above, and that is what makes it one branch
   // instead of four: whichever way the building is turned, rg's local z runs 0..L along the
@@ -12154,44 +12242,87 @@ function buildShed3DModel(THREE, p) {
   // ITS STEPS (roof.porchSteps, 2026-10-03), off the floor's edge in the opening: d3RecessedStepsOnGround's
   // flight, the one its readout says, built after the projecting porch below. Null without them.
   const recessedStepsGeom = porchOn ? d3RecessedStepsOnGround(p.styleSpec, bldgW, bldgH) : null;
-  if (porchOnEave) {
-    const uIn = (porchWall === "south" || porchWall === "east" ? 1 : -1) * (S / 2 - 0.21);   // south or east is +u here (u = world z, or x)
-    const POST = 0.32, INSET = 0.4;
-    // Centre steps take one bay more where the count is even, so no post stands at the top of them
-    // (d3RecessedPorchFrame, d3PorchGeom's rule). Without steps the count is what it always was.
-    const ruleBays = Math.max(1, Math.ceil(L / 10 - 1e-6));
-    const bays = recessedStepsGeom && recessedStepsGeom.where === "center" && ruleBays % 2 === 0 ? ruleBays + 1 : ruleBays;
-    const za = INSET + POST / 2, zb = L - INSET - POST / 2;
-    for (let i = 0; i <= bays; i++) {
-      const post = box(trimMat, POST, H, POST);
-      post.position.set(uIn, H / 2, za + ((zb - za) * i) / bays);
+  // THE FRAME'S TIMBER (2026-10-07): the style's wood colour (colors.wood, the lumber its recessed steps are
+  // already built of) where it has one -- the real porch cabin's posts, beams and truss are red-stained wood
+  // against a dark wall -- else the trim material, as the posts and truss always were, which a trim swatch
+  // recolours live. Every member is a 4x6 (D3_PORCH_TIMBER) tagged userData.ssPorchFrame with what it is.
+  const porchWoodHex = porchOn && p.styleSpec && p.styleSpec.colors && p.styleSpec.colors.wood ? p.styleSpec.colors.wood : null;
+  const porchFrameMat = porchWoodHex ? mat(porchWoodHex, { roughness: 0.9 }) : trimMat;
+  const PT_W = D3_PORCH_TIMBER.W, PT_D = D3_PORCH_TIMBER.D;
+  // From the floor, or on a raised floor from the bottom of the skirt, as the corner boards they replace.
+  const pfBot = RAISED && foundationInfo ? -foundationInfo.skirt : 0;
+  const pfTag = (m, part) => { m.userData.ssPorchFrame = part; return m; };
+  if (porchOnEave && PF) {
+    // ONE UPRIGHT AT EACH CORNER (2026-10-07): the end posts take the two corner boards' place (the
+    // corner-board loop skips the porch wall's), their outer side faces on the end walls' corner-board
+    // line and their front faces with the corner boards' (pfFront). The posts between, PF.bays of them
+    // (d3RecessedPorchFrame: every 10 ft or less, a bay more for centre steps on an even count), and the
+    // header on them, all in that one plane.
+    const sg = porchWall === "south" || porchWall === "east" ? 1 : -1;   // south or east is +u here (u = world z, or x)
+    const uMid = sg * (S / 2 + pfFront - PT_D / 2);
+    const za = -PF.face + PT_W / 2, zb = L + PF.face - PT_W / 2;
+    for (let i = 0; i <= PF.bays; i++) {
+      const post = box(porchFrameMat, PT_D, H - PT_W - pfBot, PT_W);
+      post.position.set(uMid, (H - PT_W + pfBot) / 2, za + ((zb - za) * i) / PF.bays);
       post.userData.ssRecessedEave = "post";
-      rg.add(post);
+      rg.add(pfTag(post, "post"));
     }
-    const ehdr = box(trimMat, 0.4, 0.5, L);
-    ehdr.position.set(uIn, H - 0.25, L / 2);
+    const ehdr = box(porchFrameMat, PT_D, PT_W, L + 2 * PF.face);
+    ehdr.position.set(uMid, H - PT_W / 2, L / 2);
     ehdr.userData.ssRecessedEave = "header";
-    rg.add(ehdr);
+    rg.add(pfTag(ehdr, "beam"));
   }
-  if (porchOn && !porchOnEave) {
+  if (porchOn && !porchOnEave && PF) {
     // local z = 0 is world -Z for a portrait footprint but world +X for a landscape one,
     // because rg turns a quarter circle in the second case. So the end is resolved through the
     // SAME uAxisIsX the wall set-back used, not assumed.
     const porchAtLocalZero = uAxisIsX ? porchAtNeg : !porchAtNeg;
     const pzFace = porchAtLocalZero ? 0 : L;
-    const pzIn = pzFace + (porchAtLocalZero ? 1 : -1) * 0.21;   // a post's half-thickness inside the edge
-    const POST = 0.32, INSET = 0.4;
-    const half = Math.max(0.5, S / 2 - INSET - POST / 2);
+    const sOut = porchAtLocalZero ? -1 : 1;                 // local z's sign for "out of the building"
+    const zAt = (out) => pzFace + sOut * out;
+    const zMid = zAt(pfFront - PT_D / 2);
+    const zExt = pzFace + (sOut > 0 ? pfBack : -pfFront);   // where a member PT_D deep across the frame starts
+    const uO = S / 2 + PF.face;                             // the posts' outer side faces, the beam's ends
+    // ── ONE TIMBER FRAME IN ONE PLANE (2026-10-07) ─────────────────────────────────────────────
+    // The 2026-10-06 review, on a dark cabin with an 8 ft recessed porch: two posts at each front corner,
+    // and the truss "not cut to fit". The second post was the building's corner board, which the corner
+    // loop no longer draws on the porch wall; the posts take its place, a 4x6 at each corner with its
+    // outer side face and front face where the corner boards' faces are elsewhere (the projecting porch's
+    // rule, d3PorchGeom's side). The beam lies ON them, post face to post face, in their plane, its top
+    // at the plate, so the cap (sided) or the open gable starts on it.
     for (const s of [-1, 1]) {
-      const post = box(trimMat, POST, H, POST);
-      post.position.set(s * half, H / 2, pzIn);
-      rg.add(post);
+      const post = box(porchFrameMat, PT_W, H - PT_W - pfBot, PT_D);
+      post.position.set(s * (uO - PT_W / 2), (H - PT_W + pfBot) / 2, zMid);
+      rg.add(pfTag(post, "post"));
     }
-    const phdr = box(trimMat, S, 0.5, 0.4);
-    phdr.position.set(0, H - 0.25, pzIn);
-    rg.add(phdr);
+    const beam = box(porchFrameMat, 2 * uO, PT_W, PT_D);
+    beam.position.set(0, H - PT_W / 2, zMid);
+    rg.add(pfTag(beam, "beam"));
+    // SIDE BEAMS: along each open side of the porch at the beam's height, from the frame's back face to the
+    // corner board where the set-back wall meets that side wall, their outer faces on the posts'. The real
+    // porch has them, red, from each post back to the wall.
+    const zSB0 = pzFace - sOut * (porchDepth - PF.face), zSB1 = zAt(pfBack);
+    const sbLen = sOut * (zSB1 - zSB0);
+    if (sbLen > 0.05) {
+      for (const s of [-1, 1]) {
+        const sb = box(porchFrameMat, PT_D, PT_W, sbLen);
+        sb.position.set(s * (uO - PT_D / 2), H - PT_W / 2, (zSB0 + zSB1) / 2);
+        rg.add(pfTag(sb, "sideBeam"));
+      }
+    }
+    // A member cut to its joints: a polygon in the frame's plane (x = u across the gable, y up), extruded
+    // the timber's depth across it. Its outline rides on userData.ssOutline for the harness.
+    const frameMember = (pts, part) => {
+      const sh = new THREE.Shape();
+      pts.forEach((q, i) => (i ? sh.lineTo(q[0], q[1]) : sh.moveTo(q[0], q[1])));
+      const m = new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth: PT_D, bevelEnabled: false }), porchFrameMat);
+      m.position.z = zExt;
+      m.userData.ssOutline = pts.map((q) => [q[0], q[1]]);
+      rg.add(pfTag(m, part));
+      return m;
+    };
 
-    // ── THE KING-POST TRUSS (2026-09-11) ──────────────────────────────────────────────
+    // ── THE KING-POST TRUSS (2026-09-11; cut to fit 2026-10-07) ─────────────────────────────────
     // Ahsan, with a close-up of the timber frame over his porch: "i ment this design not
     // windows or door". Every generation of that building had already described it —
     // "a decorative king-post/truss style timber frame filling the gable above a recessed
@@ -12204,85 +12335,139 @@ function buildShed3DModel(THREE, p) {
     //
     // GABLE ONLY. A gambrel's porch gable is a different polygon and a shed roof has no
     // gable above the porch at all, so drawing a triangular frame on either would be wrong
-    // rather than merely approximate. `trimMat` is deliberate: the posts below it already
-    // use it, and on a real porch shed the truss and the posts are the same timber.
+    // rather than merely approximate. The truss is the posts' and the beam's timber.
+    //
+    // CUT TO FIT (2026-10-07). The members were boxes that stopped short of each other: the king post
+    // 0.25 ft under the apex, the braces' feet 0.2 ft above the header and 0.05 off the king post, their
+    // tops a clearance under the rafter line, no top chords at all (what read as chords were the rake
+    // boards, out at the overhang), and the whole truss standing in front of the gable while the header
+    // stood behind it: an open triangle at each brace foot, a notch under the ridge, a step in depth
+    // between header and king post. Now each member is the polygon it is on a real porch truss, its ends
+    // cut to the member they meet, so every joint closes exactly:
+    //   top chords  under the roof's edge, just under the slab, from the beam's top up to the apex, the two
+    //               meeting at the apex on the line through their top and bottom intersections (a plumb
+    //               cut on an even ridge; it stays a closed joint on a saltbox's ridgeOffset)
+    //   king post   from the beam's top up to the chords' undersides, its top cut to both slopes
+    //   struts      from the king post's foot, a level cut on the beam and a plumb cut against the king
+    //               post (their centre line through that corner), up and out at 50 degrees to the chord's
+    //               underside, the top cut to the chord's slope
+    // A strut with no room keeps today's rule: dropped when its run is under 0.25 ft, or when it would
+    // land within 0.2 ft of the chord's foot.
     if (porchTrussOn) {
       const tRise = (S / 2) * (roofCfg.pitch || 0.4);
       // Same ridge shift the roof profile applies, or a saltbox would grow a truss pointing
       // at where the peak is not.
       const tRu = S * Math.max(-0.35, Math.min(0.35, roofCfg.ridgeOffset || 0));
-      // 0.5 ft = a 6x6 timber, which is what a real porch truss is built from. The first
-      // attempt used 0.34 (a 4x4) and was invisible at any sane zoom — it WAS drawing, it just
-      // could not be seen, which is the most expensive kind of "not working".
-      const TB = 0.5, TD = 0.42;
-      // PROUD OF THE GABLE FACE, not inside it. The gable above the porch is a SOLID wall
-      // (siding, usually with the vent in it), so the first attempt — offset from pzIn, which
-      // is already 0.21 ft INTO the building — put the whole truss behind that wall and drew
-      // it perfectly, invisibly. On a real porch shed the timbers are applied ON the gable and
-      // stand out from it, so the offset has to go the other way: pzFace is the wall plane and
-      // the MINUS direction is outward, because pzIn adds to reach the interior.
-      //
-      // IN FRONT OF EVERYTHING ELSE ON THE GABLE (2026-09-15). This was `TD / 2 + 0.03` off the
-      // cap — a back face 0.03 ft out — while the vent frame stood to 0.25 and the battens to 0.12,
-      // so the king post and both braces passed straight through the frame and every batten ran
-      // through the timber: Carolyn's "vent merging with the wood", measured with gableProbe.
-      // A real porch truss is applied OVER the siding and the vent, so its back face now sits
-      // 0.02 ft in front of the proudest thing on this cap — the vent frame when the style has
-      // one, else the batten/rib face, else the bare cap (which is today's number, give or take
-      // 0.01). The porch end's cap keeps the mid-plane (capOut 0), read through the ladder
-      // rather than assumed.
-      const pzCapOut = porchAtLocalZero ? capOut0 : capOutL;
-      // A placed gable vent on this end counts the same as the style's: same frame, same face.
-      const pzHasVent = !!styleVent || (porchAtLocalZero ? gableVentAt0 : gableVentAtL);
-      const trussBackOut = (pzHasVent ? capVentFace(pzCapOut) : capReliefFace(pzCapOut)) + 0.02;
-      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (trussBackOut + TD / 2);
-      const kpH = Math.max(0.2, tRise - 0.25);       // stop just under the ridge
-      const kp = box(trimMat, TB, kpH, TD);
-      kp.position.set(tRu, H + kpH / 2, zT);
-      rg.add(kp);
-      // THE BRACES ARE A V, NOT AN A (2026-09-14). They start at the FOOT of the king post, just
-      // above the header, and rise up and out until they meet the underside of the rafter. The
-      // first two versions ran them the other way — from the header near the posts up to a node
-      // high on the king post — and steepening that (e158bf1) could never make it look right,
-      // because the shape was upside down. Seen side by side with Ahsan's front photo of the real
-      // porch shed, where the struts fan out from the base at roughly 54 degrees.
-      //
-      // A FIXED ANGLE, NOT A FIXED LANDING POINT. The first cut of this landed each brace a
-      // quarter of the way along its own side's run, and review (wf_cedaa470-b84) proved that
-      // wrong on an off-centre ridge: at ridgeOffset 0.35 the short side's landing point fell
-      // inside the brace's own foot on anything 8 ft wide, so that brace vanished, and on wider
-      // spans it stood near-vertical against the king post and read as a fatter post. Holding
-      // the angle and solving for where the line meets the slope gives every side the same
-      // shape — the short, steep side simply gets a shorter brace.
-      //
-      // The clearance is not a constant either. The box is rotated, so of its two top corners
-      // one rises toward the ridge and one drops toward the eave, by (TB/2)·sin and (TB/2)·cos
-      // of the angle, while the rafter falls by `slope` per foot outward. `clr` is the smallest
-      // gap that keeps BOTH corners under the rafter for this side's slope, plus a hair, so a
-      // steep side can no longer push a corner through the roof edge on a small overhang.
-      // Positioned at their midpoint and rotated, because a box is built on the x axis.
-      const BR_TAN = Math.tan(50 * Math.PI / 180), BR_SIN = Math.sin(50 * Math.PI / 180), BR_COS = Math.cos(50 * Math.PI / 180);
-      const foot = TRUSS_FOOT;                       // sitting on the header, beside the king post
-      const u0 = TB / 2 + 0.05;                      // the foot's distance out from the ridge line
-      for (const s of [-1, 1]) {
-        const run = S / 2 - s * tRu;                 // ridge to this side's eave
-        if (run < 0.5) continue;
-        const slope = tRise / run;
-        const clr = 0.05 + (TB / 2) * Math.abs(slope * BR_SIN - BR_COS);
-        // Brace: y = foot + BR_TAN·(u - u0). Rafter underside: y = H + tRise - slope·u - clr.
-        const u1 = (H + tRise - clr - foot + BR_TAN * u0) / (BR_TAN + slope);
-        // A brace shorter than about a hand's width sideways is a stub, not a frame member, and
-        // one landing past the eave has left the gable — both mean this porch is too small.
-        if (u1 - u0 < 0.25 || u1 > run - 0.2) continue;
-        const x0 = tRu + s * u0, x1 = tRu + s * u1;
-        const y1 = foot + BR_TAN * (u1 - u0);
-        const dx = x1 - x0, dy = y1 - foot;
-        const br = box(trimMat, Math.hypot(dx, dy), TB, TD);
-        br.position.set((x0 + x1) / 2, (foot + y1) / 2, zT);
-        br.rotation.z = Math.atan2(dy, dx);
-        rg.add(br);
+      // Each side's slope and the lines of its chord, y = a + b x: the top edge 0.016 ft (plumb, x k) above
+      // the rafter line, just under the slab's underside (0.02), the bottom edge a timber's face below it.
+      const sideLines = (s) => {
+        const pp = tRise / (S / 2 - s * tRu), kk = Math.sqrt(1 + pp * pp), b = -s * pp;
+        const a = H + tRise - b * tRu;                       // the rafter line through the apex
+        return { p: pp, k: kk, b, aTop: a + 0.016 * kk, aBot: a + 0.016 * kk - PT_W * kk };
+      };
+      const SL = { [-1]: sideLines(-1), [1]: sideLines(1) };
+      const meet = (a1, b1, a2, b2) => { const x = (a2 - a1) / (b1 - b2); return [x, a1 + b1 * x]; };
+      const apexTop = meet(SL[-1].aTop, SL[-1].b, SL[1].aTop, SL[1].b);
+      const apexBot = meet(SL[-1].aBot, SL[-1].b, SL[1].aBot, SL[1].b);
+      // The chords' undersides, the lower of the two at each x (they cross at apexBot).
+      const under = (x) => Math.min(SL[-1].aBot + SL[-1].b * x, SL[1].aBot + SL[1].b * x);
+      // A gable too low for a frame (its chords would meet the beam before the apex) draws none.
+      if (apexBot[1] > H + 0.3) {
+        const footB = {};
+        for (const s of [-1, 1]) {
+          const sl = SL[s];
+          const xT = (H - sl.aTop) / sl.b, xB = (H - sl.aBot) / sl.b;   // where each edge reaches the beam's top
+          footB[s] = xB;
+          frameMember([apexTop, [xT, H], [xB, H], apexBot], "chord");
+        }
+        const xL = tRu - PT_W / 2, xR = tRu + PT_W / 2;
+        if (under(xL) > H + 0.2 && under(xR) > H + 0.2) {
+          const kpTop = apexBot[0] > xL && apexBot[0] < xR ? [apexBot] : [];
+          frameMember([[xL, H], [xR, H], [xR, under(xR)], ...kpTop, [xL, under(xL)]], "kingPost");
+          const BR_TAN = Math.tan(50 * Math.PI / 180), BR_SIN = Math.sin(50 * Math.PI / 180), BR_COS = Math.cos(50 * Math.PI / 180);
+          for (const s of [-1, 1]) {
+            const sl = SL[s];
+            const xK = tRu + s * PT_W / 2;                    // the king post's side face
+            // The strut's centre line through the corner at (xK, H); its edges half a face either side.
+            const bS = s * BR_TAN, aC = H - bS * xK, dA = (PT_W / 2) / BR_COS;
+            const xFoot = xK + s * (PT_W / 2) / BR_SIN;          // the lower edge on the beam's top
+            const topLo = meet(aC - dA, bS, sl.aBot, sl.b);      // the lower edge on the chord's underside
+            const topHi = meet(aC + dA, bS, sl.aBot, sl.b);      // the upper edge on the chord's underside
+            const land = meet(aC, bS, sl.aBot, sl.b);            // the centre line's landing
+            if (s * (land[0] - xK) < 0.25 || s * (footB[s] - topLo[0]) < 0.2) continue;
+            if (s * (topHi[0] - xK) < 0.02 || s * (topHi[0] - apexBot[0]) <= 0) continue;
+            frameMember([[xK, H], [xFoot, H], topLo, topHi, [xK, aC + dA + bS * xK]], "strut");
+          }
+        }
       }
     }
+
+    // ── AN OPEN PORCH GABLE (roof.porchGable "open", 2026-10-07) ──────────────────────────────────
+    // The real porch cabin has no siding over its porch: the cap is the set-back wall's (capZ above),
+    // and over the porch a tongue-and-groove pine ceiling runs up under both slopes from the frame to that
+    // wall, seen through the truss. Boards along the ridge, a hair under the slab, the slab's underside
+    // showing in the joints between them as the board lines; each slope's boards stop where the ceiling's
+    // underside meets the next slope's, so the two halves close at the ridge (and at a gambrel's knee).
+    if (porchOpenGable) {
+      const pineMat = mat("#C98B4F", { roughness: 0.75 });
+      const CT = 0.05, BW = 0.29, GAP = 0.015, tTop = 0.016, tBot = tTop - CT;
+      const zA = porchAtLocalZero ? capZ0 - capCo0 : capZL + capCoL;   // the set-back cap's face
+      const zB = zAt(porchTrussOn ? pfBack : pfFront);
+      const zLen = Math.abs(zB - zA), zC = (zA + zB) / 2;
+      const same = (P, Q) => Math.abs(P[0] - Q[0]) < 1e-6 && Math.abs(P[1] - Q[1]) < 1e-6;
+      if (zLen > 0.1) {
+        slopes.forEach((sl) => {
+          const A = sl[0], B = sl[1];
+          const du = B[0] - A[0], dy = B[1] - A[1], slen = Math.hypot(du, dy);
+          if (!(slen > 0.2)) return;
+          const ux = du / slen, uy = dy / slen, nx = -dy / slen, ny = du / slen;
+          // How far past P (along dir) the ceiling's underside runs before it meets the next slope's.
+          const reach = (P, dirX, dirY) => {
+            const o = slopes.find((q) => q !== sl && (same(q[0], P) || same(q[1], P)));
+            if (!o) return 0;
+            const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1], olen = Math.hypot(odu, ody) || 1;
+            const onx = -ody / olen, ony = odu / olen, dot = nx * onx + ny * ony;
+            return (tBot * (nx + onx) / (1 + dot)) * dirX + (tBot * (ny + ony) / (1 + dot)) * dirY;
+          };
+          const a0 = -reach(A, -ux, -uy), a1 = slen + reach(B, ux, uy);
+          if (!(a1 - a0 > 0.1)) return;
+          const n = Math.max(1, Math.round((a1 - a0) / (BW + GAP))), step = (a1 - a0) / n;
+          for (let i = 0; i < n; i++) {
+            const at = a0 + (i + 0.5) * step;
+            const b = box(pineMat, step - GAP, CT, zLen);
+            b.rotation.z = Math.atan2(dy, du);
+            b.position.set(A[0] + ux * at + nx * (tTop + tBot) / 2, A[1] + uy * at + ny * (tTop + tBot) / 2, zC);
+            rg.add(pfTag(b, "ceiling"));
+          }
+        });
+      }
+    }
+  }
+  // ── THE PORCH FLOOR AS A DECK (2026-10-07) ──
+  // With the style's wood colour the porch floor is decking in it, as on the real cabin: boards parallel to
+  // the porch wall with 0.03 ft gaps over a dark strip, on the floor slab from the set-back wall's face to
+  // the slab's edge and across the whole opening. In root with the floor, so look-inside keeps it, in a
+  // holder on the footprint's edge turned like the recessed steps'. Without colors.wood the floor is the
+  // slab it always was.
+  if (porchOn && porchWoodHex && PF) {
+    const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[porchWall];
+    const run = (porchWall === "south" || porchWall === "north") ? bldgW : bldgH;
+    const DECK_T = 0.045, BOARD = 0.46, GAP = 0.03, VOID = 0.005;
+    const d0 = T / 2 - porchDepth, d1 = 0.1;
+    const nB = Math.max(1, Math.round((d1 - d0) / (BOARD + GAP))), step = (d1 - d0) / nB;
+    const deckHolder = new THREE.Group();
+    deckHolder.userData.ssPorch = "recessedDeck";
+    deckHolder.position.set((n[0] * bldgW) / 2, 0, (n[1] * bldgH) / 2);
+    deckHolder.rotation.y = Math.atan2(n[0], n[1]);
+    for (let i = 0; i < nB; i++) {
+      const b = box(porchFrameMat, run + 0.2, DECK_T, step - GAP);
+      b.position.set(0, VOID + DECK_T / 2, d0 + (i + 0.5) * step);
+      deckHolder.add(pfTag(b, "deck"));
+    }
+    const voidB = box(mat("#3B3024", { roughness: 1 }), run + 0.2, VOID, d1 - d0);
+    voidB.position.set(0, VOID / 2, (d0 + d1) / 2);
+    deckHolder.add(pfTag(voidB, "deckVoid"));
+    root.add(deckHolder);
   }
 
   // ── DORMER (2026-08-25) ──────────────────────────────────────────────────────────
@@ -12619,7 +12804,8 @@ function buildShed3DModel(THREE, p) {
         return spans;
       };
       // Beside end wings the middle's caps stand on the end wings' inner lines (mass.zA, mass.zB).
-      [[hasEnds ? mass.zA - capStripOut(capOut0) : -capStripOut(capOut0), rects0, plate0, yTop0], [(hasEnds ? mass.zB : L) + capStripOut(capOutL), rectsL, Hr, yTop]].forEach(([z, rects, lo, hi]) => {
+      // The porch end's cap reads capZ / capCo (the porch frame's plane, 2026-10-07): 0 / L and capOut elsewhere.
+      [[hasEnds ? mass.zA - capStripOut(capCo0) : (capZ0 ? capZ0 - capStripOut(capCo0) : -capStripOut(capCo0)), rects0, plate0, yTop0], [(hasEnds ? mass.zB : capZL) + capStripOut(capCoL), rectsL, Hr, yTop]].forEach(([z, rects, lo, hi]) => {
         if (hi <= lo + 0.05) return;
         spansFor(rects, lo, hi).forEach((sp) => {
           if (sp[1] - sp[0] < 0.05) return;
@@ -13919,7 +14105,9 @@ function buildShed3DModel(THREE, p) {
   // the whole porch wall. The top never moves, so the vent sills above it are unchanged.
   if (roofCfg.plateBand === true) {
     // Beside end wings, across the middle's caps on the end wings' inner lines.
-    (hasEnds ? [[mass.zA, -1, capOut0], [mass.zB, 1, capOutL]] : [[0, -1, capOut0], [L, 1, capOutL]]).forEach(([z0, s, co]) => {
+    // An OPEN porch gable's cap stands on the set-back wall (capZ, 2026-10-07), a wall under a cap like any
+    // other, so it carries the band; a sided porch end's cap rides the beam and keeps none.
+    (hasEnds ? [[mass.zA, -1, capOut0], [mass.zB, 1, capOutL]] : [[capZ0, -1, capCo0], [capZL, 1, capCoL]]).forEach(([z0, s, co]) => {
       if (capPorchEnd === z0) return;
       const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
       // ...unless the style sets where the porch roof meets the wall (roof.porchAttachFt), or wings
@@ -13950,7 +14138,9 @@ function buildShed3DModel(THREE, p) {
     return m;
   };
   // Beside end wings the middle's caps stand on the end wings' inner lines, and its vents with them.
-  const END0 = [hasEnds ? mass.zA : 0, -1, capOut0], ENDL = [hasEnds ? mass.zB : L, 1, capOutL];
+  // The porch end's cap where the porch frame put it (capZ / capCo, 2026-10-07): behind a truss, or on the
+  // set-back wall of an open porch gable. 0 / L and capOut everywhere else.
+  const END0 = [hasEnds ? mass.zA : capZ0, -1, capCo0], ENDL = [hasEnds ? mass.zB : capZL, 1, capCoL];
   // ONE LOUVERED VENT ON ONE CAP, in rg-local space: `end` = [z of the cap, outward sign, capOut],
   // (cu, cy) the louvre's centre, w x h its size, F the frame board. Shared by the style's vent and
   // every vent a customer placed in a gable (2026-09-15), so the two can never be framed or set in
@@ -14104,27 +14294,48 @@ function buildShed3DModel(THREE, p) {
   // corner, Hc on the side of a raised centre that has no wing, and at a new-frame shed's high wall
   // up the tall corner to just under the roof line at its inner face, so it covers the corner notch
   // the whole way without poking up through the slab on a steep pitch.
-  [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
+  // ONE UPRIGHT AT EACH PORCH CORNER (2026-10-07). A recessed porch sets its wall back, and the two
+  // boards this loop always drew at that wall's footprint corners stood alone in the porch opening, a
+  // hand outside the porch posts and in another colour: the "two posts at each corner" of the 2026-10-06
+  // review. On the porch wall the corner post now takes the board's place (the recessed-porch block), and
+  // the board goes to the INSIDE corner, where the set-back wall meets the side wall, as the real building's trim does:
+  // moved in along the wall's inward normal by the porch's depth, as tall as those two walls there. A
+  // footprint corner that was a TALL one (a single slant's high side) keeps a board above the beam, from
+  // H up, to close the end of the tall band over the opening. Every other corner, and every corner of
+  // every building without a recessed porch, is built exactly as it was.
+  const porchN = porchOn ? { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[porchWall] : null;
+  [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c0) => {
     const half = Math.max(T / 2 + 0.07, trimFace);
-    const nsW = c[1] < 0 ? "north" : "south", ewW = c[0] < 0 ? "west" : "east";
-    // Along each wall from its west/north end, in the PLAN's frame (d3WallTops').
-    const cH = Math.max(
-      d3WallTopFt(roofCfg, bldgW, bldgH, H, nsW, c[0] + bldgW / 2, c[0] + bldgW / 2, porchWall === nsW),
-      d3WallTopFt(roofCfg, bldgW, bldgH, H, ewW, c[1] + bldgH / 2, c[1] + bldgH / 2, porchWall === ewW));
-    let cTop = cH;
-    if (cH > H + 1e-9) {
-      const uc = (uAxisIsX ? c[0] : c[1]) - mass.uc;   // in rg's u: the centre's, with wings
-      // Under the roof over THAT corner: a roof step's rear section at the back (north) corners.
-      cTop = Math.max(H, Math.min(cH, (rearProf && c[1] < 0 ? rearProf.yAt : profYAt)(uc - Math.sign(uc) * half)));
-    }
+    // The walls are named off the FOOTPRINT corner: a deep porch on a short footprint can carry the inside
+    // corner past the centre line.
+    const nsW = c0[1] < 0 ? "north" : "south", ewW = c0[0] < 0 ? "west" : "east";
+    const onPorch = !!porchN && (porchN[0] ? Math.sign(c0[0]) === porchN[0] : Math.sign(c0[1]) === porchN[1]);
+    const board = (c, bottom, onlyAbove) => {
+      // Along each wall from its west/north end, in the PLAN's frame (d3WallTops').
+      const cH = Math.max(
+        d3WallTopFt(roofCfg, bldgW, bldgH, H, nsW, c[0] + bldgW / 2, c[0] + bldgW / 2, porchWall === nsW),
+        d3WallTopFt(roofCfg, bldgW, bldgH, H, ewW, c[1] + bldgH / 2, c[1] + bldgH / 2, porchWall === ewW));
+      let cTop = cH;
+      if (cH > H + 1e-9) {
+        const uc = (uAxisIsX ? c[0] : c[1]) - mass.uc;   // in rg's u: the centre's, with wings
+        // Under the roof over THAT corner: a roof step's rear section at the back (north) corners.
+        cTop = Math.max(H, Math.min(cH, (rearProf && c[1] < 0 ? rearProf.yAt : profYAt)(uc - Math.sign(uc) * half)));
+      }
+      if (onlyAbove && !(cTop > bottom + 0.05)) return;
+      const post = box(cornerMat, half * 2, cTop - bottom, half * 2);
+      post.position.set(c[0], (cTop + bottom) / 2, c[1]);
+      if (cTop !== H) post.userData.ssCorner = "tall";
+      if (onPorch) post.userData.ssPorchCorner = onlyAbove ? "above" : "inside";
+      roofGroup.add(post);
+    };
     // On a raised floor (2026-09-25) the board runs on down over the siding's skirt to its bottom
     // edge, as the cladding does; 0 on every other building, where it stands on the floor (a slab's
     // stem wall, 2026-10-03, is concrete under the floor band, with no siding on it to cover).
     const cBot = RAISED ? -foundationInfo.skirt : 0;
-    const post = box(cornerMat, half * 2, cTop - cBot, half * 2);
-    post.position.set(c[0], (cTop + cBot) / 2, c[1]);
-    if (cTop !== H) post.userData.ssCorner = "tall";
-    roofGroup.add(post);
+    if (!onPorch) { board(c0, cBot, false); return; }
+    board(c0, H, true);
+    // The inside corner stands on the floor, inside the skirt that runs round the footprint.
+    board([c0[0] - porchN[0] * porchDepth, c0[1] - porchN[1] * porchDepth], 0, false);
   });
   // THE CLERESTORY'S CORNERS: a board at each end of every centre side wall above a wing, from its
   // foot in the wing roof up to the centre's eave, over the joint where the clerestory meets the
@@ -14656,6 +14867,16 @@ function buildShed3DModel(THREE, p) {
   // recessedSteps: a recessed porch's steps as built (d3RecessedStepsOnGround's flight and the wall it
   // leaves), only when there are some (2026-10-03). Read by tests/harness/porchProbe.mjs.
   if (recessedStepsGeom) model.recessedSteps = { ...recessedStepsGeom, wall: porchWall };
+  // recessedFrame (2026-10-07): the recessed porch's timber frame as built, for tests/harness/gableProbe.mjs
+  // and porchProbe.mjs: d3RecessedPorchFrame's numbers, the frame's two faces out from the footprint line,
+  // the porch end's cap out (capCo) and the plane it is measured from (capZ, in rg's local z), and whether
+  // the gable is open and the frame takes the wood colour. Only with a recessed porch.
+  if (PF) {
+    const atZero = capPorchEnd === 0;
+    model.recessedFrame = { wall: PF.wall, onEave: PF.onEave, side: PF.side, face: PF.face, bays: PF.bays, posts: PF.posts, sizes: PF.sizes,
+      front: pfFront, back: pfBack, truss: porchTrussOn, open: porchOpenGable, wood: !!porchWoodHex,
+      capCo: capPorchEnd == null ? null : (atZero ? capCo0 : capCoL), capZ: capPorchEnd == null ? null : (atZero ? capZ0 : capZL) };
+  }
   if (NEW_FRAME) {
     // S is the building's full span (mass.S): the roof section's own S is the centre's with wings.
     model.frame = { uAxisIsX, S: mass.S, L, tallNeg, tops: Object.fromEntries(Object.keys(WALLS).map((w) => [w, WALLS[w].top])), porchWall };
@@ -21397,6 +21618,8 @@ const SS_CHANGE_WORDS = {
   "roof.porchDepthFt": ["How far the porch goes into the building", (v) => ssFtInWords(Number(v))],
   "roof.porchEnd": ["Which end the porch is on", (v) => (String(v) === "back" ? "the other end" : String(v) === "left" || String(v) === "right" ? `the ${String(v)} side` : "the end you filmed first")],
   "roof.porchTruss": ["The beam across the porch", (v) => (v ? "there" : "not there")],
+  // The gable over a recessed porch (2026-10-07): open framing with the ceiling showing, or sided.
+  "roof.porchGable": ["The gable over the porch", (v) => (String(v) === "open" ? "open, the ceiling showing" : "sided")],
   "roof.leanToWidthFt": ["How far the lean-to sticks out", (v) => ssFtInWords(Number(v))],
   "roof.leanToDropFt": ["How far the lean-to roof drops", (v) => ssFtInWords(Number(v))],
   "roof.leanToSide": ["Which side the lean-to is on", (v) => String(v)],
@@ -25980,6 +26203,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   recessed    sets porchDepthFt, deletes porchOutFt.
   //   projecting  sets porchOutFt, deletes porchDepthFt and porchTruss (the truss stands in a
   //               recessed porch's gable; the sanitizer drops it on save as well).
+  // roof.porchGable (2026-10-07) is a recessed porch's alone: the sanitizer keeps it only beside a
+  // recessed porch, so any other kind deletes it here and the preview never draws what Save drops.
   // With no depth given the number carries across from the porch that is on, else 6 ft, so a switch
   // never leaves the builder an empty field.
   const calSetPorch = (kind, depth) => setAdminCal((p) => {
@@ -25992,6 +26217,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     delete roof.porchOutFt;
     if (kind === "recessed") roof.porchDepthFt = d;
     if (kind === "projecting") { roof.porchOutFt = d; delete roof.porchTruss; }
+    if (kind !== "recessed") delete roof.porchGable;
     // Where a projecting porch's roof meets the wall, and how wide it is, belong to a projecting
     // porch only (2026-09-24): the sanitiser keeps them only while porchOutFt is over 0.5, so on
     // any other kind they would draw in the preview and vanish on Save. Its posts, its roof's pitch
@@ -26510,7 +26736,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = dr.type ? { ...base, ...dr } : { ...stored, ...dr };
     const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
     if ((dr.porchOutFt || 0) > 0.5) {
-      delete roof.porchDepthFt; delete roof.porchTruss;
+      delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
       for (const k of own) if (!(k in dr)) delete roof[k];
       // A flight off an END of the deck (2026-10-04) is the builder's: the prompt tells the model to
       // leave it out, so a draft silent on the steps keeps a stored one and its count.
@@ -27906,7 +28132,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList, roof.wingCornersMeet]);
-    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchGable, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward, spec.gradeCornersFt]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
@@ -31379,13 +31605,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           Timber truss in the porch gable
                         </label>
                       )}
+                      {/* THE OPEN PORCH GABLE (roof.porchGable, 2026-10-07): no siding over the porch, the ceiling
+                          showing through the frame, the building's own gable standing on the set-back wall. A
+                          gable END's porch only, like the truss, but any two-slope roof (a gambrel's too); a single
+                          slant's porch side is its tall band. Ticked writes "open", unticked deletes the key:
+                          absent is the sided gable every style was drawn with. */}
+                      {kind === "recessed" && (roof.type || "gable") !== "shed" && !d3PorchOnEave(roof, bldgW, bldgH) && (
+                        <label data-ss-porch-gable="ss-grid" style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
+                          <input type="checkbox" checked={roof.porchGable === "open"}
+                            onChange={(e) => calSetRoofOpt("porchGable", e.target.checked ? "open" : null)} />
+                          Open gable: the ceiling shows, no siding over the porch
+                        </label>
+                      )}
                       {/* Its own box, NOT a fourth entry in the colour loop below: that loop offers the
                           catalog, and for any key but body or trim the catalog is ROOFING, so a pick
                           would write a metal roof colour as lumber. Blank means natural wood, and blank
                           is what is stored (calSetWood deletes the key). A recessed porch's steps are
                           built of it too (2026-10-04), so it shows for them, named for them. */}
-                      {(kind === "projecting" || (kind === "recessed" && roof.porchSteps)) && (
-                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{kind === "projecting" ? "Wood colour (posts, deck, ceiling)" : "Wood colour (steps)"}
+                      {(kind === "projecting" || kind === "recessed") && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{kind === "projecting" ? "Wood colour (posts, deck, ceiling)" : "Wood colour (posts, beams, truss, deck)"}
                           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                             <input type="text" placeholder="#C4965A (natural)" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                             <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors.wood || D3_COLORS.wood, flexShrink: 0 }} />
@@ -33158,6 +33396,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {kind === "recessed" && (roof.type || "gable") === "gable" && !d3PorchOnEave(roof, bldgW, bldgH) && (
             <div key="truss" className="ss-adv-f is-full">{advSwitch("porchTruss", !!roof.porchTruss, "Timber truss in the porch gable", "Timber truss in the porch gable", () => calSetRoof({ porchTruss: !roof.porchTruss }))}</div>
           )}
+          {/* The open porch gable (roof.porchGable, 2026-10-07): the calibration panel's box, the same rule. */}
+          {kind === "recessed" && (roof.type || "gable") !== "shed" && !d3PorchOnEave(roof, bldgW, bldgH) && (
+            <div key="porchGable" className="ss-adv-f is-full">{advSwitch("porchGable", roof.porchGable === "open", "Open gable: the ceiling shows, no siding over the porch", "Open gable: the ceiling shows, no siding over the porch", () => calSetRoofOpt("porchGable", roof.porchGable === "open" ? null : "open"))}</div>
+          )}
           {kind === "projecting" && advNum({ k: "porchWidthFt", label: "Porch width (ft)", value: roof.porchWidthFt, min: 4, max: Math.max(4, Math.min(60, porchW)), step: 0.5, band: [4, 60],
             write: (n) => calSetRoofOpt("porchWidthFt", n), placeholder: "Whole", fallback: porchW,
             note: "Along its wall, centred on it.",
@@ -33198,10 +33440,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 steep || shallow, { "data-ss-step-rise": "adv" })}
             </div>
           )}
-          {/* A recessed porch's steps are built of the porch wood too (2026-10-04). */}
-          {(kind === "projecting" || (kind === "recessed" && roof.porchSteps)) && (
+          {/* A recessed porch's steps are built of the porch wood too (2026-10-04), and its posts, beams, truss and
+              deck (2026-10-07). */}
+          {(kind === "projecting" || kind === "recessed") && (
             <div key="wood" className="ss-adv-f is-full" data-ss-adv-f="wood">
-              <div className="ss-adv-fh"><span className="ssd-fld-l">{kind === "projecting" ? "Wood color (posts, deck, ceiling)" : "Wood color (steps)"}</span></div>
+              <div className="ss-adv-fh"><span className="ssd-fld-l">{kind === "projecting" ? "Wood color (posts, deck, ceiling)" : "Wood color (posts, beams, truss, deck)"}</span></div>
               <div className="ss-adv-pick">
                 <span className="ssd-cs-swatch" style={{ background: advHexOk(wood) ? wood : D3_COLORS.wood }} />
                 <span className="ssd-tb-read">{!wood ? "Natural wood" : (woods.find((w) => w[0] && w[0].toLowerCase() === wood.toLowerCase()) || [0, `Custom ${wood}`])[1]}</span>

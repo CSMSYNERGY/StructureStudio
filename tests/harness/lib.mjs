@@ -253,6 +253,8 @@ export function purePorch() {
   };
   const regions = [
     ["const D3 = {", "// The casing reveal every opening"],
+    // D3_CLADDING and d3CladdingFor: the corner boards' face the recessed porch's posts stand on (2026-10-07).
+    ["const D3_CLADDING = {", "// ── METAL ROOF PROFILE"],
     ["function d3RoofAxes(", "function d3FtIn("],
     ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
     ["function d3DefaultOverhangStyle(", "// ── THE PROJECTING PORCH'S NUMBERS"],
