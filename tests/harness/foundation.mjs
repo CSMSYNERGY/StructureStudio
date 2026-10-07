@@ -36,6 +36,9 @@
 //      height saves as typed, clamped to 0.3..6, and a cleared box deletes it; leaving blocks/piers
 //      deletes the height; "Not set" deletes the foundation; a style storing piers saves them back
 //      untouched; every save says frame "front"; the preview's ground moves with the height
+//   10. A WING ALONG PART OF ITS WALL (lengthFt, 2026-10-07, cases PWB, PWP, PWS; "PW" for all three): on blocks,
+//      piers and a slab over falling ground the base follows the L: no block, pier or runner in the open ground, the
+//      skirt and the stem wall a piece per edge (8), none across it, and no shade over it
 //   9. zero page errors
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -578,6 +581,79 @@ async function runPanel(ctx, ok, shots) {
   }
 }
 
+// PW · A WING ALONG PART OF ITS WALL (roof.wingList[i].lengthFt, 2026-10-07): a 24 x 40 whose left wing runs 20 ft of
+// its wall (open ground at x -12..-4 over z -20..-10 and 10..20, world feet). On blocks, on piers and on a slab over
+// falling ground, the base follows the outline: no block, pier or runner in the open ground, the skirt and the
+// stem wall one piece per edge of the L (8), none across the open ground, and no shade over it.
+const PW_ROOF = { type: "gable", front: "gable", pitch: 0.5, overhang: 1, eave: "fascia", wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }] };
+const PW_CASES = [
+  { id: "PWB", label: "Found Part Wing Blocks", size: "24x40", d3: { roof: PW_ROOF, siding: "lap", colors: PLAIN, wallHeightFt: 9, foundation: "blocks", floorHeightFt: 2 } },
+  { id: "PWP", label: "Found Part Wing Piers", size: "24x40", d3: { roof: PW_ROOF, siding: "lap", colors: PLAIN, wallHeightFt: 9, foundation: "piers", floorHeightFt: 1.5 } },
+  { id: "PWS", label: "Found Part Wing Slab", size: "24x40", slab: true, d3: { roof: PW_ROOF, siding: "lap", colors: PLAIN, wallHeightFt: 9, foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2 } } },
+];
+// The open ground's inside, a hair in from its walls' lines (world feet).
+const PW_OPEN = [[-12, -4, -20, -10], [-12, -4, 10, 20]];
+const pwIn = (b, pad = 0.2) => PW_OPEN.some(([x0, x1, z0, z1]) => Math.min(b.x1, x1 - pad) - Math.max(b.x0, x0 + pad) > 0.01 && Math.min(b.z1, z1 - pad) - Math.max(b.z0, z0 + pad) > 0.01);
+async function runPartWing(ctx, c, ok, shots) {
+  const config = configFor(c);
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  await stubSupabase(page, { config, fixtures: FIXTURES });
+  const tag = `${c.id} ${c.label}`;
+  try {
+    await openDesigner(page, config.clientId);
+    await page.waitForFunction(() => [...document.querySelectorAll("svg rect")].some((r) => r.getAttribute("stroke") === "#1E293B"), null, { timeout: 30000 });
+    await pickStyle(page, c.label);
+    await chooseSize(page, c.size);
+    await openEditor(page);
+    const s = await page.evaluate(() => {
+      const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+      E.scene.updateMatrixWorld(true);
+      const bb = (q) => {
+        if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+        const b = q.geometry.boundingBox, mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+          const v = new V(x, y, z).applyMatrix4(q.matrixWorld);
+          [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+        }
+        return { x0: mn[0], x1: mx[0], y0: mn[1], y1: mx[1], z0: mn[2], z1: mx[2] };
+      };
+      const parts = {};
+      M.root.traverse((q) => {
+        if (!q.isMesh || !q.userData || !q.userData.ssFoundationPart) return;
+        (parts[q.userData.ssFoundationPart] = parts[q.userData.ssFoundationPart] || []).push(bb(q));
+      });
+      return { parts, foundation: JSON.parse(JSON.stringify(M.foundation || null)), notches: M.notches || null };
+    });
+    ok(`${tag}: the model is built round the open ground`, Array.isArray(s.notches) && s.notches.length === 2, JSON.stringify(s.notches));
+    const p = s.parts;
+    if (!c.slab) {
+      const sup = (p.block || []).concat(p.pier || []);
+      ok(`${tag}: supports stand under the floor (${sup.length}) and none in the open ground`, sup.length > 10 && !sup.some((b) => pwIn(b, 0)), JSON.stringify(sup.filter((b) => pwIn(b, 0)).slice(0, 2)));
+      ok(`${tag}: no runner runs through the open ground`, (p.runner || []).length > 0 && !(p.runner || []).some((b) => pwIn(b)), JSON.stringify((p.runner || []).filter((b) => pwIn(b)).slice(0, 2)));
+      ok(`${tag}: the skirt is one piece per edge of the L (8), none across the open ground`, (p.skirt || []).length === 8 && !(p.skirt || []).some((b) => pwIn(b, 0.3)), JSON.stringify((p.skirt || []).length));
+      ok(`${tag}: no shade over the open ground, and shade under the building`, (p.shade || []).length >= 2 && !(p.shade || []).some((b) => pwIn(b, 0.3)), JSON.stringify((p.shade || []).map((b) => [b.x0, b.x1, b.z0, b.z1].map((v) => +v.toFixed(2)))));
+      // Every support stands under a runner piece (the runners' own rows): its centre within a runner's footprint.
+      const under = (b) => (p.runner || []).some((r) => (b.x0 + b.x1) / 2 >= r.x0 - 0.01 && (b.x0 + b.x1) / 2 <= r.x1 + 0.01 && (b.z0 + b.z1) / 2 >= r.z0 - 0.01 && (b.z0 + b.z1) / 2 <= r.z1 + 0.01);
+      ok(`${tag}: every support stands under a runner`, sup.every(under), String(sup.filter((b) => !under(b)).length));
+    } else {
+      const st = p.stem || [];
+      ok(`${tag}: the stem wall is one piece per edge of the L (8), none across the open ground`, st.length === 8 && !st.some((b) => pwIn(b, 0.3)), JSON.stringify(st.length));
+      ok(`${tag}: model.foundation records the eight stems`, s.foundation && s.foundation.kind === "slab" && s.foundation.stems.length === 8, JSON.stringify(s.foundation && s.foundation.stems.map((q) => q.wall)));
+    }
+    if (shots) {
+      await page.evaluate(() => { const E = window.__ss3dEngine; E.camera.position.set(-36, 10, 34); E.controls.target.set(0, 2, 0); E.camera.lookAt(0, 2, 0); E.camera.updateProjectionMatrix(); if (E.controls.update) E.controls.update(); E.render(); });
+      await settle(page, 300);
+      await page.evaluate(() => window.__ss3dEngine.render());
+      const c3 = await page.evaluate(() => { const r = window.__ss3dEngine.renderer.domElement.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
+      await page.screenshot({ path: join(shots, `${c.id}.png`), clip: c3 });
+    }
+    ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) { ok(`${tag}: ran`, false, e && e.stack); }
+  await page.close();
+}
+
 const { ok, failed } = reporter();
 const only = process.env.SS_CASES ? process.env.SS_CASES.split(",") : null;
 const todo = CASES.filter((c) => !only || only.includes(c.id));
@@ -588,6 +664,8 @@ try {
   const q = todo.slice();
   const jobs = Array.from({ length: N }, async () => { while (q.length) await runCase(ctx, q.shift(), ok, shots); });
   if (!only || only.includes("panel")) jobs.push(runPanel(ctx, ok, shots));
+  // A part-wall wing (2026-10-07): "PW" runs all three, or each by its own id.
+  for (const c of PW_CASES) if (!only || only.includes("PW") || only.includes(c.id)) jobs.push(runPartWing(ctx, c, ok, shots));
   await Promise.all(jobs);
 } finally {
   await browser.close();

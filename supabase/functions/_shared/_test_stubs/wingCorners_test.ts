@@ -318,6 +318,27 @@ Deno.test("d3WingCorners: the corners as if the switch were on, on or off; null 
   assertEquals(F.d3WingCorners({ ...T, wingList: [W("left"), W("front", { widthFt: 16 })] }, 24, 10, 9), F.d3Massing(ON({ ...T, wingList: [W("left"), W("front", { widthFt: 16 })] }), 24, 10, 9).corners || null);
 });
 
+// PART OF A WALL (lengthFt / offsetFt, 2026-10-07) is ignored beside end wings (partIgnored "ends"), so a length on
+// the side wing changes no corner: the same joins and near-misses, the same massing but for that one flag.
+Deno.test("⚠️ a length on a side wing beside end wings changes no corner, on or off", () => {
+  const lenOf = (roof: Any) => ({ ...roof, wingList: roof.wingList.map((e: Any) => (e.wall === "left" || e.wall === "right" ? { ...e, lengthFt: 10, offsetFt: 3 } : e)) });
+  const cases = [T, { ...T, wingList: [W("left", { widthFt: 6 }), W("right"), W("front")] }, { ...T, wingList: [W("left"), W("front"), W("back")] }];
+  for (const base of cases) {
+    for (const [w, d] of [[24, 28], [30, 40], [37, 22]]) {
+      for (const roof of [base, ON(base)]) {
+        const a = F.d3Massing(roof, w, d, 9), b = F.d3Massing(lenOf(roof), w, d, 9);
+        const tag = `${JSON.stringify(roof.wingList)} ${w}x${d} ${roof.wingCornersMeet ? "on" : "off"}`;
+        assertEquals(b.corners, a.corners, tag);
+        assertEquals(F.d3WingCorners(lenOf(roof), w, d, 9), F.d3WingCorners(roof, w, d, 9), tag);
+        const drop = (m: Any) => JSON.parse(JSON.stringify(m, (k, v) => (k === "partIgnored" ? undefined : v)));
+        assertEquals(drop(b), drop(a), tag);
+        assert(b.wings.every((g: Any) => !g.part), tag);
+        if (b.ends.length) assert(b.wings.every((g: Any) => (lenOf(roof).wingList[g.i].lengthFt != null) === (g.partIgnored === "ends")), tag);
+      }
+    }
+  }
+});
+
 // ── FOUR: the fuzz ───────────────────────────────────────────────────────────────────────────
 
 Deno.test("⚠️ fuzz: every join is an exact match of two lone Automatic wings at H; every side wing that meets meets every end wing it runs to; no join means today's massing", () => {

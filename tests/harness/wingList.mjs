@@ -43,6 +43,10 @@
 //       their own sides of the hip; their slabs', fascias' and soffits' cut faces are one face; two strips
 //       cap it; no rake, fly rafter or tail stands at a joined end; the side wings stay at H; the end wing's
 //       clerestory stops at the side wings'; a near-miss side builds exactly as without the switch.
+//   PW  A WING ALONG PART OF ITS WALL (lengthFt / offsetFt, 2026-10-07): a 24 x 40 with a 20 ft left wing builds round the
+//       open ground (the floor's outline, no wall in it, the face behind it down to the floor, the wing's end walls,
+//       its corner boards, lap courses run on across the joins); the Advanced page's Whole wall / Part of it, length and position, the Plan, Save, a
+//       saved length at a size it covers, and a length on an inner wing or beside an end wing said and kept.
 //   AJ  THE SWITCH ON THE ADVANCED PAGE: shown only with a side wing and an end wing on one corner; the
 //       corners' words (a match, a join, a near-miss with its numbers, a hint while Off); the card lines; the End view, Side
 //       view and Plan drawn round the hip; Save carrying the key; Off deleting it.
@@ -53,7 +57,7 @@
 //
 //   python -m http.server 8406 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8406 node tests/harness/wingList.mjs      (SS_SHOTS=<dir> for the PNGs)
-//   SS_CASES=D,Z,M,S,E,C,T,SZ,A,P,X,DL,J,AJ                            (a subset; default all but D, D+, X, DL)
+//   SS_CASES=D,Z,M,S,E,C,T,SZ,A,P,X,DL,J,AJ,PW                            (a subset; default all but D, D+, X, DL)
 //
 // Exit 0 = every assertion held.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -1004,7 +1008,7 @@ async function openAdvanced(viewport = { width: 1440, height: 1000 }) {
   const errors = collectErrors(page);
   const calls = [];
   let made = 0;
-  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => {
+  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|(?:[a-z0-9-]+\.)*localhost)(:\d+)?\//.test(u.href), (route) => {
     const req = route.request();
     if (req.method() === "GET" && PASS_THROUGH_GET.test(req.url())) return route.continue();
     return route.abort();
@@ -1530,6 +1534,256 @@ if (want("X") && OLD) {
     ok("X: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
     await page.close();
   } catch (e) { ok("X: ran", false, e && e.stack); }
+}
+
+// ── PW · A WING ALONG PART OF ITS WALL (roof.wingList[i].lengthFt / offsetFt, 2026-10-07) ──────────────
+// Carolyn, Q3: "a wing can cover part of a side (e.g. 20 ft of a 40 ft wall)". The 3D of a 24 x 40 with a 20 ft left
+// wing: the floor's outline is W x L less the open ground, w x (L - len); no wall stands in the open ground; the face
+// the wing meets comes down to the floor there; the wing has an end wall at each end and its members stay over its
+// stretch; the west wall is the wing's 20 ft. Then the Advanced page: Whole wall / Part of it, the length and position
+// boxes (and the position held when typed past the wall), the Plan with the open ground, a length on an inner wing
+// or beside an end wing said and kept, and Save carrying lengthFt.
+if (want("PW")) {
+  const W = 24, L = 40, H = 9, roof = { ...G, front: "gable", eave: "fascia", wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }] };
+  try {
+    const { page, errors } = await openCase("Part Wing", `${W}x${L}`, D3of(roof, H));
+    const s = await page.evaluate(() => {
+      const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+      E.scene.updateMatrixWorld(true);
+      const bb = (o) => {
+        const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        o.traverse((q) => {
+          if (!q.isMesh || !q.geometry) return;
+          if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+          const b = q.geometry.boundingBox;
+          for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+            const v = new V(x, y, z).applyMatrix4(q.matrixWorld);
+            [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+          }
+        });
+        return { x0: mn[0], x1: mx[0], y0: mn[1], y1: mx[1], z0: mn[2], z1: mx[2] };
+      };
+      let area = 0;
+      M.root.traverse((o) => {
+        if (!(o.isMesh && o.userData && o.userData.ssNotched)) return;
+        const p = o.geometry.attributes.position;
+        for (let k = 0; k + 2 < p.count; k += 3) {
+          const a = new V().fromBufferAttribute(p, k).applyMatrix4(o.matrixWorld), b = new V().fromBufferAttribute(p, k + 1).applyMatrix4(o.matrixWorld), c = new V().fromBufferAttribute(p, k + 2).applyMatrix4(o.matrixWorld);
+          const n = new V().subVectors(b, a).cross(new V().subVectors(c, a));
+          if (Math.abs(a.y) < 1e-6 && Math.abs(b.y) < 1e-6 && Math.abs(c.y) < 1e-6 && n.length() > 0) area += n.length() / 2;
+        }
+      });
+      const walls = [];
+      M.wallsGroup.children.forEach((g) => {
+        const m = [];
+        g.traverse((q) => { if (q.isMesh) m.push(bb(q)); });
+        walls.push({ ud: JSON.parse(JSON.stringify(g.userData || {})), bb: bb(g), meshes: m });
+      });
+      const wing = [];
+      M.roofGroup.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssWingList === 0 && !q.userData.ssCorner) wing.push(bb(q)); });
+      const corners = [];
+      M.roofGroup.children.forEach((q) => { if (q.userData && q.userData.ssCorner) corners.push({ tag: q.userData.ssCorner, ...bb(q) }); });
+      return { notches: M.notches || null, area, walls, wing, corners, massing: JSON.parse(JSON.stringify(M.massing)) };
+    });
+    const g = s.massing.wings[0];
+    ok("PW1: the model is built round the open ground: two corners, x 0..8 over y 0..10 and 30..40", JSON.stringify((s.notches || []).map((n) => [n.x0, n.x1, n.y0, n.y1])) === "[[0,8,0,10],[0,8,30,40]]", JSON.stringify(s.notches));
+    ok("PW1: the wing runs 10..30, its record a whole wing's plus part", g && g.part === true && g.z0 === 10 && g.z1 === 30 && g.len === 20, JSON.stringify(g && [g.part, g.z0, g.z1, g.len]));
+    // The floor's top face: the outline 0.1 ft out all round, the open ground cut out.
+    const wantArea = (W + 0.2) * (L + 0.2) - 2 * 8 * 10;
+    ok("PW2: the floor's outline is W x L less w x (L - len), with its 0.1 ft rim", near(s.area, wantArea, 0.05), `${s.area} vs ${wantArea} (unpadded ${W * L - 8 * 20})`);
+    // No wall mesh inside the open ground (each corner's interior, kept 0.3 ft off its walls' lines).
+    const inside = (b) => [[-20, -10], [10, 20]].some(([za, zb]) => Math.min(b.x1, -4.3) - Math.max(b.x0, -11.7) > 0.01 && Math.min(b.z1, zb - 0.3) - Math.max(b.z0, za + 0.3) > 0.01);
+    const intruders = s.walls.flatMap((w) => w.meshes.filter(inside).map((b) => ({ ud: w.ud, b })));
+    ok("PW3: no wall stands in the open ground", intruders.length === 0, JSON.stringify(intruders.slice(0, 3)));
+    const open = s.walls.filter((w) => w.ud.ssPartWall === "open"), ends = s.walls.filter((w) => w.ud.ssPartWall === "end");
+    ok("PW4: the face the wing meets comes down to the floor over each open stretch, up to the middle's walls", open.length === 2 && open.every((w) => w.bb.y0 < 0.05 && near(w.bb.y1, s.massing.Hc, 0.3) && near((w.bb.x0 + w.bb.x1) / 2, -4, 0.2)),
+      JSON.stringify(open.map((w) => w.bb)));
+    ok("PW5: the wing has an end wall at each end, across its 8 ft, floor to its wall's top", ends.length === 2 && ends.every((w) => w.bb.y0 < 0.05 && near(w.bb.y1, H, 0.3) && w.bb.x0 < -11.7 && w.bb.x1 > -4.3)
+      && ends.some((w) => near((w.bb.z0 + w.bb.z1) / 2, -10, 0.2)) && ends.some((w) => near((w.bb.z0 + w.bb.z1) / 2, 10, 0.2)), JSON.stringify(ends.map((w) => w.bb)));
+    const west = s.walls.find((w) => w.ud.wall === "west");
+    ok("PW6: the west wall is the wing's 20 ft only", !!west && west.bb.z0 > -10.5 && west.bb.z1 < 10.5 && west.bb.z1 - west.bb.z0 > 19.5, JSON.stringify(west && west.bb));
+    const north = s.walls.find((w) => w.ud.wall === "north");
+    ok("PW6: the north wall starts at the face the wing meets (x -4)", !!north && north.bb.x0 > -4.6, JSON.stringify(north && north.bb));
+    ok("PW7: the wing's members (its corner boards aside) stay over its stretch, out to its rakes", s.wing.length > 3 && s.wing.every((b) => b.z0 > -10 - 1.6 && b.z1 < 10 + 1.6), JSON.stringify(s.wing.filter((b) => !(b.z0 > -11.6 && b.z1 < 11.6)).slice(0, 2)));
+    const tags = s.corners.map((c) => c.tag).sort();
+    ok("PW8: corner boards at the open ground's corners: two outside, one inside, a set per end", JSON.stringify(tags.filter((t) => t !== "tall")) === JSON.stringify(["openGround", "openGround", "wingIn", "wingIn", "wingOut", "wingOut"]), JSON.stringify(tags));
+    await shot(page, "PW-part-wing-sw.png", [-38, 18, 40], [0, 6, 0]);
+    await shot(page, "PW-part-wing-nw.png", [-38, 22, -34], [0, 6, 0]);
+    ok("PW: zero page errors in 3D", errors.length === 0, errors.slice(0, 3).join(" | "));
+    await page.close();
+    // A length as long as the wall is the whole wall: no open ground, the building it always was.
+    const { page: p2, errors: e2 } = await openCase("Whole Wing", `${W}x${L}`, D3of({ ...roof, wingList: [{ wall: "left", widthFt: 8, lengthFt: 40 }] }, H));
+    const whole = await p2.evaluate(() => ({ notches: window.__ss3dEngine.model.notches || null, part: window.__ss3dEngine.model.massing.wings.some((g) => g.part) }));
+    ok("PW9: a length as long as the wall is the whole wall (no open ground, no part)", whole.notches === null && whole.part === false, JSON.stringify(whole));
+    ok("PW9: zero page errors", e2.length === 0, e2.slice(0, 3).join(" | "));
+    await p2.close();
+    // Lap siding, the wing on the wall (a clerestory over its stretch): the clerestory and the face over the open
+    // ground meet in line at z -10 and z 10, no corner board there, so every lap course runs to the join from both
+    // sides. Before 10-07 the flags were read before they were declared, so the bundle stopped each course short.
+    const { page: p3, errors: e3 } = await openCase("Lap Part Wing", `${W}x${L}`, D3of({ ...roof, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20, attach: "wall" }] }, H, { siding: "lap" }));
+    const lap = await p3.evaluate(() => {
+      const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+      E.scene.updateMatrixWorld(true);
+      const out = { clere: [], open: [] };
+      M.wallsGroup.children.forEach((g) => {
+        const ud = g.userData || {};
+        const bin = ud.ssPartWall === "open" ? out.open : ud.clerestory && ud.clerestoryI === 0 && !ud.ssPartWall ? out.clere : null;
+        if (!bin) return;
+        g.traverse((q) => {
+          if (!q.isMesh || !q.geometry || q.geometry.type !== "BoxGeometry") return;
+          const p = q.geometry.parameters;
+          if (Math.abs(p.height - 0.08) > 1e-6 || Math.abs(p.depth - 0.1) > 1e-6) return;
+          if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+          const b = q.geometry.boundingBox;
+          let z0 = Infinity, z1 = -Infinity;
+          for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+            const v = new V(x, y, z).applyMatrix4(q.matrixWorld);
+            z0 = Math.min(z0, v.z); z1 = Math.max(z1, v.z);
+          }
+          bin.push([z0, z1]);
+        });
+      });
+      return out;
+    });
+    const reach = (bin, z) => bin.some(([a, b]) => Math.abs(a - z) <= 0.02 || Math.abs(b - z) <= 0.02);
+    ok("PW10: lap courses on the clerestory over the wing run to both joins (z -10 and 10)", lap.clere.length > 0 && reach(lap.clere, -10) && reach(lap.clere, 10),
+      JSON.stringify([lap.clere.length, Math.min(...lap.clere.map((s) => s[0])), Math.max(...lap.clere.map((s) => s[1]))]));
+    ok("PW10: ...and on the faces over the open ground, from the other side", lap.open.length > 0 && reach(lap.open, -10) && reach(lap.open, 10),
+      JSON.stringify(lap.open.filter((s) => Math.abs(s[0]) < 12 || Math.abs(s[1]) < 12).slice(0, 4)));
+    ok("PW10: zero page errors", e3.length === 0, e3.slice(0, 3).join(" | "));
+    await p3.close();
+  } catch (e) { ok("PW 3D: ran", false, e && e.stack); }
+
+  const { actx, page, errors, calls } = await openAdvanced();
+  try {
+    await setSize(page, 24, 40);
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="wingsOn"]').click();
+    await settle(page, 400);
+    await advModel(page, (M) => M.massing.wings.length === 2 && !M.massing.list);
+    // A list of one left wing: + Left side converts today's pair and adds a left wing 2; remove it and the right one.
+    await clickF(page, "wlAdd", "left");
+    await advModel(page, (M) => M.massing.list && M.massing.wings.length === 3);
+    for (let n = 0; n < 2; n++) {
+      const cs = await wlCards(page);
+      const c = cs.find((x) => !(x.wall === "left" && x.tier === "1"));
+      if (!c) break;
+      await page.locator(`[data-ss-adv-wl="${c.i}"] [data-ss-adv-f="wlRemove"]`).click();
+      await settle(page, 450);
+    }
+    await advModel(page, (M) => M.massing.list && M.massing.wings.length === 1);
+    const cards = await wlCards(page);
+    const wi = cards[0].i;
+    const card = page.locator(`[data-ss-adv-wl="${wi}"]`);
+    ok("PWA1: the outermost side wing's card has Along the wall, Whole wall pressed", (await card.locator('[data-ss-adv-f="wlLength"]').count()) === 1
+      && (await card.getByRole("button", { name: "Whole wall" }).getAttribute("aria-pressed")) === "true");
+    ok("PWA1: ...and no length box while it runs the whole wall", (await card.locator('[data-ss-adv-f="wlLengthFt"]').count()) === 0);
+    await card.getByRole("button", { name: "Part of it" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part && Math.abs(g.len - 20) < 1e-9));
+    let m = await mass(page);
+    ok("PWA2: Part of it seeds half the 40 ft wall, centred (10..30)", m.wings[0].part && m.wings[0].z0 === 10 && m.wings[0].z1 === 30, JSON.stringify([m.wings[0].z0, m.wings[0].z1]));
+    // The beta-only note (⚠️ PROMOTION HOLD in the twins): on a beta host while the wing runs part of its wall, never
+    // elsewhere. SS_BASE=http://beta.localhost:<port> serves the same files under a beta host name.
+    const host = new URL(BASE).hostname, onBeta = /(^|\.)beta(\.|--)/.test(host);
+    const liveNote = await card.locator("[data-ss-adv-wl-live]").count();
+    ok(`PWA2b: the live-site note ${onBeta ? "shows" : "stays hidden"} on ${host} while the wing runs part of its wall`, liveNote === (onBeta ? 1 : 0), String(liveNote));
+    const plan = await page.$$eval('[data-ss-adv="wingplan"] [data-ss-plan-open]', (g) => g.length);
+    ok("PWA3: the Plan draws the open ground at both ends", plan === 2, String(plan));
+    const sideV = await page.locator('[data-ss-adv="side"] [data-ss-elev-part]').count();
+    ok("PWA3: and the Side view shows the wing's stretch", sideV === 1, String(sideV));
+    if (process.env.SS_SHOTS) {
+      await card.screenshot({ path: join(shots, "PW-setup-card.png") }).catch(() => {});
+      await page.locator('[data-ss-adv="wingplan"]').screenshot({ path: join(shots, "PW-setup-plan.png") }).catch(() => {});
+      await page.locator('[data-ss-adv="side"]').screenshot({ path: join(shots, "PW-setup-side.png") }).catch(() => {});
+    }
+    await typeBox(page, card.getByLabel("Left wing 1 length along the wall (ft)", { exact: true }), 16);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part && Math.abs(g.len - 16) < 1e-9));
+    await typeBox(page, card.getByLabel("Left wing 1 position from the middle (ft)", { exact: true }), 6);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part && Math.abs(g.off - 6) < 1e-9));
+    m = await mass(page);
+    ok("PWA4: 16 ft, 6 ft toward the front: 18..34", near(m.wings[0].z0, 18) && near(m.wings[0].z1, 34), JSON.stringify([m.wings[0].z0, m.wings[0].z1]));
+    await typeBox(page, card.getByLabel("Left wing 1 position from the middle (ft)", { exact: true }), 30);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part && g.offHeld));
+    const held = sp(await card.locator("[data-ss-adv-wl-offheld]").innerText().catch(() => ""));
+    ok("PWA5: a position past the wall is held at its end and said", /Held\s+12'\s*0"\s+toward\s+the\s+front\s+of\s+the\s+middle/.test(held), held);   // the page writes a no-break space inside 12' 0"
+    const d3 = await saveNew(page, calls, "Acme Part Wing");
+    const e0 = d3 && d3.roof && d3.roof.wingList && d3.roof.wingList[0];
+    ok("PWA6: Save carries the length and the position asked", !!e0 && e0.lengthFt === 16 && e0.offsetFt === 30, JSON.stringify(e0));
+    // Previewed at a size whose left wall is no longer than the saved 16 ft (12 x 16), the wing covers that wall. The
+    // card keeps Part of it pressed and the length in its box, and says the length still runs on longer sizes: Whole
+    // wall, pressed here, would have read as the saved state and cleared the length for every size.
+    await setSize(page, 12, 16);
+    await advModel(page, (M) => M.massing.wings.length === 1 && !M.massing.wings[0].part && Math.abs(M.massing.L - 16) < 1e-9);
+    const shortSay = sp(await card.locator('[data-ss-adv-f="wlLength"]').innerText().catch(() => "")).replace(/\s+/g, " ");
+    ok("PWA6c: at a size the saved length covers, Part of it stays pressed and Whole wall is not",
+      (await card.getByRole("button", { name: "Part of it" }).getAttribute("aria-pressed")) === "true"
+      && (await card.getByRole("button", { name: "Whole wall" }).getAttribute("aria-pressed")) === "false");
+    ok("PWA6c: ...the card says the 16 ft covers this wall and runs on a longer one", /length covers the whole 16' 0" left wall/.test(shortSay) && /On a longer wall it runs 16' 0"/.test(shortSay), shortSay);
+    ok("PWA6c: ...and the length box still holds 16", (await card.getByLabel("Left wing 1 length along the wall (ft)", { exact: true }).inputValue().catch(() => "")) === "16");
+    await setSize(page, 24, 40);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part && Math.abs(g.len - 16) < 1e-9));
+    // A lean-to on the left wall, the whole wall, runs past the wing's end into open ground: not drawn, and its card
+    // says what to do (leanTos.mjs case PW has the 3D).
+    await page.locator('[data-ss-adv-sec="leanto"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await settle(page, 450);
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await settle(page, 450);
+    const off = await page.$$eval("[data-ss-leanto-offwing]", (b) => b.map((x) => [x.getAttribute("data-ss-leanto-offwing"), x.innerText]));
+    ok("PWA6b: a whole-wall lean-to on the wing's wall says it runs into open ground, and what to do", off.length === 1 && off[0][0] === "eave" && /keep it within the wing's 16' 0"/i.test(off[0][1].replace(/\s+/g, " ")), JSON.stringify(off));
+    await advModel(page, (M) => !!(M.leanTos && M.leanTos.length === 1 && M.leanTos[0].wall === "right"));
+    ok("PWA6b: ...and only the right one is drawn", true);
+    for (let n = 0; n < 2; n++) { await page.locator('[data-ss-adv-lt] .ss-adv-lt-x').first().click().catch(() => {}); await settle(page, 400); }
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    // Whole wall clears both.
+    await card.getByRole("button", { name: "Whole wall" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => M.massing.wings.length === 1 && !M.massing.wings[0].part);
+    ok("PWA7: Whole wall draws the whole wall again", true);
+    ok("PWA7: ...and the live-site note is gone", (await card.locator("[data-ss-adv-wl-live]").count()) === 0);
+    await card.getByRole("button", { name: "Part of it" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.part));
+    // A projecting porch on the left wall (a side wall once the front is set) would stand on the open ground: it is
+    // not drawn, and the Porch tab says why.
+    await page.locator('[data-ss-adv-f="front"] button', { hasText: "Gable end" }).click();
+    await settle(page, 450);
+    await page.locator('[data-ss-adv-sec="porch"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="projecting"]').click();
+    await settle(page, 450);
+    await page.locator('[data-ss-adv-f="porchEnd"] button', { hasText: "Left wall" }).click();
+    await settle(page, 450);
+    const pj = sp(await page.locator('[data-ss-porch-endwing="part"]').innerText().catch(() => ""));
+    ok("PWA7b: a projecting porch on the part-wall wing's side wall is not drawn, and the Porch tab says so", /the wing on that wall runs only part of it/.test(pj), pj);
+    await advModel(page, (M) => !M.porch);
+    ok("PWA7b: ...no porch is built", true);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="none"]').click();
+    await settle(page, 450);
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    // A wing added outside it: this one is inner, keeps its length, and says so.
+    await clickF(page, "wlAddOn", "left");
+    await advModel(page, (M) => M.massing.wings.length === 2);
+    const inner = sp(await card.locator('[data-ss-adv-wl-partignored="inner"]').innerText().catch(() => ""));
+    ok("PWA8: an inner wing with a length says only the outermost can run part of a wall, and keeps it", /Only the outermost wing on a wall can run part of it/.test(inner), inner);
+    m = await mass(page);
+    ok("PWA8: ...and is drawn whole", m.wings.every((q) => !q.part) && m.wings.some((q) => q.partIgnored === "inner"), JSON.stringify(m.wings.map((q) => [q.tier, q.part, q.partIgnored])));
+    if (ENDS) {
+      await clickF(page, "wlAdd", "front");
+      await advModel(page, (M) => M.massing.ends && M.massing.ends.length === 1);
+      const endsSay = sp(await card.locator('[data-ss-adv-wl-partignored="ends"]').innerText().catch(() => ""));
+      ok("PWA9: beside an end wing the length is not used, and said", /Beside end wings a side wing runs the whole middle stretch/.test(endsSay), endsSay);
+    }
+    const addNote = sp(await page.locator(".ss-adv-wl-add").first().innerText().catch(() => ""));
+    ok("PWA10: the add row says a wing can run part of a side", /the whole wall or part of it/.test(addNote), addNote);
+    ok("PWA: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) { ok("PWA: ran", false, e && e.stack); }
+  await actx.close();
 }
 
 await browser.close();

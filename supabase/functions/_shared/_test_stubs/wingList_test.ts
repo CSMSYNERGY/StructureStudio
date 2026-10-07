@@ -65,7 +65,7 @@ const NAMES = [
   "D3", "d3RoofAxes", "d3RoofProfile", "d3Massing", "d3MassingTopAt", "d3WallTops", "d3WallTopFt", "d3CeilingFt", "d3PorchSpanWings",
   "d3LeanTosGeom", "d3LeanToGeom", "d3RoofStep", "d3ProjectingPorch", "d3FrameHeightFt", "d3ModelTopFt", "d3RoofLands", "d3WingHcFloor",
   "d3WlNum", "d3WingListEntries", "d3WingListOn", "d3WingsOn", "d3WingListDeep", "d3ListEndStair", "d3DormerBlocked", "d3WingListBlocksPorch",
-  "d3WingListFallback", "d3WingListFromLegacy", "D3_WINGLIST_MAX", "D3_WINGLIST_WALLS", "D3_WINGLIST_ENDS",
+  "d3WingListFallback", "d3WingListFromLegacy", "D3_WINGLIST_MAX", "D3_WINGLIST_WALLS", "D3_WINGLIST_ENDS", "d3WingNotches",
 ];
 const build = (cmp: string) => {
   const text = REGIONS.map(([a, b]) => lift(cmp, "structure-studio.component.js", a, b)).join("\n");
@@ -718,6 +718,9 @@ Deno.test("⚠️ fuzz: sanitizeWingList keeps exactly the entries the renderer 
       if (rnd() < 0.4) e.attach = one(["roof", "wall", "up", "auto", ["roof"], ""]);
       if (rnd() < 0.4) e.attachFt = one(OPT);
       if (rnd() < 0.4) e.eaveFt = one([...OPT, 3, 40]);
+      // PART OF A WALL (lengthFt / offsetFt, 2026-10-07): the same parser and bands on both sides.
+      if (rnd() < 0.3) e.lengthFt = one([...OPT, 2, 4, 3.99, 20, "12", 100, 101, 500, -6]);
+      if (rnd() < 0.3) e.offsetFt = one([...OPT, -80, 80, -50, 50, "-7.5", 0]);
       if (rnd() < 0.2) e.color = "red";
       return e;
     });
@@ -730,6 +733,13 @@ Deno.test("⚠️ fuzz: sanitizeWingList keeps exactly the entries the renderer 
       assertEquals(x.e.wall, san![k].wall, tag);
       assertEquals(Math.min(16, F.d3WlNum(x.e.widthFt)), san![k].widthFt, tag);
       assertEquals(x.e, raw[x.i], "the renderer reads the raw entry by its raw index");
+      // The length and position the massing reads are the stored ones: alone on the left wall of a 24 x 200 (a wall
+      // longer than any length, with 50 ft of room either way), the wing runs exactly the stored length and sits
+      // exactly the stored offset from the middle; without a stored length it is whole.
+      const g = F.d3Massing({ type: "gable", wingList: [{ ...x.e, wall: "left" }] }, 24, 200, 9).wings[0];
+      assertEquals(g.part ? g.len : undefined, san![k].lengthFt, `${tag}: length`);
+      if (g.part) assertEquals(g.off, san![k].offsetFt ?? 0, `${tag}: offset`);
+      assertEquals(F.d3Massing({ type: "gable", wingList: [{ ...san![k], wall: "left" }] }, 24, 200, 9).wings[0], g, `${tag}: the stored entry draws the same wing`);
     });
     assertEquals(F.d3WingListOn({ type: "gable", wingList: raw }), san !== null, tag);
     assertEquals(F.d3WingListOn({ type: "gambrel", wingList: raw }), san !== null, tag);
@@ -747,6 +757,78 @@ Deno.test("⚠️ fuzz: sanitizeWingList keeps exactly the entries the renderer 
   const s = sanitizeWingList(over)!, e = F.d3WingListEntries({ wingList: over });
   assertEquals(s.length, 16); assertEquals(e.length, 16);
   assertEquals(e.map((x: Any) => x.i), over.map((x, i) => (x.wall === "left" ? i : -1)).filter((i) => i >= 0).slice(0, 16));
+});
+
+// ── PART OF A WALL (roof.wingList[i].lengthFt / offsetFt, 2026-10-07) ──────────────────────────────
+// Carolyn, Q3: a wing can cover part of a side (20 ft of a 40 ft wall). Only the outermost wing on a side wall,
+// without end wings; a whole-wall wing is the one it always was. partialWing_test.ts has the open ground (the
+// notches) and the readers that follow it.
+
+Deno.test("⚠️ part of a wall: no length, or a length at least the wall, is today's massing field for field", () => {
+  let n = 0;
+  for (const [name, base] of LISTS) {
+    for (const [W, D] of INV_SIZES) {
+      for (const front of [undefined, "gable", "eave"]) {
+        for (const L of [F, FE]) {
+          const roof = { ...base, ...(front ? { front } : {}) };
+          const m = L.d3Massing(roof, W, D, 9);
+          const run = m.L;
+          for (const len of [run, run + 0.001, 100, run + 30]) {
+            if (len < 4) continue;
+            const r2 = { ...roof, wingList: roof.wingList.map((e: Any) => ({ ...e, lengthFt: len, offsetFt: 7 })) };
+            const tag = `${name} ${W}x${D} front ${front} len ${len}`;
+            assertEquals(JSON.stringify(L.d3Massing(r2, W, D, 9)), JSON.stringify(m), tag);
+            assertEquals(L.d3WingListDeep(L.d3Massing(r2, W, D, 9)), L.d3WingListDeep(m), tag);
+            for (const w of WALLS) assertEquals(L.d3WallTops(r2, W, D, 9, w), L.d3WallTops(roof, W, D, 9, w), `${tag} ${w}`);
+            n++;
+          }
+        }
+      }
+    }
+  }
+  assert(n > 500, String(n));
+});
+
+Deno.test("part of a wall: a left wing 8 ft wide, 20 ft of a 24 x 40's 40 ft wall, centred, then held at the end", () => {
+  const whole = { ...G, wingList: [{ wall: "left", widthFt: 8 }] };
+  const part = { ...G, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }] };
+  const a = F.d3Massing(whole, 24, 40, 9), b = F.d3Massing(part, 24, 40, 9);
+  const g = b.wings[0];
+  assertEquals([g.part, g.z0, g.z1, g.len, g.off, g.offHeld], [true, 10, 30, 20, 0, false]);
+  for (const k of ["Sc", "uc", "Hc", "ya"]) assertEquals(b[k], a[k], `${k} as the whole wing's`);
+  // The record is the whole wing's, field for field, with the part fields last.
+  const { part: _p, z0: _a, z1: _b, len: _l, off: _o, offHeld: _h, ...rest } = g;
+  assertEquals(rest, a.wings[0]);
+  assertEquals(Object.keys(g).slice(-6), ["part", "z0", "z1", "len", "off", "offHeld"]);
+  assertEquals(F.d3WingListDeep(a), false); assertEquals(F.d3WingListDeep(b), true);
+  // Toward the FRONT on the left wall (the lean-to's frame): 20 ft off the middle is held at the 10 ft of room.
+  const held = F.d3Massing({ ...G, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20, offsetFt: 20 }] }, 24, 40, 9).wings[0];
+  assertEquals([held.z0, held.z1, held.off, held.offHeld], [20, 40, 10, true]);
+  const back = F.d3Massing({ ...G, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20, offsetFt: -4 }] }, 24, 40, 9).wings[0];
+  assertEquals([back.z0, back.z1, back.off, back.offHeld], [6, 26, -4, false]);
+  // At least 4 ft: a length under it in raw data is read as 4.
+  assertEquals(F.d3Massing({ ...G, wingList: [{ wall: "left", widthFt: 8, lengthFt: 1 }] }, 24, 40, 9).wings[0].len, 4);
+});
+
+Deno.test("part of a wall: an inner wing, or a side wing beside end wings, is drawn whole and says why; its length stays saved", () => {
+  const inner = { ...G, wingList: [{ wall: "left", widthFt: 6, lengthFt: 20 }, { wall: "left", widthFt: 4 }] };
+  const m = F.d3Massing(inner, 30, 40, 9);
+  const t1 = tier(m, -1, 1), t2 = tier(m, -1, 2);
+  assertEquals([t1.part, t1.partIgnored, t2.part, t2.partIgnored], [undefined, "inner", undefined, undefined]);
+  assertEquals(F.d3WingNotches(inner, 30, 40, 9), null, "no open ground");
+  // The outer one of the two takes its own length, the inner one stays whole.
+  const outer = { ...G, wingList: [{ wall: "left", widthFt: 6 }, { wall: "left", widthFt: 4, lengthFt: 20, offsetFt: 3 }] };
+  const mo = F.d3Massing(outer, 30, 40, 9);
+  assertEquals([tier(mo, -1, 1).part, tier(mo, -1, 2).part, tier(mo, -1, 2).z0, tier(mo, -1, 2).z1], [undefined, true, 13, 33]);
+  // Beside an end wing (flag on) every side wing runs the middle stretch.
+  const ends = { ...G, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }, { wall: "front", widthFt: 8 }] };
+  const me = FE.d3Massing(ends, 24, 40, 9);
+  assertEquals([me.wings[0].part, me.wings[0].partIgnored], [undefined, "ends"]);
+  const { partIgnored: _pi, ...rest } = me.wings[0];
+  assertEquals(rest, FE.d3Massing({ ...G, wingList: [{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 8 }] }, 24, 40, 9).wings[0], "the whole wing, field for field");
+  // An end wall's length is kept and never read by the massing (an end wing runs the whole span).
+  const endLen = { ...G, wingList: [{ wall: "front", widthFt: 8, lengthFt: 10 }] };
+  assertEquals(JSON.stringify(FE.d3Massing(endLen, 24, 40, 9)), JSON.stringify(FE.d3Massing({ ...G, wingList: [{ wall: "front", widthFt: 8 }] }, 24, 40, 9)));
 });
 
 Deno.test("the constants agree with the sanitiser's", () => {

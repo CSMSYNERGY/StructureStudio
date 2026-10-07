@@ -78,7 +78,7 @@ const json = (route, body, status = 200) =>
 export const PASS_THROUGH_GET = /^https:\/\/esm\.sh\//;
 export async function stubSupabase(page, { config, fixtures = [], rpc = {} } = {}) {
   const calls = [];
-  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => {
+  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|(?:[a-z0-9-]+\.)*localhost)(:\d+)?\//.test(u.href), (route) => {
     const req = route.request();
     if (req.method() === "GET" && PASS_THROUGH_GET.test(req.url())) return route.continue();
     calls.push({ method: req.method(), url: req.url(), aborted: true });

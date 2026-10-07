@@ -336,10 +336,17 @@ export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null 
 // = the renderer's d3WingListEntries (stubs/wingList_test fuzz-tests the two): an object, a wall word,
 // a width over 0.5 ft, the first 16 such. A size never drops an entry here: the renderer says why a wing
 // is not drawn at a size, and the wing stays saved.
+// PART OF A WALL (lengthFt/offsetFt, 2026-10-07). Carolyn, Q3: "yes, a wing can cover part of a side (e.g.
+// 20 ft of a 40 ft wall)". lengthFt is how much of its wall the wing runs along, 4..100 (a wing is a room,
+// so at least 4 ft, where a lean-to's is 2); offsetFt is its middle from the wall's middle, -50..50, in the
+// lean-to list's frame (toward the FRONT on the left and right walls, toward the RIGHT on the front and
+// back ones). Both are kept on any entry: the sanitiser never knows the size or which wall is a side wall,
+// so the renderer decides where they apply (d3MassingList: the outermost side wing, without end wings)
+// and the page says where they do not. Absent, or at least the wall, is the whole wall, as before.
 export const D3_WINGLIST_WALLS = ["left", "right", "front", "back"] as const;
 export const D3_WINGLIST_MAX = 16;
 export const WINGLIST_BANDS: Record<string, readonly [number, number]> = {
-  widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26],
+  widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26], lengthFt: [4, 100], offsetFt: [-50, 50],
 };
 // A LOCAL number parser, not the shared num(): a blank box is no number at all (num("") is 0). The
 // twins' d3WlNum is this line for line, so the sanitiser and the renderer keep the same entries.
@@ -369,6 +376,8 @@ export function sanitizeWingList(raw: unknown): Record<string, unknown>[] | null
     if (typeof src.attach === "string" && (D3_ATTACH as readonly string[]).includes(src.attach)) wl.attach = src.attach;
     const attachFt = band("attachFt"); if (attachFt !== null) wl.attachFt = attachFt;
     const eaveFt = band("eaveFt"); if (eaveFt !== null) wl.eaveFt = eaveFt;
+    const lengthFt = band("lengthFt"); if (lengthFt !== null) wl.lengthFt = lengthFt;
+    const offsetFt = band("offsetFt"); if (offsetFt !== null) wl.offsetFt = offsetFt;
     out.push(wl);
   }
   return out.length ? out : null;
@@ -821,9 +830,14 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 
   // A spec is a handful of numbers. Anything approaching this size is either a mistake
   // or someone using a customer-visible jsonb column as free storage.
-  if (JSON.stringify(d3).length > 4096) return { ok: false, error: "That 3D spec is implausibly large." };
+  if (JSON.stringify(d3).length > D3_SPEC_MAX_BYTES) return { ok: false, error: "That 3D spec is implausibly large." };
   return { ok: true, d3 };
 }
+// The ceiling above. 4096 until 2026-10-07: sixteen part-wall wings (each wing's lengthFt and offsetFt stay
+// saved when another wing is added outside it, and the page offers no way to clear them there) beside every
+// other key at its maximum, roof.seat and rafterDepthIn included, come to about 4.1 KB, a spec the page can
+// produce. The heaviest-spec test in styleD3.test.ts builds exactly that and must stay under this.
+export const D3_SPEC_MAX_BYTES = 5120;
 
 // ── A RAISED FOUNDATION SURVIVES AN OLDER PANEL'S SAVE (2026-09-25) ────────────────────────────
 // The save paths' carry-forward for `foundation` "blocks"/"piers" and `floorHeightFt`, shared by
@@ -4039,7 +4053,7 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   };
 
   let finalSpec = build();
-  // Defensive: with roof.type guarded above, the only refusal left is the 4 KB ceiling, and a
+  // Defensive: with roof.type guarded above, the only refusal left is the size ceiling, and a
   // merge of a spec that already passed it cannot reach that. Keeping the draft and saying so is
   // the honest answer if it ever happens — better than reporting "matches" over a spec we could
   // not build.
