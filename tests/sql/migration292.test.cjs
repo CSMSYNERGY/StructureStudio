@@ -1,10 +1,13 @@
 // Execute migration 292 for real in PGlite (Postgres compiled to WASM, in memory) on top of
 // sms_registrations, sms_numbers, twilio_usage_daily and Vault as they are live, then check what it
 // promises: twilio_accounts exists, service-role only, RLS on and NOT forced; the parent is encoded
-// only as a NULL account SID; the two definer functions put a sub's secrets in Vault and read them
-// back by tenant and by SID, and nobody but the service role may call them; every existing row
-// stays on the parent and twilio_usage_daily keeps its key; the apply-time rehearsal leaves nothing
-// behind; a re-apply is harmless; and broken copies are refused (mutants). Nothing here touches
+// only as a NULL account SID; every tenant already holding something on the parent gets a parent
+// pin row, and no tenant holding anything there can be made a sub (one tenant, one account); the
+// two definer functions put a sub's secrets in Vault and read them back by tenant and by SID, only
+// ever a secret named for the row's own SID (a row pointed at another secret reads and writes
+// nothing of it), and nobody but the service role may call them; every existing row stays on the
+// parent and twilio_usage_daily keeps its key; the apply-time rehearsal leaves nothing behind; a
+// re-apply is harmless; and broken copies are refused (mutants). Nothing here touches
 // the live project: no network, no Supabase, no Twilio. Every SID and secret below is made up.
 //
 // Run (from the repo root):
@@ -25,6 +28,8 @@ const TOKEN_A = "testauthtoken" + "a".repeat(19);
 const TOKEN_B = "testauthtoken" + "b".repeat(19);
 const KEY_SECRET = "testkeysecret" + "c".repeat(19);
 const KEY_SID = "SK" + "3".repeat(32);
+const SUB3_SID = "AC" + "4".repeat(32);
+const EVIL_SID = "AC" + "7".repeat(32);
 
 // Vault as Supabase ships it, cut to what 292 uses: vault.secrets (name unique), the
 // decrypted_secrets view, and create_secret / update_secret with their live signatures. The
@@ -71,7 +76,12 @@ alter default privileges in schema public grant execute on functions to anon, au
 ${vault ? VAULT : ""}
 
 create table public.sms_registrations (
-  client_id text primary key, status text not null default 'none', messaging_service_sid text, brand_sid text
+  client_id text primary key, status text not null default 'none', customer_profile_sid text, a2p_profile_sid text,
+  brand_sid text, messaging_service_sid text, campaign_sid text, campaign_cm_sid text
+);
+create table public.client_settings (
+  client_id text primary key, sms_number text, sms_status text not null default 'off',
+  internal_account boolean not null default false
 );
 create table public.sms_numbers (
   id uuid primary key default gen_random_uuid(), client_id text not null, phone_number text not null,
@@ -85,11 +95,20 @@ create table public.twilio_usage_daily (
 alter table public.sms_registrations enable row level security;
 alter table public.sms_numbers enable row level security;
 alter table public.twilio_usage_daily enable row level security;
+alter table public.client_settings enable row level security;
 
+-- Who already lives on the parent: demo-tenant (a number and a registration), own-account (our
+-- internal account, nothing else), legacy-tenant (a texting number from before 165, no number
+-- row). Not pinned: quiet-tenant (a registration that never reached Twilio), gone-tenant (only a
+-- released number), plain-tenant (settings only).
 insert into public.sms_registrations (client_id, status, messaging_service_sid) values
   ('demo-tenant', 'active', 'MG' || repeat('0', 32)), ('quiet-tenant', 'none', null);
-insert into public.sms_numbers (client_id, phone_number, twilio_sid, registration_status) values
-  ('demo-tenant', '+15555550100', 'PN' || repeat('0', 32), 'registered');
+insert into public.sms_numbers (client_id, phone_number, twilio_sid, registration_status, released_at) values
+  ('demo-tenant', '+15555550100', 'PN' || repeat('0', 32), 'registered', null),
+  ('gone-tenant', '+15555550111', 'PN' || repeat('1', 32), 'registered', now());
+insert into public.client_settings (client_id, sms_number, internal_account) values
+  ('demo-tenant', '+15555550100', false), ('own-account', null, true), ('legacy-tenant', '+15555550177', false),
+  ('plain-tenant', '', false), ('quiet-tenant', null, false);
 insert into public.twilio_usage_daily (day, category, count, usage, price_micros) values
   ('2026-10-01', 'sms-outbound', 3, 3, 24900), ('2026-10-01', 'calls-inbound', 2, 7, 59500);
 `;
@@ -129,6 +148,7 @@ async function as(db, role, fn) {
   await db.exec(`set role ${role}`);
   try { return await fn(); } finally { await db.exec("reset role"); }
 }
+const svc0 = (db, sql, params) => as(db, "service_role", () => db.query(sql, params));
 
 (async () => {
   // ── 1. The live shape: applies, checks pass, the RECORD reads PASS ─────────────────────
@@ -139,12 +159,26 @@ async function as(db, role, fn) {
   catch (e) { ok(false, "292 applied", e.message); process.exit(1); }
   ok(res.notices.some((n) => /292: checks hold/.test(n)), "the checks ran to their notice", res.notices.join(" | "));
   const R = res.record || {};
-  ok(R.table_ready === true && R.functions_ready === true, "RECORD: table_ready and functions_ready", JSON.stringify(R));
-  ok(R.accounts === 0 && R.columns_added === 3 && R.rows_not_parent === 0, "RECORD: no accounts, three columns, every row on the parent", JSON.stringify(R));
+  ok(R.table_ready === true && R.functions_ready === true && R.guard_ready === true, "RECORD: table_ready, functions_ready and guard_ready", JSON.stringify(R));
+  ok(R.parent_pins === 3 && R.subs === 0 && R.unpinned_holders === 0, "RECORD: three parent pins, no subs, nobody left unpinned", JSON.stringify(R));
+  ok(R.columns_added === 3 && R.rows_not_parent === 0, "RECORD: three columns, every row on the parent", JSON.stringify(R));
   ok(R.usage_pk === "day,category", "RECORD: twilio_usage_daily keeps (day, category)", R.usage_pk);
-  ok(/^secrets stored, replaced in place and read back by tenant and by SID/.test(String(R.rehearsal)), "RECORD: the rehearsal ran to its end", R.rehearsal);
+  ok(/^secrets stored, replaced in place, bound to their names and read back by tenant and by SID/.test(String(R.rehearsal)), "RECORD: the rehearsal ran to its end", R.rehearsal);
   ok((await one(db, "select count(*)::int n from vault.secrets")).n === 0, "the rehearsal left no Vault secret behind");
-  ok((await one(db, "select count(*)::int n from public.twilio_accounts")).n === 0, "and no twilio_accounts row");
+  ok((await one(db, "select count(*)::int n from public.twilio_accounts where client_id = 'm292-rehearsal'")).n === 0, "and no rehearsal row");
+
+  // ── 1b. The parent pins ───────────────────────────────────────────────────────────────
+  console.log("parent pins");
+  const pins = (await db.query("select client_id, kind, account_sid, status from public.twilio_accounts order by 1")).rows;
+  ok(JSON.stringify(pins.map((r) => r.client_id)) === JSON.stringify(["demo-tenant", "legacy-tenant", "own-account"]),
+    "pinned: the tenant with a number and a registration, the pre-165 texting number, our internal account", JSON.stringify(pins));
+  ok(pins.every((r) => r.kind === "parent" && r.account_sid === null && r.status === "active"), "every pin is kind 'parent', NULL SID, active");
+  const holds = await one(db, `select public.twilio_parent_holdings('demo-tenant') d, public.twilio_parent_holdings('legacy-tenant') l,
+      public.twilio_parent_holdings('quiet-tenant') q, public.twilio_parent_holdings('gone-tenant') g,
+      public.twilio_parent_holdings('plain-tenant') p, public.twilio_parent_holdings('own-account') o`);
+  ok(holds.d === "a live number" && holds.l === "a texting number" && holds.q === null && holds.g === null && holds.p === null && holds.o === null,
+    "twilio_parent_holdings: a live number / a texting number; nothing for a registration that never reached Twilio, a released number, an empty setting", JSON.stringify(holds));
+  ok((await one(db, "select public.twilio_parent_holdings('nobody') h")).h === null, "and nothing for a tenant with no rows at all");
 
   // ── 2. Existing rows: untouched, NULL = the parent ────────────────────────────────────
   console.log("existing rows");
@@ -152,7 +186,7 @@ async function as(db, role, fn) {
     (select count(*) from public.sms_registrations where twilio_account_sid is null)::int r,
     (select count(*) from public.sms_numbers where twilio_account_sid is null)::int n,
     (select count(*) from public.twilio_usage_daily where account_sid is null)::int u`);
-  ok(nn.r === 2 && nn.n === 1 && nn.u === 2, "every existing registration, number and usage row reads NULL (the parent)", JSON.stringify(nn));
+  ok(nn.r === 2 && nn.n === 2 && nn.u === 2, "every existing registration, number and usage row reads NULL (the parent)", JSON.stringify(nn));
   ok((await refused(db, "insert into public.twilio_usage_daily (day, category, account_sid) values ('2026-10-01', 'sms-outbound', $1)", [SUB_SID], /duplicate key/)).refused,
     "twilio_usage_daily's key is still (day, category): a second account's row for the same day and category collides (phase 7 swaps it)");
   for (const [t, c] of [["sms_registrations", "twilio_account_sid"], ["sms_numbers", "twilio_account_sid"], ["twilio_usage_daily", "account_sid"]]) {
@@ -204,6 +238,31 @@ async function as(db, role, fn) {
   ok(true, "accepts a parent pin (no SID), a sub still provisioning (no SID yet), and an active sub with its SID");
   const dup = await refused(db, "insert into public.twilio_accounts (client_id, kind, account_sid, status) values ('other', 'sub', $1, 'active')", [SUB_SID], /duplicate key/);
   ok(dup.refused, "one tenant per sub-account SID", dup.message);
+
+  // ── 3b. One tenant, one account: no sub over anything still on the parent ──────────────
+  console.log("twilio_accounts_no_split");
+  const svcR = (sql, params, re) => as(db, "service_role", () => refused(db, sql, params, re));
+  let r = await svcR("update public.twilio_accounts set kind = 'sub', status = 'provisioning' where client_id = 'demo-tenant'", [], /no_split.*still has a live number on the parent/);
+  ok(r.refused, "a parent pin holding a live number cannot be turned into a sub (as the service role)", r.message);
+  r = await svcR("update public.twilio_accounts set kind = 'sub', status = 'provisioning' where client_id = 'legacy-tenant'", [], /still has a texting number/);
+  ok(r.refused, "nor one holding only a pre-165 texting number", r.message);
+  // The window between this migration and phase 3: a registration made on the parent after the pins.
+  await db.query("insert into public.sms_registrations (client_id, status, customer_profile_sid) values ('late-tenant', 'profile_pending', 'BU' || repeat('9', 32))");
+  r = await svcR("insert into public.twilio_accounts (client_id, kind, status) values ('late-tenant', 'sub', 'provisioning')", [], /still has a texting registration/);
+  ok(r.refused, "a tenant that registered on the parent after the pins cannot be given a sub either", r.message);
+  r = await svcR("update public.twilio_accounts set client_id = 'late-tenant' where client_id = 'new-builder'", [], /still has a texting registration/);
+  ok(r.refused, "nor can an existing sub row be re-pointed at it", r.message);
+  // Moved (the runbook step): its registration says which sub it is in; then the row is allowed.
+  await db.query("update public.sms_registrations set twilio_account_sid = $1 where client_id = 'late-tenant'", [SUB3_SID]);
+  await svc0(db, "insert into public.twilio_accounts (client_id, kind, status) values ('late-tenant', 'sub', 'provisioning')");
+  ok(true, "once its registration is marked as the sub's, the sub row is accepted");
+  await svc0(db, "update public.twilio_accounts set status = 'failed', last_error = 'step:create' where client_id = 'late-tenant'");
+  ok(true, "a sub row's own updates (status, step) are not re-judged");
+  await db.query("delete from public.twilio_accounts where client_id = 'late-tenant'");
+  await db.query("delete from public.sms_registrations where client_id = 'late-tenant'");
+  await svc0(db, "insert into public.twilio_accounts (client_id, kind, status) values ('gone-tenant', 'sub', 'provisioning')");
+  ok(true, "a tenant whose only number was released may have a sub");
+  await db.query("delete from public.twilio_accounts where client_id = 'gone-tenant'");
 
   // ── 4. The secret functions, as the service role ──────────────────────────────────────
   console.log("twilio_account_secret_put / twilio_account_creds");
@@ -265,6 +324,25 @@ async function as(db, role, fn) {
       (select s.secret from vault.secrets s join public.twilio_accounts a on a.auth_token_id = s.id where a.client_id = 'sub-two') v`, [`twilio_auth_token_${SUB2_SID}`]);
   ok(adopted.n === 1 && adopted.v === TOKEN_B, "a secret already in Vault under this account's name is adopted and replaced, never duplicated", JSON.stringify(adopted));
 
+  // Bound to the name: the service role can write the id columns, so a row pointed at ANY other
+  // Vault secret (here 256's push webhook secret) must neither read it nor overwrite it.
+  const other = (await one(db, "select vault.create_secret('unrelated-push-secret-value', 'sss_phone_push_secret', 'not twilio') id")).id;
+  await svc("insert into public.twilio_accounts (client_id, kind, account_sid, status, auth_token_id, api_secret_id) values ('evil-row', 'sub', $1, 'active', $2, $2)", [EVIL_SID, other]);
+  const evil = (await svc("select auth_token, api_secret from public.twilio_account_creds(p_client_id := 'evil-row')")).rows[0];
+  ok(evil && evil.auth_token === null && evil.api_secret === null, "creds: a row pointed at a secret not named for it reads NULL, never that secret", JSON.stringify(evil));
+  await svc("select public.twilio_account_secret_put('evil-row', 'auth_token', $1)", [TOKEN_A]);
+  const untouched = await one(db, "select secret, name from vault.secrets where id = $1", [other]);
+  ok(untouched.secret === "unrelated-push-secret-value" && untouched.name === "sss_phone_push_secret", "put: never writes through an id that is not this account's secret", JSON.stringify(untouched));
+  const repointed = await one(db, "select s.name, s.secret from public.twilio_accounts a join vault.secrets s on s.id = a.auth_token_id where a.client_id = 'evil-row'");
+  ok(repointed && repointed.name === `twilio_auth_token_${EVIL_SID}` && repointed.secret === TOKEN_A, "put: the row is re-pointed at its own, correctly named secret", JSON.stringify(repointed));
+  // Another sub's own secret is foreign too, Twilio-named or not.
+  const subTwoTok = (await one(db, "select auth_token_id id from public.twilio_accounts where client_id = 'sub-two'")).id;
+  await db.query("update public.twilio_accounts set api_secret_id = $1 where client_id = 'evil-row'", [subTwoTok]);
+  ok((await svc("select api_secret from public.twilio_account_creds(p_client_id := 'evil-row')")).rows[0].api_secret === null,
+    "creds: another account's own secret is foreign too");
+  await db.query("delete from public.twilio_accounts where client_id = 'evil-row'");
+  await db.query("delete from vault.secrets where name in ('sss_phone_push_secret', $1)", [`twilio_auth_token_${EVIL_SID}`]);
+
   // ── 5. Re-apply: harmless, the rows and secrets kept ─────────────────────────────────
   console.log("re-apply");
   const before = await one(db, "select (select count(*) from public.twilio_accounts)::int a, (select count(*) from vault.secrets)::int s");
@@ -284,6 +362,11 @@ async function as(db, role, fn) {
     ["a public search_path", (s) => s.replace(/(twilio_account_creds\(p_client_id text default null[\s\S]*?)set search_path to ''/, "$1set search_path to 'public'"), /empty search_path/],
     ["the parent allowed a SID", (s) => s.replace("then account_sid is null and api_key_sid is null", "then api_key_sid is null"), /parent row with an account SID was accepted/],
     ["a put that ignores its row", (s) => s.replace("update public.twilio_accounts set auth_token_id = v_id, updated_at = now() where client_id = p_client_id;", "null;"), /did not give back what was put/],
+    ["creds not bound to the secret's name", (s) => s.replace("where s.id = a.auth_token_id and s.name = 'twilio_auth_token_' || a.account_sid)", "where s.id = a.auth_token_id)"), /read a secret that is not named for the row/],
+    ["a put not bound to the secret's name", (s) => s.replace("where s.id = v_id and s.name = v_name) then", "where s.id = v_id) then"), /wrote through an id that is not named for the row/],
+    ["no guard against a split tenant", (s) => s.replace(/create trigger twilio_accounts_no_split[\s\S]*?execute function public\.twilio_accounts_no_split\(\);/, ""), /no_split trigger is missing/],
+    ["no parent pins", (s) => s.replace("on conflict (client_id) do nothing;", "and false on conflict (client_id) do nothing;"), /have no parent pin row/],
+    ["holdings open to the browser roles", (s) => s.replace("revoke all on function public.twilio_parent_holdings(text) from public, anon, authenticated;", ""), /may execute twilio_parent_holdings/],
   ];
   for (const [label, mutate, re] of mutants) {
     const m = mutate(src);
@@ -299,6 +382,13 @@ async function as(db, role, fn) {
       ok((await one(mdb, "select to_regclass('public.twilio_accounts') is null as gone")).gone, `  and left no table behind`);
     }
   }
+  // A tenant id that is not a slug cannot have a row: it stays on the parent unpinned, counted.
+  const odd = await makeDb();
+  await odd.exec("insert into public.client_settings (client_id, sms_number) values ('Odd_Tenant', '+15555550188')");
+  const oddRes = await apply(odd);
+  ok(oddRes.record && oddRes.record.unpinned_holders === 1 && oddRes.record.parent_pins === 3,
+    "a non-slug tenant holding a number is left unpinned and counted (unpinned_holders), not a failed apply", JSON.stringify(oddRes.record));
+
   const novault = await makeDb({ vault: false });
   try { await apply(novault); ok(false, "a database without Vault is refused", "it committed"); }
   catch (e) { ok(/Vault is not available/.test(e.message), "a database without Vault is refused before anything is created", e.message); }

@@ -25,8 +25,17 @@
 -- live somewhere the code can find them per tenant: this table.
 --
 -- Stays on the parent, always: structure-studio (the pilot number, the primary profile, its own
--- brand), Verify, the setup-test app and NTS. A tenant with no row here IS on the parent, so no
--- pin rows are written and no tenant is named in this file (the repository is public).
+-- brand), Verify, the setup-test app and NTS. A tenant with no row here IS on the parent; the
+-- parent pin rows below are a RECORD that a tenant already lives there (derived by query, so no
+-- tenant is named in this file: the repository is public).
+--
+-- ONE TENANT, ONE ACCOUNT. Every Twilio call a tenant makes runs as one account, chosen per
+-- tenant (resolveTwilioAccount), and a webhook may only touch a tenant of the account it came from.
+-- A tenant whose numbers or registration sit on the parent and who ALSO had a sub row would be
+-- split: its sends would go out as the sub with parent SIDs, and its parent numbers' webhooks
+-- would be refused as another account's. So the database refuses to make that tenant a sub
+-- (twilio_accounts_no_split below) until its numbers and registration say they have moved
+-- (their twilio_account_sid set). Moving a tenant stays a runbook step, never code.
 --
 -- ── WHAT THIS DOES ───────────────────────────────────────────────────────────────────────
 --   * public.twilio_accounts, one row per tenant (client_id, plain text, NO foreign key: admin-
@@ -45,7 +54,16 @@
 --     twilio_usage_daily: which account a registration, a number or a usage row lives in. NULL =
 --     the parent, the only encoding; every row today is NULL. twilio_usage_daily KEEPS its
 --     primary key (day, category): the live Worker upserts on it (usageCharge.ts onConflict
---     "day,category"), and phase 7 swaps it in the order the plan gives.
+--     "day,category"), and phase 7 swaps it in the order the plan gives. ⚠️ A primary key cannot
+--     hold a NULL, so phase 7's key is `unique nulls not distinct (day, account_sid, category)`
+--     (Postgres 15+), never a primary key and never a plain unique index (which would let every
+--     day's parent rows duplicate).
+--   * Parent pin rows (kind 'parent', NULL SID) for every tenant that already holds something on
+--     the parent: a live number, a registration with a Twilio SID, a texting number in
+--     client_settings, or our own internal account. Derived by query; nothing is named here.
+--   * twilio_parent_holdings(p_client_id): what of that tenant still sits on the parent (NULL =
+--     nothing), and the trigger twilio_accounts_no_split, which refuses a 'sub' row for a tenant
+--     that holds anything there. The one rule phase 3's provisioning and any hand edit both meet.
 --   * Two SECURITY DEFINER functions, search_path '', service role only:
 --       twilio_account_secret_put(p_client_id, p_kind 'auth_token' | 'api_secret', p_secret)
 --         stores a sub's secret in Vault (vault.create_secret, or vault.update_secret when the row
@@ -54,14 +72,19 @@
 --       twilio_account_creds(p_client_id, p_account_sid): exactly one of the two. One row (or
 --         none): the account's SIDs and status with its two secrets decrypted. What the edge
 --         resolver (_shared/twilioAccount.ts) calls, and only while TWILIO_SUBACCOUNTS is "on".
+--     ⚠️ BOTH ARE BOUND TO THE SECRET'S NAME. The service role can write the id columns, and the
+--     definer can read all of Vault, so an id alone would let a row point at ANY secret (the push
+--     webhook secret of 256, the phone's push keys later) and read or overwrite it through these
+--     functions. A secret is only ever read or written here when its Vault name is
+--     'twilio_auth_token_<the row's SID>' / 'twilio_api_secret_<the row's SID>'.
 --   * RLS ENABLED, NOT FORCED (FORCE applies RLS to the table owner too, and the definer
 --     functions would then read no rows: 154, 188 and 193 each assert it off), no policies, and
 --     every privilege revoked from public, anon and authenticated.
 --
 -- ── WHAT THIS DOES NOT DO ────────────────────────────────────────────────────────────────
---   * NOTHING CHANGES FOR ANY TENANT. The table starts empty; the resolver never reads it while
---     the edge secret / Worker var TWILIO_SUBACCOUNTS is anything but "on" (off by default), and
---     with it on, no row still means the parent.
+--   * NOTHING CHANGES FOR ANY TENANT. The table starts with parent pins only, which answer exactly
+--     what no row answers (the parent); the resolver never reads it while the edge secret / Worker
+--     var TWILIO_SUBACCOUNTS is anything but "on" (off by default).
 --   * Creates no sub-account and no Vault secret (phase 3 does, behind the same switch).
 --   * Does not touch delete_client: a row left behind by a deleted tenant is inert (phase 9 makes
 --     delete_client close the sub first).
@@ -81,11 +104,12 @@
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
 -- Turn TWILIO_SUBACCOUNTS off first (edge secret and Worker var). ⛔ Never while a row of kind
 -- 'sub' still has numbers: its SID is the only record of where they are. With no sub rows:
---   delete from vault.secrets where id in (select api_secret_id from public.twilio_accounts where api_secret_id is not null
---                                         union select auth_token_id from public.twilio_accounts where auth_token_id is not null);
+--   delete from vault.secrets where name like 'twilio\_auth\_token\_AC%' or name like 'twilio\_api\_secret\_AC%';
 --   drop function if exists public.twilio_account_creds(text, text);
 --   drop function if exists public.twilio_account_secret_put(text, text, text);
---   drop table if exists public.twilio_accounts;
+--   drop table if exists public.twilio_accounts;          -- takes its trigger with it
+--   drop function if exists public.twilio_accounts_no_split();
+--   drop function if exists public.twilio_parent_holdings(text);
 --   alter table public.sms_registrations drop column if exists twilio_account_sid;
 --   alter table public.sms_numbers drop column if exists twilio_account_sid;
 --   alter table public.twilio_usage_daily drop column if exists account_sid;
@@ -106,6 +130,12 @@ begin
   end if;
   if to_regclass('public.twilio_usage_daily') is null then
     raise exception '292: twilio_usage_daily is missing (migration 259 not applied?)';
+  end if;
+  -- What the parent pins and twilio_parent_holdings read: the legacy texting number (150) and
+  -- the internal flag (169).
+  if (select count(*) from information_schema.columns c where c.table_schema = 'public' and c.table_name = 'client_settings'
+        and c.column_name in ('client_id', 'sms_number', 'internal_account')) <> 3 then
+    raise exception '292: client_settings.sms_number / internal_account are missing (migrations 150, 169 not applied?)';
   end if;
   if to_regprocedure('vault.create_secret(text, text, text, uuid)') is null
      or to_regprocedure('vault.update_secret(uuid, text, text, text, uuid)') is null
@@ -223,7 +253,100 @@ comment on column public.sms_registrations.twilio_account_sid is
 comment on column public.sms_numbers.twilio_account_sid is
   'Migration 292: the Twilio sub-account (AC…) this number lives in. NULL = the parent account.';
 comment on column public.twilio_usage_daily.account_sid is
-  'Migration 292: the Twilio account this usage row is for. NULL = the parent. The primary key is still (day, category) until phase 7.';
+  'Migration 292: the Twilio account this usage row is for. NULL = the parent. The primary key is still (day, category) until phase 7, '
+  'whose key must be UNIQUE NULLS NOT DISTINCT (day, account_sid, category): a primary key cannot hold the parent''s NULL, and a plain '
+  'unique index never matches two NULLs, so an upsert on it would add a second parent row every day.';
+
+-- ═════════════════════════════════════════════════════════════════════════════════════════
+-- PART 2b — one tenant, one account: what a tenant holds on the parent, the guard, the pins
+-- ═════════════════════════════════════════════════════════════════════════════════════════
+
+-- What of this tenant still lives on the PARENT account, in words, or NULL for nothing: a live
+-- number, a registration that has made anything in Twilio, or a texting number in client_settings
+-- that no sub-account number row claims (a tenant set up before 165 has only that). Read by the
+-- guard below, by the pins, and by phase 3 before it provisions anyone.
+create or replace function public.twilio_parent_holdings(p_client_id text)
+returns text
+language sql
+stable
+set search_path to ''
+as $fn$
+  select coalesce(
+    (select 'a live number' from public.sms_numbers n
+      where n.client_id = p_client_id and n.released_at is null and n.twilio_account_sid is null
+      limit 1),
+    (select 'a texting registration' from public.sms_registrations r
+      where r.client_id = p_client_id and r.twilio_account_sid is null
+        and coalesce(r.customer_profile_sid, r.a2p_profile_sid, r.brand_sid, r.messaging_service_sid,
+                     r.campaign_sid, r.campaign_cm_sid) is not null
+      limit 1),
+    (select 'a texting number' from public.client_settings cs
+      where cs.client_id = p_client_id and nullif(btrim(cs.sms_number), '') is not null
+        and not exists (select 1 from public.sms_numbers n
+                         where n.client_id = cs.client_id and n.phone_number = cs.sms_number
+                           and n.released_at is null and n.twilio_account_sid is not null)
+      limit 1)
+  );
+$fn$;
+
+comment on function public.twilio_parent_holdings(text) is
+  'Migration 292: what of this tenant still lives on the parent Twilio account (a live number, a texting registration, a texting number), or NULL. A tenant holding anything there may not be given a sub-account (twilio_accounts_no_split). Service role only.';
+
+-- The guard: a 'sub' row (made, or a parent pin turned into one) for a tenant that still holds
+-- anything on the parent is refused, so a tenant is never split across two accounts. Moving one
+-- is a runbook step: its numbers and registration get their twilio_account_sid first.
+create or replace function public.twilio_accounts_no_split()
+returns trigger
+language plpgsql
+set search_path to ''
+as $fn$
+declare
+  v_what text;
+begin
+  if new.kind is distinct from 'sub' then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' and old.kind = 'sub' and old.client_id = new.client_id then
+    return new;
+  end if;
+  v_what := public.twilio_parent_holdings(new.client_id);
+  if v_what is not null then
+    raise exception using errcode = '23514',
+      message = format('twilio_accounts_no_split: %s still has %s on the parent Twilio account; a sub-account would split it across two accounts', new.client_id, v_what),
+      hint = 'Move its numbers and registration first (set their twilio_account_sid), or leave it on the parent.';
+  end if;
+  return new;
+end;
+$fn$;
+
+drop trigger if exists twilio_accounts_no_split on public.twilio_accounts;
+create trigger twilio_accounts_no_split
+  before insert or update of kind, client_id on public.twilio_accounts
+  for each row execute function public.twilio_accounts_no_split();
+
+revoke all on function public.twilio_parent_holdings(text) from public, anon, authenticated;
+revoke all on function public.twilio_accounts_no_split() from public, anon, authenticated;
+grant execute on function public.twilio_parent_holdings(text) to service_role;
+
+-- The parent pins: every tenant that holds something on the parent today, and our own internal
+-- account(s), get a kind 'parent' row. The resolver answers a pin exactly as it answers no row;
+-- the pin is what tells phase 3 "this one already lives on the parent". A tenant id that is not
+-- a slug cannot have a row (twilio_accounts_client_id_chk): it stays on the parent unpinned, the
+-- guard still covers it, and the RECORD counts it (unpinned_holders).
+insert into public.twilio_accounts (client_id, kind, status)
+select t.client_id, 'parent', 'active'
+  from (
+    select u.client_id, bool_or(u.internal) as internal
+      from (
+        select cs.client_id, cs.internal_account is true as internal from public.client_settings cs
+        union all select n.client_id, false from public.sms_numbers n where n.released_at is null
+        union all select r.client_id, false from public.sms_registrations r
+      ) u
+     group by u.client_id
+  ) t
+ where t.client_id ~ '^[a-z0-9][a-z0-9-]*$'
+   and (t.internal or public.twilio_parent_holdings(t.client_id) is not null)
+on conflict (client_id) do nothing;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 3 — the two definer functions
@@ -265,7 +388,11 @@ begin
 
   v_name := 'twilio_' || p_kind || '_' || v_row.account_sid;
   v_id := case p_kind when 'auth_token' then v_row.auth_token_id else v_row.api_secret_id end;
-  if v_id is not null and not exists (select 1 from vault.decrypted_secrets s where s.id = v_id) then
+  -- ⚠️ Only a secret under THIS account's name is ever updated: the id column is writable by the
+  -- service role, and an id pointing anywhere else (another account's, or a secret that is not
+  -- Twilio's at all) must never be overwritten through this definer. It is dropped, and the row
+  -- is re-pointed at the right secret below.
+  if v_id is not null and not exists (select 1 from vault.decrypted_secrets s where s.id = v_id and s.name = v_name) then
     v_id := null;
   end if;
   if v_id is null then
@@ -314,10 +441,14 @@ begin
   if (p_client_id is null) = (p_account_sid is null) then
     raise exception using errcode = '22023', message = 'twilio_account_creds: pass exactly one of p_client_id or p_account_sid';
   end if;
+  -- ⚠️ BOUND TO THE NAME: a row's id decrypts only the secret named for that row's own SID, so a
+  -- row pointed at any other Vault secret reads NULL (and the resolver refuses that tenant).
   return query
     select a.client_id, a.kind, a.account_sid, a.status, a.api_key_sid,
-           (select s.decrypted_secret from vault.decrypted_secrets s where s.id = a.api_secret_id)::text,
-           (select s.decrypted_secret from vault.decrypted_secrets s where s.id = a.auth_token_id)::text,
+           (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.id = a.api_secret_id and s.name = 'twilio_api_secret_' || a.account_sid)::text,
+           (select s.decrypted_secret from vault.decrypted_secrets s
+             where s.id = a.auth_token_id and s.name = 'twilio_auth_token_' || a.account_sid)::text,
            a.twiml_app_sid, a.push_apns_dev_sid, a.push_apns_prod_sid, a.push_fcm_sid
       from public.twilio_accounts a
      where (p_client_id is not null and a.client_id = p_client_id)
@@ -327,7 +458,7 @@ end;
 $fn$;
 
 comment on function public.twilio_account_creds(text, text) is
-  'Migration 292: one tenant''s Twilio account (by p_client_id or p_account_sid, exactly one) with its auth token and API key secret decrypted from Vault. Service role only.';
+  'Migration 292: one tenant''s Twilio account (by p_client_id or p_account_sid, exactly one) with its auth token and API key secret decrypted from Vault, each only when its Vault name is twilio_<kind>_<the row''s SID>. Service role only.';
 
 -- The live default ACLs grant every new function to the browser roles until revoked.
 revoke all on function public.twilio_account_secret_put(text, text, text) from public, anon, authenticated;
@@ -396,6 +527,37 @@ begin
       raise exception '292: service_role may not execute %', v_fn;
     end if;
   end loop;
+
+  -- ── One tenant, one account: the holdings function, the guard, the pins ──
+  if not exists (select 1 from pg_catalog.pg_proc p where p.oid = to_regprocedure('public.twilio_parent_holdings(text)')
+                   and not p.prosecdef and 'search_path=""' = any(coalesce(p.proconfig, '{}'::text[]))) then
+    raise exception '292: twilio_parent_holdings is missing, or not an invoker function with an empty search_path';
+  end if;
+  foreach v_role in array array['anon', 'authenticated'] loop
+    if has_function_privilege(v_role, 'public.twilio_parent_holdings(text)', 'EXECUTE') then
+      raise exception '292: % may execute twilio_parent_holdings', v_role;
+    end if;
+  end loop;
+  if not exists (select 1 from pg_catalog.pg_trigger t
+                  where t.tgrelid = 'public.twilio_accounts'::regclass and t.tgname = 'twilio_accounts_no_split'
+                    and not t.tgisinternal and t.tgenabled = 'O'
+                    and t.tgfoid = 'public.twilio_accounts_no_split()'::regprocedure) then
+    raise exception '292: the twilio_accounts_no_split trigger is missing or disabled';
+  end if;
+  select count(*) into v_cnt
+    from (select cs.client_id from public.client_settings cs where cs.internal_account is true
+          union select n.client_id from public.sms_numbers n where n.released_at is null
+          union select r.client_id from public.sms_registrations r) t
+   where t.client_id ~ '^[a-z0-9][a-z0-9-]*$'
+     and (public.twilio_parent_holdings(t.client_id) is not null
+          or exists (select 1 from public.client_settings cs where cs.client_id = t.client_id and cs.internal_account is true))
+     and not exists (select 1 from public.twilio_accounts a where a.client_id = t.client_id);
+  if v_cnt <> 0 then
+    raise exception '292: % tenant(s) holding something on the parent have no parent pin row', v_cnt;
+  end if;
+  if exists (select 1 from public.twilio_accounts a where a.kind = 'sub' and public.twilio_parent_holdings(a.client_id) is not null) then
+    raise exception '292: a sub-account tenant still holds something on the parent (split across two accounts)';
+  end if;
 
   -- ── The three new columns: nullable text, no default, every row NULL (the parent) ──
   foreach v_t in array array['sms_registrations.twilio_account_sid', 'sms_numbers.twilio_account_sid', 'twilio_usage_daily.account_sid'] loop
@@ -471,7 +633,19 @@ begin
       raise exception '292: twilio_account_creds accepted both arguments';
     exception when invalid_parameter_value then null;
     end;
-    v_out := 'secrets stored, replaced in place and read back by tenant and by SID; parent-with-SID and active-without-SID refused';
+    -- Bound to the name: the row pointed at a secret that is not its own (its API secret, named for
+    -- the other kind) reads NULL there, and a put never writes through that id.
+    update public.twilio_accounts set auth_token_id = api_secret_id where client_id = v_probe;
+    select * into v_got from public.twilio_account_creds(p_client_id := v_probe);
+    if v_got.auth_token is not null or v_got.api_secret is distinct from v_key then
+      raise exception '292: twilio_account_creds read a secret that is not named for the row';
+    end if;
+    perform public.twilio_account_secret_put(v_probe, 'auth_token', v_tok1);
+    select * into v_got from public.twilio_account_creds(p_client_id := v_probe);
+    if v_got.api_secret is distinct from v_key or v_got.auth_token is distinct from v_tok1 then
+      raise exception '292: twilio_account_secret_put wrote through an id that is not named for the row';
+    end if;
+    v_out := 'secrets stored, replaced in place, bound to their names and read back by tenant and by SID; parent-with-SID and active-without-SID refused';
     raise exception using errcode = 'S2920', message = v_out;
   exception when sqlstate 'S2920' then
     v_out := sqlerrm;
@@ -485,7 +659,7 @@ begin
   end if;
   perform set_config('ss.m292_rehearsal', v_out, true);
 
-  raise notice '292: checks hold; twilio_accounts is empty and every existing row is on the parent';
+  raise notice '292: checks hold; every tenant holding something on the parent is pinned there, and every existing row is on the parent';
 end
 $check$;
 
@@ -493,11 +667,15 @@ notify pgrst, 'reload schema';
 
 -- ── THE RECORD — the one thing `db query` prints ─────────────────────────────────────────
 -- Before the commit, so a dry run (last `commit;` swapped for `rollback;`) prints the same row and
--- leaves nothing behind. PASS is all of these, none of which drifts with live data:
---   table_ready true, functions_ready true, accounts 0, columns_added 3, rows_not_parent 0,
---   usage_pk 'day,category',
---   rehearsal 'secrets stored, replaced in place and read back by tenant and by SID; parent-with-SID
---     and active-without-SID refused'
+-- leaves nothing behind. PASS is all of these:
+--   table_ready true, functions_ready true, guard_ready true,
+--   parent_pins = the tenants holding something on the parent plus our internal account(s): at
+--     least 1 (the pilot), and the same number the phase 0 inventory lists,
+--   subs 0, unpinned_holders 0 (a non-slug tenant id holding parent resources; >0 is not a
+--     failure, it is a tenant the pins could not record: look at it before phase 3),
+--   columns_added 3, rows_not_parent 0, usage_pk 'day,category',
+--   rehearsal 'secrets stored, replaced in place, bound to their names and read back by tenant and
+--     by SID; parent-with-SID and active-without-SID refused'
 -- Anything else: roll back (see ROLLBACK above) before recording the ledger row.
 select
   '292' as migration,
@@ -511,7 +689,17 @@ select
      and not has_function_privilege('authenticated', 'public.twilio_account_creds(text, text)', 'EXECUTE')
      and not has_function_privilege('anon', 'public.twilio_account_secret_put(text, text, text)', 'EXECUTE')
      and not has_function_privilege('authenticated', 'public.twilio_account_secret_put(text, text, text)', 'EXECUTE')) as functions_ready,
-  (select count(*) from public.twilio_accounts)::int as accounts,
+  (exists (select 1 from pg_catalog.pg_trigger t where t.tgrelid = 'public.twilio_accounts'::regclass
+             and t.tgname = 'twilio_accounts_no_split' and t.tgenabled = 'O')
+     and has_function_privilege('service_role', 'public.twilio_parent_holdings(text)', 'EXECUTE')
+     and not has_function_privilege('anon', 'public.twilio_parent_holdings(text)', 'EXECUTE')
+     and not has_function_privilege('authenticated', 'public.twilio_parent_holdings(text)', 'EXECUTE')) as guard_ready,
+  (select count(*) from public.twilio_accounts where kind = 'parent')::int as parent_pins,
+  (select count(*) from public.twilio_accounts where kind = 'sub')::int as subs,
+  (select count(*) from (select n.client_id from public.sms_numbers n where n.released_at is null
+                         union select r.client_id from public.sms_registrations r
+                         union select cs.client_id from public.client_settings cs) t
+    where t.client_id !~ '^[a-z0-9][a-z0-9-]*$' and public.twilio_parent_holdings(t.client_id) is not null)::int as unpinned_holders,
   (select count(*) from information_schema.columns c where c.table_schema = 'public'
      and ((c.table_name in ('sms_registrations', 'sms_numbers') and c.column_name = 'twilio_account_sid')
        or (c.table_name = 'twilio_usage_daily' and c.column_name = 'account_sid')))::int as columns_added,
