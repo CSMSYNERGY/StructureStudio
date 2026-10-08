@@ -31,7 +31,9 @@
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is
 // how to prove a check still fires: against c5b2ec4's artifact, B, C, D, E and G fail; against
-// 366b93b's, I's unreadable-ledger check fails.
+// 366b93b's, I's unreadable-ledger check fails. (Since 2026-10-09 the CRM Connection anchor is the
+// company rate's read-only summary rather than its old input box, so artifacts from before then
+// stop at the first CRM Connection visit; re-point openCrm to "SALES TAX RATE (%)" to replay them.)
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 
@@ -134,10 +136,11 @@ const boot = async (shape) => {
   await page.getByText("Settings", { exact: true }).last().click();
   await page.waitForTimeout(900);
 };
-// The label is uppercased by CSS, and innerText reports what is rendered.
+// The company rate is not a box on CRM Connection since 2026-10-09 (it is set on Company → Tax); a
+// tenant without the capability sees its read-only summary, whose link is the anchor here.
 const openCrm = async () => {
   await page.getByText("CRM Connection", { exact: true }).last().click();
-  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "SALES TAX RATE (%)");
+  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "Change it in Company → Tax");
 };
 const openLocations = async () => {
   await page.getByText("Company", { exact: true }).last().click();
@@ -161,7 +164,7 @@ try {
   await openCrm();
   await page.waitForTimeout(1500);
   let t = await text();
-  ok("B: numbering + company-rate fields still show (unchanged)", t.toLowerCase().includes("sales tax rate (%)"));
+  ok("B: numbering + the company-rate summary still show (unchanged)", t.includes("Change it in Company → Tax") && t.includes("6.5%, shown on documents as"));
   ok("B: CRM Connection makes no tax_settings call", taxCalls() === before, `calls ${taxCalls() - before}`);
   ok("B: CRM Connection shows no tax text", !TAX_TEXT.test(t), hit(t));
   await openLocations();

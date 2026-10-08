@@ -4198,7 +4198,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
         The lots where your buildings sit on display. Every inventory building is tracked to one of these.
         {showTax && <>
           {" "}A location can also carry your local sales tax rate: an estimate made for that location charges it
-          instead of your company rate{tax.companyRatePct != null ? ` (${pctText(tax.companyRatePct)}%)` : ""}.
+          instead of your company rate{tax.companyRatePct != null ? ` (${pctText(tax.companyRatePct)}%, set in Company → Tax)` : " (set in Company → Tax)"}.
           {/* Said up front rather than left to a missing button: a reader who can see the
               rates but not change them should know who can, not wonder where the control went. */}
           {!canEditTax && " Only someone who can edit CRM Connection settings can change these rates."}
@@ -4263,7 +4263,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
                 <div><span style={S.lbl}>Local tax rate (%)</span>
                   <input style={S.input} value={taxForm.rate} inputMode="decimal" placeholder="e.g. 7.25"
                     onChange={(e) => { const v = e.target.value; setTaxForm((f) => ({ ...f, rate: v })); }} />
-                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Leave blank to use your company rate. Enter 0 if you don't collect tax here.</div></div>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Leave blank to use your company rate (set in Company → Tax). Enter 0 if you don't collect tax here.</div></div>
                 <div><span style={S.lbl}>Tax label (optional)</span>
                   <input style={S.input} value={taxForm.label} maxLength={40} placeholder={tax.companyLabel || "Sales tax"}
                     onChange={(e) => { const v = e.target.value; setTaxForm((f) => ({ ...f, label: v })); }} />

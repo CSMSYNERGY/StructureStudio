@@ -20,7 +20,11 @@
 //      heading codes), or wiping it after other tables — deployed ahead of 246, that half-deletes;
 //   8. a builder-side tax code action reaching Avalara;
 //   9. avalara_tax_codes_status (the Admin console's catalog row) growing an Avalara call or a
-//      read of anything but the catalog, while it sits on READ_ONLY_ACTIONS.
+//      read of anything but the catalog, while it sits on READ_ONLY_ACTIONS;
+//  10. tax_codes_get losing the company rate and the Tax tab's states (2026-10-09), sending a CRM
+//      credential instead of a boolean, or folding the codes switch (migration 290) into its main
+//      select, which would fail the whole action on a database without 290. Driven for real in
+//      companyTaxWiring_test.
 // Same technique as taxSpendWiring_test / locationTaxWiring_test: read the source, so a drift
 // fails the push. If an anchor moves, re-point it — do not delete the test.
 
@@ -125,8 +129,39 @@ Deno.test("tax_codes_get reads only this tenant's settings, styles and assignmen
   for (const table of ["client_settings", "building_styles", "tax_code_assignments"]) {
     assert(/\.eq\("client_id", clientId\)/.test(chainOf(GET, table, "taxCodesResponse")), `taxCodesResponse reads ${table} across tenants`);
   }
+  // Every client_settings read, not just the first: since 2026-10-09 there are two (the company
+  // rate in the main select, and the tolerant read of the codes switch).
+  let n = 0;
+  for (let i = GET.indexOf('admin.from("client_settings")'); i >= 0; i = GET.indexOf('admin.from("client_settings")', i + 1)) {
+    assert(/\.eq\("client_id", clientId\)/.test(chainOf(GET, "client_settings", "taxCodesResponse", i)),
+      `taxCodesResponse's client_settings read #${n + 1} is not limited to this tenant`);
+    n++;
+  }
+  assert(n === 2, `expected the main read and the switch's tolerant read of client_settings, found ${n}`);
   assert(/visibleAssignments\(storedRes\.data \?\? \[\], new Set\(styles\.map/.test(GET),
     "stored assignments reach the builder without the style/heading visibility filter");
+});
+
+Deno.test("tax_codes_get answers the company rate and the Tax tab's states; the codes switch is a tolerant read", () => {
+  // The fields the "Your sales tax rate" block reads (2026-10-09). companyRatePct's presence is how
+  // the page tells this function from an older one, so it must come from companyTaxView every time.
+  assert(/\.\.\.companyTaxView\(cs\),/.test(GET), "the company rate no longer rides on tax_codes_get (the Tax tab's block would hide)");
+  assert(/ghlInvoicingAllowed: cs\?\.ghl_invoicing_allowed === true,/.test(GET), "ghlInvoicingAllowed is not status's reading");
+  assert(/crmConfigured: Boolean\(cs\?\.ghl_location_id && cs\?\.ghl_api_key\),/.test(GET), "crmConfigured is not status's `configured`");
+  assert(!/ghlLocationId|ghlApiKey|ghl_location_id: |ghl_api_key: /.test(GET), "a CRM credential is in the answer");
+  // The switch's column must never join the main select: on a database without 290 that would fail
+  // the whole action, and every builder's Tax tab with it.
+  const main = chainOf(GET, "client_settings", "taxCodesResponse");
+  assert(!/tax_codes_enabled/.test(main), "tax_codes_enabled moved into the main client_settings select");
+  assert(/admin\.from\("client_settings"\)\.select\("tax_codes_enabled"\)\.eq\("client_id", clientId\)\.maybeSingle\(\)/.test(GET),
+    "the switch's own read is gone");
+  assert(/taxCodesEnabled: switchErr \? null : /.test(GET), "a failed switch read no longer answers null");
+  assert(!/if \(switchRes\.error\)|dbFail\([^)]*switch/.test(GET), "a failed switch read fails the action");
+});
+
+Deno.test("GATES: save_company_tax is settings_crm:edit, beside the rates, with no crm_ prefix", () => {
+  assert(/\n\s*save_company_tax:\s*\{\s*area:\s*"settings_crm",\s*level:\s*"edit"\s*\}/.test(SETTINGS), "save_company_tax's gate is no longer settings_crm:edit");
+  assert(/if \(action === "save_company_tax"\) \{/.test(SETTINGS), "the save_company_tax branch is gone");
 });
 
 Deno.test("tax_codes_search reads the stored catalog only: active codes, North America unless asked", () => {
