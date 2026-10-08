@@ -5,7 +5,7 @@ import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
 import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget, numberVerdictEffect } from "../_shared/twilioEventKey.ts";
 // Workstream 2, phase 4: whose Twilio account an event came from (only while TWILIO_SUBACCOUNTS is "on").
-import { eventAccountSid, subaccountsOn, tenantAccountSid } from "../_shared/twilioAccount.ts";
+import { eventAccountSid, eventAccountVerdict, subaccountsOn } from "../_shared/twilioAccount.ts";
 
 // Twilio Event Streams sink for A2P compliance events.
 //
@@ -44,11 +44,14 @@ import { eventAccountSid, subaccountsOn, tenantAccountSid } from "../_shared/twi
 // ⚠️ ONE SINK PER TWILIO ACCOUNT, ONE SHARED KEY (Workstream 2, phase 4). Each builder's
 // sub-account gets its own Event Streams sink pointing here with the same ?key=, so the key alone
 // no longer says which account an event is from. While TWILIO_SUBACCOUNTS is "on", an event acts
-// on a registration only when its AccountSid (the payload's `accountsid`) is the account that
-// registration's business lives in: the parent's for a business with no sub-account, the sub's
-// otherwise. Anything else (another account, no AccountSid, a lookup that failed) is recorded
-// with no tenant and reported as twilio_event_account_mismatch, never acted on. Off, nothing here
-// changes and nothing is looked up.
+// on a registration only when its AccountSid (the payload's `accountsid`) fits the account that
+// registration's business lives in (_shared/twilioAccount.ts eventAccountVerdict): a sub's
+// business only on an event naming that sub; a business on the parent on an event naming the
+// parent OR NAMING NO ACCOUNT (today's events, until phase 6 confirms the field is sent). Anything
+// else (another account, a sub's business with no AccountSid, a lookup that failed) is recorded
+// with no tenant under a key of its own and reported as twilio_event_account_mismatch, never acted
+// on. ⚠️ This is not authentication: the payload is written by whoever holds the key. Off,
+// nothing here changes and nothing is looked up.
 
 // Supabase's runtime provides this; the type is not in the edge-runtime .d.ts, so declare the
 // one member used. Guarded at the call site — if it is ever absent the work is awaited inline,
@@ -163,24 +166,23 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     // A registration found above is acted on only when the event came from the account its
     // business lives in. Otherwise the event is recorded with no tenant and reported below.
     if (perAccount && reg) {
-      const evAccount = eventAccountSid(d);
-      let expected: string | null = null;
-      let lookupFailed = false;
-      try {
-        expected = (await tenantAccountSid(admin, String(reg.client_id), envGet)) ?? (Deno.env.get("TWILIO_ACCOUNT_SID") || null);
-      } catch {
-        lookupFailed = true;
-      }
-      if (lookupFailed || !expected || evAccount !== expected) {
+      const verdict = await eventAccountVerdict(admin, d, String(reg.client_id), envGet);
+      if (verdict !== "ok") {
         if (!isTest) {
+          const evAccount = eventAccountSid(d);
           mismatched.push({
-            type, client_id: reg.client_id, lookup_failed: lookupFailed,
+            type, client_id: reg.client_id, lookup_failed: verdict === "lookup_failed",
             // SID prefixes only, like twilio_event_no_tenant: enough to find it, not a copy.
             event_account: evAccount ? evAccount.slice(0, 8) : null,
           });
         }
+        // ⚠️ UNDER A KEY OF ITS OWN, never the event's real one: a refusal (a lookup that failed for
+        // a moment, above all) must not use up the idempotency key, or the same event re-sent
+        // later (Twilio does re-send, see twilioEventKey.ts), or replayed by hand once the cause is
+        // fixed, would be dropped as a duplicate and its verdict never applied.
+        const realKey = eventOccurrenceKey(eventId, d);
         await admin.from("sms_registration_events").insert({
-          client_id: null, event_id: eventOccurrenceKey(eventId, d), event_type: type, detail: d,
+          client_id: null, event_id: realKey ? `${realKey}:refused` : null, event_type: type, detail: d,
         }).then(() => {}, () => {});
         continue;
       }

@@ -1156,6 +1156,15 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           }
         }
         if (!acct) return json({ ok: false, verdict: "no_account_sid", ...which });
+        if (!tok && which.account === "sub") {
+          // Not the parent's "unset" state: a sub has no key-only mode, so with no token in Vault
+          // every webhook it sends is REFUSED (twilioAccount.ts accountBySid), not let through.
+          return json({
+            ok: false, verdict: "sub_token_missing",
+            detail: "This business's Twilio account has no auth token stored, so every text and call webhook it sends is being refused.",
+            ...which,
+          });
+        }
         if (!tok) {
           return json({
             ok: false, verdict: "empty",

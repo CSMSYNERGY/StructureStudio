@@ -20,17 +20,8 @@ const API_BASE = "https://api.twilio.com/2010-04-01";
 
 /** Read at REQUEST time, never at module top: a module-top read needs a redeploy to pick
  *  up a rotated secret, which cost us a debugging session on Deposyt. */
-function accountSid(): string | null {
-  return Deno.env.get("TWILIO_ACCOUNT_SID") || null;
-}
 function authToken(): string | null {
   return Deno.env.get("TWILIO_AUTH_TOKEN") || null;
-}
-function apiKey(): string | null {
-  return Deno.env.get("TWILIO_API_KEY") || null;
-}
-function apiSecret(): string | null {
-  return Deno.env.get("TWILIO_API_SECRET") || null;
 }
 /** ⚠️ REMOVED, deliberately: there is no platform-wide Messaging Service any more.
  *  Under the ISV model each BUILDER has their own service (their own A2P campaign), so the
@@ -38,35 +29,12 @@ function apiSecret(): string | null {
  *  A platform default here would silently send one builder's text under another builder's
  *  carrier registration — which is the exact campaign-sharing carriers prohibit. */
 
-/** Basic auth as EITHER ApiKeySid:ApiKeySecret or AccountSid:AuthToken — the key pair
- *  wins. This deployment's TWILIO_AUTH_TOKEN landed as an EMPTY STRING on 2026-08-11
- *  because the operator's shell only had the key pair, so auth-token auth must never be
- *  the only door. (Signature validation below is the one place the token is required and
- *  cannot be substituted — see validateTwilioSignature.) */
-function basicAuthPair(): { user: string; pass: string } | null {
-  const key = apiKey();
-  const secret = apiSecret();
-  if (key && secret) return { user: key, pass: secret };
-  const sid = accountSid();
-  const token = authToken();
-  if (sid && token) return { user: sid, pass: token };
-  return null;
-}
-
-/** Credentials only — "does this DEPLOYMENT have Twilio at all".
- *
- *  ⚠️ This deliberately no longer asks about a Messaging Service. It used to, and that
- *  coupling was the shared-campaign model: one platform service, every tenant on it. Under
- *  the ISV model the service is the BUILDER'S, so "is this tenant able to send" is a
- *  different question with a different answer per tenant, and it is asked in smsSend.ts
- *  against sms_registrations. Keeping both questions in one boolean is how a tenant with no
- *  registration would inherit the platform's.
- *
- *  The account SID is needed separately because it is in the request PATH, not just the
- *  auth header, and an API-key pair does not carry it. */
-export function smsCredentialsConfigured(): boolean {
-  return basicAuthPair() !== null && !!accountSid();
-}
+/** ⚠️ NO CREDENTIALS ARE READ HERE ANY MORE (Workstream 2). Which account a text goes out from,
+ *  and its Basic pair, are resolved per tenant by _shared/twilioAccount.ts (parentCreds: the API
+ *  key pair first, then AccountSid:AuthToken, because this deployment's TWILIO_AUTH_TOKEN once
+ *  landed as an empty string) and handed to sendSms as `creds`. The old environment readers
+ *  (basicAuthPair, smsCredentialsConfigured) went with that: nothing called them. The auth token
+ *  above stays: it is the parent's default for validateTwilioSignature. */
 
 export class SmsNotConfigured extends Error {
   constructor(msg = "Twilio Messaging is not configured on this deployment.") {

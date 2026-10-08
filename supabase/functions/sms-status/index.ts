@@ -4,7 +4,7 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { validateTwilioSignature, hasSignatureKey } from "../_shared/twilioSms.ts";
 // Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
-import { requestAccount, subaccountsOn, tenantAccountSid, webhookMatchesTenant, type WebhookAccount } from "../_shared/twilioAccount.ts";
+import { edgeWebhookAccount, subaccountsOn, webhookTenantVerdict, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
 // Twilio delivery receipts → the outbound row's final status. The twin of postmark-events,
 // and the reason the Messages feed can say "delivered" rather than only "we handed it over".
@@ -80,9 +80,10 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
 
   // Same three-state signature handling as sms-inbound — see its header for why "no token"
   // proceeds rather than refusing. PER ACCOUNT while TWILIO_SUBACCOUNTS is "on", exactly as
-  // sms-inbound (Workstream 2, phase 4): a sub-account's callback must carry its own signature,
-  // and an AccountSid that is not ours is refused. Off, nothing here runs or is looked up, and
-  // the database client is made where it always was, below.
+  // sms-inbound (Workstream 2, phase 4, _shared/twilioAccount.ts edgeWebhookAccount): a
+  // sub-account's callback must carry its own signature, and an AccountSid that is not ours is
+  // refused. Off, nothing here runs or is looked up, and the database client is made where it
+  // always was, below.
   const envGet = (k: string) => Deno.env.get(k);
   // deno-lint-ignore no-explicit-any
   let early: any = null;
@@ -93,13 +94,22 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
       { auth: { persistSession: false } },
     );
-    const r = await requestAccount(early, params.AccountSid, envGet);
-    if (r.kind === "refused") return deny();
-    if (r.kind === "account") account = r.account;
+    const sig = req.headers.get("X-Twilio-Signature") ?? "";
+    const perAccount = await edgeWebhookAccount(early, params.AccountSid, envGet, (token) =>
+      validateTwilioSignature(`${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`, params, sig, token));
+    if (perAccount.kind === "refused") {
+      // Ours to fix only when the lookup failed; a stranger's AccountSid or a bad signature is a
+      // refusal like the parent's, which this function has never logged.
+      if (perAccount.reason === "lookup_failed") {
+        await logEdgeError({ fn: "sms-status", code: "sms_account_lookup_failed",
+          message: "The Twilio account a delivery status's AccountSid names could not be looked up; refused." }).catch(() => {});
+      }
+      return deny();
+    }
+    if (perAccount.kind !== "off") account = perAccount.account;
   }
   if (account?.source === "sub") {
-    const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`;
-    if (!(await validateTwilioSignature(url, params, req.headers.get("X-Twilio-Signature") ?? "", account.authToken))) return deny();
+    // Signed with the sub's own token: checked by edgeWebhookAccount above.
   } else if (hasSignatureKey()) {
     const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`;
     const valid = await validateTwilioSignature(url, params, req.headers.get("X-Twilio-Signature") ?? "");
@@ -117,7 +127,8 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
   );
 
   // Workstream 2, phase 4 (switch on only): a sub-account's callback may only move its own
-  // business's rows; the parent's only rows of a business that has no sub-account.
+  // business's rows; the parent's only rows of a business that has no sub-account. Authenticated by
+  // now, so a refusal here is ALWAYS 200 (above): logged, nothing written.
   let update = admin.from("sms_messages")
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq("provider_sid", sid);
@@ -127,13 +138,17 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
     const { data: row } = await admin.from("sms_messages").select("client_id").eq("provider_sid", sid).limit(1).maybeSingle();
     const owner = (row as { client_id?: string | null } | null)?.client_id ?? null;
     if (owner) {
-      let tenantSid: string | null;
-      try { tenantSid = await tenantAccountSid(admin, owner, envGet); } catch { return deny(); }
-      if (!webhookMatchesTenant(account, tenantSid)) {
-        await logEdgeError({ fn: "sms-status", clientId: owner, code: "sms_account_mismatch",
-          message: "A delivery status came from a Twilio account this message's business does not live in; refused.",
-          context: { source: account.source } }).catch(() => {});
-        return deny();
+      const verdict = await webhookTenantVerdict(admin, account, owner, envGet);
+      if (verdict !== "ok") {
+        await logEdgeError({
+          fn: "sms-status", clientId: owner,
+          code: verdict === "lookup_failed" ? "sms_account_lookup_failed" : "sms_account_mismatch",
+          message: verdict === "lookup_failed"
+            ? "The business's Twilio account could not be looked up; delivery status not recorded."
+            : "A delivery status came from a Twilio account this message's business does not live in; not recorded.",
+          context: { source: account.source },
+        }).catch(() => {});
+        return ok();
       }
     }
   }

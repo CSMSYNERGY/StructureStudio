@@ -12,8 +12,9 @@
 // Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/twilioAccount.test.ts
 
 import {
-  _resetTwilioAccountCaches, accountBySid, eventAccountSid, parentCreds, requestAccount, resolveTwilioAccount,
-  subaccountsOn, tenantAccountSid, TwilioAccountError, webhookMatchesTenant, type WebhookAccount,
+  _resetTwilioAccountCaches, _twilioAccountCacheSizes, accountBySid, edgeWebhookAccount, eventAccountSid, eventAccountVerdict,
+  parentCreds, requestAccount, resolveTwilioAccount, signedBySub, subaccountsOn, tenantAccountSid, TwilioAccountError,
+  webhookMatchesTenant, webhookTenantVerdict, type WebhookAccount,
 } from "./twilioAccount.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
@@ -167,15 +168,15 @@ Deno.test("accountBySid: the parent with no lookup (on or off); off, anything el
   assertEquals(await accountBySid(untouchable, "not-a-sid", ON), null);
 });
 
-Deno.test("accountBySid ON: an active sub with its token; anything else null; kept 5 minutes, a miss 30 seconds", async () => {
+Deno.test("accountBySid ON: an active sub with its token; anything else null; kept 60 seconds, a miss 30 seconds", async () => {
   _resetTwilioAccountCaches();
   const t0 = 1_000_000;
   const f = fakeAdmin({ creds: (a) => (a.p_account_sid === SUB ? [subRow()] : []) });
   assertEquals(await accountBySid(f.admin, SUB, ON, t0), { source: "sub", accountSid: SUB, clientId: "sub-builder", authToken: TOKEN });
-  await accountBySid(f.admin, SUB, ON, t0 + 4 * 60_000);
-  assertEquals(f.calls.length, 1, "a known sub is answered from the cache inside 5 minutes");
-  await accountBySid(f.admin, SUB, ON, t0 + 6 * 60_000);
-  assertEquals(f.calls.length, 2, "and looked up again after");
+  await accountBySid(f.admin, SUB, ON, t0 + 50_000);
+  assertEquals(f.calls.length, 1, "a known sub is answered from the cache inside 60 seconds");
+  await accountBySid(f.admin, SUB, ON, t0 + 61_000);
+  assertEquals(f.calls.length, 2, "and looked up again after (a rotated token or a suspension is seen within a minute)");
   const other = "AC" + "9".repeat(32);
   assertEquals(await accountBySid(f.admin, other, ON, t0), null);
   await accountBySid(f.admin, other, ON, t0 + 20_000);
@@ -244,4 +245,122 @@ Deno.test("eventAccountSid reads Event Streams' accountsid, and only a real SID"
   assertEquals(eventAccountSid({ accountSid: SUB }), SUB);
   assertEquals(eventAccountSid({ accountsid: "AC123" }), "");
   assertEquals(eventAccountSid(null), "");
+});
+
+// ── Review follow-ups: revalidation, the cache's size, and the handlers' decisions ─────────────
+const NEW_TOKEN = "subauthtoken" + "z".repeat(20);
+const SUB_HOOK: WebhookAccount = { source: "sub", accountSid: SUB, clientId: "sub-builder", authToken: TOKEN };
+const PARENT_HOOK: WebhookAccount = { source: "parent", accountSid: PARENT, clientId: null, authToken: "parent-auth-token" };
+
+Deno.test("accountBySid revalidate: asks again inside the cache's lifetime, but never twice within 15 seconds", async () => {
+  _resetTwilioAccountCaches();
+  const t0 = 2_000_000;
+  const f = fakeAdmin({ creds: () => [subRow()] });
+  await accountBySid(f.admin, SUB, ON, t0);
+  await accountBySid(f.admin, SUB, ON, t0 + 5_000, { revalidate: true });
+  assertEquals(f.calls.length, 1, "a revalidation 5 s after the lookup is answered from the cache");
+  await accountBySid(f.admin, SUB, ON, t0 + 20_000, { revalidate: true });
+  assertEquals(f.calls.length, 2, "20 s after, it asks the database again");
+  await accountBySid(f.admin, SUB, ON, t0 + 25_000, { revalidate: true });
+  assertEquals(f.calls.length, 2, "and a burst of them costs one lookup per 15 s");
+});
+
+Deno.test("signedBySub: the cached token first; a ROTATED token is found on one more lookup; anything else refuses", async () => {
+  const signedWith = (good: string) => (t: string) => Promise.resolve(t === good);
+  let asked = 0;
+  const lookup = (answer: WebhookAccount | null | "throw") => () => {
+    asked++;
+    return answer === "throw" ? Promise.reject(new Error("down")) : Promise.resolve(answer);
+  };
+  asked = 0;
+  assertEquals(await signedBySub(SUB_HOOK, lookup(null), signedWith(TOKEN)), SUB_HOOK);
+  assertEquals(asked, 0, "the cached token validates: no lookup");
+  const rotated = { ...SUB_HOOK, authToken: NEW_TOKEN };
+  asked = 0;
+  assertEquals(await signedBySub(SUB_HOOK, lookup(rotated), signedWith(NEW_TOKEN)), rotated, "a rotated token is accepted after one lookup");
+  assertEquals(asked, 1);
+  assertEquals(await signedBySub(SUB_HOOK, lookup(SUB_HOOK), signedWith("forged")), null, "the same token again: refused");
+  assertEquals(await signedBySub(SUB_HOOK, lookup(rotated), signedWith("forged")), null, "a new token that does not validate either: refused");
+  assertEquals(await signedBySub(SUB_HOOK, lookup(null), signedWith(NEW_TOKEN)), null, "the sub is no longer active: refused");
+  assertEquals(await signedBySub(SUB_HOOK, lookup("throw"), signedWith(NEW_TOKEN)), null, "the lookup fails: refused");
+  assertEquals(await signedBySub({ ...SUB_HOOK, authToken: null }, lookup(rotated), signedWith(NEW_TOKEN)), null, "a sub with no token never signs");
+  assertEquals(await signedBySub(PARENT_HOOK, lookup(null), signedWith("parent-auth-token")), null, "the parent is not a sub");
+});
+
+Deno.test("the caches stop growing: emptied at 1000 entries, whatever AccountSids are sent", async () => {
+  _resetTwilioAccountCaches();
+  const f = fakeAdmin({ creds: () => [] });
+  for (let i = 0; i < 1000; i++) await accountBySid(f.admin, "AC1" + i.toString(16).padStart(31, "0"), ON);
+  assertEquals(_twilioAccountCacheSizes().bySid, 1000);
+  await accountBySid(f.admin, "AC" + "f".repeat(32), ON);
+  assertEquals(_twilioAccountCacheSizes().bySid, 1, "the 1001st emptied it first");
+  const g = fakeAdmin({ accounts: () => null });
+  for (let i = 0; i < 1001; i++) await tenantAccountSid(g.admin, `builder-${i}`, ON);
+  assertEquals(_twilioAccountCacheSizes().tenant, 1);
+});
+
+Deno.test("edgeWebhookAccount: off is 'off' with no lookup and no signature check", async () => {
+  _resetTwilioAccountCaches();
+  let checked = 0;
+  const check = () => { checked++; return Promise.resolve(true); };
+  for (const sid of [SUB, PARENT, "", "AC" + "9".repeat(32)]) {
+    assertEquals(await edgeWebhookAccount(untouchable, sid, envOf(), check), { kind: "off" });
+  }
+  assertEquals(checked, 0);
+});
+
+Deno.test("edgeWebhookAccount ON: parent (the caller's own check), a signed sub, and every refusal", async () => {
+  _resetTwilioAccountCaches();
+  const check = (good: string) => (t: string) => Promise.resolve(t === good);
+  assertEquals(await edgeWebhookAccount(untouchable, PARENT, ON, check("never")), { kind: "parent", account: PARENT_HOOK });
+  assertEquals((await edgeWebhookAccount(untouchable, "", ON, check("never"))).kind, "parent", "no AccountSid: the parent's check");
+  const f = fakeAdmin({ creds: (a) => (a.p_account_sid === SUB ? [subRow()] : []) });
+  assertEquals(await edgeWebhookAccount(f.admin, SUB, ON, check(TOKEN)), { kind: "sub", account: SUB_HOOK });
+  assertEquals(await edgeWebhookAccount(f.admin, SUB, ON, check("parent-auth-token")), { kind: "refused", reason: "bad_signature" },
+    "a sub's request signed with the parent's token");
+  assertEquals(await edgeWebhookAccount(f.admin, "AC" + "9".repeat(32), ON, check(TOKEN)), { kind: "refused", reason: "wrong_account" });
+  _resetTwilioAccountCaches();
+  const down = fakeAdmin({ creds: () => "throw" });
+  assertEquals(await edgeWebhookAccount(down.admin, SUB, ON, check(TOKEN)), { kind: "refused", reason: "lookup_failed" });
+  // A rotation: the cached token is the old one, Vault now holds the new one.
+  _resetTwilioAccountCaches();
+  let vaultToken = TOKEN;
+  const rot = fakeAdmin({ creds: () => [subRow({ auth_token: vaultToken })] });
+  const t0 = Date.now();
+  await accountBySid(rot.admin, SUB, ON, t0 - 20_000);
+  vaultToken = NEW_TOKEN;
+  const r = await edgeWebhookAccount(rot.admin, SUB, ON, check(NEW_TOKEN));
+  assertEquals(r.kind === "sub" && r.account.authToken, NEW_TOKEN, "the request signed with the new token is accepted");
+});
+
+Deno.test("webhookTenantVerdict: no account or switch off is ok with no lookup; a sub its own tenant; the parent only parent tenants", async () => {
+  _resetTwilioAccountCaches();
+  assertEquals(await webhookTenantVerdict(untouchable, null, "anyone", ON), "ok");
+  assertEquals(await webhookTenantVerdict(untouchable, PARENT_HOOK, "anyone", envOf()), "ok");
+  assertEquals(await webhookTenantVerdict(untouchable, SUB_HOOK, "sub-builder", ON), "ok", "a sub: answered from its row, no lookup");
+  assertEquals(await webhookTenantVerdict(untouchable, SUB_HOOK, "someone-else", ON), "mismatch");
+  assertEquals(await webhookTenantVerdict(untouchable, { ...SUB_HOOK, clientId: null }, "sub-builder", ON), "mismatch");
+  const f = fakeAdmin({ accounts: (id) => (id === "sub-builder" ? { kind: "sub", account_sid: SUB } : null) });
+  assertEquals(await webhookTenantVerdict(f.admin, PARENT_HOOK, "parent-builder", ON), "ok");
+  assertEquals(await webhookTenantVerdict(f.admin, PARENT_HOOK, "sub-builder", ON), "mismatch", "the parent may not touch a sub's tenant");
+  _resetTwilioAccountCaches();
+  const down = fakeAdmin({ accounts: () => ({ error: { code: "57014" } }) });
+  assertEquals(await webhookTenantVerdict(down.admin, PARENT_HOOK, "parent-builder", ON), "lookup_failed", "never a match on a failed read");
+});
+
+Deno.test("eventAccountVerdict: off ok with no lookup; a parent tenant takes the parent's events AND events naming no account", async () => {
+  _resetTwilioAccountCaches();
+  assertEquals(await eventAccountVerdict(untouchable, { accountsid: "AC" + "9".repeat(32) }, "anyone", envOf()), "ok");
+  const f = fakeAdmin({ accounts: (id) => (id === "sub-builder" ? { kind: "sub", account_sid: SUB } : null) });
+  // On the parent (the pilot): today's events go on being acted on, field or not.
+  assertEquals(await eventAccountVerdict(f.admin, {}, "parent-builder", ON), "ok", "no accountsid: today's event");
+  assertEquals(await eventAccountVerdict(f.admin, { accountsid: PARENT }, "parent-builder", ON), "ok");
+  assertEquals(await eventAccountVerdict(f.admin, { accountsid: SUB }, "parent-builder", ON), "mismatch", "a sub's event about a parent tenant");
+  // On a sub: only that sub's events, and the field is required.
+  assertEquals(await eventAccountVerdict(f.admin, { accountsid: SUB }, "sub-builder", ON), "ok");
+  assertEquals(await eventAccountVerdict(f.admin, {}, "sub-builder", ON), "mismatch", "a sub's tenant needs the field");
+  assertEquals(await eventAccountVerdict(f.admin, { accountsid: PARENT }, "sub-builder", ON), "mismatch");
+  _resetTwilioAccountCaches();
+  const down = fakeAdmin({ accounts: () => ({ error: { code: "57014" } }) });
+  assertEquals(await eventAccountVerdict(down.admin, {}, "parent-builder", ON), "lookup_failed");
 });
