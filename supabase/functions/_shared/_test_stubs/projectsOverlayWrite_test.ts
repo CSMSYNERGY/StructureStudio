@@ -11,7 +11,8 @@
 // the refusals for anything that cannot be carried across. Pinned here against the real handler:
 //   1. a Feature row's App, written with the working board's option id, lands as Features' own id;
 //   2. a status label the home board has BY TEXT saves, as the home board's id;
-//   3. a choice the home board does not have is a 400, and nothing is written;
+//   3. a choice the home board does not have, a value that is no choice at all, or more choices
+//      than the home column takes is a 400, and nothing is written;
 //   4. no cross-board write is ever a 200 that did not write what it was asked to write.
 //
 // ⚠️ (4) IS THE TRAP THE DESIGN REVIEW CAUGHT. remapValues re-keys the COLUMN itself, so handing it
@@ -62,7 +63,9 @@ const COLUMNS: Record<string, any[]> = {
       ["l_todo", "To Do"], ["l_doing", "In Progress"], ["l_blocked", "Blocked"], ["l_wk_planned", "Planned"],
       ["l_fixed", "Fixed"], ["l_done", "Completed"],
     ]),
-    dropdown("w-app", "App", APP_BUGS),
+    // Multi-select here and single-choice on both homes: the worst case, since the page decides
+    // single or multi from the column it SHOWS and so can send two Apps to a home that keeps one.
+    dropdown("w-app", "App", APP_BUGS, true),
     dropdown("w-tags", "Tags", [["o_wk_mobile", "Mobile"], ["o_wk_web", "Web"]], true),
     notes("w-notes"),
     { id: "w-sprint", name: "Sprint", type: "text", settings: {} },   // nothing like it on Bugs or Features
@@ -74,7 +77,8 @@ const COLUMNS: Record<string, any[]> = {
   ],
   [FEATURES]: [
     status("f-status", [["l_new", "New"], ["l_review", "Under Review"], ["l_planned", "Planned"], ["l_done", "Completed"]]),
-    dropdown("f-app", "App", [["o_ss", "Structure Studio"], ["o_csm", "CSM Studio"]]),   // no BuildBridge
+    // No BuildBridge, so there is a choice to refuse. Made up: the live Features board offers it.
+    dropdown("f-app", "App", [["o_ss", "Structure Studio"], ["o_csm", "CSM Studio"]]),
     dropdown("f-tags", "Tags", [["o_mobile", "Mobile"], ["o_web", "Web"]], true),
     notes("f-notes"),
   ],
@@ -170,7 +174,8 @@ const written = (t: Trace) => {
 
 // ─── 1. App on a Feature row ───────────────────────────────────────────────────────────────────
 Deno.test("a Feature row's App, written with the working board's option id, lands as the Features option id", async () => {
-  // The cell editor sends an array; a drop onto an App bucket sends the bare id. Both shapes.
+  // The page always sends an array (the cell editor, and a bucket drop wraps the key too). The bare
+  // id is defensive input: the handler accepts both shapes, so both are pinned.
   for (const sent of [["o_fa02"], "o_fa02"]) {
     const { status, body, trace } = await updateItem(FEATURE_ROW, { "w-app": sent });
     assertEquals(status, 200, JSON.stringify(body));
@@ -206,7 +211,13 @@ Deno.test("a choice the home board does not have is refused, and nothing is writ
     ["Completed on a Bug row (Bugs has no such label)", BUG_ROW, { "w-status": "l_done" }],
     ["To Do on a Feature row (the working board's own label)", FEATURE_ROW, { "w-status": "l_todo" }],
     ["BuildBridge as a Feature row's App (Features has no such option)", FEATURE_ROW, { "w-app": ["o_fa03"] }],
-    ["the same, as the bare id a bucket drop sends", FEATURE_ROW, { "w-app": "o_fa03" }],
+    ["the same, as a bare id (defensive input: the page sends an array)", FEATURE_ROW, { "w-app": "o_fa03" }],
+    // Shapes the page never sends. sanitizeValues made each of them [] with a 200.
+    ["an object as App", FEATURE_ROW, { "w-app": { x: 1 } }],
+    ["a null entry in App", FEATURE_ROW, { "w-app": [null] }],
+    ["an empty-string entry in App", FEATURE_ROW, { "w-app": [""] }],
+    ["a number as App", FEATURE_ROW, { "w-app": 5 }],
+    ["a real choice beside a non-string one", FEATURE_ROW, { "w-app": ["o_fa02", 7] }],
   ];
   for (const [label, row, values] of refusals) {
     const { status, body, trace } = await updateItem(row, values);
@@ -214,6 +225,24 @@ Deno.test("a choice the home board does not have is refused, and nothing is writ
     assert(/That choice does not exist on the board this item lives on/.test(body.error), `${label}: ${body.error}`);
     assertEquals(trace.writes.length, 0, `${label}: refused, so nothing may be written`);
   }
+});
+
+Deno.test("two Apps sent to a home App that takes one are refused, never trimmed to the first", async () => {
+  // Every id here exists on the home board, so nothing is "lost"; sanitizeValues just keeps one of
+  // them, and that was a 200 storing Structure Studio while the cell showed both.
+  for (const [row, values] of [
+    [FEATURE_ROW, { "w-app": ["o_fa01", "o_fa02"] }],
+    [BUG_ROW, { "w-app": ["o_fa01", "o_fa02"] }],
+  ] as Array<[{ id: string }, Record<string, unknown>]>) {
+    const { status, body, trace } = await updateItem(row, values);
+    assertEquals(status, 400, `${row.id}: ${JSON.stringify(body)}`);
+    assert(body.error.includes("App takes one choice"), body.error);
+    assertEquals(trace.writes.length, 0, `${row.id}: refused, so nothing may be written`);
+  }
+  // The same choice twice is still one choice.
+  const twice = await updateItem(FEATURE_ROW, { "w-app": ["o_fa02", "o_fa02"] });
+  assertEquals(twice.status, 200, JSON.stringify(twice.body));
+  assertEquals(written(twice.trace)["f-app"], ["o_csm"]);
 });
 
 Deno.test("a column the home board does not have is still a 400 naming it", async () => {
@@ -232,6 +261,8 @@ Deno.test("every cross-board write either stores what it asked for or is refused
       { "b-status": "l_fixing", "b-notes": "picked up", "b-app": ["o_fa02"] }],
     [BUG_ROW, { "w-notes": "" }, { "b-notes": null }],
     [FEATURE_ROW, { "w-app": [] }, { "f-app": [] }],                    // clearing App is a real edit
+    [FEATURE_ROW, { "w-app": null }, { "f-app": null }],                // and so is clearing it with null
+    [FEATURE_ROW, { "w-tags": ["o_wk_mobile", "o_wk_web"] }, { "f-tags": ["o_mobile", "o_web"] }], // multi keeps all
     [FEATURE_ROW, { "w-status": "l_blocked" }, null],
     [BUG_ROW, { "w-status": "l_done", "w-notes": "half of this is fine" }, null], // all or nothing
   ];

@@ -1100,22 +1100,46 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             // out, so its entries are checked one by one. An option the row ALREADY holds is let
             // through: a since-deleted one rides back in every multi-select edit and is dropped
             // as it always was, and refusing for it would leave the row uneditable from the
-            // working board for a reason nobody can see there.
+            // working board for a reason nobody can see there. An entry that is no id at all ({…},
+            // null, an empty string, a number) is refused the same way: sanitizeValues turned each
+            // of those into [] with a 200 too. (A whole cell sent as null, "" or [] is a clear.)
             const asList = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+            // deno-lint-ignore no-explicit-any
+            const colOf = (k: string) => (columns as any[]).find((c) => c.id === k);
+            // deno-lint-ignore no-explicit-any
+            const offeredBy = (col: any) => new Set((col.settings?.options || []).map((o: any) => o.id));
             const lost = asked.filter((k) => {
               if (!(k in clean)) return true;
-              // deno-lint-ignore no-explicit-any
-              const col = (columns as any[]).find((c) => c.id === k);
+              const col = colOf(k);
               if (col?.type !== "dropdown") return false;
-              // deno-lint-ignore no-explicit-any
-              const offered = new Set((col.settings?.options || []).map((o: any) => o.id));
+              const offered = offeredBy(col);
               const had = asList((item.values || {})[k]);
-              return asList(incoming[k]).map((x) => str(x, 40)).some((x) => !!x && !offered.has(x) && !had.includes(x));
+              return asList(incoming[k]).some((x) => {
+                const id = typeof x === "string" ? str(x, 40) : x;
+                return !had.includes(id) && (typeof id !== "string" || !offered.has(id));
+              });
             });
             if (lost.length) {
-              // deno-lint-ignore no-explicit-any
-              const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
+              const names = lost.map((k) => colOf(k)?.name || k);
               return json({ error: `That choice does not exist on the board this item lives on (${names.join(", ")}). Open the item there to change it.` }, 400);
+            }
+            // ⚠️ A SINGLE-CHOICE COLUMN KEEPS THE FIRST CHOICE AND DROPS THE REST. The page decides
+            // single or multi from the column it is SHOWING, so a multi-select App on the working
+            // board can send two choices to a single-choice App here, and sanitizeValues saved the
+            // first with a 200 while the cell showed both. Every real choice sent must be kept.
+            const crowded = asked.filter((k) => {
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const kept = asList(clean[k]);
+              return asList(incoming[k]).some((x) => typeof x === "string" && offered.has(str(x, 40)) && !kept.includes(str(x, 40)));
+            });
+            if (crowded.length) {
+              const limits = crowded.map((k) => {
+                const col = colOf(k);
+                return `${col?.name || k} takes ${col?.settings?.multi === true ? "fewer choices" : "one choice"}`;
+              });
+              return json({ error: `On the board this item lives on, ${limits.join("; ")}. Open the item there to change it.` }, 400);
             }
           }
           newValues = { ...item.values, ...clean };
