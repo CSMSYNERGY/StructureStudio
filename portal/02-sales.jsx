@@ -3399,6 +3399,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
   // which shows nothing. onEditProfile opens My Profile, where it is changed.
   emailSignature = null, onEditProfile = null,
+  // Whether the signed-in person switched reply copies on (My Profile): true, false, or null in
+  // view-as. It only changes the line above the Email box; the server decides what goes out.
+  replyCopy = null,
   // Quick sends (the signed-in person's saved messages, the list My Synergy Phone keeps) beside
   // the Email and SMS boxes. Off in view-as: the list would be the OPERATOR's own, and the server
   // refuses it there too.
@@ -4757,11 +4760,22 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     own address, except in view-as, where CSM Synergy staff are never put on a
                     builder's email and the copy goes to the customer's assigned rep instead (or the
                     send is refused when no reply could reach anyone). viewingLabel is set only in
-                    view-as. */}
+                    view-as. Since 2026-10-07 the inbox copy is opt-in per person (replyCopy, My
+                    Profile), so with it off this line never promises the inbox: the reply comes
+                    back to the record, and to the inbox only while the company hasn't set up
+                    replies (the server keeps the address then, so a reply reaches somebody).
+                    ⚠️ ALL THREE LINES CARRY THAT "UNTIL REPLIES ARE SET UP" (review 2026-10-07).
+                    This page can't see the email settings, and on an account without them the
+                    record never gets the reply: it goes to the writer's inbox alone, and in
+                    view-as to the assigned rep whatever their switch says. And the OFF line says
+                    files aren't kept on the record (email-inbound stores the words only), the same
+                    sentence as the My Profile card in 08-integrations.jsx. */}
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
                   {viewingLabel
-                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They go to this customer's assigned rep, if they have one.</>
-                    : <>To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.</>}
+                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They come back to this record, and to this customer's assigned rep if they've switched reply copies on (until this company sets up replies, to the rep only).</>
+                    : replyCopy === true
+                      ? <>To <strong>{data.contact.email}</strong> — replies come back here and to your inbox (just your inbox until your company sets up replies).</>
+                      : <>To <strong>{data.contact.email}</strong> — replies come back to this record (your inbox until your company sets up replies). Files a customer attaches aren't kept on the record yet: switch on reply copies in My Profile if you need them.</>}
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />

@@ -9,7 +9,7 @@ import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { repReplyTo } from "../_shared/repReplyTo.ts";
+import { repReplyTo, type ReplyCopy } from "../_shared/repReplyTo.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceChangeOrder, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
@@ -103,15 +103,17 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
 // _shared/repReplyTo.ts). Every email this function sends to a customer is one THEY set off by
 // accepting, signing or approving, so there is no staff sender to name: the copy goes to the rep
 // the customer is assigned to (the design's contact's owner), when that person still works here,
-// and otherwise to nobody, which is the routing address alone, as before. A failed lookup is
-// logged and costs the copy, never the confirmation.
+// if they've switched reply copies on in My Profile (their own switch; while replies aren't
+// routed to the record on this account they get it whatever the switch says, 2026-10-07), and
+// otherwise to nobody, which is the routing address alone, as before. A failed lookup is logged
+// and costs the copy, never the confirmation.
 //
 // `recipient` is where the confirmation goes (the design's contact email, as the shopper typed
 // it). The rep is named only when that is the contact's own address: a design is linked to its
 // contact by phone first, so a stranger who typed a known customer's number beside their own
 // email must not learn that customer's rep, or the rep's address, by accepting their own quote.
 // deno-lint-ignore no-explicit-any
-function assignedRepReplyTo(admin: any, req: Request, clientId: string, shortCode: string, recipient: string): Promise<string | null> {
+function assignedRepReplyTo(admin: any, req: Request, clientId: string, shortCode: string, recipient: string): Promise<ReplyCopy | null> {
   return repReplyTo(admin, clientId, {
     shortCode,
     recipient,

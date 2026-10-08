@@ -15,6 +15,12 @@
 // The call COUNT is pinned too, so a sender added later fails here until it is held to the same
 // rule. Also pinned: crm_send_email reads no address of its own any more, save_prefs and the My
 // Profile box check addresses with the same rule as the senders, and the card says what it does.
+// Since 2026-10-07 the copy is opt-in: save_prefs keeps `replyCopy` only when it is true. The send
+// shape is unchanged: repReplyTo's answer goes into replyTo as it is, and sendTenantEmail decides.
+// The card's two choices and wording are pinned in replyCopyCard.test.ts, NOT here, on purpose:
+// this file ships with the SERVER commit and must pass against the portal as it was before the
+// card changed (review 2026-10-07: a server-only commit carrying card assertions failed preflight
+// on its own). So the one card check below holds for the old card and the new one alike.
 //
 // Needs read access to the repo (preflight grants --allow-read=<repo>); no network.
 import { cleanReplyAddress, REPLY_ADDRESS_RE } from "./repReplyTo.ts";
@@ -172,6 +178,9 @@ Deno.test("crm_send_email asks the rule and reads no address of its own; save_pr
   const save = ps.slice(ps.indexOf('if (action === "save_prefs")'), ps.indexOf('if (action === "save_prefs")') + 4000);
   assert(/const addr = cleanReplyAddress\(raw\.replyToEmail\);\s*if \(addr\) clean\.replyToEmail = addr;/.test(save),
     "save_prefs must check the address with cleanReplyAddress");
+  // The reply-copy switch survives a save only as exactly true; anything else stores nothing (OFF).
+  assert(save.includes("if (raw.replyCopy === true) clean.replyCopy = true;"), "save_prefs must keep replyCopy, and only when it is true");
+  assert(!/clean\.replyCopy\s*=(?!\s*true;)/.test(save), "save_prefs must never store any other replyCopy value");
 });
 
 Deno.test("submit-estimate names the verified caller; customer-accept names nobody but the assigned rep", () => {
@@ -202,5 +211,7 @@ Deno.test("the My Profile box checks addresses with the senders' own rule, and s
   assert(/const looksLikeEmail = \(v\) => v\.length <= 320 && REPLY_ADDRESS_RE\.test\(v\);/.test(PROFILE), "the reply-to box must use it");
   assert(!/DOES NOT WORK YET|HANDOFF-reply-to-prefs/.test(PROFILE), "the stale 'does not work yet' notes must be gone");
   const card = PROFILE.slice(PROFILE.indexOf("Where replies to your emails go"), PROFILE.indexOf("Where replies to your emails go") + 900);
-  assert(/quote/.test(card) && /invoice/.test(card), "the card must say it covers quotes and invoices");
+  // True of the card before reply copies and after (the "estimate" wording and the choices are
+  // replyCopyCard.test.ts's), so this file passes on the server commit alone.
+  assert(/invoice/.test(card) && /change order/.test(card), "the card must say it covers invoices and change orders");
 });

@@ -12,7 +12,7 @@
  * (the pre-push gate runs this for you with exactly those flags — see scripts/preflight.mjs)
  */
 
-import { combineReplyTo, sendTenantEmail, type TenantMail } from "./emailSend.ts";
+import { combineReplyTo, humanReplyTo, sendTenantEmail, type TenantMail } from "./emailSend.ts";
 
 // Local assertions rather than jsr:@std/assert, deliberately. The pre-push gate runs this
 // file, and a gate that needs a registry fetch fails closed on an offline machine — which
@@ -545,6 +545,104 @@ Deno.test("a caller's duplicate of the routing address is not advertised twice",
     assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to,
       "d.ss-test123456@reply.example.com",
       "de-duplicated down to one, so it collapses back to a bare string");
+  } finally {
+    teardown();
+  }
+});
+
+// ── The reply-copy switch (2026-10-07) ─────────────────────────────────────────────────────
+// Every customer-email sender now passes repReplyTo's ReplyCopy `{ address, copy }`, and the
+// person's address rides only when they switched copies on, OR when there is no routing address
+// to receive the reply instead (a reply must never reach nobody). A plain string or string[] is
+// the old contract and is still always advertised, so a caller that means "always" keeps it.
+
+const ROUTE = "d.ss-test123456@reply.example.com";
+
+Deno.test("humanReplyTo: a plain string or string[] is always advertised (back-compat)", () => {
+  assertEquals(humanReplyTo("staff@example.com", ROUTE), "staff@example.com");
+  assertEquals(humanReplyTo("staff@example.com", null), "staff@example.com");
+  assertArrayEquals(humanReplyTo(["a@example.com", "b@example.com"], ROUTE), ["a@example.com", "b@example.com"]);
+  // Junk inside an array is dropped element-wise, as combineReplyTo would.
+  assertArrayEquals(humanReplyTo(["a@example.com", 7, null, "b@example.com"], ROUTE), ["a@example.com", "b@example.com"]);
+});
+
+Deno.test("humanReplyTo: copies ON rides with routing present; OFF rides only without it", () => {
+  assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy: true }, ROUTE), "sam@acme-sheds.example.test", "on, routed");
+  assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy: true }, null), "sam@acme-sheds.example.test", "on, unrouted");
+  assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy: false }, ROUTE), null, "off, routed: the record only");
+  assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy: false }, null), "sam@acme-sheds.example.test", "off, unrouted: kept, or the reply reaches nobody");
+  assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy: false }, ""), "sam@acme-sheds.example.test", "an empty routing address is no routing address");
+  // Only `true` is on: anything else behaves as off.
+  for (const copy of ["true", 1, null, undefined]) {
+    assertEquals(humanReplyTo({ address: "sam@acme-sheds.example.test", copy }, ROUTE), null, JSON.stringify(copy));
+  }
+});
+
+Deno.test("humanReplyTo: anything malformed gives nothing", () => {
+  for (const bad of [undefined, null, 42, true, {}, { copy: true }, { address: 42, copy: true }, { address: "", copy: true }, { address: "   ", copy: false }]) {
+    assertEquals(humanReplyTo(bad, ROUTE), null, `${JSON.stringify(bad)}, routed`);
+    assertEquals(humanReplyTo(bad, null), null, `${JSON.stringify(bad)}, unrouted`);
+  }
+});
+
+Deno.test("on the wire: copies OFF on a routed tenant sends the routing address alone", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, replyTo: { address: "sam@acme-sheds.example.test", copy: false } });
+    assert(res.sent, "must send");
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, ROUTE, "the reply lands on the record, and only there");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("on the wire: copies ON on a routed tenant sends both, routing first", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, replyTo: { address: "sam@acme-sheds.example.test", copy: true } });
+    assertArrayEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, [ROUTE, "sam@acme-sheds.example.test"]);
+    // De-duplication is unchanged: a person whose address IS the routing address is listed once.
+    const f2 = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: INBOUND_ON }).admin, CLIENT_ID, { ...MAIL, replyTo: { address: "D.SS-TEST123456@Reply.Example.com", copy: true } });
+    assertEquals(JSON.parse(f2[0].body ?? "{}").reply_to, ROUTE);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("on the wire: copies OFF where replies aren't routed keeps the person, so a reply reaches somebody", async () => {
+  setup();
+  try {
+    // Inbound pending, none at all, and a routed tenant on a send with nothing to route by.
+    for (const [settings, mail] of [
+      [{ ...INBOUND_ON, inbound_status: "pending" }, MAIL],
+      [VERIFIED, MAIL],
+      [INBOUND_ON, { ...MAIL, kind: "test" as const, shortCode: null }],
+    ] as [Record<string, unknown>, TenantMail][]) {
+      const fetches = stubFetch(() => jsonResponse(OK_SEND));
+      await sendTenantEmail(stubAdmin({ settings }).admin, CLIENT_ID, { ...mail, replyTo: { address: "sam@acme-sheds.example.test", copy: false } });
+      assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, "sam@acme-sheds.example.test", JSON.stringify(settings.inbound_status ?? null));
+    }
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("on the wire: a plain string is still advertised beside the routing address", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: INBOUND_ON }).admin, CLIENT_ID, { ...MAIL, replyTo: "staff@example.com" });
+    assertArrayEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, [ROUTE, "staff@example.com"]);
+    // And a malformed object adds nothing, leaving the routing address alone.
+    const f2 = stubFetch(() => jsonResponse(OK_SEND));
+    // deno-lint-ignore no-explicit-any
+    await sendTenantEmail(stubAdmin({ settings: INBOUND_ON }).admin, CLIENT_ID, { ...MAIL, replyTo: { copy: true } as any });
+    assertEquals(JSON.parse(f2[0].body ?? "{}").reply_to, ROUTE);
   } finally {
     teardown();
   }
