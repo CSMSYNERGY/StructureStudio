@@ -23,9 +23,16 @@
 
 import {
   cpAuth,
+  cpAuthFieldNames,
+  type CpAuthRequest,
+  type CpBilling,
+  cpBillingFields,
   cpCents,
+  cpDeclineVerification,
   cpInquireByOrderId,
   cpSummary,
+  type CpVerification,
+  cpVerification,
   cpVoid,
   isGatewayConfig,
   isGatewayThrottled,
@@ -34,6 +41,7 @@ import {
 } from "./cardpointe.ts";
 import { amountOwed } from "./estimateLines.ts";
 import { agreedBaseline } from "./changeOrderDiff.ts";
+import { addressFrom } from "./contactAddress.ts";
 
 /** $1 floor — below it the card fee exceeds the payment. $50,000 ceiling: above that a
  *  figure is more likely a typo than a shed, and "call your builder" is the right answer.
@@ -249,14 +257,79 @@ export type ChargeOpts = {
   /** CardSecure token from the iFrame, or raw encrypted track data from the VP3350. */
   account: string;
   expiry?: string;
+  /** Billing name, street and ZIP for AVS — billingFromRequest's answer. All optional. */
   postal?: string;
   name?: string;
-  /** "E" online, "R" card present at the counter. */
-  ecomind?: "E" | "R";
+  address?: string;
+  /** For a KEYED card: "E" (the default). Never sent on a swipe, whatever this says — see `entry`. */
+  ecomind?: "E" | "T";
+  /** "swipe" = read by the card reader, card physically present: the auth carries NO ecomind
+   *  (CardPointe's "R" means RECURRING, which is what swipes used to be sent as), and the
+   *  payment's entry_mode still says it was a swipe when the gateway does not. */
+  entry?: "keyed" | "swipe";
   actorKind: "customer" | "operator" | "staff";
   actorRef?: string | null;
   createdBy?: string | null;
 };
+
+/**
+ * The billing name, street and ZIP for a charge, from the request body and the design's contact.
+ *
+ *   body `name` / `address` / `postal`   what was typed, through cpBillingFields
+ *   body `billing: "delivery"`           "Billing address is my delivery address": the street and
+ *                                        ZIP come from the design's contact (addressFrom) and
+ *                                        whatever was typed for them is ignored
+ *
+ * The name falls back to the contact's, which is what both functions always sent. Every field
+ * stays optional: production's pages send none of these, and get exactly the auth they got before.
+ *
+ * ⚠️ THE DELIVERY ADDRESS NEVER GOES BACK TO THE PAGE. The customer ticks a box and the server
+ * fills it in; nothing here is echoed (the migration-048 lesson: a contact's address is not
+ * something a payment endpoint hands out).
+ */
+// deno-lint-ignore no-explicit-any
+export function billingFromRequest(body: any, contact: any): CpBilling {
+  const typed = cpBillingFields(body);
+  const c = (contact && typeof contact === "object" ? contact : {}) as Record<string, unknown>;
+  const name = typed.name ?? cpBillingFields({ name: c.name }).name;
+  if (body?.billing !== "delivery") return { ...typed, ...(name ? { name } : {}) };
+  const a = addressFrom(c);
+  const d = cpBillingFields({ address: a.street ?? undefined, postal: a.zip ?? undefined });
+  return { ...(name ? { name } : {}), ...d };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Migration 291's columns, written so a deploy AHEAD of the migration still takes money.
+//
+// sent_fields and ecomind go on the attempt INSERT, which is the concurrency guard, and the
+// AVS/CVV answers go on the attempt's CLOSE. PostgREST refuses the WHOLE statement when one key
+// names a column it cannot find (PGRST204; 42703 from Postgres), so without this a function
+// deployed before 291 would refuse every charge at the insert ("already going through"), and
+// worse, a close that failed would leave a charged attempt `open` until the stale sweep turned
+// it closed_unknown and blocked the order. On that error the write is tried once more without
+// the 291 keys (emailSend.ts and sms-inbound do the same for their own migrations). A failed
+// statement wrote nothing, so the retried insert is still the guard.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+const M291_KEYS = ["sent_fields", "ecomind", "avsresp", "cvvresp"];
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+
+function isMissingColumn(err: unknown): boolean {
+  return MISSING_COLUMN.has(String((err as { code?: unknown } | null)?.code ?? ""));
+}
+function without291(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([k]) => !M291_KEYS.includes(k)));
+}
+
+/** The verification codes as attempt columns, each only when the gateway gave one, so a close
+ *  that has none of them writes exactly the row it wrote before 291. */
+function verificationColumns(v: CpVerification | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (v?.respcode) out.respcode = v.respcode;
+  if (v?.avsresp) out.avsresp = v.avsresp;
+  if (v?.cvvresp) out.cvvresp = v.cvvresp;
+  return out;
+}
 
 /** A durable, unguessable order reference minted BEFORE the attempt row exists — which is
  *  what makes /inquireByOrderid able to answer for a charge whose response we never saw.
@@ -338,19 +411,40 @@ export async function chargeInvoicePayment(
   //    HERE, before any money moves. Two tabs, a double-tap, or a customer paying while a
   //    rep charges the same balance all land on this.
   const orderRef = mintOrderRef();
-  const { data: attempt, error: attErr } = await admin.from("payment_attempts")
-    .insert({
-      client_id: clientId,
-      order_id: orderId,
-      short_code: opts.shortCode ?? null,
-      amount_cents: amountCents,
-      rail,
-      merchid: opts.merchid,
-      orderid: orderRef,
-      actor_kind: opts.actorKind,
-      actor_ref: opts.actorRef ?? null,
-    })
-    .select("id").maybeSingle();
+  // The request is built BEFORE the attempt row, so the row can say which fields the sale
+  // carries. A swipe sends no ecomind at all; a keyed card sends "E" unless told otherwise.
+  const authReq: CpAuthRequest = {
+    merchid: opts.merchid,
+    amountCents,
+    account: opts.account,
+    expiry: opts.expiry,
+    orderid: orderRef,
+    postal: opts.postal,
+    name: opts.name,
+    address: opts.address,
+    ecomind: opts.entry === "swipe" ? null : (opts.ecomind ?? "E"),
+    rail,
+  };
+  const attemptRow: Record<string, unknown> = {
+    client_id: clientId,
+    order_id: orderId,
+    short_code: opts.shortCode ?? null,
+    amount_cents: amountCents,
+    rail,
+    merchid: opts.merchid,
+    orderid: orderRef,
+    actor_kind: opts.actorKind,
+    actor_ref: opts.actorRef ?? null,
+    // Migration 291: field NAMES only, never a value, and the ecomind actually sent (null = none).
+    sent_fields: cpAuthFieldNames(authReq),
+    ecomind: authReq.ecomind ?? null,
+  };
+  const insertAttempt = (row: Record<string, unknown>) =>
+    admin.from("payment_attempts").insert(row).select("id").maybeSingle();
+  let { data: attempt, error: attErr } = await insertAttempt(attemptRow);
+  if (attErr && isMissingColumn(attErr)) {
+    ({ data: attempt, error: attErr } = await insertAttempt(without291(attemptRow)));
+  }
   if (attErr || !attempt) {
     return {
       ok: false,
@@ -360,16 +454,22 @@ export async function chargeInvoicePayment(
     };
   }
 
-  // Closing the ledger must never become a second failure — it swallows its own errors,
-  // exactly as walletTopup's does.
+  // Writing to the ledger after the insert must never become a second failure — it swallows
+  // its own errors, exactly as walletTopup's does. A database without 291's columns gets the
+  // same write without them (see M291_KEYS).
+  const updateAttempt = async (patch: Record<string, unknown>) => {
+    try {
+      const r = await admin.from("payment_attempts").update(patch).eq("id", attempt.id);
+      if (r?.error && isMissingColumn(r.error) && Object.keys(patch).some((k) => M291_KEYS.includes(k))) {
+        await admin.from("payment_attempts").update(without291(patch)).eq("id", attempt.id);
+      }
+    } catch { /* see above */ }
+  };
   const closeAttempt = (
     state: string,
     detail: string | null,
     extra: Record<string, unknown> = {},
-  ) =>
-    admin.from("payment_attempts")
-      .update({ state, detail, closed_at: new Date().toISOString(), ...extra })
-      .eq("id", attempt.id).then(() => undefined, () => undefined);
+  ) => updateAttempt({ state, detail, closed_at: new Date().toISOString(), ...extra });
 
   const logFault = (code: string, message: string) =>
     admin.from("app_errors").insert({
@@ -383,17 +483,7 @@ export async function chargeInvoicePayment(
   // 4. The sale.
   let auth;
   try {
-    auth = await cpAuth({
-      merchid: opts.merchid,
-      amountCents,
-      account: opts.account,
-      expiry: opts.expiry,
-      orderid: orderRef,
-      postal: opts.postal,
-      name: opts.name,
-      ecomind: opts.ecomind ?? "E",
-      rail,
-    });
+    auth = await cpAuth(authReq);
   } catch (se) {
     const msg = String((se as Error).message ?? "");
 
@@ -443,8 +533,10 @@ export async function chargeInvoicePayment(
 
     // A plain decline: the gateway answered, nothing was charged. Safe to say so, and the
     // reason is the one thing the customer can act on. Capped and stripped — it is still
-    // third-party text.
-    await closeAttempt("closed_declined", msg);
+    // third-party text. The AVS/CVV answer is kept on the attempt (291): a decline writes no
+    // payments row, and a mismatching street or CVV is exactly the decline worth reading back.
+    const v = cpDeclineVerification(se);
+    await closeAttempt("closed_declined", msg, { ...(v ? { respstat: "C" } : {}), ...verificationColumns(v) });
     const clean = msg.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 200);
     return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402 };
   }
@@ -454,9 +546,12 @@ export async function chargeInvoicePayment(
   //     retref FIRST so the void has a durable subject even if what follows fails, then
   //     release the hold. There is never a payments row for a partial.
   if (auth.kind === "partial") {
-    await admin.from("payment_attempts")
-      .update({ retref: auth.retref, respstat: "A", detail: "partial approval - voiding" })
-      .eq("id", attempt.id).then(() => undefined, () => undefined);
+    await updateAttempt({
+      retref: auth.retref,
+      respstat: "A",
+      detail: "partial approval - voiding",
+      ...verificationColumns(cpVerification(auth.raw)),
+    });
     let voided = false;
     try {
       voided = await cpVoid(opts.merchid, auth.retref);
@@ -495,6 +590,8 @@ export async function chargeInvoicePayment(
   // 5. Record it. ACH is money three days from now, so it lands `pending` and counts toward
   //    nothing until the reconcile sweep says otherwise.
   const fundingState: "settled" | "pending" = rail === "ach" ? "pending" : "settled";
+  // On every close from here on: the sale was approved, so its AVS/CVV answer is known.
+  const verified = verificationColumns(cpVerification(auth.raw));
   const nowIso = new Date().toISOString();
   const row = {
     client_id: clientId,
@@ -511,7 +608,10 @@ export async function chargeInvoicePayment(
     gateway_authcode: auth.authcode,
     instrument_brand: auth.brand ?? (rail === "ach" ? "ACH" : null),
     instrument_last4: auth.last4,
-    entry_mode: auth.entrymode ?? (opts.ecomind === "R" ? "Retail" : "ECommerce"),
+    // The gateway's own word when it gives one. Otherwise what WE know: a swipe or a keyed card.
+    // (This read "Retail" for a swipe, the label of the "R" ecomind swipes used to send, which
+    // CardPointe defines as recurring.)
+    entry_mode: auth.entrymode ?? (opts.entry === "swipe" ? "Swipe" : "ECommerce"),
     avs_result: auth.avsresp,
     cvv_result: auth.cvvresp,
     surcharge_cents: auth.surchargeCents,
@@ -535,6 +635,7 @@ export async function chargeInvoicePayment(
         retref: auth.retref,
         payment_id: existing?.id ?? null,
         respstat: "A",
+        ...verified,
       });
       const after = await readOrderMoney(admin, clientId, orderId);
       return {
@@ -565,6 +666,7 @@ export async function chargeInvoicePayment(
     await closeAttempt("closed_unknown", `charge ${auth.retref} succeeded but the payments insert failed: ${msg}`, {
       retref: auth.retref,
       respstat: "A",
+      ...verified,
     });
     await logFault(
       "payment_recorded_failed",
@@ -586,6 +688,7 @@ export async function chargeInvoicePayment(
     retref: auth.retref,
     payment_id: payment.id,
     respstat: "A",
+    ...verified,
   });
 
   const after = await readOrderMoney(admin, clientId, orderId);
@@ -601,6 +704,48 @@ export async function chargeInvoicePayment(
     balanceCents: after ? (after.owedCents ?? 0) - after.settledCents : 0,
     already: false,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// The merchant a charge was taken on.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** The merchant account one charge was taken on. The environment joins the MID here when
+ *  test and live accounts are told apart (workstream 1 phase 3). */
+export type MerchantOfRecord = { merchid: string };
+
+/**
+ * The MID each charge was TAKEN ON, keyed by String(attempt id), read off the attempt rows
+ * (payment_attempts.merchid, written before the card was touched).
+ *
+ * Void, refund, settlestat and the recovery inquire must ask the account that HOLDS the
+ * transaction. Until 2026-10 they asked the tenant's CURRENT one (client_settings, or the
+ * deployment default when that was blank), so a builder whose MID changed after a sale could no
+ * longer void, refund or reconcile it: the gateway was asked about a retref on an account that
+ * never saw it.
+ *
+ * An id with no row, or a row with a blank MID, is simply ABSENT from the map. The caller refuses
+ * and logs; nothing here or there falls back to the current MID. Throws on a read error, so "the
+ * database did not answer" can never be mistaken for "no such attempt".
+ */
+export async function merchantOfRecord(
+  admin: Admin,
+  clientId: string,
+  attemptIds: unknown[],
+): Promise<Map<string, MerchantOfRecord>> {
+  const out = new Map<string, MerchantOfRecord>();
+  // payment_attempts.id is a bigint: anything else is not an attempt id, and asking Postgres to
+  // cast it would fail the whole read.
+  const ids = [...new Set(attemptIds.map((v) => (v == null ? "" : String(v).trim())).filter((v) => /^\d{1,19}$/.test(v)))];
+  if (!ids.length) return out;
+  const { data, error } = await admin.from("payment_attempts")
+    .select("id, merchid").eq("client_id", clientId).in("id", ids);
+  if (error) throw new Error(`merchantOfRecord: ${String(error.message ?? error.code ?? "read failed")}`);
+  for (const row of Array.isArray(data) ? data : []) {
+    const merchid = typeof row?.merchid === "string" ? row.merchid.trim() : "";
+    if (row?.id != null && merchid) out.set(String(row.id), { merchid });
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────
@@ -622,7 +767,7 @@ export async function resolveUnknownAttempt(
   attemptId: number,
 ): Promise<ResolveResult> {
   const { data: att } = await admin.from("payment_attempts")
-    .select("id, order_id, short_code, amount_cents, rail, merchid, orderid, state, retref, created_at")
+    .select("id, order_id, short_code, amount_cents, rail, orderid, state, retref, created_at")
     .eq("client_id", clientId).eq("id", attemptId).maybeSingle();
   if (!att) return { resolved: false, reason: "not_found" };
   if (att.state !== "closed_unknown" && att.state !== "open") {
@@ -639,9 +784,19 @@ export async function resolveUnknownAttempt(
     if (!(ageMs > STALE_OPEN_MS)) return { resolved: false, reason: "in_flight" };
   }
 
+  // The orderid lives on the account the attempt was made on (merchantOfRecord), which is not
+  // necessarily the tenant's account today. No merchant, no question: the block stays.
+  let merchant: MerchantOfRecord | undefined;
+  try {
+    merchant = (await merchantOfRecord(admin, clientId, [att.id])).get(String(att.id));
+  } catch {
+    return { resolved: false, reason: "merchant_unreadable" };
+  }
+  if (!merchant) return { resolved: false, reason: "no_merchant" };
+
   let found: Record<string, unknown> | null;
   try {
-    found = await cpInquireByOrderId(att.merchid, att.orderid);
+    found = await cpInquireByOrderId(merchant.merchid, att.orderid);
   } catch (e) {
     return { resolved: false, reason: isGatewayUnknown(e) ? "gateway_unreachable" : "inquire_failed" };
   }

@@ -1578,8 +1578,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             // SHAPE: digits only, 12–16 of them. A CardPointe MID is a 12-digit number
             // (the gateway fixtures in _shared/cardpointe.test.ts are 12), and Fiserv has
             // issued longer numeric ids on some front-ends — 16 leaves that headroom without
-            // ever accepting free text. NOTHING IS STRIPPED: "4900-0000-0101" and
-            // "4900 0000 0101" are refused, not silently repunctuated, because a value the
+            // ever accepting free text. NOTHING IS STRIPPED: "1002-0030-0400" and
+            // "1002 0030 0400" are refused, not silently repunctuated, because a value the
             // operator never typed is exactly the class of change that must not happen
             // quietly to the field that decides where money goes.
             throw new Error(

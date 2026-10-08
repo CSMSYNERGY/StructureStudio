@@ -3652,9 +3652,24 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [achChecking, setAchChecking] = useState(false);
   const [achRetry, setAchRetry] = useState(0);       // bumped to re-check unchanged numbers after a failed charge
   const clearAch = () => { setAchRouting(""); setAchAccount(""); setAchLeft({}); setAchChecking(false); };
+  // Name on card, billing street and ZIP for a KEYED card (2026-10): the card's bank checks the
+  // street and ZIP (AVS), and nothing sent them before. Prefilled from pay_options' billingPrefill
+  // (the delivery address on the estimate) and editable, because the card may be billed somewhere
+  // else. Hidden for a swipe (the card is present) and for a bank payment (the server names the
+  // account holder from the estimate, as it always did).
+  const [billName, setBillName] = useState("");
+  const [billStreet, setBillStreet] = useState("");
+  const [billZip, setBillZip] = useState("");
+  const [billErr, setBillErr] = useState("");
   const frameRef = useRef(null);
   const modalRef = useRef(null);
   const chargeable = method === "card" || method === "ach";
+  const keyedCard = method === "card" && entry === "keyed";
+  // The server's ZIP rule (cpBillingFields): 5 digits, or ZIP+4.
+  const billZipOk = /^\d{5}(-?\d{4})?$/.test(billZip.trim());
+  const billProblem = !billName.trim() ? "Enter the name on the card."
+    : !billStreet.trim() ? "Enter the card's billing street address."
+    : !billZipOk ? "Enter the card's billing ZIP code (5 digits)." : "";
 
   // What CAN be charged is decided by the server, never here: the deposit-vs-balance rule,
   // the pending-ACH block and the signature gate all live in portal-payments. The browser
@@ -3684,6 +3699,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       setCollect("recorded"); setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
     }
   }, [payOpts, collect]);
+
+  // Each fresh pay_options answer prefills the billing fields. An older portal-payments sends no
+  // billingPrefill, and an operator or a viewer is sent null: the fields then start empty.
+  useEffect(() => {
+    const p = (payOpts && payOpts.billingPrefill) || {};
+    setBillName(p.name || ""); setBillStreet(p.street || ""); setBillZip(p.zip || ""); setBillErr("");
+  }, [payOpts]);
 
   // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
   // security of this listener — without it any page that opens this one could post a forged
@@ -3764,18 +3786,40 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
   // Whether a surcharge applies cannot be known until the CARD is known — the card brands
   // forbid it on debit, so the same order is one price on one card and another on the next.
-  // Probe once a token exists, and never let a failed probe block a payment.
+  // Probe once a token exists, and never let a failed probe block a payment. A keyed card's
+  // billing ZIP goes with it (a fee can turn on where the card is billed), and a new ZIP asks again.
+  //
+  // ⚠️ CHARGE WAITS FOR THE ANSWER THAT MATCHES WHAT IT SENDS. Each answer is stored with the card
+  // and ZIP it was for (`key`), and Charge stays on "Checking card fee…" until the answer on screen
+  // is the one for the card and ZIP the charge will carry: the gateway adds the fee for THOSE, so
+  // charging on an older answer could take a fee nobody saw. A failed probe, or one with no answer
+  // in FEE_WAIT_MS, counts as "could not look it up" and releases Charge.
+  const FEE_WAIT_MS = 8000;
+  const probeZip = keyedCard && billZipOk ? billZip.trim().replace("-", "") : "";
+  const feeKey = payToken && method === "card" ? `${payToken}|${probeZip}` : "";
+  const probedTokenRef = useRef(null);
   useEffect(() => {
-    if (!payToken || method !== "card") { setSurcharge(null); return; }
+    if (!payToken || method !== "card") { setSurcharge(null); probedTokenRef.current = null; return; }
     let alive = true;
-    (async () => {
-      const { data } = await sb.functions.invoke("portal-payments", {
-        body: { action: "surcharge_probe", payToken },
-      });
-      if (alive && data) setSurcharge(data);
-    })();
-    return () => { alive = false; };
-  }, [payToken, method]);
+    const key = `${payToken}|${probeZip}`;
+    // A new card asks at once; a changed ZIP waits for a 400 ms pause, so one typed toward a ZIP+4
+    // is asked about once it settles rather than at every valid length on the way.
+    const wait = probedTokenRef.current === payToken ? 400 : 0;
+    probedTokenRef.current = payToken;
+    const unknown = { applies: null, percent: null, key };
+    const ask = setTimeout(async () => {
+      let data = null;
+      try {
+        ({ data } = await sb.functions.invoke("portal-payments", {
+          body: { action: "surcharge_probe", payToken, ...(probeZip ? { postal: probeZip } : {}) },
+        }));
+      } catch (_e) { /* answered as unknown below */ }
+      if (alive) setSurcharge(data && !data.error ? { ...data, key } : unknown);
+    }, wait);
+    const giveUp = setTimeout(() => { if (alive) setSurcharge((s) => (s && s.key === key ? s : unknown)); }, wait + FEE_WAIT_MS);
+    return () => { alive = false; clearTimeout(ask); clearTimeout(giveUp); };
+  }, [payToken, method, probeZip]);
+  const feeReady = !feeKey || !!(surcharge && surcharge.key === feeKey);
 
   // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
   // whatever element has focus, fast, ending in Enter. This modal's amount box carries
@@ -3809,11 +3853,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const closePay = () => {
     setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
     setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed"); clearAch();
+    setBillName(""); setBillStreet(""); setBillZip(""); setBillErr("");
   };
 
   const chargeCard = async () => {
     if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
     if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    // Required here, optional on the server: production's portal sends none of these yet.
+    if (keyedCard && billProblem) { setBillErr(billProblem); return; }
+    // The button is off until then (feeReady); this is the belt to that brace.
+    if (!feeReady) return;
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-payments", {
       body: {
@@ -3823,6 +3872,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         payToken,
         expiry: payExpiry || undefined,
         entry,
+        // A keyed card only: a swipe carries its own name, and a bank payment's holder is named
+        // by the server from the estimate.
+        ...(keyedCard ? { name: billName.trim(), address: billStreet.trim(), postal: billZip.trim() } : {}),
         // The echo that keeps three numbers provably identical: what is on screen, what the
         // token was minted against, and what is charged.
         confirmChargeCents: askCents,
@@ -4495,6 +4547,34 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       frameBorder="0" scrolling="no"
                     />
                   )}
+                  {keyedCard && payOpts && payOpts.tokenizer && (
+                    // Name on card, billing street and ZIP: prefilled from the delivery address
+                    // (billingPrefill), editable. autoComplete off: this is the BUILDER's browser,
+                    // and what it would offer is the builder's own name and address.
+                    <div data-ss-billing="1" style={{ marginTop: 10 }}>
+                      <label style={{ display: "block" }}>
+                        <span style={S.lbl}>Name on card</span>
+                        <input style={S.input} value={billName} maxLength={60} autoComplete="off" spellCheck={false}
+                          onChange={(e) => { setBillName(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <label style={{ display: "block", marginTop: 10 }}>
+                        <span style={S.lbl}>Billing street address</span>
+                        <input style={S.input} value={billStreet} maxLength={60} autoComplete="off"
+                          onChange={(e) => { setBillStreet(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <label style={{ display: "block", marginTop: 10 }}>
+                        <span style={S.lbl}>Billing ZIP code</span>
+                        <input style={S.input} value={billZip} maxLength={10} inputMode="numeric" autoComplete="off"
+                          onChange={(e) => { setBillZip(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
+                        {payOpts.billingPrefill && (payOpts.billingPrefill.street || payOpts.billingPrefill.zip)
+                          ? "Filled in from the delivery address. Change it if the card is billed somewhere else."
+                          : "Where the card's statement goes. The card's bank checks the street and ZIP."}
+                      </div>
+                      {billErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{billErr}</div>}
+                    </div>
+                  )}
                   {method === "ach" && payOpts && payOpts.canCharge && payOpts.tokenizer && (
                     // Routing and Checking as two boxes (Carolyn, 2026-09-02). Digits only, no
                     // autofill, nothing remembered — see achTokenize at the top of this file.
@@ -4570,8 +4650,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
                 {collect === "charge" ? (
-                  <button onClick={chargeCard} disabled={busy || !payToken} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken ? 0.55 : 1 }}>
-                    {busy ? "Charging…" : `Charge ${money(askCents + feeCents)}`}
+                  <button onClick={chargeCard} disabled={busy || !payToken || !feeReady} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken || !feeReady ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : !feeReady ? "Checking card fee…" : `Charge ${money(askCents + feeCents)}`}
                   </button>
                 ) : (
                   <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
