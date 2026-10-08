@@ -69,6 +69,16 @@ verify_jwt = false
 # outage's exact shape. An unset secret refuses everything, so it is inert until minted.
 verify_jwt = false
 
+[functions.release-ci]
+# Commit trailers -> What's New ('beta' notes) and Projects "On Beta" moves. Called server to server
+# by .github/workflows/release-notes-on-beta.yml, which cannot mint a Supabase JWT, so the
+# authentication is a shared secret in the x-release-ci-key HEADER (not ?key=, so it stays out of
+# URL logs) <-> RELEASE_CI_SECRET, compared in constant time behind an empty-secret gate. Unset
+# secret = every call 401s. Writes need RELEASE_CI_WRITES=1 as well; without it every call is a
+# dry run. Flip this to true and the gateway 401s every push before the function runs, with
+# nothing logged anywhere -- the billing-webhook outage's exact shape.
+verify_jwt = false
+
 [functions.postmark-events]
 # RESEND (the name is Postmark's, kept: it is an address) posts delivered / opened / bounced /
 # complained / suppressed / failed events here server-to-server, from a webhook of its own (not
@@ -129,10 +139,11 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.admin-import-monday]
-# ONE-SHOT, RETIRED: the Monday→Projects import, run and then DELETED from the project
-# on 2026-08-27 (26 items + updates + assets imported; report in the worklog). The source
-# stays in the repo as the record of the mapping. If it ever needs re-deploying (re-import
-# is idempotent), it is operator-gated + can_write like portal-projects.
+# ONE-SHOT, RETIRED: the Monday→Projects import, run on 2026-08-27 (26 items + updates + assets
+# imported; report in the worklog). The source stays in the repo as the record of the mapping.
+# ⚠️ It was meant to be deleted from the project then, but was found still ACTIVE on 2026-10-09.
+# Since migration 293 (one canonical status list) it refuses every action with a 410: a re-run
+# would match no label text and blank every imported item's status. Operator-gated + can_write.
 verify_jwt = true
 
 [functions.submit-estimate]

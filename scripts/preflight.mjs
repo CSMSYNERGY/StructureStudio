@@ -75,7 +75,9 @@
 //      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
 //      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
 //      without it the step prints a SKIPPED line and blocks nothing — unless CI is set or
-//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead.
+//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead. Then every
+//      `scripts/*.test.mjs` under `node --test` (the release-note nudge's, since 2026-10-09:
+//      until then nothing ran a scripts test at all).
 //   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
 //      standalone HTML file, so the eslint pass never reads its inline script and the deno
 //      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
@@ -1888,6 +1890,26 @@ function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()
   return { errors, skipped: false, files };
 }
 
+// ── Script tests: scripts/*.test.mjs (node --test) ──────────────────────────────────────
+// Tests for the repo's own Node tooling (release-note-nudge.test.mjs first, 2026-10-09). Before
+// this step the gate ran _shared, _test_stubs, tests/phone and tests/sql and NOTHING under scripts/,
+// so a test written there passed review and then never ran — the silent-pass hazard every other
+// step here guards against. Discovered by suffix, like the others, so the next one is covered the
+// day it lands. Same Node as this gate, no shell, run from scripts/ with the file names as given.
+// `dir` is a parameter so --self-test can drive it on a fixture.
+const SCRIPT_TESTS_DIR = "scripts";
+function scriptTests(dir = join(root, SCRIPT_TESTS_DIR)) {
+  if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SCRIPT_TESTS_DIR}/ does not exist`, files: [] };
+  const files = readdirSync(dir).filter((f) => f.endsWith(".test.mjs")).sort();
+  if (!files.length) return { errors: [], skipped: true, why: `no *.test.mjs files in ${SCRIPT_TESTS_DIR}/`, files };
+  const res = spawnSync(process.execPath, ["--test", ...files], { cwd: dir, encoding: "utf8" });
+  if (res.status !== 0) {
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
+    return { errors: [`script tests: node --test failed in ${SCRIPT_TESTS_DIR}/ (exit ${res.status ?? res.signal}; ${files.join(", ")})\n${out}`], skipped: false, files };
+  }
+  return { errors: [], skipped: false, files };
+}
+
 /**
  * Every Settings sub-page must appear in tests/e2e/portal-routes.spec.mjs.
  *
@@ -2831,6 +2853,34 @@ if (process.argv.includes("--self-test")) {
   }
   console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI or SS_REQUIRE_SQL_TESTS=1), and a failing one fails the gate (${realSql.files.length} file(s) found)`);
 
+  // ── The script-test step (scripts/*.test.mjs, node --test) ───────────────────
+  // Discovered for real (the nudge's test must be among them), and on a fixture directory a failing
+  // test fails the gate while a passing one does not.
+  const realScripts = readdirSync(join(root, SCRIPT_TESTS_DIR)).filter((f) => f.endsWith(".test.mjs"));
+  if (!realScripts.includes("release-note-nudge.test.mjs")) {
+    console.error(`self-test FAILED: ${SCRIPT_TESTS_DIR}/release-note-nudge.test.mjs was not discovered by the script-test step`);
+    process.exit(1);
+  }
+  const tmpN = mkdtempSync(join(tmpdir(), "ss-preflight-node-"));
+  try {
+    writeFileSync(join(tmpN, "fails.test.mjs"), 'import { test } from "node:test";\ntest("deliberately failing", () => { throw new Error("boom"); });\n');
+    const failedN = scriptTests(tmpN);
+    if (failedN.skipped || failedN.errors.length !== 1 || !/node --test failed/.test(failedN.errors[0])) {
+      console.error("self-test FAILED: a failing scripts/*.test.mjs did not fail the gate");
+      process.exit(1);
+    }
+    rmSync(join(tmpN, "fails.test.mjs"));
+    writeFileSync(join(tmpN, "passes.test.mjs"), 'import { test } from "node:test";\ntest("fine", () => {});\n');
+    const passedN = scriptTests(tmpN);
+    if (passedN.skipped || passedN.errors.length) {
+      console.error("self-test FAILED: a passing scripts/*.test.mjs failed the gate:\n" + passedN.errors.join("\n"));
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpN, { recursive: true, force: true });
+  }
+  console.log(`self-test passed: scripts/*.test.mjs run under node --test, and a failing one fails the gate (${realScripts.length} file(s) found)`);
+
   // ── The my-quotes tax-breakdown step ───────────────────────────────────────
   // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
   // subject from a file by pattern, so a rename could leave it quietly asserting nothing.
@@ -3342,6 +3392,12 @@ const sql = sqlTests();
 errors.push(...sql.errors);
 if (sql.skipped) {
   console.error(`preflight: migration tests SKIPPED — ${sql.why}.`);
+}
+
+const scriptRes = scriptTests();
+errors.push(...scriptRes.errors);
+if (scriptRes.skipped) {
+  console.error(`preflight: script tests SKIPPED — ${scriptRes.why}.`);
 }
 
 errors.push(...checkStandalonePagesParse({

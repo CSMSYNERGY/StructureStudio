@@ -3,9 +3,11 @@
 #   git config core.hooksPath .githooks
 #   npm install
 #
-# Two checks, in order:
+# Two checks, in order, and one reminder between them:
 #   1. FRESHNESS — refuse to push a branch that is behind its remote. The rule
 #      (Carolyn, 2026-08-02): always `git pull --rebase origin beta` before pushing.
+#   1b. RELEASE-NOTE NUDGE (never blocks) — commits going to beta that change what builders
+#      see but carry no `Release-note:` trailer are named, with the one command that adds it.
 #   2. CORRECTNESS — scripts/preflight.mjs (JSX no-undef and friends across all five
 #      source files, the CDN version lock, cache-buster lockstep, deno check).
 # Zero output means go. Emergency bypass: git push --no-verify — say so in the commit.
@@ -63,6 +65,7 @@ all_zero() {
 }
 
 stale=0
+nudge_ranges=""
 # `|| [ -n "$local_ref" ]` so a final line with no trailing newline is still processed.
 # No pipeline here on purpose: a `while` fed by a pipe runs in a subshell in POSIX sh and
 # $stale would not survive the loop.
@@ -73,6 +76,18 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "$local_ref" ]; 
     *) continue ;;
   esac
   all_zero "$local_oid"  && continue   # deleting the remote ref
+
+  # >>> nudge-collect  (pre-push-selftest.mjs part E moves this block to prove where it must be)
+  # The release-note nudge's input: what this push adds to beta. Collected HERE, before the
+  # brand-new-branch and fast-forward `continue`s below, because an ordinary up-to-date push to
+  # beta IS a fast-forward and takes the first of them; collected after it, the nudge would only
+  # ever see pushes that are about to be refused. Not on a brand-new beta (no remote tip to
+  # measure from), and not here when stale (the push is refused below anyway).
+  if [ "$remote_ref" = "refs/heads/beta" ] && ! all_zero "$remote_oid"; then
+    nudge_ranges="$nudge_ranges $remote_oid..$local_oid"
+  fi
+  # <<< nudge-collect
+
   all_zero "$remote_oid" && continue   # brand-new branch: nothing to be behind
 
   short=${remote_ref#refs/heads/}
@@ -109,6 +124,16 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "$local_ref" ]; 
 done
 
 [ "$stale" -eq 0 ] || exit 1
+
+# ── 1b. Release-note nudge (warning only) ────────────────────────────────────
+# What's New is written by people, in the commit's `Release-note:` trailer (CLAUDE.md, "What's
+# New changelog"); release-ci copies it when the commit lands on beta. This names the commits in
+# this push that change what builders see and carry no trailer. It NEVER blocks: whatever it
+# prints or however it fails, `|| true` keeps the push going, and it is skipped outright when
+# the script is absent (an older checkout, the self-test's lab repositories).
+if [ -n "$nudge_ranges" ] && [ -f scripts/release-note-nudge.mjs ]; then
+  node scripts/release-note-nudge.mjs "$nudge_ranges" || true
+fi
 
 # ── 2. Correctness ───────────────────────────────────────────────────────────
 if [ ! -d node_modules/eslint ]; then
