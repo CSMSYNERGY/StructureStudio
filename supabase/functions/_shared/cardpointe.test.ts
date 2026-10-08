@@ -412,14 +412,19 @@ Deno.test("cpAuth cleans the billing fields itself, whoever built the request", 
   check("street has no newline", !/[\n\r]/.test(String(body.address)), JSON.stringify(body.address));
   check("street capped at 60", String(body.address).length <= 60, String(String(body.address).length));
   check("a malformed ZIP is left off, not sent", !("postal" in body), JSON.stringify(body));
+  // A ZIP+4 typed with its dash is ten characters; the wire carries the nine digits.
+  const plus4 = (await sentBody({ ...REQ, postal: "12345-6789" })).body;
+  check("ZIP+4 goes out as nine digits", plus4.postal === "123456789", JSON.stringify(plus4.postal));
 });
 
-Deno.test("cpBillingFields: trim, strip controls, cap the street at 60, keep only a real ZIP", () => {
+Deno.test("cpBillingFields: trim, strip controls, cap the street at 60, keep only a real ZIP (ZIP+4 as nine digits)", () => {
   const NUL = String.fromCharCode(0), BEL = String.fromCharCode(7), NEL = String.fromCharCode(0x85);
   const cases: [string, unknown, Record<string, string>][] = [
     ["all three, clean", { name: "Pat Example", address: "12 Main St", postal: "12345" }, { name: "Pat Example", address: "12 Main St", postal: "12345" }],
     ["trimmed", { name: "  Pat  ", address: "  12 Main St  ", postal: " 12345 " }, { name: "Pat", address: "12 Main St", postal: "12345" }],
-    ["ZIP+4 with a dash", { postal: "12345-6789" }, { postal: "12345-6789" }],
+    // Nine digits on the wire, dash removed: the gateway's US postal is 5 or 9 digits (AN 9).
+    ["ZIP+4 with a dash: sent as nine digits", { postal: "12345-6789" }, { postal: "123456789" }],
+    ["ZIP+4 with a dash, padded", { postal: " 02134-0001 " }, { postal: "021340001" }],
     ["ZIP+4 without one", { postal: "123456789" }, { postal: "123456789" }],
     ["four digits: dropped", { postal: "1234" }, {}],
     ["six digits: dropped", { postal: "123456" }, {}],

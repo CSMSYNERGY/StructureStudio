@@ -331,14 +331,21 @@ function cpCleanText(v: unknown, max: number): string | undefined {
   return s || undefined;
 }
 
+/** The cap on the name and the street, here and in both pages' maxLength. ⚠️ Unconfirmed against
+ *  the gateway: CardPointe's auth spec may cap both at 30 (AN 30). The UAT sale with a 31+
+ *  character street settles it before promotion; if 30 is enforced, change this and both pages. */
+const CP_BILLING_TEXT_MAX = 60;
+
 /**
  * Name, street and ZIP from a request body (`name`, `address`, `postal`), cleaned for /auth.
  *
- * Trimmed, control characters out, runs of space collapsed. Name and street are capped at 60.
- * The ZIP is KEPT ONLY when it is a US ZIP or ZIP+4 (`12345`, `12345-6789`, `123456789`): a
- * malformed one is dropped rather than sent, because a garbage ZIP is an AVS mismatch the card's
- * bank may decline on, where a missing one is only "not checked". Anything absent, blank or not
- * a string is left out of the result, never sent as an empty field.
+ * Trimmed, control characters out, runs of space collapsed. Name and street are capped at
+ * CP_BILLING_TEXT_MAX. The ZIP is KEPT ONLY when it is a US ZIP or ZIP+4 (`12345`, `12345-6789`,
+ * `123456789`): a malformed one is dropped rather than sent, because a garbage ZIP is an AVS
+ * mismatch the card's bank may decline on, where a missing one is only "not checked". A kept
+ * ZIP+4 goes out as NINE DIGITS, dash removed: a US postal code is 5 or 9 digits on the gateway's
+ * side (AN 9), and `12345-6789` is ten characters. Anything absent, blank or not a string is left
+ * out of the result, never sent as an empty field.
  *
  * Every field is OPTIONAL here, on purpose: production's pages send none of them, and the server
  * must keep taking exactly what they send. The pages are what require them.
@@ -346,12 +353,12 @@ function cpCleanText(v: unknown, max: number): string | undefined {
 export function cpBillingFields(raw: unknown): CpBilling {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const out: CpBilling = {};
-  const name = cpCleanText(r.name, 60);
-  const address = cpCleanText(r.address, 60);
+  const name = cpCleanText(r.name, CP_BILLING_TEXT_MAX);
+  const address = cpCleanText(r.address, CP_BILLING_TEXT_MAX);
   const zip = typeof r.postal === "string" ? r.postal.trim() : "";
   if (name) out.name = name;
   if (address) out.address = address;
-  if (/^\d{5}(-?\d{4})?$/.test(zip)) out.postal = zip;
+  if (/^\d{5}(-?\d{4})?$/.test(zip)) out.postal = zip.replace("-", "");
   return out;
 }
 
