@@ -3781,6 +3781,29 @@ function taxCodesUnavailable(err) {
   return /Unrecogni[sz]ed action|^Unknown action\b/i.test(String(err.message || ""));
 }
 
+// ─── Your sales tax rate (Settings → Company → Tax, 2026-10-09) ───
+// The company rate (client_settings.ss_tax_rate / ss_tax_label / ss_tax_delivery, migration 158)
+// lived only on CRM Connection → Estimates & Invoices; it is set here now, through
+// save_company_tax, and that card shows a read-only summary with a link back. Nothing about how
+// tax is worked out changes: every taxable item gets the one rate the chain picks (a rate verified
+// for the delivery address, else the sales location's own, else this one), and an item marked not
+// taxable in the catalog is never taxed.
+//
+// THE BLOCK RENDERS ONLY WHEN tax_codes_get ANSWERS companyRatePct (null included: no rate yet).
+// A portal-settings older than this page leaves the key out, and the tab then looks exactly as it
+// did, with no box offering a save the function cannot take (the salesTaxModeGate lesson).
+//
+// Never word it as tax "figured from each estimate's delivery address": a verified rate exists only
+// where someone pressed Verify. The CRM card's help text once said lookups ran on every estimate,
+// and a builder reading it believed every estimate was being checked.
+const ssHasCompanyTax = (d) => !!d && !d.err && Object.prototype.hasOwnProperty.call(d, "companyRatePct");
+// The stored values as the form holds them: strings for the boxes, a boolean for the tick.
+const ssCompanyTaxForm = (d) => ({
+  rate: d.companyRatePct == null ? "" : String(d.companyRatePct),
+  label: d.companyLabel || "",
+  delivery: d.ssTaxDelivery === true,
+});
+
 // One row's code picker: the chosen code with a Change button, or a type-ahead over
 // tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the
 // common codes first with their hints. The search reads the stored catalog; nothing here reaches
@@ -3887,13 +3910,20 @@ function TaxCodePicker({ code, info, onPick, disabled = false }) {
   );
 }
 
-function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
+function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection = null }) {
   const [data, setData] = useState(null);       // tax_codes_get answer | { err, unavailable } | null while loading
   const [rows, setRows] = useState([]);         // the editor's working copy: [{ rid, title, code, targets: [id] }]
   const [codeInfo, setCodeInfo] = useState({}); // code → { code, description, typeId, isActive, hint }
   const [openRid, setOpenRid] = useState(null); // the row whose checklist is open
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);         // { ok } | { err }
+  // "Your sales tax rate": the boxes (see ssCompanyTaxForm), its save, and the "Use tax codes"
+  // switch, which saves the moment it is flipped and flips back if the save is refused.
+  const [rateForm, setRateForm] = useState({ rate: "", label: "", delivery: false });
+  const [rateBusy, setRateBusy] = useState(false);
+  const [rateMsg, setRateMsg] = useState(null); // { ok } | { err }
+  const [codesBusy, setCodesBusy] = useState(false);
+  const [codesMsg, setCodesMsg] = useState(null); // { ok } | { err }
   const ridSeq = useRef(0);
   // Latest load wins, the LocationsCard rule: a slow first answer must not land over a retry's.
   const loadSeq = useRef(0);
@@ -3920,9 +3950,53 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
     const saved = taxSavedRows(d);
     setRows(withRids(saved.length ? saved : taxSuggestedRows(d)));
     setOpenRid(null);
+    if (ssHasCompanyTax(d)) setRateForm(ssCompanyTaxForm(d));
     setData(d);
   }, [canReadTax]);
   useEffect(() => { load(); }, [load]);
+
+  // Only what CHANGED is sent. ss_tax_delivery has a second editor (Options → Delivery's Taxable),
+  // so a tab opened before someone changed it there must not write the old value back with a rate.
+  const companyTax = ssHasCompanyTax(data);
+  const storedRate = companyTax ? ssCompanyTaxForm(data) : null;
+  const rateChanges = {};
+  if (storedRate) {
+    if (rateForm.rate.trim() !== storedRate.rate) rateChanges.ssTaxRate = rateForm.rate;
+    if (rateForm.label.trim() !== storedRate.label) rateChanges.ssTaxLabel = rateForm.label;
+    if (rateForm.delivery !== storedRate.delivery) rateChanges.ssTaxDelivery = rateForm.delivery;
+  }
+  const rateDirty = Object.keys(rateChanges).length > 0;
+  const saveRate = async () => {
+    if (!rateDirty || rateBusy) return;
+    setRateBusy(true); setRateMsg(null);
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_company_tax", ...rateChanges } });
+    setRateBusy(false);
+    // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's sentence.
+    if (error || !res || res.error || !ssHasCompanyTax(res)) {
+      setRateMsg({ err: (res && res.error) || (error && error.message) || "Couldn't save your sales tax rate." });
+      return;
+    }
+    // The answer is what is stored; ssMode with it, because a first save creates the row.
+    const stored = { ssMode: res.ssMode === true, companyRatePct: res.companyRatePct, companyLabel: res.companyLabel, ssTaxDelivery: res.ssTaxDelivery === true };
+    setData((cur) => (cur && !cur.err ? { ...cur, ...stored } : cur));
+    setRateForm(ssCompanyTaxForm(stored));
+    setRateMsg({ ok: stored.companyRatePct == null ? "Saved — your estimates have no company rate now." : `Saved — your sales tax rate is ${stored.companyRatePct}%.` });
+  };
+  const setCodesOn = async (next) => {
+    if (!data || data.err || typeof data.taxCodesEnabled !== "boolean" || codesBusy || next === data.taxCodesEnabled) return;
+    const prev = data.taxCodesEnabled;
+    setCodesBusy(true); setCodesMsg(null);
+    setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: next } : cur));
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_company_tax", taxCodesEnabled: next } });
+    setCodesBusy(false);
+    if (error || !res || res.error || typeof res.taxCodesEnabled !== "boolean") {
+      setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: prev } : cur));
+      setCodesMsg({ err: (res && res.error) || (error && error.message) || "Couldn't change the tax codes setting." });
+      return;
+    }
+    setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: res.taxCodesEnabled } : cur));
+    setCodesMsg({ ok: res.taxCodesEnabled ? "Tax codes are on." : "Tax codes are off. The codes you saved are kept." });
+  };
 
   const d = data && !data.err ? data : null;
   const targets = useMemo(() => taxTargetsOf(d), [d]);
@@ -4044,9 +4118,97 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
       : <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Nothing yet</span>;
   };
 
-  return (
+  // The "Use tax codes" switch shows only when the answer carries it as a boolean: a function older
+  // than migration 290's read leaves it out, and a database without 290 answers null. Either way
+  // the editor shows as it always has. Off folds the editor to one line; every saved code is kept.
+  const switchShown = !!d && typeof d.taxCodesEnabled === "boolean";
+  const codesOff = switchShown && d.taxCodesEnabled === false;
+  const rateInput = { ...S.input, maxWidth: 220 };
+  // Same-document navigation where the shell handed us a way to do it, a plain link otherwise:
+  // ssPagePath keeps ?view=, so an operator's view-as survives either way.
+  const connectionLink = (text) => (
+    <a href={ssPagePath("settings", "connection")} onClick={onOpenConnection ? ssNavClick(onOpenConnection) : undefined}
+      style={{ color: ACCENT, fontWeight: 700 }}>{text}</a>
+  );
+
+  return (<>
+    {companyTax && (
+      <div style={S.card} data-company-tax="">
+        <div style={S.h2}>Your sales tax rate</div>
+        {/* What the rate does depends on who issues this builder's estimates. In paperwork mode it is
+            the rate on every taxable item unless a closer one applies. In CRM mode with a CRM
+            connected the CRM works the tax out (submit-estimate sends the CRM's estimate). In CRM
+            mode with NO CRM every estimate is refused today (submit-estimate's first check), and
+            the way out is the paperwork switch on CRM Connection, which needs this rate saved
+            first: that card's save judges the STORED rate since it stopped posting one. */}
+        <div data-company-tax-copy="" style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
+          {d.ssMode === true
+            ? <>Charged on every taxable item. Items marked not taxable in your catalog are never taxed. A sales location's own rate, or a rate verified for the delivery address, is used instead. Enter 0 if you don't collect sales tax.</>
+            : d.crmConfigured === true
+              ? <>Your CRM works out the tax on your estimates, so this rate isn't used.</>
+              : <>Your estimates can't go out until you switch to StructureStudio paperwork. Save your rate here first (0 counts), then {connectionLink("make the switch on CRM Connection")}.</>}
+          {!canEditTax && " Only someone who can edit CRM Connection settings can change this."}
+        </div>
+        {canEditTax ? (<>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, maxWidth: 520 }}>
+            <div><span style={S.lbl}>Sales tax rate (%)</span>
+              <input style={rateInput} value={rateForm.rate} disabled={rateBusy} placeholder="e.g. 7.25" inputMode="decimal" aria-label="Sales tax rate (%)"
+                onChange={(e) => { const v = e.target.value; setRateMsg(null); setRateForm((f) => ({ ...f, rate: v })); }} /></div>
+            <div><span style={S.lbl}>Tax label on documents</span>
+              <input style={rateInput} value={rateForm.label} disabled={rateBusy} placeholder="Sales tax" maxLength={40} aria-label="Tax label on documents"
+                onChange={(e) => { const v = e.target.value; setRateMsg(null); setRateForm((f) => ({ ...f, label: v })); }} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on estimates and invoices.</div></div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 10 }}>
+            <input type="checkbox" checked={rateForm.delivery} disabled={rateBusy}
+              onChange={(e) => { const v = e.target.checked; setRateMsg(null); setRateForm((f) => ({ ...f, delivery: v })); }} />
+            Charge tax on delivery
+          </label>
+        </>) : (
+          <div data-company-tax-readonly="" style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.6 }}>
+            <div><b>Rate:</b> {d.companyRatePct == null ? "not set" : `${d.companyRatePct}%`}</div>
+            <div><b>Label on documents:</b> {d.companyLabel || "Sales tax"}</div>
+            <div><b>Tax on delivery:</b> {d.ssTaxDelivery === true ? "yes" : "no"}</div>
+          </div>
+        )}
+        {/* Paperwork mode with no rate on file: an estimate whose sales location has no rate of its
+            own is refused (submit-estimate's no_tax_rate). From the STORED value, not the box. */}
+        {d.ssMode === true && d.companyRatePct == null && (
+          <div data-company-tax-warning="" style={{ marginTop: 12, maxWidth: 780, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            No sales tax rate is set. An estimate whose sales location has no rate of its own can't go out until you save one (0 counts).
+          </div>
+        )}
+        {canEditTax && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+            <button type="button" onClick={saveRate} disabled={rateBusy || !rateDirty} style={S.btn(rateDirty ? ACCENT : "#CBD5E1", "#FFF")}>
+              {rateBusy ? "Saving…" : "Save tax rate"}
+            </button>
+            {!rateBusy && <span style={{ fontSize: 12, color: "#64748B" }}>{rateDirty ? "Unsaved changes" : "No changes to save"}</span>}
+          </div>
+        )}
+        {rateMsg && rateMsg.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{rateMsg.ok}</div>}
+        {rateMsg && rateMsg.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{rateMsg.err}</div>}
+      </div>
+    )}
+
     <div style={S.card}>
       <div style={S.h2}>Tax codes</div>
+      {switchShown && (
+        <label data-tax-codes-switch="" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 10, cursor: canEditTax ? "pointer" : "default" }}>
+          <input type="checkbox" checked={d.taxCodesEnabled === true} disabled={!canEditTax || codesBusy}
+            onChange={(e) => setCodesOn(e.target.checked)} />
+          Use tax codes
+          {codesBusy && <span style={{ fontSize: 12, fontWeight: 500, color: "#64748B" }}>Saving…</span>}
+        </label>
+      )}
+      {codesMsg && codesMsg.ok && <div style={{ ...S.okMsg, marginTop: 0, marginBottom: 10 }}>{codesMsg.ok}</div>}
+      {codesMsg && codesMsg.err && <div style={{ ...S.err, marginTop: 0, marginBottom: 10 }}>{codesMsg.err}</div>}
+      {codesOff && (
+        <div data-tax-codes-off="" style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, maxWidth: 780 }}>
+          Tax codes are off.{d.ssMode === true ? " Every taxable item is charged the rate above." : ""} Any codes you saved are kept.
+        </div>
+      )}
+      {!codesOff && (<>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
         Every building, option and service you sell falls under a tax code from Avalara's list. Pick a code, then tick
         everything that code covers — each building style and option heading takes one code. You (or your accountant)
@@ -4202,8 +4364,9 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
             : "Only Avalara's common codes are listed until CSM Synergy loads the full list."}
         </div>
       )}
+      </>)}
     </div>
-  );
+  </>);
 }
 
 // ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
@@ -4352,8 +4515,10 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
       {sub === "crews" && <DriversTerritoriesCard section="crews" />}
       {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
       {/* The whole tab is settings_crm (SETTINGS_TAB_AREA.tax), so reading is already implied by
-          the tab being here; editing is passed separately, the same pair LocationsCard gets. */}
-      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} />}
+          the tab being here; editing is passed separately, the same pair LocationsCard gets. The
+          company rate block's "switch to StructureStudio paperwork" link opens CRM Connection
+          (also settings_crm) without leaving the page. */}
+      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} onOpenConnection={() => onSub("connection")} />}
     </div>
   );
 }
@@ -4426,7 +4591,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           canReadTax={isAdmin || !access || ssCanRead(access, "settings_crm")}
           canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
       )}
-      {sub === "connection" && <SettingsView section="connection" />}
+      {/* The company rate lives on Company → Tax now; the Estimates & Invoices card links there. */}
+      {sub === "connection" && <SettingsView section="connection" onOpenTax={() => setSub("tax")} />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked

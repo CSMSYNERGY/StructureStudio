@@ -28,7 +28,7 @@ function ssQuoteDaysOk(v) {
   return n >= 1 && n <= 365;
 }
 
-function SettingsView({ section, view3d = false }) {
+function SettingsView({ section, view3d = false, onOpenTax = null }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
   // display + testing). No section = all (legacy). Form state always covers
@@ -70,7 +70,8 @@ function SettingsView({ section, view3d = false }) {
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
-    ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
+    // (The company sales tax rate, its label and tax on delivery left this form on 2026-10-09: they
+    // are set on Company → Tax, and the Estimates & Invoices card reads them from `status`.)
     // Changing a signed order (migrations 209-216). coUnlockRequired defaults FALSE and
     // that is load-bearing: with it off the whole approval-and-fee regime is dormant and
     // every tenant behaves exactly as they did before the feature existed.
@@ -187,12 +188,6 @@ function SettingsView({ section, view3d = false }) {
         ssQuotePrefix: data.ssQuotePrefix || "",
         ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
         ssInvoicePrefix: data.ssInvoicePrefix || "",
-        // Sales tax (migration 158). The status call surfaces the stored fraction as a
-        // PERCENT; blank means "never answered", which the server refuses to let SS-issued
-        // mode start with — 0 is a legitimate explicit answer, silence is not.
-        ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
-        ssTaxLabel: data.ssTaxLabel || "",
-        ssTaxDelivery: Boolean(data.ssTaxDelivery),
         coUnlockRequired: Boolean(data.coUnlockRequired),
         coFreeDays: data.coFreeDays == null ? "0" : String(data.coFreeDays),
         coFee: data.coFee == null ? "0" : String(data.coFee),
@@ -290,6 +285,12 @@ function SettingsView({ section, view3d = false }) {
   // the saved counter as status reports it, so the preview never promises 1000 to a builder whose
   // numbering has moved on.
   const blankStart = (stored) => (stored == null || stored === "" ? "1000" : String(stored));
+  // The company rate's home since 2026-10-09: Company → Tax. A same-document switch where the shell
+  // gave us one (SettingsShell's setSub), a plain link otherwise; ssPagePath keeps ?view=.
+  const taxLink = (text, color = ACCENT) => (
+    <a href={ssPagePath("settings", "tax")} onClick={onOpenTax ? ssNavClick(onOpenTax) : undefined}
+      style={{ color, fontWeight: 700, textDecoration: "underline" }}>{text}</a>
+  );
 
   // SALES TAX SUMMARY — read-only, under the company rate (Avalara plan, 2026-09-17). Which rate
   // a quote charges is no longer just the box on this card: a sales location's own rate beats
@@ -354,9 +355,11 @@ function SettingsView({ section, view3d = false }) {
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
       ssInvoicePrefix: form.ssInvoicePrefix,
-      ssTaxRate: form.ssTaxRate,
-      ssTaxLabel: form.ssTaxLabel,
-      ssTaxDelivery: form.ssTaxDelivery,
+      // NO ssTaxRate / ssTaxLabel / ssTaxDelivery (2026-10-09). The company rate is set on Company →
+      // Tax (save_company_tax). Posting this card's copy of it on every save would write back a
+      // value read when the tab opened over a rate changed there since. `save`'s paperwork guard
+      // reads the STORED rate when the key is absent, so moving to paperwork with no rate on file
+      // is still refused with the server's sentence.
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
@@ -593,7 +596,7 @@ function SettingsView({ section, view3d = false }) {
           the last number issued under the prefix, so a book never restarts at 1. A box cleared
           over a counter already in use keeps that counter (the server ignores the blank), and
           the preview says so. The tax rate is still required (the server refuses the save
-          without one). */}
+          without one), and it is set on Company → Tax: this card summarises it and links there. */}
       <div style={S.card}>
         <div style={S.h2}>Estimates &amp; Invoices</div>
         {mayGhlInvoice && (
@@ -629,31 +632,21 @@ function SettingsView({ section, view3d = false }) {
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || blankStart(status && status.ssInvoiceNext))}.</div></div>
           </div>
         )}
-        {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
-            own documents. The rate here is the COMPANY rate, and it is the last rung a quote
-            can land on: a rate verified for the delivery address wins, then the quote's
-            sales location's own rate (migration 244), then this. Nothing looks an address up
-            on its own — a verified rate only exists where someone asked for one. That is why
-            the server refuses to flip SS mode on while this is blank: with no location rate
-            either, a quote would have nothing to charge. 0 is a real answer, "unanswered" is
-            not.
-
-            The help text used to say tax was "figured from each quote's delivery address" and
-            this rate charged "when that lookup can't resolve". Neither was true once lookups
-            stopped running on every submit, and a builder reading it would believe every
-            quote was being checked. */}
+        {/* Sales tax (migration 158). SS mode only: in CRM mode the CRM computes tax on its
+            own documents. The rate is the COMPANY rate, and it is the last rung an estimate can
+            land on: a rate verified for the delivery address wins, then the estimate's sales
+            location's own rate (migration 244), then this. Since 2026-10-09 it is SET on Company →
+            Tax (save_company_tax) and only SUMMARISED here, from `status` (the stored values, not
+            a form): two editors of one rate would let a stale tab write an old value back. The
+            server still refuses to flip SS mode on while it is blank; 0 is a real answer,
+            "unanswered" is not. */}
         {ssMode && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
-            <div><span style={S.lbl}>Sales tax rate (%)</span>
-              <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every estimate unless the estimate's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
-            <div><span style={S.lbl}>Tax label on documents</span>
-              <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on estimates and invoices.</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
-                <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
-                Charge tax on delivery
-              </label></div>
+          <div data-company-tax-summary="" style={{ marginTop: 12, maxWidth: 620, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginBottom: 4 }}>Company sales tax rate</div>
+            {status && status.ssTaxRate != null
+              ? <><b>{status.ssTaxRate}%</b>, shown on documents as “{status.ssTaxLabel || "Sales tax"}”, {status.ssTaxDelivery === true ? "also charged on delivery" : "not charged on delivery"}.</>
+              : <>Not set yet.</>}
+            {" "}{taxLink("Change it in Company → Tax")}
           </div>
         )}
         {/* Read-only: where else a quote's rate can come from, and whether verified lookups
@@ -687,10 +680,11 @@ function SettingsView({ section, view3d = false }) {
             })()}
           </div>
         )}
-        {/* Only the tax rate is still required: a blank starting number begins at 1000 (283). */}
-        {ssMode && !String(form.ssTaxRate).trim() && (
-          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Before saving, set your sales tax rate (0 counts).
+        {/* Only the tax rate is still required: a blank starting number begins at 1000 (283). It is
+            the STORED rate that counts (this card no longer posts one), so the banner reads status. */}
+        {ssMode && status && status.ssTaxRate == null && (
+          <div data-company-tax-needed="" style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Before saving, set your sales tax rate in {taxLink("Company → Tax", "#B45309")} (0 counts).
             Without a company tax rate, an estimate whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
@@ -4514,9 +4508,10 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
             <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
             Taxable
-            {/* The twin of "Charge tax on delivery" on CRM Connection → Quotes & Invoices (both write
-                ss_tax_delivery). It used to point at Company → Business details, which has no such switch. */}
-            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Estimates &amp; Invoices)</span>
+            {/* The twin of "Charge tax on delivery" on Company → Tax (both write ss_tax_delivery;
+                until 2026-10-09 the other one was on CRM Connection → Estimates & Invoices). It used to
+                point at Company → Business details, which has no such switch. */}
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as Company &rarr; Tax)</span>
           </label>
 
           <div>

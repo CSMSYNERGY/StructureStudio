@@ -1405,7 +1405,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // and no rail item that leads to it.
     ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team")
       || ssCanRead(access, "settings_crm"))
-      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and tax codes", null]] : []),
+      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and sales tax", null]] : []),
     // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
     // to move the subscriptions and the wallet in there"). Subscription and Wallet are its
     // tabs — see ssBillingTabs.
@@ -1508,8 +1508,10 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
     // and delivery carry an Avalara tax code the builder picks). Last, so the order Carolyn
     // gave for the tabs above is untouched. Gated on settings_crm through SETTINGS_TAB_AREA
-    // like every tab here; the hub gate in ssSettingsTabs admits that area for it.
-    ["tax", "Tax", "Which Avalara tax code each building, option and service falls under"],
+    // like every tab here; the hub gate in ssSettingsTabs admits that area for it. Since
+    // 2026-10-09 it is also where the company sales tax rate is set, and the codes are optional
+    // (the "Use tax codes" switch, migration 290).
+    ["tax", "Tax", "Your sales tax rate, and optional tax codes for each building, option and service"],
   ].filter(([id]) => {
     if (isAdmin || !access) return true;
     const area = SETTINGS_TAB_AREA[id];
