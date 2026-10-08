@@ -51,8 +51,9 @@
 -- retry the same insert/update without the four keys (_shared/invoicePayment.ts M291_KEYS). So the
 -- order between this file and those deploys cannot stop a charge. Still apply this FIRST, so the
 -- very first attempt after the deploy carries its fields. Functions deployed before this branch
--- never name the columns. ADD COLUMN takes a brief ACCESS EXCLUSIVE lock on payment_attempts,
--- which every charge writes, so lock_timeout makes a hung apply give up instead of queueing them.
+-- never name the columns. The file locks payment_attempts against writes from before its snapshot
+-- to its commit (EXCLUSIVE, then the ADD COLUMN's brief ACCESS EXCLUSIVE). Every charge writes that
+-- table, so lock_timeout makes a hung apply give up instead of queueing them.
 -- `notify pgrst` at the end reloads PostgREST's schema cache, or the new columns would answer
 -- PGRST204 until it next reloaded on its own.
 --
@@ -68,6 +69,12 @@ begin;
 -- The ALTER takes ACCESS EXCLUSIVE on payment_attempts (brief: a catalog change). A hung apply must
 -- give up rather than sit in front of every charge's attempt insert.
 set local lock_timeout = '5s';
+
+-- Writes stop HERE, before the snapshot, not at the ALTER below (281's order). Without it a charge
+-- inserting or closing its attempt between the two statements made the "no row moved" check fail
+-- the apply at a busy moment. EXCLUSIVE still lets a read through; an attempt insert waits the
+-- few milliseconds this file takes. Held to the commit.
+lock table public.payment_attempts in exclusive mode;
 
 -- Every row BEFORE anything here runs, whole, so the checks can prove no row moved. As jsonb so the
 -- same snapshot works on a first apply (no 291 columns yet) and on a re-apply (columns present and
@@ -134,7 +141,7 @@ begin
     raise exception '291: these payment_attempts rows changed during the apply: %', v_moved;
   end if;
   if (select count(*) from m291_before) <> (select count(*) from public.payment_attempts) then
-    raise exception '291: the row count moved during the apply — a charge landed mid-apply; run it again';
+    raise exception '291: the row count moved during the apply, which the lock above should make impossible; nothing was committed';
   end if;
 
   -- ── Still service-role only, as 174 left it: RLS on, no policy, nothing for the browser roles ──

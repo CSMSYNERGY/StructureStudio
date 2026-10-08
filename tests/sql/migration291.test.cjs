@@ -261,6 +261,31 @@ const STATEMENT = /  add column if not exists cvvresp     text;\r?\n/;
     await db.close();
   }
 
+  // ── 4b. Writes are locked out BEFORE the snapshot, not only at the ALTER ───────────────────
+  // Without it a charge closing its attempt between the snapshot and the ALTER failed the "no row
+  // moved" check at a busy moment. PGlite has one connection, so the race itself cannot be staged
+  // here: this proves the order in the file and that the lock really is held at the snapshot.
+  console.log("migration 291: payment_attempts is locked against writes before the snapshot is taken");
+  {
+    const t = MIG_TEXT().replace(/\r\n/g, "\n");
+    const iBegin = t.indexOf("\nbegin;");
+    const at = (needle) => t.indexOf(needle, iBegin);
+    const iTimeout = at("set local lock_timeout = '5s';");
+    const iLock = at("lock table public.payment_attempts in exclusive mode;");
+    const iSnap = at("create temp table m291_before");
+    const iAlter = at("alter table public.payment_attempts");
+    ok(iBegin > 0 && iTimeout > iBegin && iLock > iTimeout && iSnap > iLock && iAlter > iSnap,
+      "begin; then lock_timeout, then the EXCLUSIVE lock, then the snapshot, then the ALTER", JSON.stringify({ iBegin, iTimeout, iLock, iSnap, iAlter }));
+    const db = await fresh();
+    let err = null;
+    try { await db.exec(t.slice(iBegin, iSnap)); } catch (e) { err = e.message; }
+    ok(!err, "the file up to the snapshot runs", err);
+    const held = await rows(db, "select mode from pg_locks where relation = 'public.payment_attempts'::regclass and granted");
+    ok(held.some((r) => r.mode === "ExclusiveLock"), "and at the snapshot the table is held in EXCLUSIVE mode (reads pass, writes wait)", JSON.stringify(held));
+    await db.exec("rollback");
+    await db.close();
+  }
+
   // ── 5. A CRLF checkout of the file applies the same ─────────────────────────────────────────
   console.log("migration 291: a Windows (CRLF) checkout applies the same");
   {
