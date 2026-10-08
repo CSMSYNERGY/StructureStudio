@@ -14,7 +14,7 @@
 //     intake): it finishes where it started;
 //   * for save_intake only, a draft already saved (status past 'none'): editing it makes nothing,
 //     and the refusal comes at its first submit instead;
-//   * our own internal account (structure-studio) and any tenant pinned to the parent (a kind
+//   * our own internal account and any tenant pinned to the parent (a kind
 //     'parent' twilio_accounts row): they live on the parent by decision.
 // A pure module, so tests/phone drives every case; the reads are portal-sms's.
 
