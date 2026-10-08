@@ -71,9 +71,11 @@ async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0:
   // TWILIO_SUBACCOUNTS is "on" (twilioSignature.ts); off, this is the parent check it always was.
   const check = await verifyTwilioRequest(envIn, req, { accountBySid: webhookAccountLookup(envIn, () => adminClient(envIn)) });
   if (!check.ok) {
-    // A missing secret, or an account lookup that failed, is OUR fault: an error. A bad key or
-    // signature is someone else's request being correctly refused: info, and throttled.
-    const misconfigured = check.reason === "no_webhook_secret" || check.reason === "account_lookup_failed";
+    // A missing secret, an account lookup that failed, or (sub-accounts on) a missing parent token
+    // is OUR fault: an error. A bad key or signature is someone else's request being correctly
+    // refused: info, and throttled.
+    const misconfigured = check.reason === "no_webhook_secret" || check.reason === "account_lookup_failed"
+      || check.reason === "parent_token_missing";
     ec.waitUntil(logFault({
       code: `twilio_${check.reason}`,
       severity: misconfigured ? "error" : "info",
@@ -81,6 +83,8 @@ async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0:
         ? "Refusing every Twilio request: PHONE_WEBHOOK_SECRET is not set."
         : check.reason === "account_lookup_failed"
         ? `Refused a Twilio webhook on ${path}: the account its AccountSid names could not be looked up.`
+        : check.reason === "parent_token_missing"
+        ? `Refused the parent account's Twilio webhook on ${path}: TWILIO_SUBACCOUNTS is on but TWILIO_AUTH_TOKEN is not set, and with sub-accounts every webhook must be signed.`
         : `Refused a Twilio webhook (${check.reason}) on ${path}.`,
       req,
       throttleMs: misconfigured ? 5 * 60_000 : 60_000,

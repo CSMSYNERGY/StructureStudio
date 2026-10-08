@@ -22,11 +22,11 @@
 import type { Env } from "./env";
 import type { Admin } from "./db";
 import {
-  accountBySid, resolveTwilioAccount, subaccountsOn, tenantAccountSid, TwilioAccountError, webhookMatchesTenant,
-  type TwilioAccount, type WebhookAccount,
+  accountBySid, resolveTwilioAccount, signedBySub, subaccountsOn, TwilioAccountError, webhookTenantVerdict,
+  type AccountLookup, type TenantVerdict, type TwilioAccount, type WebhookAccount,
 } from "../../../supabase/functions/_shared/twilioAccount.ts";
 
-export { TwilioAccountError, type WebhookAccount };
+export { signedBySub, TwilioAccountError, type AccountLookup, type WebhookAccount };
 
 /** The shared resolver's `get` over the Worker's env: string values only, like the Deno shim. */
 export function envGet(env: Env): (k: string) => string | undefined {
@@ -84,9 +84,10 @@ export async function twilioEnvFor(env: Env, admin: Admin, who: { clientId: stri
   return acct && acct.source === "sub" ? scopedTwilioEnv(env, acct) : env;
 }
 
-/** For verifyTwilioRequest: the account an AccountSid names (the shared accountBySid). */
-export function webhookAccountLookup(env: Env, admin: () => Admin): (sid: string) => Promise<WebhookAccount | null> {
-  return (sid) => accountBySid(admin(), sid, envGet(env));
+/** For verifyTwilioRequest: the account an AccountSid names (the shared accountBySid), and the
+ *  same again with `revalidate` when a sub's cached token did not validate. */
+export function webhookAccountLookup(env: Env, admin: () => Admin): AccountLookup {
+  return (sid, opts) => accountBySid(admin(), sid, envGet(env), Date.now(), opts);
 }
 
 /** The Env a verified webhook's handler runs with: the account it came from rides along (phase 4).
@@ -96,18 +97,16 @@ export function webhookEnv(env: Env, account: WebhookAccount | undefined): Env {
 }
 
 /**
- * Does the tenant a handler just resolved live in the account the webhook came from? True with no
- * lookup while the switch is off (no TWILIO_WEBHOOK_ACCOUNT). A sub's webhook may only touch its own
- * tenant (no lookup: the account row names it); the parent's only a tenant with no sub-account
- * (one cached read). A failed read is false: refused, never guessed.
+ * Does the tenant a handler just resolved live in the account the webhook came from? The shared
+ * webhookTenantVerdict, the same answer the edge functions get: "ok" with no lookup while the
+ * switch is off (no TWILIO_WEBHOOK_ACCOUNT). A sub's webhook may only touch its own tenant (no
+ * lookup: the account row names it); the parent's only a tenant with no sub-account (one cached
+ * read). A failed read is "lookup_failed": refused, never guessed.
  */
+export function tenantVerdictForWebhook(env: Env, admin: Admin, clientId: string): Promise<TenantVerdict> {
+  return webhookTenantVerdict(admin, env.TWILIO_WEBHOOK_ACCOUNT ?? null, clientId, envGet(env));
+}
+
 export async function tenantMatchesWebhook(env: Env, admin: Admin, clientId: string): Promise<boolean> {
-  const account = env.TWILIO_WEBHOOK_ACCOUNT;
-  if (!account || !subaccountsOnFor(env)) return true;
-  if (account.source === "sub") return !!account.clientId && account.clientId === clientId;
-  try {
-    return webhookMatchesTenant(account, await tenantAccountSid(admin, clientId, envGet(env)));
-  } catch {
-    return false;
-  }
+  return (await tenantVerdictForWebhook(env, admin, clientId)) === "ok";
 }

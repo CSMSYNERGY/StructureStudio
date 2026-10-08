@@ -31,7 +31,7 @@ import {
 import { hook } from "../urls";
 import { voicemailTwiml, type VoicemailFor } from "../voicemail";
 import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
-import { tenantMatchesWebhook } from "../twilioAccount";
+import { tenantMatchesWebhook, tenantVerdictForWebhook } from "../twilioAccount";
 
 /** Twilio allows at most 10 nouns in one <Dial>. */
 const MAX_NOUNS = 10;
@@ -541,13 +541,23 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   }
   // Workstream 2, phase 4: the number's business must live in the account the call came from. Only
   // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
-  if (env.TWILIO_WEBHOOK_ACCOUNT && !(await tenantMatchesWebhook(env, admin, info.client_id))) {
-    ec.waitUntil(logFault({
-      code: "twilio_account_mismatch", severity: "error", clientId: info.client_id, throttleMs: 10 * 60_000,
-      message: "An inbound call came from a Twilio account this number's business does not live in; refused.",
-      context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source },
-    }));
-    return response(say(SAY.notInService), hangup());
+  // ⚠️ NEVER FOR THE 911 CALLBACK. Inside the 60 minutes after a 911 call from this number the
+  // dispatcher calling back is rung through whatever the account check says (a mismatch, or a
+  // lookup that failed): the request is already signed by one of our accounts, and a dropped
+  // dispatcher is the one failure worse than a misfiled call. It is still logged as an error.
+  if (env.TWILIO_WEBHOOK_ACCOUNT) {
+    const verdict = await tenantVerdictForWebhook(env, admin, info.client_id);
+    if (verdict !== "ok") {
+      const emergency = !!info.recent_emergency_user;
+      ec.waitUntil(logFault({
+        code: "twilio_account_mismatch", severity: "error", clientId: info.client_id, throttleMs: 10 * 60_000,
+        message: emergency
+          ? "A 911 callback came from a Twilio account this number's business does not live in; rung anyway (the 911 path is never refused)."
+          : "An inbound call came from a Twilio account this number's business does not live in; refused.",
+        context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source, verdict, emergency },
+      }));
+      if (!emergency) return response(say(SAY.notInService), hangup());
+    }
   }
   const emergencyUser = info.recent_emergency_user;
   const callId = crypto.randomUUID();
