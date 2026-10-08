@@ -467,7 +467,25 @@ Rules that are easy to break and expensive to get wrong:
 
 ## What's New changelog — what must NEVER be published
 
-`release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab. It is hand-authored: nothing in the codebase writes to it, and no code change should ever auto-generate an entry.
+`release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab (now the Support page). **The words are always written by a person** (rule rewritten 2026-10-09): in the commit's `Release-note:` trailer, or by a hand INSERT for work that has no commit. `release-ci` (`supabase/functions/release-ci`) copies a trailer **word for word** when its commit lands on beta; nothing in the codebase generates, summarises or rewrites an entry, and nothing ever should. A trailer it cannot use as written is refused, never "fixed".
+
+**The trailer**, in the commit message's FINAL paragraph — the same block as `Co-Authored-By` (git only reads trailers from the last paragraph, and every line there must be `Key: value`):
+
+```
+Release-note: feature: Estimates can now carry a second contact     (or "fix: …"; one line, 10-120 characters, no URL)
+Release-section: Contacts                                           (optional: the Support page's chip, e.g. Designer, Contacts, Settings)
+Release-detail: Add a co-buyer from the contact card.               (optional: the line under the title, up to 1000 characters, no URL)
+Projects: 3f2a9c1e                                                  (optional: a Projects item id or its first 8+ hex characters)
+Co-Authored-By: …
+```
+
+or `Release-note: none` when nothing a builder sees changed. Forgot it? `git commit --allow-empty -m "Release note" --trailer "Release-note: fix: …"` before you push; `.githooks/pre-push` names user-facing commits that lack one and never blocks. The parser and the holds are `_shared/releaseTrailer.ts`.
+
+⛔ **Never put a builder's name, slug or anything about pricing in a trailer: this repository is PUBLIC**, and a trailer is public the moment it is pushed. release-ci holds a note that names a builder (`held_names_builder`, never echoing which) or mentions money (`held_commercial`) so it does not reach What's New, but it cannot take the words back out of git history. A held or refused note is published only by a person: a corrected empty commit, or a hand INSERT.
+
+**It is dark by default** (one Supabase project serves beta and production): the GitHub variable `RELEASE_NOTES_FROM_GIT` (`off` / `dry-run` / `on`; unset = the workflow `.github/workflows/release-notes-on-beta.yml` does nothing), the secret `RELEASE_CI_SECRET` (GitHub and Supabase, the same value; unset = 401), Supabase `RELEASE_CI_WRITES=1` (unset = every call is a dry run) and `RELEASE_CI_MOVE_ITEMS=1` (unset = `Projects:` refs are reported, not moved). That workflow file must be identical on main and beta (twin commits): the promotion's token cannot push workflow changes.
+
+**The Projects ids are load-bearing.** Bugs, Feature Requests and Ongoing Projects (`working`) share ONE status list since migration 293 (New, Under Review, Missing Info, Planned, In Progress, On Beta, Done, Declined, Duplicate). A `Projects:` ref moves its item to **`l_onbeta`**, and promotion moves it to **`l_done`** only when the newest commit that put it on beta was in the promoted merge (release-ci's `released` action). Renaming a label's text is safe; deleting or re-id-ing `l_onbeta` or `l_done`, or letting the three lists drift apart again, makes release-ci report `no_onbeta_label` / `no_done_label` and move nothing. The promotion step that calls `released` is not wired yet: until it is, set On Beta items to Done by hand from Ongoing Projects after a promotion.
 
 **Commercial and internal-posture changes are not release notes.** Specifically, never log an entry for: pricing changes or pricing *visibility* (e.g. `billing_plans.price_visible`, migration `055`), plan/catalog cost edits, margin or packaging decisions, or anything describing how we present money to tenants. Announcing "prices are now hidden" tells every tenant to go look at what changed and anchors them to whatever they last saw — the exact harm hiding the number was meant to avoid. This was an explicit instruction from the project owner on 2026-07-26.
 
@@ -475,7 +493,7 @@ Log a release note when a tenant gains something they can *use* — a feature, a
 
 **Publish as the work lands on beta, as `status='beta'` — never wait for Monday, and never hand-set `'shipped'`** (Carolyn 2026-08-08; migration 103 added the status). The lifecycle:
 
-1. When a feature/fix lands on `beta`, INSERT its note with `status='beta'`. The portal renders it with an **"On beta for testing"** badge (orange, `ReleasesView`'s `statusBadge`) so tenants can see what's coming and try it on beta before release. Badge only — no beta URL in the note; tell individual customers where beta is if you want them testing.
+1. When a feature/fix lands on `beta`, its commit's `Release-note:` trailer becomes the note with `status='beta'` and `source_commit` = that commit (migration 294; re-delivery answers `exists`, a note already written by hand with the same words answers `duplicate_title`). Work with no commit gets a hand INSERT with `status='beta'` and `source_commit` NULL. The portal renders it with an **"On beta for testing"** badge (orange, `ReleasesView`'s `statusBadge`) so tenants can see what's coming and try it on beta before release. Badge only — no beta URL in the note; tell individual customers where beta is if you want them testing.
 2. On Monday, `.github/workflows/merge-beta-to-main.yml` promotes beta → main and its **"Flip beta release notes to Live"** step PATCHes every `status='beta'` row to `'shipped'` — keyed to the merge *succeeding*, not to the clock, so a failed/skipped promotion can never label unshipped work as Live. The outcome ("N note(s) now Live" / "skipped" / "FAILED") is included in the run's monday.com report.
 3. The step needs the **`SUPABASE_SERVICE_ROLE_KEY` repo secret** (GitHub → Settings → Secrets → Actions). If it's missing the step skips with a warning and notes stay on "On beta for testing" — the merge itself is never blocked by it.
 
