@@ -199,3 +199,38 @@ Deno.test("remapValues without the column lists behaves exactly as before", () =
   // The old two-argument shape is still valid; it just cannot re-key the choice.
   assertEquals(remapValues({ c1: "o_ss" }, columnIdMap(src, dst)), { c2: "o_ss" });
 });
+
+// ── the write direction (update_item, 2026-10-09) ────────────────────────────────────────
+// Ongoing Projects writes back with ITS ids, so the same translation runs working -> home. The
+// handler-level proof is _test_stubs/projectsOverlayWrite_test.ts; these pin the function half.
+const statusT = (id: string, labels: Array<[string, string]>) =>
+  ({ id, name: "Status", type: "status", settings: { labels: labels.map(([l, label]) => ({ id: l, label })) } });
+const WORKING = [
+  statusT("w-status", [["l_todo", "To Do"], ["l_fixed", "Fixed"], ["l_done", "Completed"]]),
+  dropdownCol("w-app", "App", [{ id: "o_fa01", label: "Structure Studio" }, { id: "o_fa03", label: "BuildBridge" }]),
+];
+const FEATURES = [
+  statusT("f-status", [["l_new", "New"], ["l_done", "Completed"]]),
+  dropdownCol("f-app", "App", [{ id: "o_ss", label: "Structure Studio" }]),
+];
+const BUGS = [statusT("b-status", [["l_readydev", "Ready for Dev"], ["l_fixed", "Fixed"]])];
+
+Deno.test("a Features App written through the working board's option id becomes Features' own id", () => {
+  const map = columnIdMap(WORKING, FEATURES);
+  assertEquals(remapValues({ "w-app": ["o_fa01"] }, map, WORKING, FEATURES), { "f-app": ["o_ss"] });
+  assertEquals(remapValues({ "w-app": "o_fa01" }, map, WORKING, FEATURES), { "f-app": "o_ss" });
+});
+
+Deno.test("a choice the home board lacks keeps its id, so update_item's sanitize step refuses it", () => {
+  // Never guessed at: BuildBridge stays o_fa03, which Features does not offer.
+  assertEquals(remapValues({ "w-app": ["o_fa03"] }, columnIdMap(WORKING, FEATURES), WORKING, FEATURES), { "f-app": ["o_fa03"] });
+  // Completed is a Features label; Bugs has no such words, so l_done is carried as-is.
+  assertEquals(remapValues({ "w-status": "l_done" }, columnIdMap(WORKING, BUGS), WORKING, BUGS), { "b-status": "l_done" });
+});
+
+Deno.test("remapValues needs the SOURCE keys: values already re-keyed to the destination come back empty", () => {
+  // This is why update_item hands it payload.values and not its own re-keyed copy. Fed the
+  // re-keyed copy, the write would carry {} and the old backstop would see nothing missing.
+  const map = columnIdMap(WORKING, FEATURES);
+  assertEquals(remapValues({ "f-app": ["o_ss"], "f-status": "l_new" }, map, WORKING, FEATURES), {});
+});

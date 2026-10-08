@@ -6,7 +6,7 @@ import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
-import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
+import { buildOverlayItems, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -1063,28 +1063,55 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           let incoming = (payload.values || {}) as Record<string, unknown>;
           const fromBoardId = str(payload.fromBoardId, 40);
           const crossBoard = !!fromBoardId && fromBoardId !== item.board_id;
+          // The home-board column each sent cell asked for. The refusal below checks THESE
+          // against what sanitizeValues kept, not the translated object, so a translation that
+          // comes back short is a 400 rather than a 200 that wrote nothing.
+          const asked: string[] = [];
           if (crossBoard) {
             const srcColumns = await boardColumns(fromBoardId);
             const map = columnIdMap(srcColumns, columns);
-            const remapped: Record<string, unknown> = {};
             const unmapped: string[] = [];
-            for (const [k, v] of Object.entries(incoming)) {
+            for (const k of Object.keys(incoming)) {
               const dest = map.get(k);
               // deno-lint-ignore no-explicit-any
               if (!dest) { unmapped.push(((srcColumns as any[]).find((c) => c.id === k)?.name) || k); continue; }
-              remapped[dest] = v;
+              asked.push(dest);
             }
             if (unmapped.length) {
               return json({ error: `"${unmapped.join('", "')}" does not exist on the board this item lives on. Open the item there to change it.` }, 400);
             }
-            incoming = remapped;
+            // THE CHOICE IDS INSIDE A CELL ARE PER-BOARD TOO. The working board offers Bugs' App
+            // ids and Feature Requests seeds its own (o_ss …), so re-keying the column alone
+            // carried an id the home column had never heard of: a status came back as the 400
+            // below, and a Feature row's App was WRITTEN as [] with a 200 (sanitizeValues keeps a
+            // dropdown key with whatever survives). remapValues translates them by label text,
+            // the same translation get_board applies for display.
+            //
+            // ⚠️ GIVE IT THE BROWSER'S ORIGINAL KEYS. remapValues re-keys the column itself; fed
+            // values already re-keyed to this board, every lookup misses and it returns {},
+            // which is the silent no-op all over again (design review, 2026-10-09).
+            incoming = remapValues(payload.values, map, srcColumns, columns);
           }
           const clean = sanitizeValues(columns, incoming, opIds);
           if (crossBoard) {
             // sanitizeValues drops a value its column does not recognise — a status label or a
-            // dropdown option belonging to the board being VIEWED rather than the board the
-            // item lives on. Column names match across boards; the ids inside them do not.
-            const lost = Object.keys(incoming).filter((k) => !(k in clean));
+            // dropdown option of the board being VIEWED with no label of the same words here. A
+            // status goes missing from `clean`; a dropdown stays in it with the option filtered
+            // out, so its entries are checked one by one. An option the row ALREADY holds is let
+            // through: a since-deleted one rides back in every multi-select edit and is dropped
+            // as it always was, and refusing for it would leave the row uneditable from the
+            // working board for a reason nobody can see there.
+            const asList = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+            const lost = asked.filter((k) => {
+              if (!(k in clean)) return true;
+              // deno-lint-ignore no-explicit-any
+              const col = (columns as any[]).find((c) => c.id === k);
+              if (col?.type !== "dropdown") return false;
+              // deno-lint-ignore no-explicit-any
+              const offered = new Set((col.settings?.options || []).map((o: any) => o.id));
+              const had = asList((item.values || {})[k]);
+              return asList(incoming[k]).map((x) => str(x, 40)).some((x) => !!x && !offered.has(x) && !had.includes(x));
+            });
             if (lost.length) {
               // deno-lint-ignore no-explicit-any
               const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
