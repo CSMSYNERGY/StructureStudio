@@ -53,9 +53,15 @@
 --
 -- ── NUMBERING ────────────────────────────────────────────────────────────────────────────
 -- origin/beta 2026-10-09: 289 (the door generator) is the newest file; 288 is held by another
--- batch. 290 is this batch's working number. Confirm at apply time, and record the ledger row with
--- `returning`: no row back means 290 was taken, so rename.
---   select version from supabase_migrations.schema_migrations order by 1 desc limit 4;
+-- batch. 290 is this batch's working number. THE GATE IS THE LEDGER READ, RIGHT BEFORE THE APPLY:
+--   select version, name from supabase_migrations.schema_migrations order by 1 desc limit 4;
+-- If 290 is there, rename the file (and every '290' in it) to the next free number and read the
+-- ledger again before running anything. The ledger insert at the top cannot be the check: it has
+-- no `on conflict`, and version is the ledger's primary key, so it never comes back empty. If 290
+-- is claimed between that read and the insert, the insert fails with a duplicate-key error
+-- (23505), and by then this file has already run under a number someone else holds: rename it,
+-- read the ledger again, and record it under the new number. Never add `on conflict do nothing`
+-- to quiet that error: it answers no row, and the SQL is live with no ledger row of its own.
 --
 -- ── ORDER ────────────────────────────────────────────────────────────────────────────────
 -- Push to beta first (Ahsan's go), then this file (a separate go), then portal-settings (its
@@ -71,9 +77,15 @@
 --   select count(*) filter (where tax_codes_enabled) as on_, count(*) as rows from public.client_settings;
 --
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
--- Put back the portal-settings without the switch first if it is live (a save that carries the
--- switch would fail on a missing column; tax_codes_get's tolerant read survives either way). Each
--- builder's choice is lost with the column: one who switched codes off sees the editor again.
+-- Drop the column with the CURRENT portal-settings left live. Its tax_codes_get read is tolerant
+-- (taxCodesEnabled answers null, so the Tax tab hides the switch and shows the code editor) and a
+-- rate save never names the column; only a switch flipped on a tab loaded before the drop fails
+-- ("Couldn't save your sales tax settings", nothing written). Do NOT put the older portal-settings back first while the
+-- beta portal with the "Your sales tax rate" block is live: the block hides against the older
+-- function and CRM Connection only summarises the rate, so beta builders would have nowhere to set
+-- one. To undo the whole change instead, go in this order: the beta portal, then portal-settings,
+-- then this column. Each builder's choice is lost with the column: one who switched codes off sees
+-- the editor again.
 --   alter table public.client_settings drop column if exists tax_codes_enabled;
 --   notify pgrst, 'reload schema';
 --   delete from supabase_migrations.schema_migrations where version = '290';

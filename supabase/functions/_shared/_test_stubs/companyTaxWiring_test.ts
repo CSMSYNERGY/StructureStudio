@@ -12,9 +12,12 @@
 //     2. a blank rate on a paperwork-mode row, and on a builder with NO row: the sentence, and no
 //        write at all; on a CRM-mode row (with a CRM): the rate is cleared;
 //     3. a builder with no row may not save a label or the switch alone (the upsert would create a
-//        paperwork-mode row with no rate); with a rate, the save creates the row;
+//        paperwork-mode row with no rate; the switch's refusal says to save the rate first); with a
+//        rate, the save creates the row;
 //     4. the codes switch alone writes only that column (plus client_id and updated_at), and a
-//        "true" string is refused; switching off never touches tax_code_assignments;
+//        "true" string is refused; switching off never touches tax_code_assignments; a rate save
+//        names the switch nowhere, neither in the upsert nor in the columns it reads back, so it
+//        works on a database without 290;
 //     5. settings_crm:edit WITHOUT Branding may save (unlike `save`, which needs both); settings_crm
 //        view is refused with resolveTenant's 403, before any read;
 //     6. the answer is what is stored, and every save leaves an admin_audit row.
@@ -24,6 +27,11 @@
 //     8. on a database WITHOUT migration 290 (the column missing): 200, taxCodesEnabled null, every
 //        other field as before, and no app_errors row (the tolerant read);
 //     9. a builder with no settings row reads no rate, CRM mode, switch off.
+//   save (CRM Connection → Estimates & Invoices)
+//    10. the beta card no longer posts the rate, so the paperwork guard judges the stored one: with
+//        that row unreadable the answer is the read failure, not "StructureStudio needs a sales tax
+//        rate" (a builder with a rate on file told to set one); production's card, which posts the
+//        rate, is judged on what it sent exactly as before.
 //
 // HOW. paperworkDefaultWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts is
 // imported, so a request runs through withErrorLog, resolveTenant and the action's branch as it does
@@ -38,7 +46,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert";
 import { stubAuth, stubDb } from "./supabase_stub.ts";
-import { BAD_RATE, RATE_REQUIRED } from "../companyTax.ts";
+import { BAD_RATE, RATE_FIRST, RATE_REQUIRED } from "../companyTax.ts";
 
 // ─── The real handler ──────────────────────────────────────────────────────────────────────────
 async function captureHandler(rel: string): Promise<(req: Request) => Promise<Response>> {
@@ -86,6 +94,7 @@ type World = {
   row?: Row;
   codes?: boolean;          // client_settings.tax_codes_enabled
   noColumn?: boolean;       // the database has no tax_codes_enabled (a deploy ahead of 290)
+  guardReadFails?: boolean; // `save`'s paperwork-guard read of client_settings errors
   member?: { role: string; title: string | null; access: Record<string, string> | null };
 };
 type Trace = {
@@ -95,6 +104,7 @@ type Trace = {
   audits: Record<string, unknown>[];
   errors: Record<string, unknown>[];
   selects: string[];
+  returning: string[];      // the columns each client_settings upsert reads back (.select after it)
 };
 const MISSING = { code: "42703", message: "column client_settings.tax_codes_enabled does not exist" };
 const WRITE_OPS = ["insert", "update", "upsert", "delete"];
@@ -114,10 +124,16 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
     if (has("upsert")) {
       const up = arg("upsert");
       trace.upserts.push(up);
-      if (world.noColumn && "tax_codes_enabled" in up) return { data: null, error: MISSING };
+      trace.returning.push(cols);
+      // The columns an upsert reads back are part of the same statement: naming the switch there
+      // fails the save on a database without 290 exactly as writing it would.
+      if (world.noColumn && ("tax_codes_enabled" in up || /\btax_codes_enabled\b/.test(cols))) return { data: null, error: MISSING };
       return { data: { ...(row ?? {}), tax_codes_enabled: world.codes ?? false, ...up }, error: null };
     }
     trace.selects.push(cols);
+    if (world.guardReadFails && /\bghl_invoicing_allowed\b/.test(cols) && /\bss_quote_next\b/.test(cols)) {
+      return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+    }
     if (/\btax_codes_enabled\b/.test(cols)) {
       if (world.noColumn) return { data: null, error: MISSING };
       return { data: row ? { tax_codes_enabled: world.codes ?? false } : null, error: null };
@@ -146,7 +162,7 @@ function chain(world: World, trace: Trace, table: string, ops: any[][]): any {
 }
 
 async function drive(body: Record<string, unknown>, world: World = {}) {
-  const trace: Trace = { upserts: [], tables: [], writes: [], audits: [], errors: [], selects: [] };
+  const trace: Trace = { upserts: [], tables: [], writes: [], audits: [], errors: [], selects: [], returning: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   const realFetch = globalThis.fetch;
@@ -241,7 +257,9 @@ Deno.test("3. no settings row: a label or the switch alone is refused; with a ra
   for (const payload of [{ ssTaxLabel: "County tax" }, { ssTaxDelivery: true }, { taxCodesEnabled: true }]) {
     const { status, body, trace } = await saveTax(payload, { row: null });
     assertEquals(status, 400, `${JSON.stringify(payload)}: ${JSON.stringify(body)}`);
-    assertEquals(body.reason, "rate_required");
+    // The switch saves by itself on the page, so its sentence says to save the rate first.
+    const [reason, sentence] = "taxCodesEnabled" in payload ? ["rate_first", RATE_FIRST] : ["rate_required", RATE_REQUIRED];
+    assertEquals([body.reason, body.error], [reason, sentence]);
     assertEquals(trace.upserts.length, 0, `${JSON.stringify(payload)} wrote nothing`);
   }
   const { status, body, trace } = await saveTax({ ssTaxRate: "7.25", ssTaxLabel: "State tax" }, { row: null });
@@ -258,6 +276,7 @@ Deno.test("4. the codes switch alone writes only that column; a string is refuse
     assertEquals(status, 200, JSON.stringify(body));
     assertEquals(keysOf(trace.upserts[0]), ["client_id", "tax_codes_enabled", "updated_at"]);
     assertEquals(trace.upserts[0].tax_codes_enabled, on);
+    assert(/\btax_codes_enabled\b/.test(trace.returning[0]), "the switch is read back with the save");
     assertEquals(body.taxCodesEnabled, on, "the answer carries the stored switch");
     assertFalse(trace.tables.includes("tax_code_assignments"), "switching codes on or off never reads or writes the codes");
   }
@@ -277,6 +296,8 @@ Deno.test("4b. a rate save never names the switch, so it works on a database wit
   const { status, body, trace } = await saveTax({ ssTaxRate: "6" }, { row: NEW_DEFAULT, noColumn: true });
   assertEquals(status, 200, JSON.stringify(body));
   assertFalse("tax_codes_enabled" in trace.upserts[0]);
+  assertEquals(trace.returning.length, 1, "the upsert's read-back is recorded");
+  assertFalse(/tax_codes_enabled/.test(trace.returning[0]), "nor does the read-back after the upsert name it");
   assertFalse("taxCodesEnabled" in body, "the answer does not claim a switch it did not read");
   assertFalse(trace.selects.some((c) => /tax_codes_enabled/.test(c)));
 });
@@ -339,4 +360,30 @@ Deno.test("9. tax_codes_get for a builder with no settings row: no rate, CRM mod
   assertEquals(status, 200, JSON.stringify(body));
   assertEquals([body.companyRatePct, body.companyLabel, body.ssTaxDelivery], [null, "Sales tax", false]);
   assertEquals([body.ssMode, body.ghlInvoicingAllowed, body.crmConfigured, body.taxCodesEnabled], [false, false, false, false]);
+});
+
+// ─── save: the Estimates & Invoices card's paperwork guard ─────────────────────────────────────
+/** The card's body for a tenant without the capability: beta's (no rate since 2026-10-09) and
+ *  production's (the rate, its label and the delivery switch as well). */
+const BETA_CARD = { invoiceInGhl: false, ssQuoteNext: "3101", ssQuotePrefix: "Q-", ssInvoiceNext: "7001", ssInvoicePrefix: "INV-" };
+const PROD_CARD = { ...BETA_CARD, ssTaxRate: "6.5", ssTaxLabel: "Sales tax", ssTaxDelivery: false };
+const NEEDS_RATE = /needs a sales tax rate/;
+
+Deno.test("10. the beta card with the settings row unreadable: the read failure, not 'needs a sales tax rate'", async () => {
+  const failed = await drive({ action: "save", ...BETA_CARD }, { row: NEW_DEFAULT, guardReadFails: true });
+  assertEquals(failed.status, 500, JSON.stringify(failed.body));
+  assertEquals(failed.body.ref, "check your sales tax settings");
+  assertFalse(NEEDS_RATE.test(String(failed.body.error)), "a builder with a rate on file is not told to set one");
+  assertEquals(failed.trace.upserts.length, 0, "nothing written");
+  assertEquals(failed.trace.writes, [], "nothing written anywhere");
+
+  // Readable, the same body is judged on the STORED rate: on file, it saves without sending one.
+  const ok = await drive({ action: "save", ...BETA_CARD }, { row: NEW_DEFAULT });
+  assertEquals(ok.status, 200, JSON.stringify(ok.body));
+  assertFalse("ss_tax_rate" in ok.trace.upserts[0], "the card no longer writes the rate");
+
+  // Production's card sends the rate, so an unreadable row is judged on what it sent, as before.
+  const prod = await drive({ action: "save", ...PROD_CARD }, { row: NEW_DEFAULT, guardReadFails: true });
+  assertEquals(prod.status, 200, JSON.stringify(prod.body));
+  assertEquals(prod.trace.upserts[0].ss_tax_rate, 0.065);
 });

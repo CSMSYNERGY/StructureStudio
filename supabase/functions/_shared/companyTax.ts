@@ -46,6 +46,11 @@ export const BAD_RATE = "The sales tax rate must be a percentage between 0 and 2
 /** save_company_tax's refusal when a save would leave paperwork-mode estimates with no rate. */
 export const RATE_REQUIRED = "Your estimates need a sales tax rate. Enter 0 if you don't collect sales tax.";
 
+/** save_company_tax's refusal when a builder with no settings row flips "Use tax codes" before any
+ *  rate is saved. The switch saves on its own the moment it is flipped, so RATE_REQUIRED alone
+ *  would not say which save has to come first; the rate block sits above it on the Tax tab. */
+export const RATE_FIRST = "Save your sales tax rate above first, then turn tax codes on. Enter 0 if you don't collect sales tax.";
+
 /**
  * The company rate, its label and the delivery switch, as `save` has always read them. Each key
  * is read only when present. The rate is entered as a PERCENT and stored as a FRACTION: blank
@@ -106,7 +111,8 @@ export function companyTaxNeedsRow(updates: CompanyTaxUpdates): boolean {
  *   2. No row and no rate: the save would CREATE the row, and since migration 280 a new row starts
  *      in paperwork mode, which needs a rate before its first estimate. `save`'s guard comment
  *      describes this as the case it exists to prevent; a label or the codes switch alone must not
- *      land that row.
+ *      land that row. The switch gets its own sentence (RATE_FIRST): it is the one control on the
+ *      Tax tab that saves by itself, so the builder has to be told to save the rate first.
  *   3. A blank rate in paperwork mode (invoice_in_ghl exactly false, the same reading as `save`'s
  *      guard): every estimate whose sales location has no rate of its own would be refused. A CRM
  *      mode builder may clear it; their CRM works out the tax. 0 is never refused.
@@ -116,7 +122,11 @@ export function companyTaxRefusal(updates: CompanyTaxUpdates, row: { invoice_in_
     return refuse(400, "nothing_to_save", "There's nothing to save — send a sales tax rate, label, delivery setting or the tax codes switch.");
   }
   if (!companyTaxNeedsRow(updates)) return null;
-  if (!row) return refuse(400, "rate_required", RATE_REQUIRED);
+  if (!row) {
+    return "tax_codes_enabled" in updates
+      ? refuse(400, "rate_first", RATE_FIRST)
+      : refuse(400, "rate_required", RATE_REQUIRED);
+  }
   // `cur ? cur.invoice_in_ghl !== false : false` is `save`'s reading of the mode; with a row in
   // hand that is: paperwork mode exactly when the column is false.
   if ("ss_tax_rate" in updates && row.invoice_in_ghl === false) return refuse(400, "rate_required", RATE_REQUIRED);
