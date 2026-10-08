@@ -178,7 +178,8 @@ export async function resolveTwilioAccount(admin: any, clientId: string, get: En
 /** Per isolate. A known active sub's webhook account is kept 60 seconds: short, because it carries
  *  the sub's auth token (rotated by twilio_account_secret_put) and its status (a suspended sub must
  *  stop being accepted promptly). A failed signature also asks again at once (signedBySub), so a
- *  rotation costs at most one refused webhook per isolate. An unknown SID is kept 30 seconds. A
+ *  rotated token is accepted on its first webhook, unless the account was read under
+ *  REVALIDATE_MIN_MS before (then within that much). An unknown SID is kept 30 seconds. A
  *  tenant's account SID is kept 5 minutes: it never changes once chosen. Failures are never kept.
  *  Each map is emptied once it reaches CACHE_MAX entries: the AccountSid is the requester's
  *  choice (after the shared key), so the cache must not grow with whatever it is sent. */
