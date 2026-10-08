@@ -16,6 +16,12 @@ import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 // before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
 import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
 import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscriptions } from "../_shared/tenantGatewayCleanup.ts";
+// Workstream 2, phase 9: the operator console's card for a builder's own Twilio sub-account (get,
+// create, suspend, close), and delete_client closing that sub-account first.
+import {
+  ensureTwilioAccount, forgetTwilioAccount, maskSid, setTwilioAccountStatus, twilioAccountView,
+  type EnsureResult, type StatusChange,
+} from "../_shared/twilioProvision.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
@@ -97,6 +103,34 @@ async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
     throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
   }
   return data;
+}
+
+// ── Workstream 2, phase 9: what the console says about a builder's Twilio account ──────────
+// Operators, not builders: these name steps, codes and the edge secrets that are missing (names,
+// never values), so the person pressing the button knows what to do next.
+function twilioProvisionSentence(r: Extract<EnsureResult, { ok: false }>): string {
+  switch (r.reason) {
+    case "not_configured":
+      return `Creating sub-accounts needs these edge secrets: ${(r.missing ?? []).join(", ")}.`
+        + (r.parentKeyOnly ? " The parent's API key cannot create or reach sub-accounts: set TWILIO_AUTH_TOKEN (the parent's auth token)." : "");
+    case "busy": return "Another run is setting this account up right now. Try again in a minute.";
+    case "suspended": return "This builder's sub-account is suspended. Press Reactivate to turn it back on.";
+    case "closed": return "This builder's sub-account was closed, and a closed Twilio account cannot be reopened.";
+    case "lookup_failed": return `The database could not be read (${r.code}). Nothing was created.`;
+    default: return `Twilio stopped at the ${r.step ?? "first"} step (${r.code}). Press Create again: it resumes from there and never makes anything twice.`;
+  }
+}
+function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: string): string {
+  switch (r.reason) {
+    case "no_sub": return "This builder has no sub-account of its own.";
+    case "has_numbers": return `This sub-account still has ${r.numbers ?? "a"} number${r.numbers === 1 ? "" : "s"}. Release ${r.numbers === 1 ? "it" : "them"} first: closing a Twilio account releases every number in it, for good.`;
+    case "not_configured": return r.code === "parent_token_missing"
+      ? "Changing a sub-account needs the parent's auth token (TWILIO_AUTH_TOKEN): its API key cannot."
+      : "TWILIO_ACCOUNT_SID is not set on the server.";
+    case "wrong_state": return r.code === "closed" ? "This sub-account is closed; nothing can change it now." : `It can't be ${want} from "${r.code}".`;
+    case "twilio_failed": return `Twilio did not accept it (${r.code}). Nothing was recorded here; try again.`;
+    default: return `It was not recorded (${r.code}). Look at the account in Twilio before you try again.`;
+  }
 }
 
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
@@ -370,6 +404,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
     "get_billing_overview", "get_payments", "avalara_tax_codes_status",
+    // Masked SIDs and what exists; `check` asks Twilio two GETs and changes nothing.
+    "twilio_account_get",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -400,6 +436,12 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // billing" would be wrong for a read.
     if (PHONE_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
       return json({ error: "This operator account cannot see or change phone and text billing." }, 403);
+    }
+    // Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio (its
+    // numbers and registrations are billed to our parent account), and closing one releases its
+    // numbers for good. Both on the money grant; suspending (reversible) needs can_write only.
+    if ((String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill) {
+      return json({ error: "This operator account cannot create or close a builder's phone account." }, 403);
     }
   }
 
@@ -1798,6 +1840,83 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // are counted as `leftBehind` so the operator sees them; see the note at that list.
       // Keep this list in step with the wipes below; drift here is what left a
       // deleted tenant's PII in the database twice already.
+      // ── Workstream 2, phase 9: the builder's own Twilio sub-account ───────────────────────────
+      // _shared/twilioProvision.ts does the work; these answer the console's card (AdmTwilioAccount
+      // in portal/07-admin.jsx). Every outcome that touches Twilio gets its own admin_audit row
+      // (masked SID), because what happened there cannot be undone from here.
+      case "twilio_account_get": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
+        return json({ ok: true, account });
+      }
+
+      case "twilio_account_provision": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        // ⚠️ AN EXPLICIT CHOICE OF BUILDER. This is the one way to make a sub-account while
+        // TWILIO_SUBACCOUNTS is off (the first test sub), so the console makes the operator type
+        // the builder's id, the way delete_client does.
+        if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const get = (k: string) => Deno.env.get(k);
+        const auditTwilio = async (outcome: string) => {
+          try {
+            await sb.from("admin_audit").insert({
+              action: "twilio_account_provision", target_client_id: clientId,
+              actor_email: identity.via === "operator" ? identity.email : null,
+              actor_user_id: identity.via === "operator" ? identity.userId : null,
+              note: `via=${identity.via} ${outcome}`.slice(0, 2000),
+            });
+          } catch (_e) { /* best-effort: the outcome is also in the response */ }
+        };
+        // The same button reactivates a suspended sub.
+        const cur = await sb.from("twilio_accounts").select("kind, status").eq("client_id", clientId).maybeSingle();
+        if (cur.error) throw new Error(`twilio_accounts: ${cur.error.message}`);
+        if (cur.data?.kind === "sub" && cur.data?.status === "suspended") {
+          const r = await setTwilioAccountStatus(sb, clientId, "active", { get });
+          if (!r.ok) return json({ error: twilioStatusSentence(r, "reactivated"), code: r.code }, r.status);
+          await auditTwilio("reactivated");
+          return json({ ok: true, reactivated: true, account: await twilioAccountView(sb, clientId, { get }) });
+        }
+        const r = await ensureTwilioAccount(sb, clientId, { get, operator: true });
+        if (!r.ok) {
+          await auditTwilio(`refused ${r.reason} step=${r.step ?? "-"} code=${r.code}`);
+          return json({ error: twilioProvisionSentence(r), reason: r.reason, step: r.step, code: r.code, ...(r.missing ? { missing: r.missing } : {}) }, r.status);
+        }
+        if (r.kind === "parent") {
+          // Pinned, our own internal account, or something already on the parent: it stays there
+          // (one tenant, one account; migration 292's twilio_accounts_no_split).
+          const why = r.reason === "internal" ? "it is our own internal account"
+            : r.reason === "parent_holdings" ? "it already has a number or a texting registration on the parent account"
+            : r.reason === "pinned" ? "it is pinned to the parent account" : "the switch is off";
+          return json({ error: `${clientId} stays on the parent account: ${why}.`, reason: r.reason }, 409);
+        }
+        await auditTwilio(`${r.ran ? "provisioned" : "already_active"} sid=${maskSid(r.accountSid)}${r.pushSkipped.length ? ` push_skipped=${r.pushSkipped.join(",")}` : ""}`);
+        return json({ ok: true, pushSkipped: r.pushSkipped, account: await twilioAccountView(sb, clientId, { get }) });
+      }
+
+      case "twilio_account_suspend":
+      case "twilio_account_close": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const closing = action === "twilio_account_close";
+        // ⚠️ CLOSING IS IRREVERSIBLE (and releases every number in it): the builder's id is typed.
+        if (closing && reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const get = (k: string) => Deno.env.get(k);
+        const r = await setTwilioAccountStatus(sb, clientId, closing ? "closed" : "suspended", { get });
+        try {
+          await sb.from("admin_audit").insert({
+            action: String(action), target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} ${r.ok ? (r.already ? "already" : "done") : `refused ${r.reason} code=${r.code}`}`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort */ }
+        if (!r.ok) return json({ error: twilioStatusSentence(r, closing ? "closed" : "suspended"), reason: r.reason, code: r.code }, r.status);
+        return json({ ok: true, status: r.status, account: await twilioAccountView(sb, clientId, { get }) });
+      }
+
       case "delete_client": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
@@ -1827,6 +1946,37 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // ⛔ The vault id is a bearer capability for charging that card (see get_billing_overview).
         // It is read here, handed to the gateway, and never reaches a response, an audit note or a
         // log: counts only.
+        // ── The builder's Twilio sub-account FIRST, before the gateway and before any wipe ──────
+        // (Workstream 2, phase 9; the same order and the same fail-closed rule as the gateway step
+        // below.) Closing a sub-account is irreversible and releases its numbers, so it REFUSES
+        // while the sub still has a number, by our rows or Twilio's own list, with nothing done
+        // anywhere: release them first. A parent pin, or a sub never made at Twilio, has nothing to
+        // close. The row itself (and the closed sub's Vault secrets) goes last, just before
+        // client_configs, so a recreated slug never inherits a dead tenant's account.
+        const twRead = await sb.from("twilio_accounts").select("kind, status, account_sid").eq("client_id", clientId).maybeSingle();
+        // 42P01: migration 292 is not applied, so no tenant has an account row at all.
+        if (twRead?.error && String(twRead.error.code ?? "") !== "42P01") throw new Error(`twilio_accounts: ${twRead.error.message}`);
+        const twRow = (twRead?.error ? null : twRead?.data ?? null) as { kind?: string; status?: string; account_sid?: string | null } | null;
+        let twilioClosed = false;
+        if (twRow?.kind === "sub" && twRow.account_sid && twRow.status !== "closed") {
+          const closed = await setTwilioAccountStatus(sb, clientId, "closed", { get: (k) => Deno.env.get(k) });
+          // Its own audit row (counts and a masked SID only), like the gateway's below.
+          const twilioAudit = {
+            action: "delete_client", target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} twilio ${closed.ok ? "closed" : `refused ${closed.reason} code=${closed.code}`} sid=${maskSid(twRow.account_sid)}`.slice(0, 2000),
+          };
+          try { await sb.from("admin_audit").insert(twilioAudit); } catch (_e) { /* best-effort */ }
+          if (!closed.ok) {
+            return json({
+              error: `${twilioStatusSentence(closed, "closed")} Nothing was deleted.`,
+              twilio: { reason: closed.reason, code: closed.code },
+            }, closed.reason === "has_numbers" || closed.reason === "no_sub" || closed.reason === "wrong_state" ? 409 : 502);
+          }
+          twilioClosed = true;
+        }
+
         const [subsRes, custRes] = await Promise.all([
           sb.from("billing_subscriptions").select("id, status").eq("client_id", clientId),
           sb.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
@@ -2066,6 +2216,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         deleted["storage_files"] = files;
 
+        // The tenant's Twilio account row (and a closed sub's two Vault secrets): migration 295's
+        // twilio_account_forget, which refuses a sub that is not closed (the step at the top closed it).
+        // A failure stops here, BEFORE client_configs, so a retry of the delete finishes it.
+        if (twRow) {
+          const forgot = await forgetTwilioAccount(sb, clientId);
+          if (!forgot.ok) throw new Error(`twilio_accounts: the account row could not be removed (${forgot.code}); delete this builder again to finish.`);
+          deleted["twilio_accounts"] = forgot.outcome === "none" ? 0 : 1;
+        }
+
         const cc = await sb.from("client_configs").delete({ count: "exact" }).eq("client_id", clientId);
         if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
         deleted["client_configs"] = cc.count ?? 0;
@@ -2079,6 +2238,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         return json({
           ok: true, clientId, deleted,
           gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
+          // Workstream 2: whether the builder's own Twilio sub-account was closed first.
+          ...(twilioClosed ? { twilio: { closed: true } } : {}),
           ...(Object.keys(retained).length ? { retained } : {}),
           ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
         });
