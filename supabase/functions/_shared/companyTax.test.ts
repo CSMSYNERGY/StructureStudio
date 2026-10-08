@@ -13,7 +13,7 @@
 // failing row pass: a failure means production's save now reads some input differently.
 
 const {
-  BAD_RATE, companyTaxNeedsRow, companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, RATE_REQUIRED,
+  BAD_RATE, companyTaxNeedsRow, companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, RATE_FIRST, RATE_REQUIRED,
 } = await import("./companyTax.ts");
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
@@ -174,11 +174,17 @@ Deno.test("companyTaxRefusal: a blank rate is refused in paperwork mode and with
 Deno.test("companyTaxRefusal: no row and no rate (a label, delivery or the switch alone) is refused", () => {
   for (const u of [{ ss_tax_label: "County tax" }, { ss_tax_delivery: true }, { tax_codes_enabled: true }, { tax_codes_enabled: false }]) {
     const r = companyTaxRefusal(u, null);
-    assert(r && r.reason === "rate_required", `${JSON.stringify(u)}: ${JSON.stringify(r)}`);
+    // The switch saves by itself, so its refusal says which save comes first.
+    const want = "tax_codes_enabled" in u ? ["rate_first", RATE_FIRST] : ["rate_required", RATE_REQUIRED];
+    assert(r && r.reason === want[0] && r.error === want[1], `${JSON.stringify(u)}: ${JSON.stringify(r)}`);
     assert(companyTaxNeedsRow(u), `${JSON.stringify(u)} must read the row`);
     assertEquals(companyTaxRefusal(u, { invoice_in_ghl: false }), null, `${JSON.stringify(u)} with a paperwork row`);
     assertEquals(companyTaxRefusal(u, { invoice_in_ghl: true }), null, `${JSON.stringify(u)} with a CRM row`);
   }
+  // A blank rate sent WITH the switch, no row: still the switch's sentence.
+  const both = companyTaxRefusal({ ss_tax_rate: null, tax_codes_enabled: true }, null);
+  assert(both && both.reason === "rate_first", JSON.stringify(both));
+  assertEquals(RATE_FIRST, "Save your sales tax rate above first, then turn tax codes on. Enter 0 if you don't collect sales tax.");
 });
 
 Deno.test("companyTaxView: tax_settings' shapes, and a builder with no row", () => {

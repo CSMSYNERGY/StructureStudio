@@ -12,7 +12,8 @@
 //     2. a blank rate on a paperwork-mode row, and on a builder with NO row: the sentence, and no
 //        write at all; on a CRM-mode row (with a CRM): the rate is cleared;
 //     3. a builder with no row may not save a label or the switch alone (the upsert would create a
-//        paperwork-mode row with no rate); with a rate, the save creates the row;
+//        paperwork-mode row with no rate; the switch's refusal says to save the rate first); with a
+//        rate, the save creates the row;
 //     4. the codes switch alone writes only that column (plus client_id and updated_at), and a
 //        "true" string is refused; switching off never touches tax_code_assignments; a rate save
 //        names the switch nowhere, neither in the upsert nor in the columns it reads back, so it
@@ -45,7 +46,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert";
 import { stubAuth, stubDb } from "./supabase_stub.ts";
-import { BAD_RATE, RATE_REQUIRED } from "../companyTax.ts";
+import { BAD_RATE, RATE_FIRST, RATE_REQUIRED } from "../companyTax.ts";
 
 // ─── The real handler ──────────────────────────────────────────────────────────────────────────
 async function captureHandler(rel: string): Promise<(req: Request) => Promise<Response>> {
@@ -256,7 +257,9 @@ Deno.test("3. no settings row: a label or the switch alone is refused; with a ra
   for (const payload of [{ ssTaxLabel: "County tax" }, { ssTaxDelivery: true }, { taxCodesEnabled: true }]) {
     const { status, body, trace } = await saveTax(payload, { row: null });
     assertEquals(status, 400, `${JSON.stringify(payload)}: ${JSON.stringify(body)}`);
-    assertEquals(body.reason, "rate_required");
+    // The switch saves by itself on the page, so its sentence says to save the rate first.
+    const [reason, sentence] = "taxCodesEnabled" in payload ? ["rate_first", RATE_FIRST] : ["rate_required", RATE_REQUIRED];
+    assertEquals([body.reason, body.error], [reason, sentence]);
     assertEquals(trace.upserts.length, 0, `${JSON.stringify(payload)} wrote nothing`);
   }
   const { status, body, trace } = await saveTax({ ssTaxRate: "7.25", ssTaxLabel: "State tax" }, { row: null });
