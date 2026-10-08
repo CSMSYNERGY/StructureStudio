@@ -24,17 +24,25 @@
 # PUBLIC LOGS: this repository is public, so its Actions logs and summaries are public too. The
 # summary shows short shas, result words, fixed reasons and Projects id prefixes only: never a note's
 # title, a commit subject, or a builder's name. release-ci never returns any of those, and the nudge
-# prints shas and paths only in --github mode.
+# prints shas and paths only in --github mode. Both holds (held_commercial, held_names_builder) are
+# shown as one "held", reason left out, in the table, the counts and the log line: which hold
+# applied would tell any reader that a word in that commit's public trailer is a customer's name.
+#
+# NO `concurrency:` GROUP, ON PURPOSE. GitHub keeps ONE pending run per group and cancels the older
+# pending one when another arrives, and each run sends only its own before..sha. So with a group,
+# three pushes inside one run's lifetime (beta has had pushes seven seconds apart) would cancel the
+# middle run and its commits' notes would never be sent, with nothing failing. Runs may overlap
+# instead, which release-ci tolerates per commit: a note is unique on source_commit (a second
+# delivery answers `exists`) and a Projects move is keyed on (item, commit). What overlap can
+# disorder is which of two commits naming the SAME item is recorded last, and `released` reads that
+# as the item's newest commit; it takes two pushes naming one item seconds apart AND a promotion
+# cut between them.
 
 name: Release notes from beta pushes
 
 on:
   push:
     branches: [beta]
-
-concurrency:
-  group: release-notes-on-beta
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -157,7 +165,11 @@ jobs:
           fi
 
           # The summary: short shas, result words, fixed reasons and id prefixes. release-ci returns
-          # no titles, subjects or names, and nothing here adds any.
+          # no titles, subjects or names, and nothing here adds any. Both holds print as "held" with
+          # no reason (see PUBLIC LOGS at the top); `held` below folds their counts the same way.
+          HELD='def held: if type == "string" and startswith("held_") then "held" else . end;
+                def counts: (. // {}) | to_entries | map(.key |= held) | group_by(.key)
+                            | map({key: .[0].key, value: (map(.value) | add)}) | from_entries;'
           {
             echo "## Release notes from this push"
             echo ""
@@ -170,13 +182,21 @@ jobs:
             echo ""
             echo "| Commit | Note | Projects refs |"
             echo "|---|---|---|"
-            jq -r '
+            jq -r "$HELD"'
               def clean: tostring | gsub("[|<>`\r\n]"; " ");
               .commits[]
-              | "| `\(.sha | clean)` | \(.result | clean)\(if .why then " (\(.why | clean))" else "" end)\(if .badRefs then ", \(.badRefs) unusable ref(s)" else "" end)"
+              | (.result | held) as $res
+              | "| `\(.sha | clean)` | \($res | clean)"
+                + (if .why and $res != "held" then " (\(.why | clean))" else "" end)
+                + (if .newSection then ", new section chip: check its spelling" else "" end)
+                + (if .badRefs then ", \(.badRefs) unusable ref(s)" else "" end)
                 + " | \(((.refs // []) | map("`\(.ref[0:8] | clean)` \(.result | clean)") | join(", ")) as $r | if $r == "" then "-" else $r end) |"
             ' "$RUNNER_TEMP/resp.json"
             echo ""
-            jq -r '"Counts: " + ((.counts // {}) | to_entries | map("\(.key) \(.value)") | join(", "))' "$RUNNER_TEMP/resp.json"
+            jq -r "$HELD"'"Counts: " + (.counts | counts | to_entries | map("\(.key) \(.value)") | join(", "))' "$RUNNER_TEMP/resp.json"
+            if jq -e '.counts // {} | keys | any(startswith("held_"))' "$RUNNER_TEMP/resp.json" >/dev/null; then
+              echo ""
+              echo "**Held** notes mention pricing or name a builder: they are not published. Read the commit's trailer; a person publishes it by hand, or not at all."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          jq -c '{dryRun, writes, moves, counts}' "$RUNNER_TEMP/resp.json"
+          jq -c "$HELD"'{dryRun, writes, moves, counts: (.counts | counts)}' "$RUNNER_TEMP/resp.json"
