@@ -37,9 +37,11 @@
 //      document, keeping ?view=
 //   N. switching codes off posts the switch alone, folds the editor to one line and keeps every
 //      code; a reload stays folded; switching back on brings the saved rows back
-//   O. a refused switch flips back and shows the server's sentence (a builder with no settings row)
+//   O. a refused switch flips back and shows the server's sentence (a builder with no settings row,
+//      told to save the rate first)
 //   P. a settings_crm READER sees the stored rate as text, who can change it, no Save, and a
-//      switch they cannot flip
+//      switch they cannot flip; in CRM mode with no CRM they are not told to save a rate or make
+//      the switch themselves
 //   Q. a database without 290 (taxCodesEnabled null): the block shows, the switch does not, and the
 //      editor is today's
 //
@@ -62,7 +64,9 @@
 // picker as it was at 8907d3d, which kept the last answer pickable while a new search was out,
 // fails B's three Enter checks: Enter there puts the empty box's P0000000 on the row. Against the
 // artifact committed just before the company rate block (2c203e02's portal.app.compiled.js) A to H
-// all pass, I's first two checks fail, and the run stops there with no block to drive.
+// all pass, I's first two checks fail, and the run stops there with no block to drive. Against
+// 3c4cffdc's artifact, which told a reader to save a rate and make the switch, everything passes
+// but P's two no-CRM reader checks.
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 import {
@@ -70,7 +74,7 @@ import {
 } from "../../supabase/functions/_shared/taxCodes.ts";
 import { partialSyncText, syncFailureText } from "../../supabase/functions/_shared/taxCodeSync.ts";
 import {
-  companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, RATE_REQUIRED,
+  companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, RATE_FIRST, RATE_REQUIRED,
 } from "../../supabase/functions/_shared/companyTax.ts";
 
 const CLIENT = "harness-tax-codes";
@@ -633,7 +637,7 @@ try {
   await page.waitForTimeout(300);
   ok("O: a builder with no settings row starts with codes off", (await switchBox().count()) === 1 && !(await switchBox().isChecked()));
   await switchBox().click();
-  ok("O: the refusal shows the server's sentence", await waitText(RATE_REQUIRED));
+  ok("O: the refusal shows the server's sentence: save the rate first", await waitText(RATE_FIRST));
   await page.waitForTimeout(200);
   ok("O: …and the switch is back off, the editor still folded", !(await switchBox().isChecked()) && (await page.locator("[data-tax-codes-off]").count()) === 1);
   ok("O: nothing was stored", S.company.noRow === true && S.company.codes === true);
@@ -647,6 +651,14 @@ try {
   ok("P: …is told who can change it", (await page.locator("[data-company-tax-copy]").innerText()).includes("Only someone who can edit CRM Connection settings can change this."));
   ok("P: …and has no boxes and no Save", (await rateBox().count()) === 0 && (await saveRateBtn().count()) === 0);
   ok("P: the switch shows the setting but cannot be flipped", (await switchBox().isChecked()) && await switchBox().isDisabled());
+  // CRM mode with no CRM: the two steps out (save a rate, make the switch) are for an editor.
+  await boot({ role: "user", access: { settings_crm: "view" }, ssMode: false, company: company({ crm: false, rate: null }) });
+  await openTax();
+  await page.waitForTimeout(400);
+  const copyP = (await page.locator("[data-company-tax-copy]").innerText().catch(() => "")).trim();
+  ok("P: no CRM, a reader: the situation and who can change it, no steps they cannot take",
+    copyP === "Your estimates can't go out until you switch to StructureStudio paperwork. Only someone who can edit CRM Connection settings can change this.", copyP);
+  ok("P: …and no link to make the switch", (await block().locator("a").count()) === 0);
 
   // ── Q: a database without 290 ──
   await boot({ company: company({ codes: null }) });

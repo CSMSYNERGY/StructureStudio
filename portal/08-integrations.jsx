@@ -4140,13 +4140,15 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
             connected the CRM works the tax out (submit-estimate sends the CRM's estimate). In CRM
             mode with NO CRM every estimate is refused today (submit-estimate's first check), and
             the way out is the paperwork switch on CRM Connection, which needs this rate saved
-            first: that card's save judges the STORED rate since it stopped posting one. */}
+            first: that card's save judges the STORED rate since it stopped posting one. Those two
+            steps are told only to someone who can take them; a reader gets the situation and who
+            can change it. */}
         <div data-company-tax-copy="" style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
           {d.ssMode === true
             ? <>Charged on every taxable item. Items marked not taxable in your catalog are never taxed. A sales location's own rate, or a rate verified for the delivery address, is used instead. Enter 0 if you don't collect sales tax.</>
             : d.crmConfigured === true
               ? <>Your CRM works out the tax on your estimates, so this rate isn't used.</>
-              : <>Your estimates can't go out until you switch to StructureStudio paperwork. Save your rate here first (0 counts), then {connectionLink("make the switch on CRM Connection")}.</>}
+              : <>Your estimates can't go out until you switch to StructureStudio paperwork.{canEditTax && <> Save your rate here first (0 counts), then {connectionLink("make the switch on CRM Connection")}.</>}</>}
           {!canEditTax && " Only someone who can edit CRM Connection settings can change this."}
         </div>
         {canEditTax ? (<>
