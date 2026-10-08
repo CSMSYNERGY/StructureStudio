@@ -7,6 +7,7 @@ import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/a
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
+import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -59,10 +60,8 @@ function json(body: unknown, status = 200) {
 const COLUMN_TYPES = new Set([
   "status", "text", "long_text", "number", "date", "people", "dropdown", "checkbox", "link",
 ]);
-// The tenant-facing ladder from migration 054 — the ONLY values client_status may hold.
-const CLIENT_STATUSES = new Set([
-  "submitted", "in_review", "planned", "in_progress", "needs_info", "shipped", "declined", "duplicate",
-]);
+// The tenant-facing ladder (CLIENT_STATUSES, migration 054) lives in _shared/pmStatus.ts with
+// propagateStatus, which release-ci shares.
 const LABEL_KINDS = new Set(["done", "working", "stuck"]);
 
 // ── Where an item came from ──────────────────────────────────────────────────
@@ -592,27 +591,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   };
 
   // Propagate a status change to the tenant mirror when the label maps to a client
-  // status and the item is linked to a feedback submission.
+  // status and the item is linked to a feedback submission. The rule lives in
+  // _shared/pmStatus.ts (release-ci moves items through the same one); this only binds
+  // this request's service-role client and activity logger.
   // deno-lint-ignore no-explicit-any
-  const propagateStatus = async (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) => {
-    if (!item.feedback_submission_id) return;
-    for (const col of columns) {
-      if (col.type !== "status" || !(col.id in newValues)) continue;
-      if (newValues[col.id] === oldValues?.[col.id]) continue;
-      // deno-lint-ignore no-explicit-any
-      const label = (col.settings?.labels || []).find((l: any) => l.id === newValues[col.id]);
-      if (!label) continue;
-      if (label.client_status && CLIENT_STATUSES.has(label.client_status)) {
-        const { error } = await admin.from("feedback_submissions")
-          .update({ status: label.client_status, status_changed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("id", item.feedback_submission_id);
-        if (error) throw error;
-        await act(item.board_id, item.id, "client_status", { to: label.client_status, label: label.label });
-      } else {
-        await act(item.board_id, item.id, "status", { label: label.label });
-      }
-    }
-  };
+  const propagateStatus = (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) =>
+    propagateStatusShared(admin, act, item, columns, newValues, oldValues);
 
   try {
     switch (action) {
