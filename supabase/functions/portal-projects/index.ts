@@ -5,9 +5,9 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
+import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
-import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
