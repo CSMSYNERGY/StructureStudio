@@ -30,6 +30,8 @@ import {
   billingFromRequest,
   chargeInvoicePayment,
   MAX_PAYMENT_CENTS,
+  type MerchantOfRecord,
+  merchantOfRecord,
   MIN_PAYMENT_CENTS,
   paymentAmountDecision,
   readOrderMoney,
@@ -85,10 +87,10 @@ const MAX_DECLINES_PER_HOUR = 5;
 const DECLINE_THROTTLE_TEXT =
   "That's several declined attempts in a row from this login. Give it an hour, or take the payment another way.";
 
-/** settlestat is ONE call per DAY and never one per payment — the 40 TPM per-MID quota is
- *  shared with live charges, so a per-payment inquire loop would starve real money. This
- *  caps the days a single reconcile may spend; they are spent OLDEST FIRST, so the payment
- *  that has been stuck longest is always the one we ask about. */
+/** settlestat is ONE call per merchant and DAY and never one per payment — the 40 TPM per-MID
+ *  quota is shared with live charges, so a per-payment inquire loop would starve real money.
+ *  This caps the (merchant, day) calls a single reconcile may spend; they are spent OLDEST
+ *  FIRST, so the payment that has been stuck longest is always the one we ask about. */
 const MAX_SETTLESTAT_DAYS = 5;
 
 /** How long after funding a bank payment can still come back. Most NACHA codes return
@@ -208,13 +210,22 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     return refusal({ error: "Card payments aren't configured on this deployment yet." });
   }
 
-  const { data: settings, error: sErr } = await admin.from("client_settings")
-    .select("payments_online_enabled, cardpointe_merchid, business_name")
-    .eq("client_id", clientId).maybeSingle();
-  if (sErr) return dbFail(req, clientId, "read your payment settings", sErr);
-  const merchid = String(settings?.cardpointe_merchid || CP_DEFAULT_MERCHID || "").trim();
-  if (settings?.payments_online_enabled !== true || !merchid) {
-    return refusal({ error: "Taking cards isn't switched on for this account yet." });
+  // ⚠️ THE SWITCH GUARDS TAKING MONEY, AND ONLY THAT (2026-10). `payments_online_enabled` and the
+  // tenant's CURRENT merchant id are for a new charge. Void, refund and reconcile act on money
+  // already taken, on the account it was taken on (merchantOfRecord), so a tenant switched off, or
+  // moved to a new MID, can still give a customer their money back and still see a bank payment
+  // clear or come back. All seven actions used to sit behind this refusal and use this MID.
+  const TAKES_MONEY = new Set(["pay_options", "surcharge_probe", "charge", "charge_adhoc"]);
+  let currentMerchid = "";
+  if (TAKES_MONEY.has(action)) {
+    const { data: settings, error: sErr } = await admin.from("client_settings")
+      .select("payments_online_enabled, cardpointe_merchid, business_name")
+      .eq("client_id", clientId).maybeSingle();
+    if (sErr) return dbFail(req, clientId, "read your payment settings", sErr);
+    currentMerchid = String(settings?.cardpointe_merchid || CP_DEFAULT_MERCHID || "").trim();
+    if (settings?.payments_online_enabled !== true || !currentMerchid) {
+      return refusal({ error: "Taking cards isn't switched on for this account yet." });
+    }
   }
 
   // ── pay_options ───────────────────────────────────────────────────────────────────
@@ -338,7 +349,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (!t || t.length > 256) return json({ ok: true, applies: null, percent: null });
     // The billing ZIP from the modal, when it holds a real one: a fee can turn on where the card
     // is billed. A malformed ZIP is left off rather than sent.
-    const probe = await cpSurchargeProbe(merchid, t, cpBillingFields(payload).postal);
+    const probe = await cpSurchargeProbe(currentMerchid, t, cpBillingFields(payload).postal);
     return json({ ok: true, applies: probe.applies, percent: probe.percent });
   }
 
@@ -413,7 +424,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const result = await chargeInvoicePayment(admin, {
       clientId,
-      merchid,
+      merchid: currentMerchid,
       orderId,
       shortCode: money.shortCode,
       amountCents: decision.askCents,
@@ -487,7 +498,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const result = await chargeInvoicePayment(admin, {
       clientId,
-      merchid,
+      merchid: currentMerchid,
       orderId: String(order.id),
       shortCode: null,
       amountCents: cents,
@@ -516,12 +527,16 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   // The portal's own void button writes voided_at directly, and RLS correctly refuses that
   // for a gateway row — the money is still at CardPointe. So voiding one has to come
   // through here, and the row is only marked voided IF THE GATEWAY AGREES.
+  //
+  // Asked on the merchant account the charge was TAKEN on (merchantOfRecord, off the payment's
+  // attempt), never the tenant's current one: a void or refund on another account is a retref
+  // that account has never seen.
   if (action === "void_payment" || action === "refund_payment") {
     const paymentId = String(payload?.paymentId ?? "").trim();
     if (!paymentId) return json({ error: "paymentId is required." }, 400);
 
     const { data: p, error: pErr } = await admin.from("payments")
-      .select("id, order_id, amount_cents, note, gateway, gateway_txn_id, voided_at, funding_state")
+      .select("id, order_id, amount_cents, note, gateway, gateway_txn_id, voided_at, funding_state, attempt_id")
       .eq("client_id", clientId).eq("id", paymentId).maybeSingle();
     if (pErr) return dbFail(req, clientId, "load that payment", pErr);
     if (!p) return json({ error: "Payment not found." }, 404);
@@ -532,10 +547,35 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     await audit(`${action}`, null, `payment=${paymentId} retref=${p.gateway_txn_id}`).catch(() => {});
 
+    // Every payment the charge path writes carries its attempt (invoicePayment.ts, both inserts).
+    // One without, or whose attempt names no MID, is refused and filed: NEVER sent to the current
+    // MID on a guess. Someone finds the account at the gateway and acts there.
+    let merchant: MerchantOfRecord | undefined;
+    try {
+      merchant = (await merchantOfRecord(admin, clientId, [p.attempt_id])).get(String(p.attempt_id ?? ""));
+    } catch (e) {
+      return dbFail(req, clientId, "find the account that payment was taken on", e);
+    }
+    if (!merchant) {
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "payment_no_merchant_of_record",
+        message:
+          `${clientId}: ${action} REFUSED for payment ${paymentId} (retref ${p.gateway_txn_id}): no charge attempt says which merchant ` +
+          `account took it (attempt_id ${p.attempt_id ?? "null"}). Not sent to the current MID. Find the account at the gateway and act there.`,
+        context: { paymentId, attemptId: p.attempt_id ?? null, action },
+      });
+      return json({
+        error: "We can't tell which merchant account took this payment, so it can't be cancelled or refunded from here. Nothing has changed, and we've been told.",
+      }, 409);
+    }
+
     if (action === "void_payment") {
       let ok = false;
       try {
-        ok = await cpVoid(merchid, String(p.gateway_txn_id));
+        ok = await cpVoid(merchant.merchid, String(p.gateway_txn_id));
       } catch (e) {
         return json({
           error: "We couldn't reach the card network to cancel that payment. Nothing has changed — try again shortly.",
@@ -565,7 +605,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     }
     let out;
     try {
-      out = await cpRefund(merchid, String(p.gateway_txn_id), refundCents);
+      out = await cpRefund(merchant.merchid, String(p.gateway_txn_id), refundCents);
     } catch (e) {
       return json({
         error: "We couldn't reach the card network to refund that payment. Nothing has changed — try again shortly.",
@@ -627,7 +667,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // about the payment that has been stuck since last week. Oldest received first means the
     // oldest money is always inside the day budget.
     let pq = admin.from("payments")
-      .select("id, order_id, gateway_txn_id, received_at")
+      .select("id, order_id, gateway_txn_id, received_at, attempt_id")
       .eq("client_id", clientId).eq("gateway", "cardpointe")
       .eq("funding_state", "pending").is("voided_at", null)
       .order("received_at", { ascending: true });
@@ -644,7 +684,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     //    heard of them.
     const returnSince = new Date(Date.now() - ACH_RETURN_WINDOW_DAYS * 86400000).toISOString();
     let rq = admin.from("payments")
-      .select("id, order_id, gateway_txn_id, received_at")
+      .select("id, order_id, gateway_txn_id, received_at, attempt_id")
       .eq("client_id", clientId).eq("gateway", "cardpointe").eq("method", "ach")
       .eq("funding_state", "settled").is("voided_at", null)
       .gt("funding_updated_at", returnSince)
@@ -654,28 +694,74 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const nowIso = new Date().toISOString();
     const updated: unknown[] = [];
+    // Keyed `${merchid}|${retref}`: a batch answers for ITS merchant, and a retref is only looked
+    // up in the batch of the account the payment was taken on.
     const byRetref = new Map<string, string>();
+    // Keyed `${merchid}|${day}`: settlestat is one call per MERCHANT and day (the 40 TPM quota is
+    // per MID), and MAX_SETTLESTAT_DAYS caps how many of those calls one sweep makes.
     const fetchedDays = new Set<string>();
     const skippedDays = new Set<string>();
     const dayOf = (v: unknown) => String(v ?? "").slice(0, 10).replace(/-/g, "");
 
-    /** Spend day-sized pieces of the per-MID budget, in the order given, never twice on the
-     *  same day, and never past MAX_SETTLESTAT_DAYS. */
+    // Each payment's own merchant of record, in one read for both lists. A payment without one is
+    // SKIPPED (left as it is) and filed, never asked about on the tenant's current MID. A failed
+    // read skips them all this sweep: the next one asks again.
+    const sweep = [...(pending ?? []), ...(settledAch ?? [])] as Record<string, unknown>[];
+    let merchants = new Map<string, MerchantOfRecord>();
+    let merchantsRead = true;
+    try {
+      merchants = await merchantOfRecord(admin, clientId, sweep.map((p) => p.attempt_id));
+    } catch (e) {
+      merchantsRead = false;
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "reconcile_merchant_read_failed",
+        message: `${clientId}: reconcile could not read which merchant account took its bank payments, so it asked the gateway nothing: ${(e as Error).message}`,
+      });
+    }
+    const merchantOf = (row: Record<string, unknown>) =>
+      row.attempt_id == null ? undefined : merchants.get(String(row.attempt_id));
+    const orphans = merchantsRead ? sweep.filter((row) => !merchantOf(row)) : [];
+    if (orphans.length) {
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "payment_no_merchant_of_record",
+        message:
+          `${clientId}: reconcile skipped ${orphans.length} bank payment(s) with no charge attempt to say which merchant account took them ` +
+          `(${orphans.slice(0, 10).map((r) => r.id).join(", ")}). Not asked about on the current MID; check them at the gateway.`,
+        context: { paymentIds: orphans.slice(0, 50).map((r) => r.id) },
+      });
+    }
+
+    /** Spend (merchant, day)-sized pieces of the budget, in the order given, never twice on the
+     *  same pair, and never past MAX_SETTLESTAT_DAYS. A row with no merchant asks nothing. */
     const loadDays = async (rows: Record<string, unknown>[]) => {
       for (const row of rows) {
+        const m = merchantOf(row);
         const d = dayOf(row.received_at);
-        if (!d || fetchedDays.has(d) || skippedDays.has(d)) continue;
-        if (fetchedDays.size >= MAX_SETTLESTAT_DAYS) { skippedDays.add(d); continue; }
-        fetchedDays.add(d);
+        if (!m || !d) continue;
+        const key = `${m.merchid}|${d}`;
+        if (fetchedDays.has(key) || skippedDays.has(key)) continue;
+        if (fetchedDays.size >= MAX_SETTLESTAT_DAYS) { skippedDays.add(key); continue; }
+        fetchedDays.add(key);
         try {
-          const batch = await cpSettleStat(merchid, d) as Record<string, unknown>;
+          const batch = await cpSettleStat(m.merchid, d) as Record<string, unknown>;
           const rs = (batch?.txns ?? batch?.transactions ?? []) as Record<string, unknown>[];
           for (const t of Array.isArray(rs) ? rs : []) {
             const rr = String(t.retref ?? "");
-            if (rr) byRetref.set(rr, String(t.setlstat ?? t.status ?? ""));
+            if (rr) byRetref.set(`${m.merchid}|${rr}`, String(t.setlstat ?? t.status ?? ""));
           }
         } catch { /* one bad day must not stop the rest */ }
       }
+    };
+    /** The settlement status the payment's OWN merchant reported for it, if a batch said. */
+    const statusOf = (row: Record<string, unknown>) => {
+      const m = merchantOf(row);
+      return m ? byRetref.get(`${m.merchid}|${String(row.gateway_txn_id ?? "")}`) : undefined;
     };
 
     const noteReturned = (paymentId: unknown, orderRef: unknown, retref: string) => {
@@ -694,12 +780,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       await loadDays(pending as Record<string, unknown>[]);
       for (const p of pending) {
         const rr = String(p.gateway_txn_id ?? "");
-        const next = fundingStateFromSetlstat(byRetref.get(rr));
+        const raw = statusOf(p);
+        const next = fundingStateFromSetlstat(raw);
         // null means "we do not recognise that status" — LEAVE IT PENDING. Never guess a
         // bank payment into being money.
         if (!next || next === "pending") continue;
         const patch = next === "returned"
-          ? returnedPaymentPatch(byRetref.get(rr), nowIso)
+          ? returnedPaymentPatch(raw, nowIso)
           : { funding_state: "settled", funding_updated_at: nowIso };
         await admin.from("payments").update(patch).eq("client_id", clientId).eq("id", p.id);
         updated.push({ paymentId: p.id, to: next });
@@ -719,7 +806,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       await loadDays(settledAch as Record<string, unknown>[]);
       for (const p of settledAch) {
         const rr = String(p.gateway_txn_id ?? "");
-        const raw = byRetref.get(rr);
+        const raw = statusOf(p);
         if (raw === undefined) continue;
         if (fundingStateFromSetlstat(raw) !== "returned") continue;
         // The funding_state/voided_at predicates are repeated on the UPDATE so a row someone
@@ -738,11 +825,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     // daysChecked/daysSkipped are additive: they say whether the budget covered everything
     // pending, which is the difference between "nothing has changed" and "we did not look".
+    // daysChecked stays a list of days (one per day, whichever merchants were asked about it);
+    // daysSkipped counts the (merchant, day) calls the budget left for the next sweep.
     return json({
       ok: true,
       resolved,
       updated,
-      daysChecked: [...fetchedDays],
+      daysChecked: [...new Set([...fetchedDays].map((k) => k.split("|")[1]))],
       daysSkipped: skippedDays.size,
     });
   }

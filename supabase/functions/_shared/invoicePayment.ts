@@ -707,6 +707,48 @@ export async function chargeInvoicePayment(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────
+// The merchant a charge was taken on.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** The merchant account one charge was taken on. The environment joins the MID here when
+ *  test and live accounts are told apart (workstream 1 phase 3). */
+export type MerchantOfRecord = { merchid: string };
+
+/**
+ * The MID each charge was TAKEN ON, keyed by String(attempt id), read off the attempt rows
+ * (payment_attempts.merchid, written before the card was touched).
+ *
+ * Void, refund, settlestat and the recovery inquire must ask the account that HOLDS the
+ * transaction. Until 2026-10 they asked the tenant's CURRENT one (client_settings, or the
+ * deployment default when that was blank), so a builder whose MID changed after a sale could no
+ * longer void, refund or reconcile it: the gateway was asked about a retref on an account that
+ * never saw it.
+ *
+ * An id with no row, or a row with a blank MID, is simply ABSENT from the map. The caller refuses
+ * and logs; nothing here or there falls back to the current MID. Throws on a read error, so "the
+ * database did not answer" can never be mistaken for "no such attempt".
+ */
+export async function merchantOfRecord(
+  admin: Admin,
+  clientId: string,
+  attemptIds: unknown[],
+): Promise<Map<string, MerchantOfRecord>> {
+  const out = new Map<string, MerchantOfRecord>();
+  // payment_attempts.id is a bigint: anything else is not an attempt id, and asking Postgres to
+  // cast it would fail the whole read.
+  const ids = [...new Set(attemptIds.map((v) => (v == null ? "" : String(v).trim())).filter((v) => /^\d{1,19}$/.test(v)))];
+  if (!ids.length) return out;
+  const { data, error } = await admin.from("payment_attempts")
+    .select("id, merchid").eq("client_id", clientId).in("id", ids);
+  if (error) throw new Error(`merchantOfRecord: ${String(error.message ?? error.code ?? "read failed")}`);
+  for (const row of Array.isArray(data) ? data : []) {
+    const merchid = typeof row?.merchid === "string" ? row.merchid.trim() : "";
+    if (row?.id != null && merchid) out.set(String(row.id), { merchid });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
 // Resolving an unverifiable charge.
 //
 // This is what the durable `orderid` was for. It turns a closed_unknown from "phone CSM
@@ -725,7 +767,7 @@ export async function resolveUnknownAttempt(
   attemptId: number,
 ): Promise<ResolveResult> {
   const { data: att } = await admin.from("payment_attempts")
-    .select("id, order_id, short_code, amount_cents, rail, merchid, orderid, state, retref, created_at")
+    .select("id, order_id, short_code, amount_cents, rail, orderid, state, retref, created_at")
     .eq("client_id", clientId).eq("id", attemptId).maybeSingle();
   if (!att) return { resolved: false, reason: "not_found" };
   if (att.state !== "closed_unknown" && att.state !== "open") {
@@ -742,9 +784,19 @@ export async function resolveUnknownAttempt(
     if (!(ageMs > STALE_OPEN_MS)) return { resolved: false, reason: "in_flight" };
   }
 
+  // The orderid lives on the account the attempt was made on (merchantOfRecord), which is not
+  // necessarily the tenant's account today. No merchant, no question: the block stays.
+  let merchant: MerchantOfRecord | undefined;
+  try {
+    merchant = (await merchantOfRecord(admin, clientId, [att.id])).get(String(att.id));
+  } catch {
+    return { resolved: false, reason: "merchant_unreadable" };
+  }
+  if (!merchant) return { resolved: false, reason: "no_merchant" };
+
   let found: Record<string, unknown> | null;
   try {
-    found = await cpInquireByOrderId(att.merchid, att.orderid);
+    found = await cpInquireByOrderId(merchant.merchid, att.orderid);
   } catch (e) {
     return { resolved: false, reason: isGatewayUnknown(e) ? "gateway_unreachable" : "inquire_failed" };
   }

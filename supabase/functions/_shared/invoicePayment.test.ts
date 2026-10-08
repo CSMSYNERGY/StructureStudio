@@ -149,12 +149,13 @@ Deno.test("amounts outside the floor and ceiling are refused", () => {
 type Call = { table: string; op: string; payload?: unknown };
 
 /** A chainable PostgREST-shaped stub. `answer` decides what each (table, op) resolves to;
- *  every call is appended to `log`, which is how ORDERING is asserted. */
+ *  every call is appended to `log`, which is how ORDERING is asserted. `inIds` is the value list
+ *  of an `.in()` filter, when the call had one (merchantOfRecord's read). */
 // deno-lint-ignore no-explicit-any
-function makeAdmin(answer: (table: string, op: string, payload: any) => any, log: Call[]) {
+function makeAdmin(answer: (table: string, op: string, payload: any, inIds?: unknown[]) => any, log: Call[]) {
   return {
     from(table: string) {
-      const st = { table, op: "", payload: undefined as unknown };
+      const st = { table, op: "", payload: undefined as unknown, inIds: undefined as unknown[] | undefined };
       // deno-lint-ignore no-explicit-any
       const b: any = {
         select() {
@@ -174,7 +175,8 @@ function makeAdmin(answer: (table: string, op: string, payload: any) => any, log
         eq() {
           return b;
         },
-        in() {
+        in(_col: string, vals: unknown[]) {
+          st.inIds = vals;
           return b;
         },
         gt() {
@@ -196,7 +198,7 @@ function makeAdmin(answer: (table: string, op: string, payload: any) => any, log
         then(res: any, rej?: any) {
           log.push({ table: st.table, op: st.op, payload: st.payload });
           try {
-            return Promise.resolve(answer(st.table, st.op, st.payload)).then(res, rej);
+            return Promise.resolve(answer(st.table, st.op, st.payload, st.inIds)).then(res, rej);
           } catch (e) {
             return rej ? Promise.resolve(rej(e)) : Promise.reject(e);
           }
@@ -542,13 +544,17 @@ const UNKNOWN_ATT = {
   created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
 };
 
-/** Default answers for the recovery path: one attempt row, an insert that succeeds. */
+/** Default answers for the recovery path: one attempt row, an insert that succeeds. The `.in()`
+ *  read (merchantOfRecord) gets the attempt as a one-row list, as PostgREST answers it. */
 // deno-lint-ignore no-explicit-any
 function attemptAnswer(att: Record<string, any>, over: Record<string, any> = {}) {
   // deno-lint-ignore no-explicit-any
-  return (table: string, op: string, _p: any): any => {
-    const key = `${table}:${op}`;
+  return (table: string, op: string, _p: any, inIds?: unknown[]): any => {
+    const key = `${table}:${op}${inIds ? ":in" : ""}`;
     if (key in over) return over[key];
+    if (table === "payment_attempts" && op === "select" && inIds) {
+      return { data: inIds.map(String).includes(String(att.id)) ? [{ id: att.id, merchid: att.merchid }] : [] };
+    }
     if (table === "payment_attempts" && op === "select") return { data: att };
     if (table === "payment_attempts" && op === "update") return { data: null, error: null };
     if (table === "payments" && op === "insert") return { data: { id: "pRec" }, error: null };
@@ -858,4 +864,85 @@ Deno.test("recovery of a SURCHARGED charge still records the ask, with the surch
   const ins = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
   check("records the ask", ins?.amount_cents === 100000, JSON.stringify(ins));
   check("surcharge beside it", ins?.surcharge_cents === 3000, JSON.stringify(ins));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Part 5 — the merchant a charge was taken on (2026-10, workstream 1 phase 2).
+//
+// Void, refund, settlestat and this recovery ask the account that HOLDS the transaction:
+// payment_attempts.merchid, written before the card was touched. Never the tenant's current
+// MID, and never the deployment default. No merchant of record means the question is not asked.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+Deno.test("merchantOfRecord maps each attempt to the MID it was taken on, and leaves out the rest", async () => {
+  const log: Call[] = [];
+  let asked: unknown[] | undefined;
+  const admin = makeAdmin((table, op, _p, inIds) => {
+    if (table === "payment_attempts" && op === "select") {
+      asked = inIds;
+      return { data: [{ id: 41, merchid: "100200300400" }, { id: 42, merchid: " 100200300500 " }, { id: 43, merchid: "  " }, { id: 44, merchid: null }] };
+    }
+    return { data: null, error: null };
+  }, log);
+  const m = await ip.merchantOfRecord(admin, "t1", [41, "42", 43, 44, 45, null, undefined, "", "abc", 41, "1;drop"]);
+  check("41", m.get("41")?.merchid === "100200300400", JSON.stringify([...m]));
+  check("42 trimmed", m.get("42")?.merchid === "100200300500", JSON.stringify([...m]));
+  check("a blank MID is absent", !m.has("43") && !m.has("44"), JSON.stringify([...m]));
+  check("an attempt with no row is absent", !m.has("45"));
+  check("ONE read, of the distinct numeric ids only", log.length === 1 && JSON.stringify(asked) === JSON.stringify(["41", "42", "43", "44", "45"]),
+    JSON.stringify(asked));
+});
+
+Deno.test("merchantOfRecord with no usable id reads nothing; a failed read THROWS, never an empty answer", async () => {
+  const log: Call[] = [];
+  const quiet = makeAdmin(() => ({ data: [] }), log);
+  const none = await ip.merchantOfRecord(quiet, "t1", [null, undefined, "", "x"]);
+  check("empty", none.size === 0);
+  check("no read at all", log.length === 0, JSON.stringify(log));
+  const broken = makeAdmin(() => ({ data: null, error: { message: "statement timeout", code: "57014" } }), []);
+  let threw = false;
+  try {
+    await ip.merchantOfRecord(broken, "t1", [41]);
+  } catch {
+    threw = true;
+  }
+  check("a read error throws", threw);
+});
+
+Deno.test("recovery inquires on the ATTEMPT's MID, not the deployment's", async () => {
+  // The env default in this file is 100200300400. The attempt says the charge was taken on
+  // another account, and only that account can answer for its orderid.
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(attemptAnswer({ ...UNKNOWN_ATT, merchid: "100200300777" }), log);
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  const urls = [...fetchLog];
+  restore();
+  check("resolved", r.resolved, JSON.stringify(r));
+  check("one inquire", urls.length === 1, urls.join(","));
+  check("on the attempt's MID", urls[0].endsWith("/inquireByOrderid/ssp_lost/100200300777"), urls[0]);
+});
+
+Deno.test("recovery with NO merchant of record asks nothing and keeps the block", async () => {
+  for (const [label, merchid] of [["blank MID", ""], ["null MID", null]] as const) {
+    const log: Call[] = [];
+    stubGateway(() => new Response(CHARGED, { status: 200 }));
+    const admin = makeAdmin(attemptAnswer({ ...UNKNOWN_ATT, merchid }), log);
+    const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+    restore();
+    check(`${label}: not resolved`, !r.resolved && r.reason === "no_merchant", JSON.stringify(r));
+    check(`${label}: ZERO gateway calls`, fetchCount === 0, String(fetchCount));
+    check(`${label}: nothing written`, !log.some((c) => c.op !== "select"), JSON.stringify(log));
+  }
+  // And a merchant read that fails is not "no merchant": it is unanswered, and also asks nothing.
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(
+    attemptAnswer(UNKNOWN_ATT, { "payment_attempts:select:in": { data: null, error: { message: "timeout", code: "57014" } } }),
+    log,
+  );
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("read failure: not resolved", !r.resolved && r.reason === "merchant_unreadable", JSON.stringify(r));
+  check("read failure: ZERO gateway calls", fetchCount === 0, String(fetchCount));
 });
