@@ -438,8 +438,11 @@ class Run {
     return { user: this.cfg.parentSid, pass: this.cfg.parentToken };
   }
 
-  /** Write to the row, only while this run still holds the lock. */
-  private async write(patch: Partial<AccountRow>): Promise<void> {
+  /** Write to the row, only while this run still holds the lock. A run over an ACTIVE sub (the
+   *  operator filling in push credentials) never moves its provision_step off 'done'. */
+  private async write(patchIn: Partial<AccountRow>): Promise<void> {
+    const patch = { ...patchIn };
+    if (this.row.status === "active" && patch.provision_step && patch.provision_step !== "done") delete patch.provision_step;
     const res = await this.admin.from("twilio_accounts")
       .update({ ...patch, updated_at: new Date(this.now()).toISOString() })
       .eq("client_id", this.clientId).eq("provision_lock_until", this.lockUntil).select("client_id");
@@ -464,13 +467,18 @@ class Run {
   }
 
   async recordFailure(pe: ProvisionError): Promise<void> {
-    const keepActive = this.row.status === "active";
-    await this.admin.from("twilio_accounts").update({
-      status: keepActive ? "active" : "failed",
-      provision_step: (PROVISION_STEPS as readonly string[]).includes(pe.step) ? pe.step : this.row.provision_step,
-      last_error: `${pe.step}:${pe.code}`.slice(0, 200),
-      updated_at: new Date(this.now()).toISOString(),
-    }).eq("client_id", this.clientId).eq("provision_lock_until", this.lockUntil);
+    const last_error = `${pe.step}:${pe.code}`.slice(0, 200);
+    const updated_at = new Date(this.now()).toISOString();
+    // An ACTIVE sub (the operator filling in push credentials) stays active and 'done': it works,
+    // and only the error is recorded. Anything else is 'failed' at the step it stopped on, which
+    // the next call resumes from.
+    const patch = this.row.status === "active"
+      ? { last_error, updated_at }
+      : {
+        status: "failed", last_error, updated_at,
+        provision_step: (PROVISION_STEPS as readonly string[]).includes(pe.step) ? pe.step : this.row.provision_step,
+      };
+    await this.admin.from("twilio_accounts").update(patch).eq("client_id", this.clientId).eq("provision_lock_until", this.lockUntil);
   }
 
   async all(): Promise<void> {
@@ -803,7 +811,10 @@ export async function setTwilioAccountStatus(
   if (!row || row.kind !== "sub" || !row.account_sid) return { ok: false, reason: "no_sub", status: 409, code: "no_sub" };
   if (row.status === want) return { ok: true, status: want, already: true };
   if (row.status === "closed") return { ok: false, reason: "wrong_state", status: 409, code: "closed" };
+  // Suspend an ACTIVE sub only, and reactivate only a suspended one: a sub still being set up is
+  // finished (or closed), never parked half-made as "suspended" and woken up as "active".
   if (want === "active" && row.status !== "suspended") return { ok: false, reason: "wrong_state", status: 409, code: row.status };
+  if (want === "suspended" && row.status !== "active") return { ok: false, reason: "wrong_state", status: 409, code: row.status };
   const parentSid = String(opts.get("TWILIO_ACCOUNT_SID") ?? "").trim();
   const parentToken = String(opts.get("TWILIO_AUTH_TOKEN") ?? "").trim();
   if (!ACCOUNT_SID.test(parentSid) || !parentToken) {

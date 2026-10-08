@@ -243,6 +243,21 @@ None of this is a migration or SQL. The markup, the wait, the pilot list, `armed
 - The fee on a text sent is T-Mobile's ($0.0045). Verizon's is $0.005 and AT&T's $0.0035.
 - With a 1-hour wait, an item Twilio prices later than that keeps its estimate, because the ledger wins.
 
+## 7f. One Twilio sub-account per builder (Workstream 2; off until you turn it on)
+
+Every builder but our own texts and calls from a Twilio sub-account of their own, billed to ours. The switch is `TWILIO_SUBACCOUNTS`, an edge secret AND a var of this Worker, exactly `on`. Unset, nothing changes anywhere (DEVIATIONS 76 and 77). The account is made by `_shared/twilioProvision.ts` (a builder's first number on the Phone tab, or the first submit of their texting registration) or by hand from the operator console.
+
+1. **Migrations 292 and 295** applied (renumbered at apply), each with its RECORD row read back.
+2. **Edge secrets provisioning needs.** `TWILIO_AUTH_TOKEN`: the parent's auth token, required (a parent API key can neither create a sub-account nor reach one; with only a key, Create answers which secret to set). Also `TWILIO_ACCOUNT_SID`, `PHONE_WEBHOOK_SECRET`, `PHONE_FALLBACK_URL`, `TWILIO_EVENTS_SECRET` (all set already) and, optional: `PHONE_API_BASE`; `TWILIO_APP_FALLBACK_URL` (the URL of the calls app's "Calling is having a problem" Bin from step 2.3; without it the sub's app falls back to `PHONE_FALLBACK_URL`); `TWILIO_EVENT_TYPES` (comma-separated, to copy the parent subscription's list exactly from the phase 0 inventory; without it the A2P brand, campaign and number-registration types twilio-events acts on). ⚠️ Whether another account may fetch a Bin the parent owns is not documented: try it on the test sub.
+3. **Push material, into Vault by hand** (the SQL editor, never a file), under exactly these names. A missing one is skipped and shown on the console card; that sub's phones then sign in without incoming-call push until it is loaded and Create is pressed again.
+   - `twilio_push_apns_dev_certificate`, `twilio_push_apns_dev_private_key`: the development bundle id's VoIP Services certificate and key, PEM.
+   - `twilio_push_apns_prod_certificate`, `twilio_push_apns_prod_private_key`: the store bundle id's, PEM.
+   - `twilio_push_fcm_secret`: the Firebase service account JSON the parent's FCM credential was made from.
+   - `select vault.create_secret('<the PEM or JSON>', '<name>', 'Twilio push material (migration 295)');` Both APNs credentials are made with Sandbox unticked (item 75's one APNs environment). The VoIP certificate expires 2027-11-05: renew the two apns secrets and every sub's credential then.
+4. **The first test sub, while the switch is still off.** Admin, the test builder, Account, "Twilio account", Create (needs can_bill; it asks first). Then Check token: both should read accepted. A builder on our main account (our own, or one already holding a number or registration there) is never offered Create.
+5. **Deploy, then switch on.** Edge functions (portal-settings, portal-sms, admin-catalog and the rest of the deploy list) and this Worker, then `npx supabase secrets set TWILIO_SUBACCOUNTS=on` and the Worker var in `wrangler.jsonc` (one file, many rails: see 7e). New texting registrations are refused while it is off (portal-sms registrationGate.ts), and the Phone tab's `PHONE_SELF_SERVE` opens only with it on.
+6. **Rollback.** Switch it off: no new sub-account is made and new registrations wait again. Never close a sub that still has numbers (Close refuses; closing releases them for good). Deleting a builder closes its sub first and refuses while it has a number.
+
 ## 8. Prove it (plan section 20, phase 1b)
 
 - A test page calls your cell, and your cell calls the test page. Timing marks appear in `phone_call_events`.

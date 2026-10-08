@@ -757,3 +757,31 @@ Deno.test("suspend, reactivate and close: with the parent's token; close refused
   const w3 = world();
   assertEquals((await setTwilioAccountStatus(w3.db, TENANT, "closed", { get: ON, http: noHttp })).ok, false);
 });
+
+Deno.test("a refill that fails leaves the working sub active and 'done' (only the error is recorded)", async () => {
+  const w = world();
+  w.db.material.fcm = { kind: "fcm", certificate: null, private_key: null, secret: null };
+  await ensure(w);
+  assertEquals(row(w).push_skipped, ["fcm"]);
+  w.db.material.fcm.secret = '{"type":"service_account"}';
+  w.tw.down.set("create_cred", 1);
+  const r = await ensure(w, { operator: true });
+  assert(!r.ok && r.step === "push", JSON.stringify(r));
+  assertEquals([row(w).status, row(w).provision_step, row(w).last_error], ["active", "done", "push:unreachable"]);
+  // Builders keep the fast path meanwhile.
+  assert((await ensure(w, { http: noHttp })).ok);
+  // And the next Create finishes it, the step still 'done' throughout.
+  assert((await ensure(w, { operator: true })).ok);
+  assertEquals([row(w).status, row(w).provision_step, row(w).push_skipped], ["active", "done", null]);
+});
+
+Deno.test("suspend only an active sub; reactivate only a suspended one", async () => {
+  const w = world();
+  w.tw.inherit = false;
+  await ensure(w);
+  assertEquals(row(w).status, "failed");
+  const s = await setTwilioAccountStatus(w.db, TENANT, "suspended", { get: ON, http: w.tw.http });
+  assert(!s.ok && s.reason === "wrong_state" && s.code === "failed", JSON.stringify(s));
+  const a = await setTwilioAccountStatus(w.db, TENANT, "active", { get: ON, http: w.tw.http });
+  assert(!a.ok && a.reason === "wrong_state", JSON.stringify(a));
+});
