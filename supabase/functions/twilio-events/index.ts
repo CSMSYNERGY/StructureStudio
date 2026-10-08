@@ -4,6 +4,8 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
 import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget, numberVerdictEffect } from "../_shared/twilioEventKey.ts";
+// Workstream 2, phase 4: whose Twilio account an event came from (only while TWILIO_SUBACCOUNTS is "on").
+import { eventAccountSid, subaccountsOn, tenantAccountSid } from "../_shared/twilioAccount.ts";
 
 // Twilio Event Streams sink for A2P compliance events.
 //
@@ -38,6 +40,15 @@ import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceSta
 //
 // ⚠️ ALWAYS 200 ONCE AUTHENTICATED, like sms-inbound. Event Streams has no documented
 // redelivery; a non-2xx buys nothing and can get the subscription disabled.
+//
+// ⚠️ ONE SINK PER TWILIO ACCOUNT, ONE SHARED KEY (Workstream 2, phase 4). Each builder's
+// sub-account gets its own Event Streams sink pointing here with the same ?key=, so the key alone
+// no longer says which account an event is from. While TWILIO_SUBACCOUNTS is "on", an event acts
+// on a registration only when its AccountSid (the payload's `accountsid`) is the account that
+// registration's business lives in: the parent's for a business with no sub-account, the sub's
+// otherwise. Anything else (another account, no AccountSid, a lookup that failed) is recorded
+// with no tenant and reported as twilio_event_account_mismatch, never acted on. Off, nothing here
+// changes and nothing is looked up.
 
 // Supabase's runtime provides this; the type is not in the edge-runtime .d.ts, so declare the
 // one member used. Guarded at the call site — if it is ever absent the work is awaited inline,
@@ -115,6 +126,9 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
   const noTenant: Record<string, unknown>[] = [];
   const stale: Record<string, unknown>[] = [];
   const unhandledTypes: string[] = [];
+  const mismatched: Record<string, unknown>[] = [];
+  const envGet = (k: string) => Deno.env.get(k);
+  const perAccount = subaccountsOn(envGet);
   for (const ev of events) {
     const eventId = String(ev?.id ?? "");
     const type = String(ev?.type ?? "");
@@ -143,6 +157,33 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     if (!reg && serviceSid) {
       const { data } = await admin.from("sms_registrations").select("*").eq("messaging_service_sid", serviceSid).maybeSingle();
       reg = data;
+    }
+
+    // ── Whose account (switch on only) ────────────────────────────────────────────────
+    // A registration found above is acted on only when the event came from the account its
+    // business lives in. Otherwise the event is recorded with no tenant and reported below.
+    if (perAccount && reg) {
+      const evAccount = eventAccountSid(d);
+      let expected: string | null = null;
+      let lookupFailed = false;
+      try {
+        expected = (await tenantAccountSid(admin, String(reg.client_id), envGet)) ?? (Deno.env.get("TWILIO_ACCOUNT_SID") || null);
+      } catch {
+        lookupFailed = true;
+      }
+      if (lookupFailed || !expected || evAccount !== expected) {
+        if (!isTest) {
+          mismatched.push({
+            type, client_id: reg.client_id, lookup_failed: lookupFailed,
+            // SID prefixes only, like twilio_event_no_tenant: enough to find it, not a copy.
+            event_account: evAccount ? evAccount.slice(0, 8) : null,
+          });
+        }
+        await admin.from("sms_registration_events").insert({
+          client_id: null, event_id: eventOccurrenceKey(eventId, d), event_type: type, detail: d,
+        }).then(() => {}, () => {});
+        continue;
+      }
     }
 
     // ── Record first, act second ──────────────────────────────────────────────────────
@@ -400,6 +441,17 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
       message: `${noTenant.length} event(s) matched no SMS registration. Recorded, not acted on.`,
       severity: "info",
       context: { events: noTenant.slice(0, 5) },
+    }).catch(() => {});
+  }
+  if (mismatched.length) {
+    // An error, not info: either an account other than the business's is posting events about it,
+    // or our own record of which account the business lives in is wrong. Someone looks at both.
+    await logEdgeError({
+      fn: "twilio-events",
+      code: "twilio_event_account_mismatch",
+      message: `${mismatched.length} event(s) came from a Twilio account other than the one their business lives in, or carried none. Recorded, not acted on.`,
+      severity: "error",
+      context: { events: mismatched.slice(0, 5) },
     }).catch(() => {});
   }
   if (unhandledTypes.length) {

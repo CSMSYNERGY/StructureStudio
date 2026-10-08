@@ -1,7 +1,9 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { computeTwilioSignature, verifyTwilioRequest } from "../src/twilioSignature";
-import { AUTH_TOKEN, BASE, FakeNet, WEBHOOK_KEY, call, makeEnv, twilioPost } from "./helpers";
+import { adminClient } from "../src/db";
+import { webhookAccountLookup } from "../src/twilioAccount";
+import { AUTH_TOKEN, BASE, CLIENT, FakeNet, WEBHOOK_KEY, call, jsonRes, makeEnv, routeInfo, twilioPost } from "./helpers";
 
 const ACCOUNT = "AC" + "0".repeat(32);
 
@@ -145,5 +147,136 @@ describe("X-Twilio-Signature", () => {
     // Only the fault log may have been written; no route lookup, no call rows.
     expect(net.seen.filter((s) => !s.url.pathname.endsWith("/app_errors"))).toEqual([]);
     expect(net.writes("app_errors").length).toBeGreaterThan(0);
+  });
+});
+
+// ── Workstream 2, phase 4: the token is picked by the request's AccountSid ─────────────────────
+// Only while TWILIO_SUBACCOUNTS is "on". Every SID and token below is made up.
+describe("per-account signatures (TWILIO_SUBACCOUNTS on)", () => {
+  const SUB = "AC" + "5".repeat(32);
+  const SUB_TOKEN = "subauthtoken" + "y".repeat(20);
+  const SUB_CLIENT = "sub-builder";
+  const on = (over: Parameters<typeof makeEnv>[0] = {}) => makeEnv({ TWILIO_SUBACCOUNTS: "on", ...over });
+  const lookupFrom = (net: FakeNet, rows: (sid: string) => unknown[]) => {
+    net.rpc("twilio_account_creds", (s) => rows(String(s.json?.p_account_sid ?? "")));
+    return (env: ReturnType<typeof makeEnv>) => webhookAccountLookup(env, () => adminClient(env));
+  };
+  const subRow = (status = "active") => [{ client_id: SUB_CLIENT, kind: "sub", account_sid: SUB, status, auth_token: SUB_TOKEN }];
+
+  it("good: a known active sub, signed with ITS token, is accepted and named", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    const env = on();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB }, {}, { signWith: SUB_TOKEN });
+    const out = await verifyTwilioRequest(env, req, { accountBySid: lookup(env) });
+    expect(out).toMatchObject({ ok: true, signed: true, account: { source: "sub", accountSid: SUB, clientId: SUB_CLIENT } });
+  });
+
+  it("bad: a sub's request signed with the PARENT's token (or anything else) is refused", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    const env = on();
+    for (const signWith of [AUTH_TOKEN, "garbage"]) {
+      const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB }, {}, { signWith });
+      expect(await verifyTwilioRequest(env, req, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "bad_signature" });
+    }
+  });
+
+  it("a sub's signature is MANDATORY, even on a Worker with no parent token", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    const env = on({ TWILIO_AUTH_TOKEN: "" });
+    const bare = new Request(`${BASE}/voice/inbound?key=${WEBHOOK_KEY}`, { method: "POST", body: `CallSid=CA1&AccountSid=${SUB}` });
+    expect(await verifyTwilioRequest(env, bare, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "no_signature" });
+  });
+
+  it("unknown: an AccountSid that is not ours, or a sub that is not active, is wrong_account", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, (sid) => (sid === SUB ? subRow("suspended") : []));
+    const env = on();
+    for (const acct of ["AC" + "9".repeat(32), SUB]) {
+      const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: acct }, {}, { signWith: SUB_TOKEN });
+      expect(await verifyTwilioRequest(env, req, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "wrong_account" });
+    }
+  });
+
+  it("a lookup that fails refuses the request (account_lookup_failed): the Worker answers 503 and logs an error", async () => {
+    const net = new FakeNet().install();
+    net.rpc("twilio_account_creds", () => jsonRes({ code: "57014", message: "timeout" }, 500));
+    net.rest("POST", "app_errors", () => []);
+    const env = on();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB }, {}, { signWith: SUB_TOKEN });
+    const { res } = await call(env, req);
+    expect(res.status).toBe(503);
+    expect(net.writes("app_errors").map((s) => s.json)).toEqual([expect.objectContaining({ code: "twilio_account_lookup_failed", severity: "error" })]);
+  });
+
+  it("the parent is today's check exactly: its token when set, the key alone without, and no lookup", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, () => []);
+    const env = on();
+    const good = await twilioPost(env, "/voice/status", { CallSid: "CA1", AccountSid: ACCOUNT });
+    expect(await verifyTwilioRequest(env, good, { accountBySid: lookup(env) })).toMatchObject({ ok: true, signed: true, account: { source: "parent" } });
+    const badSig = await twilioPost(env, "/voice/status", { CallSid: "CA1", AccountSid: ACCOUNT }, {}, { signWith: SUB_TOKEN });
+    expect(await verifyTwilioRequest(env, badSig, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "bad_signature" });
+    const noToken = on({ TWILIO_AUTH_TOKEN: "" });
+    expect(await verifyTwilioRequest(noToken, await twilioPost(env, "/voice/status", { CallSid: "CA1", AccountSid: ACCOUNT }), { accountBySid: lookup(noToken) }))
+      .toMatchObject({ ok: true, signed: false });
+    expect(await verifyTwilioRequest(noToken, await twilioPost(env, "/voice/status", { CallSid: "CA1" }), { accountBySid: lookup(noToken) }))
+      .toEqual({ ok: false, reason: "wrong_account" });
+    expect(net.rpcCalls("twilio_account_creds")).toHaveLength(0);
+  });
+
+  it("switch OFF: a sub-signed request is refused exactly as today, and the lookup is never consulted", async () => {
+    const net = new FakeNet().install();
+    const lookup = lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    const env = makeEnv();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB }, {}, { signWith: SUB_TOKEN });
+    expect(await verifyTwilioRequest(env, req, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "bad_signature" });
+    const parentSigned = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB });
+    expect(await verifyTwilioRequest(env, parentSigned, { accountBySid: lookup(env) })).toEqual({ ok: false, reason: "wrong_account" });
+    expect(net.seen).toHaveLength(0);
+  });
+
+  it("mismatch: a sub's inbound call for a number of ANOTHER business is refused (account_mismatch), never rung", async () => {
+    const net = new FakeNet().install();
+    lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    net.rpc("phone_route_for_number", () => routeInfo()); // the number is CLIENT's, not the sub's business
+    net.rest("POST", "app_errors", () => []);
+    net.rest("POST", "phone_calls", () => []);
+    const env = on();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB, To: "+15555550100", From: "+15555550142" }, {}, { signWith: SUB_TOKEN });
+    const { text } = await call(env, req);
+    expect(text).toContain("this number can't take calls right now");
+    expect(text).not.toContain("<Client");
+    expect(net.writes("phone_calls")).toHaveLength(0);
+    expect(net.writes("app_errors").map((s) => s.json)).toEqual([expect.objectContaining({ code: "twilio_account_mismatch", severity: "error", client_id: CLIENT })]);
+  });
+
+  it("match: the same call for the sub's own business rings as usual", async () => {
+    const net = new FakeNet().install();
+    lookupFrom(net, (sid) => (sid === SUB ? subRow() : []));
+    net.rpc("phone_route_for_number", () => routeInfo({ client_id: SUB_CLIENT }));
+    net.rest("GET", "crm_contacts", () => []);
+    net.rest("POST", "phone_calls", () => []);
+    net.rest("POST", "phone_call_events", () => []);
+    net.rest("POST", "app_errors", () => []);
+    const env = on();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: SUB, To: "+15555550100", From: "+15555550142" }, {}, { signWith: SUB_TOKEN });
+    const { text } = await call(env, req);
+    expect(text).toContain("<Client");
+    expect(net.writes("phone_calls", "POST")[0].json).toMatchObject({ client_id: SUB_CLIENT });
+  });
+
+  it("the parent's inbound call for a business that lives in a sub is refused too", async () => {
+    const net = new FakeNet().install();
+    net.rpc("phone_route_for_number", () => routeInfo({ client_id: SUB_CLIENT }));
+    net.rest("GET", "twilio_accounts", () => [{ kind: "sub", account_sid: SUB }]);
+    net.rest("POST", "app_errors", () => []);
+    const env = on();
+    const req = await twilioPost(env, "/voice/inbound", { CallSid: "CA1", AccountSid: ACCOUNT, To: "+15555550100", From: "+15555550142" });
+    const { text } = await call(env, req);
+    expect(text).toContain("this number can't take calls right now");
+    expect(net.writes("app_errors").map((s) => s.json)).toEqual([expect.objectContaining({ code: "twilio_account_mismatch" })]);
   });
 });

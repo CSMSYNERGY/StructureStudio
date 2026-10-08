@@ -31,6 +31,7 @@ import {
 import { hook } from "../urls";
 import { voicemailTwiml, type VoicemailFor } from "../voicemail";
 import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
+import { tenantMatchesWebhook } from "../twilioAccount";
 
 /** Twilio allows at most 10 nouns in one <Dial>. */
 const MAX_NOUNS = 10;
@@ -367,6 +368,16 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   if (ctx.device_generation !== identity.generation) return response(say(SAY.retired), hangup());
   if (ctx.phone_status !== "on") return response(say(SAY.phoneOff), hangup());
   if (!ctx.number) return response(say(SAY.noNumber), hangup());
+  // Workstream 2, phase 4: the caller's business must live in the account the call came from. Only
+  // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
+  if (env.TWILIO_WEBHOOK_ACCOUNT && !(await tenantMatchesWebhook(env, admin, ctx.client_id))) {
+    ec.waitUntil(logFault({
+      code: "twilio_account_mismatch", severity: "error", clientId: ctx.client_id, throttleMs: 10 * 60_000,
+      message: "An outbound call came from a Twilio account the caller's business does not live in; refused.",
+      context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source },
+    }));
+    return response(say(SAY.noAccess), hangup());
+  }
 
   const to = rawTo.startsWith("client:") ? null : toE164(rawTo);
   if (!to) return response(say(SAY.badNumber), hangup());
@@ -525,6 +536,16 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     ec.waitUntil(logFault({
       code: "inbound_unknown_number", severity: "warn", throttleMs: 10 * 60_000,
       message: "An inbound call reached a number with no sms_numbers row; its voice URL points here by mistake.",
+    }));
+    return response(say(SAY.notInService), hangup());
+  }
+  // Workstream 2, phase 4: the number's business must live in the account the call came from. Only
+  // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
+  if (env.TWILIO_WEBHOOK_ACCOUNT && !(await tenantMatchesWebhook(env, admin, info.client_id))) {
+    ec.waitUntil(logFault({
+      code: "twilio_account_mismatch", severity: "error", clientId: info.client_id, throttleMs: 10 * 60_000,
+      message: "An inbound call came from a Twilio account this number's business does not live in; refused.",
+      context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source },
     }));
     return response(say(SAY.notInService), hangup());
   }

@@ -3,6 +3,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { validateTwilioSignature, hasSignatureKey } from "../_shared/twilioSms.ts";
+// Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
+import { requestAccount, subaccountsOn, tenantAccountSid, webhookMatchesTenant, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
 // Twilio delivery receipts → the outbound row's final status. The twin of postmark-events,
 // and the reason the Messages feed can say "delivered" rather than only "we handed it over".
@@ -77,8 +79,28 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
   }
 
   // Same three-state signature handling as sms-inbound — see its header for why "no token"
-  // proceeds rather than refusing.
-  if (hasSignatureKey()) {
+  // proceeds rather than refusing. PER ACCOUNT while TWILIO_SUBACCOUNTS is "on", exactly as
+  // sms-inbound (Workstream 2, phase 4): a sub-account's callback must carry its own signature,
+  // and an AccountSid that is not ours is refused. Off, nothing here runs or is looked up, and
+  // the database client is made where it always was, below.
+  const envGet = (k: string) => Deno.env.get(k);
+  // deno-lint-ignore no-explicit-any
+  let early: any = null;
+  let account: WebhookAccount | null = null;
+  if (subaccountsOn(envGet)) {
+    early = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+      { auth: { persistSession: false } },
+    );
+    const r = await requestAccount(early, params.AccountSid, envGet);
+    if (r.kind === "refused") return deny();
+    if (r.kind === "account") account = r.account;
+  }
+  if (account?.source === "sub") {
+    const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`;
+    if (!(await validateTwilioSignature(url, params, req.headers.get("X-Twilio-Signature") ?? "", account.authToken))) return deny();
+  } else if (hasSignatureKey()) {
     const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`;
     const valid = await validateTwilioSignature(url, params, req.headers.get("X-Twilio-Signature") ?? "");
     if (!valid) return deny();
@@ -88,15 +110,34 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
   const patch = mapStatus(String(params.MessageStatus ?? params.SmsStatus ?? ""), String(params.ErrorCode ?? "") || null);
   if (!sid || !patch) return ok();
 
-  const admin = createClient(
+  const admin = early ?? createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     { auth: { persistSession: false } },
   );
 
-  const { error } = await admin.from("sms_messages")
+  // Workstream 2, phase 4 (switch on only): a sub-account's callback may only move its own
+  // business's rows; the parent's only rows of a business that has no sub-account.
+  let update = admin.from("sms_messages")
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq("provider_sid", sid);
+  if (account?.source === "sub") {
+    update = update.eq("client_id", account.clientId ?? "");
+  } else if (account) {
+    const { data: row } = await admin.from("sms_messages").select("client_id").eq("provider_sid", sid).limit(1).maybeSingle();
+    const owner = (row as { client_id?: string | null } | null)?.client_id ?? null;
+    if (owner) {
+      let tenantSid: string | null;
+      try { tenantSid = await tenantAccountSid(admin, owner, envGet); } catch { return deny(); }
+      if (!webhookMatchesTenant(account, tenantSid)) {
+        await logEdgeError({ fn: "sms-status", clientId: owner, code: "sms_account_mismatch",
+          message: "A delivery status came from a Twilio account this message's business does not live in; refused.",
+          context: { source: account.source } }).catch(() => {});
+        return deny();
+      }
+    }
+  }
+  const { error } = await update;
   if (error) {
     await logEdgeError({
       fn: "sms-status",

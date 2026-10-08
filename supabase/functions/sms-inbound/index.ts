@@ -4,6 +4,8 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { validateTwilioSignature, hasSignatureKey, smsPhoneKey } from "../_shared/twilioSms.ts";
 import { insertInbound, parseNumMedia } from "./numMedia.ts";
+// Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
+import { requestAccount, tenantAccountSid, webhookMatchesTenant, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
 // Inbound SMS → the CRM conversation. The return leg that makes texting two-way, and the
 // twin of email-inbound: same shared-secret gate, same always-200-once-authenticated
@@ -83,8 +85,42 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   //
   // The URL is REBUILT rather than read off req.url: the Supabase gateway rewrites the
   // incoming URL, while the signature was computed over the URL configured in Twilio.
+  //
+  // ⚠️ PER ACCOUNT, ONLY WHILE TWILIO_SUBACCOUNTS IS "on" (Workstream 2, phase 4). Each builder's
+  // sub-account signs with ITS auth token, so the token is picked by the request's AccountSid: the
+  // parent's SID (or none) gets exactly the three states above; a known ACTIVE sub-account must be
+  // signed with its own token, always; anything else is refused. The tenant found from `To` below
+  // must then live in that same account. Off, `account` stays null and nothing here is looked up.
   const sig = req.headers.get("X-Twilio-Signature") ?? "";
-  if (hasSignatureKey()) {
+  const envGet = (k: string) => Deno.env.get(k);
+  let account: WebhookAccount | null = null;
+  {
+    const r = await requestAccount(admin, params.AccountSid, envGet);
+    if (r.kind === "refused") {
+      await logEdgeError({
+        fn: "sms-inbound",
+        code: r.reason === "lookup_failed" ? "sms_account_lookup_failed" : "sms_wrong_account",
+        message: r.reason === "lookup_failed"
+          ? "The Twilio account an inbound text's AccountSid names could not be looked up; message refused."
+          : "An inbound text's AccountSid is not one of our Twilio accounts; message refused.",
+        severity: r.reason === "lookup_failed" ? "error" : "info",
+      }).catch(() => {});
+      return deny();
+    }
+    if (r.kind === "account") account = r.account;
+  }
+  if (account?.source === "sub") {
+    const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-inbound?key=${key}`;
+    if (!(await validateTwilioSignature(url, params, sig, account.authToken))) {
+      await logEdgeError({
+        fn: "sms-inbound",
+        code: "sms_signature_invalid",
+        message: "X-Twilio-Signature did not validate against the sub-account's token; message refused.",
+        context: { hasSig: !!sig, account: "sub" },
+      }).catch(() => {});
+      return deny();
+    }
+  } else if (hasSignatureKey()) {
     const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-inbound?key=${key}`;
     const ok = await validateTwilioSignature(url, params, sig);
     if (!ok) {
@@ -137,6 +173,25 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
     return twiml();
   }
   const clientId = String(tenant.client_id);
+
+  // Workstream 2, phase 4: the number's business must live in the account that sent the text. Never
+  // stored under a business in another account; a failed lookup refuses too.
+  if (account) {
+    let tenantSid: string | null;
+    try {
+      tenantSid = await tenantAccountSid(admin, clientId, envGet);
+    } catch {
+      await logEdgeError({ fn: "sms-inbound", clientId, code: "sms_account_lookup_failed",
+        message: "The business's Twilio account could not be looked up; inbound text refused." }).catch(() => {});
+      return deny();
+    }
+    if (!webhookMatchesTenant(account, tenantSid)) {
+      await logEdgeError({ fn: "sms-inbound", clientId, code: "sms_account_mismatch",
+        message: "An inbound text came from a Twilio account this number's business does not live in; refused.",
+        context: { source: account.source } }).catch(() => {});
+      return deny();
+    }
+  }
 
   // ── STAGE B: the contact, within that tenant ─────────────────────────────────────────
   // phone_digits is the 10-digit NANP key (migration 132), so the E.164 sender is reduced
