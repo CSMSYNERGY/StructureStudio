@@ -16,10 +16,12 @@
 // exact webhook settings, and the two Twilio REST calls with an injectable fetch. The handlers
 // in index.ts do the reads, the writes and the refusals.
 //
-// ⚠️ THE TWILIO AUTH LOGIC IS A SECOND COPY of twilioTrustHub.ts's basicAuthPair, same env names
-// and the same preference (an API key pair first, then the account's auth token). That helper is
-// not exported, and _shared/ is imported by portal-sms and the registration webhooks, so
-// exporting it would redeploy every importer for a one-line change. Change both or neither.
+// The credentials both REST calls take are the TENANT'S account (Workstream 2): index.ts resolves
+// them once per request through _shared/twilioAccount.ts (the parent from the environment while
+// TWILIO_SUBACCOUNTS is not "on", which is what this file's own copy, twilioCreds, read until
+// phase 2 moved it there as parentCreds).
+import type { TwilioCreds } from "../_shared/twilioAccount.ts";
+export type { TwilioCreds };
 
 /** The Worker's public base when PHONE_API_BASE is not set (SPEC section 1). The portal's
  *  SS_PHONE_API_BASE in 01-core.jsx defaults to the same address. */
@@ -158,19 +160,6 @@ export function numberActionForSwitch(
   if (!n) return null;
   if (!on) return n.voice_enabled === true ? "to_voicemail" : null;
   return n.voice_enabled !== true && !!n.voice_configured_at ? "connect" : null;
-}
-
-export type TwilioCreds = { accountSid: string; user: string; pass: string };
-
-/** twilioTrustHub.ts's basicAuthPair, see the header. null = not configured. */
-export function twilioCreds(get: EnvGet): TwilioCreds | null {
-  const accountSid = String(get("TWILIO_ACCOUNT_SID") ?? "");
-  if (!accountSid) return null;
-  const key = String(get("TWILIO_API_KEY") ?? ""), secret = String(get("TWILIO_API_SECRET") ?? "");
-  if (key && secret) return { accountSid, user: key, pass: secret };
-  const token = String(get("TWILIO_AUTH_TOKEN") ?? "");
-  if (token) return { accountSid, user: accountSid, pass: token };
-  return null;
 }
 
 export type TwilioFail = { ok: false; status: number; code: number };

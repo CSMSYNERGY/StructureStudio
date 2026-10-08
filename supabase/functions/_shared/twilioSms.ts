@@ -112,6 +112,10 @@ function codeOf(body: string): number {
 
 export type SmsSendResult = { sid: string; segments: number; status: string };
 
+/** The Twilio account a text is sent from: its SID (the /Accounts/{sid} path) and its Basic pair.
+ *  The same shape _shared/twilioAccount.ts resolves per tenant (this file keeps zero imports). */
+export type SmsCreds = { accountSid: string; user: string; pass: string };
+
 /**
  * Send one message.
  *
@@ -130,15 +134,21 @@ export async function sendSms(opts: {
   messagingServiceSid: string;
   body: string;
   statusCallback?: string | null;
+  /** ⚠️ THE ACCOUNT THE TENANT'S NUMBER LIVES IN, passed in — resolved once per send by
+   *  sendTenantSms (_shared/twilioAccount.ts resolveTwilioAccount), never read from the
+   *  environment here. With TWILIO_SUBACCOUNTS off it is the parent's environment pair, exactly
+   *  what this read itself before; per-tenant credentials can never go through the environment,
+   *  which the phone-api Worker's Deno.env shim shares across every request in an isolate. */
+  creds: SmsCreds | null;
 }): Promise<SmsSendResult> {
-  const pair = basicAuthPair();
+  const pair = opts.creds && opts.creds.user && opts.creds.pass ? { user: opts.creds.user, pass: opts.creds.pass } : null;
   const svc = opts.messagingServiceSid;
-  const acct = accountSid();
+  const acct = opts.creds?.accountSid || null;
   if (!pair || !svc || !acct) {
     const missing = [
-      pair ? null : "TWILIO_API_KEY+TWILIO_API_SECRET (or TWILIO_ACCOUNT_SID+TWILIO_AUTH_TOKEN)",
+      pair ? null : "this account's Twilio credentials",
       svc ? null : "the tenant's messaging_service_sid",
-      acct ? null : "TWILIO_ACCOUNT_SID",
+      acct ? null : "this account's SID",
     ].filter((n): n is string => n !== null).join(", ");
     throw new SmsNotConfigured(`${missing} is not set.`);
   }
@@ -221,8 +231,11 @@ export async function validateTwilioSignature(
   url: string,
   params: Record<string, string>,
   signature: string,
+  /** The SENDING account's auth token. Omitted = TWILIO_AUTH_TOKEN, the parent's (what every
+   *  caller used before sub-accounts). With TWILIO_SUBACCOUNTS on, sms-inbound and sms-status
+   *  pass the token of the account the request's AccountSid names (_shared/twilioAccount.ts). */
+  token: string | null = authToken(),
 ): Promise<boolean> {
-  const token = authToken();
   if (!token || !signature) return false;
   const data = url + Object.keys(params).sort().map((k) => k + params[k]).join("");
   const key = await crypto.subtle.importKey(

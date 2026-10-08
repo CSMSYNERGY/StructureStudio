@@ -36,13 +36,14 @@ src/callEvents.ts     what phone_call_events say that the row cannot: a warm tra
 src/voicemail.ts      the greeting + <Record> TwiML (and transcription)
 src/wallet.ts         the wallet floor for outbound calls
 src/jwt.ts            Supabase login check (ES256 via JWKS, cached per isolate)
-src/twilioSignature.ts  ?key= always, X-Twilio-Signature whenever TWILIO_AUTH_TOKEN is set
+src/twilioSignature.ts  ?key= always, X-Twilio-Signature whenever TWILIO_AUTH_TOKEN is set (per account while TWILIO_SUBACCOUNTS is on)
+src/twilioAccount.ts  which Twilio account a request runs in: the shared _shared/twilioAccount.ts resolver, wrapped as a scoped Env
 src/accessToken.ts    Twilio Access Token (HS256, cty twilio-fpa;v=1)
 src/scope.ts          contacts row scope and "mine", reusing _shared/access.ts
 scripts/log-ref.mjs   one person's user_ref / client_ref, to find their extension error reports when they ask for help
 ```
 
-It imports five files from `supabase/functions/_shared`: `smsSend.ts` (and through it `twilioSms.ts`, `smsQuietHours.ts`, `logError.ts`), `access.ts`, `featureCheck.ts` (and through it `billingPeriods.ts`; the paid-CRM check for email), and `crmFeed.ts` (only `senderVerifiedFrom`, the inbound sender check the portal shows). Those files are written for Deno. Wrangler's `alias` maps their `jsr:@supabase/supabase-js@2` import onto the npm package installed here, and `src/env.ts` installs a `Deno.env.get` shim over the Worker's env, so they read the same secret names they read on the edge functions. Nothing under `supabase/functions` is edited for this. After a change to any of those shared files, redeploy this Worker along with the edge functions that import them.
+It imports six files from `supabase/functions/_shared`: `smsSend.ts` (and through it `twilioSms.ts`, `smsQuietHours.ts`, `usageGate.ts`, `logError.ts`, `twilioAccount.ts`), `twilioAccount.ts` directly (src/twilioAccount.ts wraps it), `access.ts`, `featureCheck.ts` (and through it `billingPeriods.ts`; the paid-CRM check for email), and `crmFeed.ts` (only `senderVerifiedFrom`, the inbound sender check the portal shows). Those files are written for Deno. Wrangler's `alias` maps their `jsr:@supabase/supabase-js@2` import onto the npm package installed here, and `src/env.ts` installs a `Deno.env.get` shim over the Worker's env, so they read the same secret names they read on the edge functions. Nothing under `supabase/functions` is edited for this. After a change to any of those shared files, redeploy this Worker along with the edge functions that import them.
 
 ## Commands
 
@@ -91,6 +92,7 @@ The `ai` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`) is Workers AI
 | `TWILIO_API_SECRET` | yes | That key's secret. |
 | `TWILIO_TWIML_APP_SID` | yes | The calls TwiML App (outgoing grant). |
 | `TWILIO_ECHO_APP_SID` | yes | The setup-test TwiML App that answers `<Echo/>` (preflight tokens). |
+| `TWILIO_SUBACCOUNTS` | no (a var, unset) | Workstream 2's switch, the same name as the edge secret. Exactly `on`: a builder's own Twilio sub-account (migration 292) signs its webhooks with its own token and may only touch its own business (DEVIATIONS 76). Anything else: every Twilio value above is the parent's and nothing is looked up, the Worker as it ran before. Turn it on only with the edge secret, after phases 3 and 5. |
 | `TWILIO_PUSH_CREDENTIAL_APNS_DEV` | iPhone dev client | Push credential (a Twilio `apn` credential, Sandbox UNTICKED) for the iPhone development client (`build_type: dev`), made from the development bundle id's VoIP Services certificate. Unticked because EAS signs the development client ad hoc, and ad hoc builds get production push tokens (DEVIATIONS 75). Replaces `TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX`, which is no longer read. |
 | `TWILIO_PUSH_CREDENTIAL_APNS_PROD` | iPhone release | Push credential (a Twilio `apn` credential, Sandbox unticked) for preview, TestFlight and App Store builds (`build_type: prod`), made from the store bundle id's VoIP Services certificate. |
 | `TWILIO_PUSH_CREDENTIAL_FCM` | phase 4 | Push credential for Android. |

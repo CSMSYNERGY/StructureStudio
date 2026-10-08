@@ -7,11 +7,20 @@
  * reason — this is the path that spends real money, and it must be testable without doing so.
  *
  * ═══════════════════════════════════════════════════════════════════════════════
- * ARCHITECTURE: Twilio ISV "architecture #4" — ONE parent account, one Secondary Customer
- * Profile + Brand + Campaign + Messaging Service PER BUILDER. Not subaccounts: main-account
- * API keys are denied on subaccount resources, and every endpoint below lives on a subdomain
- * (trusthub. / messaging.), so under subaccounts none of our credentials would reach any of
- * this. Twilio's ISV API guide never mentions subaccounts.
+ * ARCHITECTURE: Twilio ISV "architecture #1" — ONE SUB-ACCOUNT PER BUILDER, billed to the
+ * parent, each holding that builder's Secondary Customer Profile, Brand, Campaign, Messaging
+ * Service and numbers (Workstream 2; until 2026-10 this was "architecture #4", everything on the
+ * parent). structure-studio stays ON THE PARENT (the pilot number, the primary profile, its own
+ * brand), with Verify, the setup-test app and NTS.
+ *
+ * ⚠️ EVERY CALL RUNS WITH ONE ACCOUNT'S OWN CREDENTIALS. Main-account API keys are denied on
+ * sub-account resources, and every endpoint below except the /Accounts/{sid} ones lives on a
+ * subdomain (trusthub. / messaging.) that only the account's own credentials reach. So each
+ * export takes the account it runs as (TrustHubCreds: the SID for the path, the pair for the
+ * header), resolved per tenant by _shared/twilioAccount.ts. Omitted, it is the parent from the
+ * environment: exactly what every call did before, and all any call does while
+ * TWILIO_SUBACCOUNTS is not "on". The secondary profile's EntityAssignment still names the
+ * PARENT's primary profile (TWILIO_PRIMARY_PROFILE_SID), across accounts.
  * ═══════════════════════════════════════════════════════════════════════════════
  *
  * ⚠️ EVERY BrandRegistration POST COSTS MONEY. Twilio: "This API request incurs fees on your
@@ -46,6 +55,24 @@ function basicAuthPair(): { user: string; pass: string } | null {
   const a = accountSid(), t = authToken();
   if (a && t) return { user: a, pass: t };
   return null;
+}
+
+/**
+ * The account a call runs as: its SID (the /Accounts/{sid} path) and the Basic pair every request
+ * carries. Same shape as _shared/twilioAccount.ts's TwilioCreds (this file keeps zero imports), so
+ * a resolved account is passed straight in. null / omitted = the parent from the environment.
+ */
+export type TrustHubCreds = { accountSid: string; user: string; pass: string };
+
+/** The Basic pair for these credentials, or the environment's when there are none. */
+function pairFor(creds: TrustHubCreds | null | undefined): { user: string; pass: string } | null {
+  if (!creds) return basicAuthPair();
+  return creds.user && creds.pass ? { user: creds.user, pass: creds.pass } : null;
+}
+
+/** The /Accounts/{sid} segment for these credentials, or the environment's. */
+function acctOf(creds: TrustHubCreds | null | undefined): string | null {
+  return creds ? (creds.accountSid || null) : accountSid();
 }
 
 export function trustHubConfigured(): boolean {
@@ -94,8 +121,9 @@ async function call(
   url: string,
   form?: Record<string, string>,
   extraHeaders?: Record<string, string>,
+  creds?: TrustHubCreds | null,
 ): Promise<any> {
-  const pair = basicAuthPair();
+  const pair = pairFor(creds);
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
   await throttle();
 
@@ -316,12 +344,13 @@ export function validateCampaignCopy(copy: Partial<CampaignCopy>): string[] {
  *  BrandRegistrations takes one of each. */
 export async function createSecondaryCustomerProfile(opts: {
   intake: BuilderIntake;
-  primaryProfileSid: string;   // OUR approved primary BU…
+  primaryProfileSid: string;   // OUR approved primary BU… (on the PARENT account, always)
   friendlyName: string;
-}): Promise<{ profileSid: string; endUserSid: string; addressSid: string; repSid: string }> {
+}, creds?: TrustHubCreds | null): Promise<{ profileSid: string; endUserSid: string; addressSid: string; repSid: string }> {
   const { intake } = opts;
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
 
-  const business = await call("POST", `${TRUSTHUB}/EndUsers`, {
+  const business = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — business info`,
     Type: "customer_profile_business_information",
     "Attributes": JSON.stringify({
@@ -337,7 +366,7 @@ export async function createSecondaryCustomerProfile(opts: {
     }),
   });
 
-  const rep = await call("POST", `${TRUSTHUB}/EndUsers`, {
+  const rep = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — authorized rep`,
     Type: "authorized_representative_1",
     "Attributes": JSON.stringify({
@@ -350,8 +379,8 @@ export async function createSecondaryCustomerProfile(opts: {
     }),
   });
 
-  const acct = accountSid();
-  const address = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/Addresses.json`, {
+  const acct = acctOf(creds);
+  const address = await as("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/Addresses.json`, {
     CustomerName: intake.legalBusinessName,
     Street: intake.street,
     City: intake.city,
@@ -361,13 +390,13 @@ export async function createSecondaryCustomerProfile(opts: {
   });
   const addressSid = String(address?.sid ?? "");
 
-  const doc = await call("POST", `${TRUSTHUB}/SupportingDocuments`, {
+  const doc = await as("POST", `${TRUSTHUB}/SupportingDocuments`, {
     FriendlyName: `${opts.friendlyName} — address`,
     Type: "customer_profile_address",
     "Attributes": JSON.stringify({ address_sids: addressSid }),
   });
 
-  const profile = await call("POST", `${TRUSTHUB}/CustomerProfiles`, {
+  const profile = await as("POST", `${TRUSTHUB}/CustomerProfiles`, {
     FriendlyName: opts.friendlyName,
     Email: intake.repEmail,
     PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE,
@@ -376,20 +405,22 @@ export async function createSecondaryCustomerProfile(opts: {
 
   for (const objectSid of [business?.sid, rep?.sid, doc?.sid]) {
     if (!objectSid) continue;
-    await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
       ObjectSid: String(objectSid),
     });
   }
   // ⚠️ The PRIMARY profile is assigned onto the secondary. This is the step that says
-  // "this builder is a customer of ours" and it is what makes the ISV relationship real.
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
+  // "this builder is a customer of ours" and it is what makes the ISV relationship real. In a
+  // sub-account the primary is the PARENT's, so this assignment crosses accounts (the phase 6
+  // spike proves Twilio takes it before any builder depends on it).
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
     ObjectSid: opts.primaryProfileSid,
   });
 
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, {
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, {
     PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE,
   });
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
 
   return { profileSid, endUserSid: String(business?.sid ?? ""), addressSid, repSid: String(rep?.sid ?? "") };
 }
@@ -403,8 +434,9 @@ export async function createA2pTrustProduct(opts: {
   email: string;
   friendlyName: string;
   companyType?: "private" | "public" | "non-profit" | "government";
-}): Promise<{ a2pProfileSid: string }> {
-  const messagingProfile = await call("POST", `${TRUSTHUB}/EndUsers`, {
+}, creds?: TrustHubCreds | null): Promise<{ a2pProfileSid: string }> {
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
+  const messagingProfile = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — A2P profile`,
     Type: "us_a2p_messaging_profile_information",
     "Attributes": JSON.stringify({
@@ -414,24 +446,24 @@ export async function createA2pTrustProduct(opts: {
     }),
   });
 
-  const tp = await call("POST", `${TRUSTHUB}/TrustProducts`, {
+  const tp = await as("POST", `${TRUSTHUB}/TrustProducts`, {
     FriendlyName: opts.friendlyName,
     Email: opts.email,
     PolicySid: POLICY_A2P_TRUST_PRODUCT,
   });
   const a2pProfileSid = String(tp?.sid ?? "");
 
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
     ObjectSid: String(messagingProfile?.sid ?? ""),
   });
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
     ObjectSid: opts.profileSid,
   });
 
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/Evaluations`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/Evaluations`, {
     PolicySid: POLICY_A2P_TRUST_PRODUCT,
   });
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}`, { Status: "pending-review" });
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}`, { Status: "pending-review" });
 
   return { a2pProfileSid };
 }
@@ -455,7 +487,7 @@ export async function registerBrand(opts: {
    *  Only ever true for an internal account — the database trigger in migration 170 makes
    *  that an invariant rather than a convention. */
   mock?: boolean;
-}): Promise<{ brandSid: string; status: string; identityStatus: string | null; mock: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ brandSid: string; status: string; identityStatus: string | null; mock: boolean }> {
   const form: Record<string, string> = {
     CustomerProfileBundleSid: opts.customerProfileBundleSid,
     A2PProfileBundleSid: opts.a2pProfileBundleSid,
@@ -473,7 +505,7 @@ export async function registerBrand(opts: {
   // safer way to say "real".
   if (opts.mock) form.Mock = "true";
 
-  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations`, form);
+  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations`, form, undefined, creds);
   // ⚠️ TRUST TWILIO'S ANSWER, NOT OUR REQUEST. The response carries `mock`, so the row
   // records what was actually created rather than what we asked for. If the parameter were
   // ever ignored we would have registered a REAL brand while believing otherwise, and the
@@ -486,10 +518,10 @@ export async function registerBrand(opts: {
   };
 }
 
-export async function fetchBrand(brandSid: string): Promise<{
+export async function fetchBrand(brandSid: string, creds?: TrustHubCreds | null): Promise<{
   status: string; identityStatus: string | null; tcrId: string | null; errors: unknown[];
 }> {
-  const b = await call("GET", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`);
+  const b = await call("GET", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, undefined, undefined, creds);
   return {
     status: String(b?.status ?? ""),
     identityStatus: b?.identity_status ? String(b.identity_status) : null,
@@ -503,8 +535,8 @@ export async function fetchBrand(brandSid: string): Promise<{
 /** Resubmit a failed brand. Twilio allows THREE free retries; the fourth returns HTTP 400
  *  with error 21724. Whatever is actually being fixed lives upstream in the bundle's
  *  EndUsers — PATCH those first; this call takes only the SID. */
-export async function updateBrand(brandSid: string): Promise<{ status: string }> {
-  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, {});
+export async function updateBrand(brandSid: string, creds?: TrustHubCreds | null): Promise<{ status: string }> {
+  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, {}, undefined, creds);
   return { status: String(b?.status ?? "") };
 }
 
@@ -516,7 +548,7 @@ export async function createMessagingService(opts: {
   friendlyName: string;
   inboundWebhookUrl: string;
   statusCallbackUrl: string;
-}): Promise<{ serviceSid: string }> {
+}, creds?: TrustHubCreds | null): Promise<{ serviceSid: string }> {
   const s = await call("POST", `${MESSAGING}/Services`, {
     FriendlyName: opts.friendlyName,
     InboundRequestUrl: opts.inboundWebhookUrl,
@@ -524,16 +556,16 @@ export async function createMessagingService(opts: {
     // Twilio answers STOP/HELP itself on the service. Our own ledger still records it —
     // the carrier block and our block must agree, and ours is what the composer reads.
     UseInboundWebhookOnNumber: "false",
-  });
+  }, undefined, creds);
   return { serviceSid: String(s?.sid ?? "") };
 }
 
 /** ⚠️ NEVER HARDCODE A USE CASE. What a brand may register depends on the brand, and the
  *  eligible list is only knowable after approval. */
-export async function fetchEligibleUseCases(serviceSid: string, brandSid: string): Promise<Array<{
+export async function fetchEligibleUseCases(serviceSid: string, brandSid: string, creds?: TrustHubCreds | null): Promise<Array<{
   code: string; name: string; description: string; postApprovalRequired: boolean;
 }>> {
-  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/Usecases?BrandRegistrationSid=${encodeURIComponent(brandSid)}`);
+  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/Usecases?BrandRegistrationSid=${encodeURIComponent(brandSid)}`, undefined, undefined, creds);
   const list = Array.isArray(r?.us_app_to_person_usecases) ? r.us_app_to_person_usecases : [];
   return list.map((u: any) => ({
     code: String(u?.code ?? ""),
@@ -578,7 +610,7 @@ export type CampaignCopy = {
  *  fields visible on the Usa2p resource at all — the plain v1 view drops them, which is
  *  precisely how they stayed null and unnoticed through two rejections. Proven against the
  *  live API with this header on both the write and the read-back. */
-async function campaignPost(url: string, params: URLSearchParams): Promise<any> {
+async function campaignPost(url: string, params: URLSearchParams, creds?: TrustHubCreds | null): Promise<any> {
   // ⚠️ ASSERT THE WIRE, NOT THE ARGUMENTS — this is the check that would have caught the
   // 2026-09-02 rejection and `requirePolicyUrls` would not have. The arguments were correct
   // that day: both URLs were typed, validated, stored and echoed back on the form. What was
@@ -593,7 +625,7 @@ async function campaignPost(url: string, params: URLSearchParams): Promise<any> 
       });
     }
   }
-  const pair = basicAuthPair();
+  const pair = pairFor(creds);
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
   await throttle();
   const res = await fetch(url, {
@@ -637,7 +669,7 @@ export async function createCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const form: Record<string, string> = {
     BrandRegistrationSid: opts.brandSid,
@@ -662,7 +694,7 @@ export async function createCampaign(opts: {
   if (opts.copy.optOutMessage) params.append("OptOutMessage", opts.copy.optOutMessage);
   if (opts.copy.helpMessage) params.append("HelpMessage", opts.copy.helpMessage);
 
-  const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params);
+  const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params, creds);
   return {
     campaignSid: String(body?.sid ?? ""),
     status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
@@ -694,7 +726,7 @@ export async function updateCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const params = new URLSearchParams();
   params.append("Description", opts.copy.description);
@@ -710,6 +742,7 @@ export async function updateCampaign(opts: {
   const body = await campaignPost(
     `${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p/${opts.campaignSid}`,
     params,
+    creds,
   );
   return {
     campaignSid: String(body?.sid ?? opts.campaignSid),
@@ -739,6 +772,7 @@ function policyUrlsEchoed(body: any): boolean {
  *  — a missed webhook, a sink that was never wired — simply never recovered. */
 export async function fetchCampaign(
   serviceSid: string,
+  creds?: TrustHubCreds | null,
 ): Promise<{
   status: string; sid: string | null; privacyPolicyUrl: string; termsUrl: string;
   errors: unknown[]; description: string; messageFlow: string; messageSamples: string[];
@@ -750,7 +784,7 @@ export async function fetchCampaign(
   // check reads them from here rather than from our own row.
   const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`, undefined, {
     "X-Twilio-Api-Version": "v1.2",
-  });
+  }, creds);
   const one = Array.isArray(r?.compliance) ? r.compliance[0] : r;
   return {
     privacyPolicyUrl: String(one?.privacy_policy_url ?? ""),
@@ -781,8 +815,8 @@ export async function fetchCampaign(
  *
  *  Pass the QE… sid the REST API returns, NOT the CM… one from Event Streams — they are
  *  different SID spaces and the CM sid matches nothing here. */
-export async function deleteCampaign(serviceSid: string, campaignSid: string): Promise<void> {
-  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/${campaignSid}`);
+export async function deleteCampaign(serviceSid: string, campaignSid: string, creds?: TrustHubCreds | null): Promise<void> {
+  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/${campaignSid}`, undefined, undefined, creds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -794,8 +828,8 @@ export async function searchAvailableNumbers(opts: {
   contains?: string;
   inRegion?: string;
   limit?: number;
-}): Promise<Array<{ phoneNumber: string; friendlyName: string; locality: string | null; region: string | null }>> {
-  const acct = accountSid();
+}, creds?: TrustHubCreds | null): Promise<Array<{ phoneNumber: string; friendlyName: string; locality: string | null; region: string | null }>> {
+  const acct = acctOf(creds);
   const p = new URLSearchParams({
     SmsEnabled: "true",
     MmsEnabled: "true",
@@ -809,7 +843,7 @@ export async function searchAvailableNumbers(opts: {
   if (opts.contains) p.append("Contains", opts.contains);
   if (opts.inRegion) p.append("InRegion", opts.inRegion);
 
-  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/AvailablePhoneNumbers/US/Local.json?${p.toString()}`);
+  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/AvailablePhoneNumbers/US/Local.json?${p.toString()}`, undefined, undefined, creds);
   const list = Array.isArray(r?.available_phone_numbers) ? r.available_phone_numbers : [];
   return list.map((n: any) => ({
     phoneNumber: String(n?.phone_number ?? ""),
@@ -831,16 +865,16 @@ export async function purchaseNumber(opts: {
   phoneNumber: string;
   clientId: string;
   messagingServiceSid?: string | null;
-}): Promise<{ sid: string; phoneNumber: string }> {
-  const acct = accountSid();
+}, creds?: TrustHubCreds | null): Promise<{ sid: string; phoneNumber: string }> {
+  const acct = acctOf(creds);
   const form: Record<string, string> = {
     PhoneNumber: opts.phoneNumber,
     FriendlyName: opts.clientId,
   };
-  const r = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json`, form);
+  const r = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json`, form, undefined, creds);
   const sid = String(r?.sid ?? "");
   if (opts.messagingServiceSid && sid) {
-    await attachNumberToService(opts.messagingServiceSid, sid);
+    await attachNumberToService(opts.messagingServiceSid, sid, trustHubHttp(creds));
   }
   return { sid, phoneNumber: String(r?.phone_number ?? opts.phoneNumber) };
 }
@@ -857,6 +891,15 @@ export type TrustHubHttp = (
   form?: Record<string, string>,
 ) => Promise<any>;
 const viaCall: TrustHubHttp = (method, url, form) => call(method, url, form);
+
+/**
+ * The transport bound to one account's credentials, for the helpers that take `http`: pass it with
+ * that account's SID as `acct` where a helper also takes one. null / omitted = the environment's
+ * (viaCall), today's behaviour.
+ */
+export function trustHubHttp(creds?: TrustHubCreds | null): TrustHubHttp {
+  return creds ? (method, url, form) => call(method, url, form, undefined, creds) : viaCall;
+}
 
 const SID = {
   service: /^MG[0-9a-f]{32}$/i,
@@ -1264,16 +1307,16 @@ export async function setupVoiceTrust(o: VoiceTrustSetup, http: TrustHubHttp = v
 }
 
 /** Reconcile a purchase whose response we never saw. */
-export async function findPurchasedNumbers(clientId: string): Promise<Array<{ sid: string; phoneNumber: string }>> {
-  const acct = accountSid();
-  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json?FriendlyName=${encodeURIComponent(clientId)}&PageSize=50`);
+export async function findPurchasedNumbers(clientId: string, creds?: TrustHubCreds | null): Promise<Array<{ sid: string; phoneNumber: string }>> {
+  const acct = acctOf(creds);
+  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json?FriendlyName=${encodeURIComponent(clientId)}&PageSize=50`, undefined, undefined, creds);
   const list = Array.isArray(r?.incoming_phone_numbers) ? r.incoming_phone_numbers : [];
   return list.map((n: any) => ({ sid: String(n?.sid ?? ""), phoneNumber: String(n?.phone_number ?? "") }));
 }
 
-export async function releaseNumber(numberSid: string): Promise<void> {
-  const acct = accountSid();
-  await call("DELETE", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers/${numberSid}.json`);
+export async function releaseNumber(numberSid: string, creds?: TrustHubCreds | null): Promise<void> {
+  const acct = acctOf(creds);
+  await call("DELETE", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers/${numberSid}.json`, undefined, undefined, creds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

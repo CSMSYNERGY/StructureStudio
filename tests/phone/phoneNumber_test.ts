@@ -14,8 +14,11 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   applyNumberVoice, areaCodeOf, buyCallingNumber, callingOnlyNumberRow, DEFAULT_PHONE_API_BASE, fallbackUrlOf, findNumberSid, numberActionForSwitch,
   numberHoldKey, numberSmsConfig, numberVoiceConfig, numberVoicemailConfig, pickedNumber, pickOrphan, smsInboundUrl, strictEncode,
-  SWITCH_WARNINGS, switchCalling, twilioCreds, voiceEnv, type Bought, type HoldResult,
+  SWITCH_WARNINGS, switchCalling, voiceEnv, type Bought, type HoldResult,
 } from "../../supabase/functions/portal-settings/phoneNumber.ts";
+// Workstream 2 phase 2 moved phoneNumber.ts's copy of the credentials (twilioCreds) into the shared
+// resolver as parentCreds; portal-settings resolves the tenant's account from there.
+import { parentCreds } from "../../supabase/functions/_shared/twilioAccount.ts";
 
 const SRC = (await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
 const WORKER_URLS = (await Deno.readTextFile(new URL("../../workers/phone-api/src/urls.ts", import.meta.url))).replace(/\r\n/g, "\n");
@@ -81,11 +84,11 @@ Deno.test("numberVoiceConfig is SETUP.md step 6, in the Worker's own URL shape",
   assertEquals(odd.VoiceUrl, "https://p.example.test/voice/inbound?key=k%27y");
 });
 
-Deno.test("twilioCreds prefers an API key pair, like twilioTrustHub's basicAuthPair", () => {
-  assertEquals(twilioCreds(env({})), null);
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1" })), null);
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t" })), { accountSid: "AC1", user: "AC1", pass: "t" });
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t", TWILIO_API_KEY: "SK1", TWILIO_API_SECRET: "s" })), { accountSid: "AC1", user: "SK1", pass: "s" });
+Deno.test("parentCreds prefers an API key pair, like twilioTrustHub's basicAuthPair", () => {
+  assertEquals(parentCreds(env({})), null);
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1" })), null);
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t" })), { accountSid: "AC1", user: "AC1", pass: "t" });
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t", TWILIO_API_KEY: "SK1", TWILIO_API_SECRET: "s" })), { accountSid: "AC1", user: "SK1", pass: "s" });
 });
 
 // ── the two Twilio calls, against a stub ───────────────────────────────────────────────────
@@ -277,7 +280,10 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
   assert(/buyCallingNumber\(\{ clientId, wanted, recorded: liveRows\.map\(\(r\) => String\(r\.phone_number\)\) \}, \{/.test(buy),
     "the purchase is buyCallingNumber (tested above), told which numbers are already the tenant's");
   assert(/p_kind: "sms_number_monthly"/.test(SRC) && /hold: takeNumberHold/.test(buy), "the first month is held on portal-sms's meter");
-  assert(/findPurchasedNumbers, purchaseNumber, releaseNumber,/.test(buy), "a number bought but not recorded can be given back");
+  // In the tenant's own Twilio account (Workstream 2: tenantTwilio, the parent while TWILIO_SUBACCOUNTS is off).
+  assert(/findPurchasedNumbers: \(id\) => findPurchasedNumbers\(id, creds\),\s*purchaseNumber: \(o\) => purchaseNumber\(o, creds\),\s*releaseNumber: \(sid\) => releaseNumber\(sid, creds\),/.test(buy),
+    "a number bought but not recorded can be given back, in the account it was bought in");
+  assert(buy.indexOf("await tenantTwilio()") > 0 && buy.indexOf("await tenantTwilio()") < buy.indexOf("buyCallingNumber("), "the account is resolved before anything is bought");
   assert(/\.insert\(callingOnlyNumberRow\(clientId, b\)\)/.test(buy));
   assert(!/messagingServiceSid/.test(buy), "the purchase itself never passes a messaging service (joining texting is attachToTexting, after the row is recorded)");
   assert(!/client_settings"\)\s*\.update/.test(buy), "a calling-only number must not become client_settings.sms_number");
@@ -294,7 +300,8 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
     "calling on: connect it as the calling-only number it is, or as the texting number it just became");
   // Migration 266: texting joins AFTER the row is recorded, and only while the builder's texting is on.
   assert(buy.indexOf("const serviceSid = await textingServiceSid();") > buy.indexOf("buyCallingNumber("));
-  assert(/attachToTexting\(\{ serviceSid, numberSid: bought\.sid \}, textingDeps\(String\(row\.id\)\)\)/.test(buy));
+  // The join runs in the tenant's own Twilio account (Workstream 2), the one the number was bought in.
+  assert(/attachToTexting\(\{ serviceSid, numberSid: bought\.sid \}, textingDeps\(String\(row\.id\), creds\)\)/.test(buy));
 });
 
 Deno.test("Connect this number for calls: only while calling is on; a calling-only number gets its SMS webhook in the same update", () => {

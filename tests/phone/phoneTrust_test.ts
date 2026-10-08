@@ -112,7 +112,8 @@ Deno.test("chooseTrustProfile asks Twilio ONLY when it decides: internal, with b
 
 Deno.test("the handler takes the profile from chooseTrustProfile, and no read of Twilio is swallowed into a guess", () => {
   const b = slice(SRC, 'if (action === "phone_trust_setup") {', "\n  }\n", "phone_trust_setup branch");
-  assert(/const prof = await chooseTrustProfile\(\{[\s\S]*?numberSid: sidRes\.sid,\s*\}, \{ numberOnProfile: \(p, num\) => numberOnProfile\(p, num\) \}\);/.test(b));
+  // Every Twilio read in the tenant's own account (Workstream 2: tenantTwilio, the parent while the switch is off).
+  assert(/const prof = await chooseTrustProfile\(\{[\s\S]*?numberSid: sidRes\.sid,\s*\}, \{ numberOnProfile: \(p, num\) => numberOnProfile\(p, num, trustHubHttp\(creds\)\) \}\);/.test(b));
   assert(!/\.catch\(\(\) => false\)/.test(b), "a failed read must not become 'no'");
   assert(/if \(prof\.kind === "refused"\) return json\(\{ error: prof\.error \}, prof\.status\);/.test(b));
   assert(/return filedHere\(json\(\{ error: prof\.error, code: prof\.code \|\| null \}, prof\.status\)\);/.test(b));
@@ -381,12 +382,15 @@ Deno.test("setup: the profile comes from the texting registration (or, internal 
   assert(/\.from\("sms_registrations"\)\s*\.select\("customer_profile_sid"\)/.test(b));
   assert(/isInternalTenant\(admin, clientId\)/.test(b));
   assert(/const primaryProfileSid = Deno\.env\.get\("TWILIO_PRIMARY_PROFILE_SID"\) \?\? null;/.test(b));
-  assert(/runTrustSetup\(\{/.test(b) && /setup: \(s\) => setupVoiceTrust\(s\)/.test(b) && /fetchProfile: \(sid\) => fetchCustomerProfile\(sid\)/.test(b));
+  assert(/runTrustSetup\(\{/.test(b) && /setup: \(s\) => setupVoiceTrust\(s, trustHubHttp\(creds\)\)/.test(b)
+    && /fetchProfile: \(sid\) => fetchCustomerProfile\(sid, trustHubHttp\(creds\)\)/.test(b));
+  assert(b.indexOf("await tenantTwilio()") > b.indexOf("phoneOperatorGate") && b.indexOf("await tenantTwilio()") < b.indexOf("runTrustSetup("),
+    "the tenant's account is resolved after the operator gate and before anything is sent");
   assert(/parseVoiceIntegrityInfo\(payload\.voiceIntegrity\)/.test(b));
   assert(b.indexOf("phoneOperatorGate") < b.indexOf("trustHubConfigured()"), "a non-operator learns nothing about the server's setup");
   assert(!/wallet_hold|takeNumberHold/.test(b), "nothing here spends the builder's wallet");
   const st = slice(SRC, 'if (action === "phone_trust_status") {', "\n  }\n", "phone_trust_status branch");
-  assert(/runTrustStatus\(/.test(st) && /fetchTrustProduct: \(sid\) => fetchTrustProduct\(sid\)/.test(st));
+  assert(/runTrustStatus\(/.test(st) && /fetchTrustProduct: \(sid\) => fetchTrustProduct\(sid, trustHubHttp\(creds\)\)/.test(st));
 });
 
 Deno.test("phone_settings_get reports the caller ID from its OWN select, and who may change it", () => {

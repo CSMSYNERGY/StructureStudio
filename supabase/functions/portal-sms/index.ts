@@ -39,6 +39,9 @@ import {
   JOB_POSITIONS,
   type BuilderIntake,
 } from "../_shared/twilioTrustHub.ts";
+// Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
+import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
+import { resolveTwilioAccount, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
 // My Synergy Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
 import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
 
@@ -428,6 +431,17 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       .then(() => {}, () => {});
   };
 
+  // ── WHICH TWILIO ACCOUNT (Workstream 2) ───────────────────────────────────────────────────
+  // Every stage of the chain, the number search, the purchase and the adoption run as the
+  // TENANT'S account, resolved at most once per request and only by a branch that calls Twilio.
+  // While TWILIO_SUBACCOUNTS is not "on" it is the parent from the environment with no lookup,
+  // the same credentials twilioTrustHub.ts read for itself before. With it on, a tenant with an
+  // active sub-account runs inside it; a sub that is not active yet, or a lookup that fails,
+  // throws TwilioAccountError to the handler's catch below and nothing reaches Twilio.
+  let twilioMemo: Promise<TwilioAccount | null> | null = null;
+  const tenantCreds = (): Promise<TwilioAccount | null> =>
+    (twilioMemo ??= resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k)));
+
   try {
     switch (action) {
       case "status": {
@@ -447,7 +461,20 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // Submitting stays an explicit act by someone with settings_billing:'edit'.
         const sweepable = reg && ["brand_pending", "campaign_pending"].includes(reg.status);
         const due = reg?.next_poll_at && new Date(reg.next_poll_at).getTime() <= Date.now();
-        if (sweepable && due && trustHubConfigured()) {
+        // The tenant's account is resolved first: a sub that is not active yet is not swept (it
+        // has nothing at Twilio to read), and a lookup that fails skips the sweep like any other
+        // sweep failure, with the page still answered below.
+        const sweepAs = sweepable && due && trustHubConfigured()
+          ? await tenantCreds().then((c) => ({ ok: true as const, c }), (e) => ({ ok: false as const, e }))
+          : null;
+        if (sweepAs && !sweepAs.ok && !(sweepAs.e instanceof TwilioAccountError && sweepAs.e.kind === "not_ready")) {
+          await logEdgeError({
+            fn: "portal-sms", clientId, code: "sms_sweep_failed",
+            message: `lazy sweep skipped, the tenant's Twilio account could not be resolved: ${(sweepAs.e as Error)?.message ?? "unknown"}`,
+            severity: "info",
+          }).catch(() => {});
+        }
+        if (sweepAs?.ok) {
           const nowIso = new Date().toISOString();
           const { data: locked } = await admin.from("sms_registrations")
             .update({ advance_lock_until: new Date(Date.now() + 5 * 60_000).toISOString() })
@@ -456,7 +483,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
             .select("*").maybeSingle();
           if (locked) {
             try {
-              reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note, null);
+              reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note, null, sweepAs.c);
             } catch (e) {
               // A sweep failure must never break the page it was riding on. The builder
               // still gets their status; the next look tries again. A failed row write was
@@ -495,7 +522,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           && (!reg.next_poll_at || new Date(reg.next_poll_at).getTime() <= Date.now());
         if (stale && reg.messaging_service_sid && trustHubConfigured()) {
           try {
-            const live = await fetchCampaign(reg.messaging_service_sid);
+            const live = await fetchCampaign(reg.messaging_service_sid, await tenantCreds());
             const patch: Record<string, unknown> = {
               last_errors: live.errors,
               next_poll_at: new Date(Date.now() + 60_000).toISOString(),
@@ -728,8 +755,11 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // state this action exists to clear. Anything else is reported, because silently losing
         // a delete would leave an orphan attached to the brand.
         if (reg.campaign_sid && reg.messaging_service_sid) {
+          // Outside the try: an account that cannot be resolved is the handler's refusal, not a
+          // failed delete.
+          const creds = await tenantCreds();
           try {
-            await deleteCampaign(reg.messaging_service_sid, reg.campaign_sid);
+            await deleteCampaign(reg.messaging_service_sid, reg.campaign_sid, creds);
           } catch (e) {
             const err = e as TrustHubError;
             if (err?.status !== 404) {
@@ -834,6 +864,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!primary) {
           return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
         }
+        // The account every stage runs in, BEFORE the lock: a tenant whose account cannot be used
+        // never takes it.
+        const creds = await tenantCreds();
 
         // ⚠️ SINGLE-FLIGHT, TAKEN IN ONE STATEMENT. A read-then-write here races, and the
         // race is two brand registrations and two real charges for one builder. Proceed
@@ -850,7 +883,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         }
 
         try {
-          const out = await advanceOne(admin, clientId, locked, p, primary, note, userId ?? null);
+          const out = await advanceOne(admin, clientId, locked, p, primary, note, userId ?? null, creds);
           return json({ ok: true, ...view(out, await numbersOf()) });
         } finally {
           // Always release, even on failure: a stuck lock parks a builder for five minutes
@@ -867,7 +900,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           contains: p.contains ? String(p.contains) : undefined,
           inRegion: p.region ? String(p.region).toUpperCase().slice(0, 2) : undefined,
           limit: 10,
-        });
+        }, await tenantCreds());
         return json({ ok: true, numbers: results });
       }
 
@@ -883,6 +916,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!reg.messaging_service_sid || reg.status === "none") {
           return json({ error: "Finish the carrier registration before buying a number." }, 409);
         }
+        // The account the number is found, adopted or bought in: the registration's.
+        const creds = await tenantCreds();
+        const http = trustHubHttp(creds);
 
         // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS READ IS THE ONLY THING ENFORCING IT (the
         // warning below is still true of it). It is a read of the rows rather than a count since
@@ -921,10 +957,11 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           const reply = await adoptBranch(
             { serviceSid: reg.messaging_service_sid, number: plan.number, registrationStatus: reg.status },
             {
-              findNumberSid: (e164) => findIncomingNumberSid(e164),
-              inService: (serviceSid, numberSid) => numberInService(serviceSid, numberSid),
-              attach: (serviceSid, numberSid) => attachNumberToService(serviceSid, numberSid),
-              clearSmsUrl: (numberSid) => clearNumberSmsUrl(numberSid),
+              // acct undefined (no account) = the helpers' own default, the environment's SID.
+              findNumberSid: (e164) => findIncomingNumberSid(e164, http, creds?.accountSid),
+              inService: (serviceSid, numberSid) => numberInService(serviceSid, numberSid, http),
+              attach: (serviceSid, numberSid) => attachNumberToService(serviceSid, numberSid, http),
+              clearSmsUrl: (numberSid) => clearNumberSmsUrl(numberSid, http, creds?.accountSid),
               setSmsNumber: async (e164) => {
                 const { error } = await admin.from("client_settings").update({ sms_number: e164 }).eq("client_id", clientId);
                 return { error: error ?? null };
@@ -974,7 +1011,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
         // Reconcile BEFORE buying: a previous attempt may have succeeded with its response
         // lost in flight, and buying again would silently rent a second number forever.
-        const already = await findPurchasedNumbers(clientId);
+        const already = await findPurchasedNumbers(clientId, creds);
         const dupe = already.find((n) => n.phoneNumber === wanted);
 
         // ⚠️ The number bills MONTHLY at Twilio from the moment it is bought, so the first
@@ -993,7 +1030,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         try {
           bought = dupe ?? await purchaseNumber({
             phoneNumber: wanted, clientId, messagingServiceSid: reg.messaging_service_sid,
-          });
+          }, creds);
         } catch (e) {
           if (heldNum.holdId) {
             await admin.rpc("wallet_release", { p_hold_id: heldNum.holdId, p_reason: "number purchase failed" })
@@ -1100,13 +1137,30 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         //
         // ⚠️ The token itself never leaves the runtime. Only a verdict, a length and a
         // Twilio error code travel — no prefix, no suffix, no hash.
-        const acct = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
-        const tok = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
-        if (!acct) return json({ ok: false, verdict: "no_account_sid" });
+        //
+        // WHICH ACCOUNT (Workstream 2, phase 4): the tenant's. While TWILIO_SUBACCOUNTS is not "on"
+        // that is always the parent's environment pair, exactly as before. With it on, a tenant on
+        // its own sub-account has ITS token checked (the one Vault holds, which signs that sub's
+        // webhooks), and the answer says `account: "sub"`; the parent's answer is unchanged.
+        let acct = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
+        let tok = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
+        let which: Record<string, string> = {};
+        if (subaccountsOn((k) => Deno.env.get(k))) {
+          const account = await tenantCreds();
+          if (account?.source === "sub") {
+            acct = account.accountSid;
+            tok = account.authToken ?? "";
+            which = { account: "sub" };
+          } else {
+            which = { account: "parent" };
+          }
+        }
+        if (!acct) return json({ ok: false, verdict: "no_account_sid", ...which });
         if (!tok) {
           return json({
             ok: false, verdict: "empty",
             detail: "TWILIO_AUTH_TOKEN is not set, so inbound webhook signatures are not being validated.",
+            ...which,
           });
         }
         let res: Response;
@@ -1115,7 +1169,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
             headers: { Accept: "application/json", Authorization: `Basic ${btoa(`${acct}:${tok}`)}` },
           });
         } catch (e) {
-          return json({ ok: false, verdict: "unreachable", detail: (e as Error).message });
+          return json({ ok: false, verdict: "unreachable", detail: (e as Error).message, ...which });
         }
         const text = await res.text();
         let body: any = {};
@@ -1132,6 +1186,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
             // the intended contract; returning the account identity had quietly broken it.
             sameAccount: String(body?.sid ?? "") === acct,
             detail: "Twilio accepted this token for this account, so inbound webhook signature validation will work.",
+            ...which,
           });
         }
         // 20003 is Twilio's authentication failure. Anything else is a different problem.
@@ -1145,6 +1200,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           detail: code === 20003
             ? "Twilio rejected this token. Inbound customer replies will be refused until it is corrected."
             : `Twilio answered HTTP ${res.status}.`,
+          ...which,
         });
       }
 
@@ -1159,6 +1215,20 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     // It still gets the generic 502 below; it just is not filed twice.
     if (e instanceof RegistrationWriteError) {
       const failed = json({ error: "The carrier registration could not be updated just now. Support has been notified." }, 502);
+      filedAtReturnSite.add(failed);
+      return failed;
+    }
+    // The tenant's Twilio account (Workstream 2, only with TWILIO_SUBACCOUNTS on): a sub that is
+    // still being set up is a refusal; a lookup that failed is a fault, logged here once.
+    if (e instanceof TwilioAccountError) {
+      if (e.kind === "not_ready") {
+        return json({ error: "Texting for this account is still being set up. Try again in a few minutes." }, 503);
+      }
+      await logEdgeError({
+        fn: "portal-sms", clientId, code: "twilio_account_lookup_failed", severity: "error",
+        message: `${action}: the tenant's Twilio account could not be resolved: ${e.message}`,
+      }).catch(() => {});
+      const failed = json({ error: "Texting couldn't reach the phone company just now. Try again in a minute." }, 502);
       filedAtReturnSite.add(failed);
       return failed;
     }
@@ -1216,6 +1286,9 @@ async function advanceOne(
   // Attribution on the wallet hold — who authorised the charge. Null on the lazy sweep,
   // which is nobody pressing anything; that path never reaches a charging state anyway.
   userId: string | null,
+  // The tenant's Twilio account (Workstream 2): every stage below runs in it. null = the
+  // environment's, what every stage did before.
+  creds: TrustHubCreds | null,
 ): Promise<any> {
   // ⚠️ A FAILED WRITE THROWS; IT NEVER RETURNS THE OLD ROW. This used to ignore the update's
   // error and hand back a fresh read of the unchanged row, so a refused write looked like a
@@ -1286,13 +1359,13 @@ async function advanceOne(
         ? { profileSid: reg.customer_profile_sid }
         : await createSecondaryCustomerProfile({
             intake, primaryProfileSid, friendlyName: `${clientId} — ${intake.legalBusinessName}`,
-          });
+          }, creds);
       const a2p = reg.a2p_profile_sid
         ? { a2pProfileSid: reg.a2p_profile_sid }
         : await createA2pTrustProduct({
             profileSid: prof.profileSid, email: intake.repEmail,
             friendlyName: `${clientId} — A2P`,
-          });
+          }, creds);
       await note("profiles_created", { profileSid: prof.profileSid, a2pProfileSid: a2p.a2pProfileSid });
       return await set({
         customer_profile_sid: prof.profileSid,
@@ -1333,7 +1406,7 @@ async function advanceOne(
           a2pProfileBundleSid: reg.a2p_profile_sid,
           tier: reg.brand_tier,
           mock: wantMock,
-        });
+        }, creds);
       } catch (e) {
         // Twilio refused, so nothing was bought. Release the hold rather than capturing it —
         // the builder must not pay for a registration that does not exist.
@@ -1372,7 +1445,7 @@ async function advanceOne(
     }
 
     case "brand_pending": {
-      const b = await fetchBrand(reg.brand_sid);
+      const b = await fetchBrand(reg.brand_sid, creds);
       const status = normalizeBrandStatus(b.status);
       if (status === "APPROVED") {
         await note("brand_approved", { tcrId: b.tcrId });
@@ -1403,7 +1476,7 @@ async function advanceOne(
           friendlyName: `${clientId} messaging`,
           inboundWebhookUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-inbound?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
           statusCallbackUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-status?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
-        });
+        }, creds);
         // ⚠️ WRITE IT DOWN BEFORE ANYTHING ELSE CAN THROW. Everything below this line can
         // fail, and until 2026-08-31 a failure meant the SID was never persisted, so the next
         // attempt built a SECOND Messaging Service and abandoned the first. Observed on the
@@ -1425,7 +1498,7 @@ async function advanceOne(
       // 21717 out of here means "too soon" and is translated for the builder by the handler's
       // catch. Nothing is written, so the row stays brand_approved and a retry reuses the
       // Messaging Service persisted above.
-      const eligible = await fetchEligibleUseCases(svc.serviceSid, reg.brand_sid);
+      const eligible = await fetchEligibleUseCases(svc.serviceSid, reg.brand_sid, creds);
       const wanted = String(p.useCase ?? "");
       const pick = eligible.find((u) => u.code === wanted)
         ?? eligible.find((u) => u.code === "MIXED")
@@ -1478,7 +1551,7 @@ async function advanceOne(
         termsUrl: String(reg.terms_url ?? ""),
         hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
         hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
-      });
+      }, creds);
       await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid, policyUrlsEchoed: c.policyUrlsEchoed });
       // ⚠️ THE 09-02 REGRESSION DETECTOR. Twilio echoing the campaign back WITHOUT the two
       // policy URLs means they did not land, which is the exact failure that cost a paid
@@ -1501,7 +1574,7 @@ async function advanceOne(
     }
 
     case "campaign_pending": {
-      const c = await fetchCampaign(reg.messaging_service_sid);
+      const c = await fetchCampaign(reg.messaging_service_sid, creds);
       const status = normalizeCampaignStatus(c.status);
       if (status === "APPROVED") {
         await note("campaign_approved", {});
@@ -1563,7 +1636,7 @@ async function advanceOne(
         termsUrl: String(reg.terms_url ?? ""),
         hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
         hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
-      });
+      }, creds);
       await note("campaign_resubmitted", { campaignSid: c.campaignSid, status: c.status, policyUrlsEchoed: c.policyUrlsEchoed });
       if (!c.policyUrlsEchoed) {
         await logEdgeError({
@@ -1592,7 +1665,7 @@ async function advanceOne(
       if (Number(reg.brand_update_count ?? 0) >= 3) {
         throw new TrustHubError({ message: "brand update limit reached", status: 400, code: 21724, permanent: true });
       }
-      await updateBrand(reg.brand_sid);
+      await updateBrand(reg.brand_sid, creds);
       await note("brand_resubmitted", { attempt: Number(reg.brand_update_count ?? 0) + 1 });
       return await set({
         brand_update_count: Number(reg.brand_update_count ?? 0) + 1,

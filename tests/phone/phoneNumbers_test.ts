@@ -236,7 +236,10 @@ Deno.test("phone_buy_number: up to MAX_NUMBERS, the tenant's own numbers never a
   assert(/\n\s*phone_number_texting: \{ area: "phone", level: "edit" \},/.test(SRC), "gated phone:edit");
   const svc = slice(SRC, "const textingServiceSid = async ()", "\n  };\n", "textingServiceSid");
   assert(/r\?\.status === "active"/.test(svc) && /\^MG\[0-9a-f\]\{32\}\$/.test(svc));
-  const deps = slice(SRC, "const textingDeps = (numberId: string) => ({", "\n  });\n", "textingDeps");
+  // Workstream 2: bound to the tenant's Twilio account, which the caller resolved once (tenantTwilio).
+  const deps = slice(SRC, "const textingDeps = (numberId: string, creds: TwilioCreds) => ({", "\n  });\n", "textingDeps");
+  assert(/numberInService\(svc, sid, trustHubHttp\(creds\)\)/.test(deps) && /attachNumberToService\(svc, sid, trustHubHttp\(creds\)\)/.test(deps)
+    && /clearNumberSmsUrl\(sid, trustHubHttp\(creds\), creds\.accountSid\)/.test(deps), "every Twilio step in the tenant's account");
   assert(/\.update\(patch\)\s*\.eq\("id", numberId\)\.eq\("client_id", clientId\)\.is\("released_at", null\)\.select\("id"\)/.test(deps));
   // Declared above every action that uses them (a const used before its line is a TDZ throw).
   for (const h of ["const textingServiceSid = async", "const textingDeps = ", "const phoneNumberRows = async"]) {
