@@ -6,7 +6,7 @@ import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
-import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
+import { buildOverlayItems, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -1063,32 +1063,83 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           let incoming = (payload.values || {}) as Record<string, unknown>;
           const fromBoardId = str(payload.fromBoardId, 40);
           const crossBoard = !!fromBoardId && fromBoardId !== item.board_id;
+          // The home-board column each sent cell asked for. The refusal below checks THESE
+          // against what sanitizeValues kept, not the translated object, so a translation that
+          // comes back short is a 400 rather than a 200 that wrote nothing.
+          const asked: string[] = [];
           if (crossBoard) {
             const srcColumns = await boardColumns(fromBoardId);
             const map = columnIdMap(srcColumns, columns);
-            const remapped: Record<string, unknown> = {};
             const unmapped: string[] = [];
-            for (const [k, v] of Object.entries(incoming)) {
+            for (const k of Object.keys(incoming)) {
               const dest = map.get(k);
               // deno-lint-ignore no-explicit-any
               if (!dest) { unmapped.push(((srcColumns as any[]).find((c) => c.id === k)?.name) || k); continue; }
-              remapped[dest] = v;
+              asked.push(dest);
             }
             if (unmapped.length) {
               return json({ error: `"${unmapped.join('", "')}" does not exist on the board this item lives on. Open the item there to change it.` }, 400);
             }
-            incoming = remapped;
+            // THE CHOICE IDS INSIDE A CELL ARE PER-BOARD TOO. The working board offers Bugs' App
+            // ids and Feature Requests seeds its own (o_ss …), so re-keying the column alone
+            // carried an id the home column had never heard of: a status came back as the 400
+            // below, and a Feature row's App was WRITTEN as [] with a 200 (sanitizeValues keeps a
+            // dropdown key with whatever survives). remapValues translates them by label text,
+            // the same translation get_board applies for display.
+            //
+            // ⚠️ GIVE IT THE BROWSER'S ORIGINAL KEYS. remapValues re-keys the column itself; fed
+            // values already re-keyed to this board, every lookup misses and it returns {},
+            // which is the silent no-op all over again (design review, 2026-10-09).
+            incoming = remapValues(payload.values, map, srcColumns, columns);
           }
           const clean = sanitizeValues(columns, incoming, opIds);
           if (crossBoard) {
             // sanitizeValues drops a value its column does not recognise — a status label or a
-            // dropdown option belonging to the board being VIEWED rather than the board the
-            // item lives on. Column names match across boards; the ids inside them do not.
-            const lost = Object.keys(incoming).filter((k) => !(k in clean));
+            // dropdown option of the board being VIEWED with no label of the same words here. A
+            // status goes missing from `clean`; a dropdown stays in it with the option filtered
+            // out, so its entries are checked one by one. An option the row ALREADY holds is let
+            // through: a since-deleted one rides back in every multi-select edit and is dropped
+            // as it always was, and refusing for it would leave the row uneditable from the
+            // working board for a reason nobody can see there. An entry that is no id at all ({…},
+            // null, an empty string, a number) is refused the same way: sanitizeValues turned each
+            // of those into [] with a 200 too. (A whole cell sent as null, "" or [] is a clear.)
+            const asList = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+            // deno-lint-ignore no-explicit-any
+            const colOf = (k: string) => (columns as any[]).find((c) => c.id === k);
+            // deno-lint-ignore no-explicit-any
+            const offeredBy = (col: any) => new Set((col.settings?.options || []).map((o: any) => o.id));
+            const lost = asked.filter((k) => {
+              if (!(k in clean)) return true;
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const had = asList((item.values || {})[k]);
+              return asList(incoming[k]).some((x) => {
+                const id = typeof x === "string" ? str(x, 40) : x;
+                return !had.includes(id) && (typeof id !== "string" || !offered.has(id));
+              });
+            });
             if (lost.length) {
-              // deno-lint-ignore no-explicit-any
-              const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
+              const names = lost.map((k) => colOf(k)?.name || k);
               return json({ error: `That choice does not exist on the board this item lives on (${names.join(", ")}). Open the item there to change it.` }, 400);
+            }
+            // ⚠️ A SINGLE-CHOICE COLUMN KEEPS THE FIRST CHOICE AND DROPS THE REST. The page decides
+            // single or multi from the column it is SHOWING, so a multi-select App on the working
+            // board can send two choices to a single-choice App here, and sanitizeValues saved the
+            // first with a 200 while the cell showed both. Every real choice sent must be kept.
+            const crowded = asked.filter((k) => {
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const kept = asList(clean[k]);
+              return asList(incoming[k]).some((x) => typeof x === "string" && offered.has(str(x, 40)) && !kept.includes(str(x, 40)));
+            });
+            if (crowded.length) {
+              const limits = crowded.map((k) => {
+                const col = colOf(k);
+                return `${col?.name || k} takes ${col?.settings?.multi === true ? "fewer choices" : "one choice"}`;
+              });
+              return json({ error: `On the board this item lives on, ${limits.join("; ")}. Open the item there to change it.` }, 400);
             }
           }
           newValues = { ...item.values, ...clean };
