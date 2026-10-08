@@ -14,7 +14,9 @@
 //     3. a builder with no row may not save a label or the switch alone (the upsert would create a
 //        paperwork-mode row with no rate); with a rate, the save creates the row;
 //     4. the codes switch alone writes only that column (plus client_id and updated_at), and a
-//        "true" string is refused; switching off never touches tax_code_assignments;
+//        "true" string is refused; switching off never touches tax_code_assignments; a rate save
+//        names the switch nowhere, neither in the upsert nor in the columns it reads back, so it
+//        works on a database without 290;
 //     5. settings_crm:edit WITHOUT Branding may save (unlike `save`, which needs both); settings_crm
 //        view is refused with resolveTenant's 403, before any read;
 //     6. the answer is what is stored, and every save leaves an admin_audit row.
@@ -95,6 +97,7 @@ type Trace = {
   audits: Record<string, unknown>[];
   errors: Record<string, unknown>[];
   selects: string[];
+  returning: string[];      // the columns each client_settings upsert reads back (.select after it)
 };
 const MISSING = { code: "42703", message: "column client_settings.tax_codes_enabled does not exist" };
 const WRITE_OPS = ["insert", "update", "upsert", "delete"];
@@ -114,7 +117,10 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
     if (has("upsert")) {
       const up = arg("upsert");
       trace.upserts.push(up);
-      if (world.noColumn && "tax_codes_enabled" in up) return { data: null, error: MISSING };
+      trace.returning.push(cols);
+      // The columns an upsert reads back are part of the same statement: naming the switch there
+      // fails the save on a database without 290 exactly as writing it would.
+      if (world.noColumn && ("tax_codes_enabled" in up || /\btax_codes_enabled\b/.test(cols))) return { data: null, error: MISSING };
       return { data: { ...(row ?? {}), tax_codes_enabled: world.codes ?? false, ...up }, error: null };
     }
     trace.selects.push(cols);
@@ -146,7 +152,7 @@ function chain(world: World, trace: Trace, table: string, ops: any[][]): any {
 }
 
 async function drive(body: Record<string, unknown>, world: World = {}) {
-  const trace: Trace = { upserts: [], tables: [], writes: [], audits: [], errors: [], selects: [] };
+  const trace: Trace = { upserts: [], tables: [], writes: [], audits: [], errors: [], selects: [], returning: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   const realFetch = globalThis.fetch;
@@ -258,6 +264,7 @@ Deno.test("4. the codes switch alone writes only that column; a string is refuse
     assertEquals(status, 200, JSON.stringify(body));
     assertEquals(keysOf(trace.upserts[0]), ["client_id", "tax_codes_enabled", "updated_at"]);
     assertEquals(trace.upserts[0].tax_codes_enabled, on);
+    assert(/\btax_codes_enabled\b/.test(trace.returning[0]), "the switch is read back with the save");
     assertEquals(body.taxCodesEnabled, on, "the answer carries the stored switch");
     assertFalse(trace.tables.includes("tax_code_assignments"), "switching codes on or off never reads or writes the codes");
   }
@@ -277,6 +284,8 @@ Deno.test("4b. a rate save never names the switch, so it works on a database wit
   const { status, body, trace } = await saveTax({ ssTaxRate: "6" }, { row: NEW_DEFAULT, noColumn: true });
   assertEquals(status, 200, JSON.stringify(body));
   assertFalse("tax_codes_enabled" in trace.upserts[0]);
+  assertEquals(trace.returning.length, 1, "the upsert's read-back is recorded");
+  assertFalse(/tax_codes_enabled/.test(trace.returning[0]), "nor does the read-back after the upsert name it");
   assertFalse("taxCodesEnabled" in body, "the answer does not claim a switch it did not read");
   assertFalse(trace.selects.some((c) => /tax_codes_enabled/.test(c)));
 });
