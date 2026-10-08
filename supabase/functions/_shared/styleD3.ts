@@ -1288,7 +1288,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>,
     "porchPosts": <projecting porch only: how many posts stand along the porch's front edge, the corner posts included>,
     "porchPitch": <projecting porch only: the porch roof's own rise over run>,
-    "porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide"
+    "porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide" (the last two on a recessed porch only)
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab" | "blocks" | "piers",
@@ -3228,7 +3228,8 @@ export const SELF_CHECK_ALLOW = [
   "roof.porchAttachFt", "roof.porchWidthFt",
   "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
   // The porch's own framing (2026-09-25): its posts, its roof's pitch, and where its steps leave
-  // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out.
+  // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out -- but the steps,
+  // which a recessed porch takes too: off its front (2026-10-03) and off its open sides (2026-10-07).
   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
   // Whether the gable over a RECESSED porch is open (2026-10-07). sanitizeD3Spec holds it to a recessed
   // porch on the way out; "sided" takes it off (applySelfCheck).
@@ -3829,14 +3830,18 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
        render never draws a porch roof so steep that less than 6 ft stands under its beam, so a
        porch roof that meets the wall low is drawn flatter than porchPitch says; where that is
        why the render's is flatter, correct roof.porchAttachFt, never porchPitch.
-     * roof.porchSteps, projecting porches only, currently ${stepsNow}: where steps leave the
-       porch's front edge, "left", "center" or "right" as seen standing in front of it, by
+     * roof.porchSteps, currently ${stepsNow}: where steps leave the porch, as seen standing
+       in front of it facing it. A RECESSED porch is open at its two sides as well as its front,
+       from each front corner post back to the wall the door is in: steps that come down off one
+       of those open sides are "leftSide" or "rightSide", for the side they leave from. Off
+       either kind's front edge they are "left", "center" or "right", by
        which third of the span between the two front corner posts the MIDDLE of the steps
        falls in (never judged against the door; with a post at the middle of the front edge,
        never "center", only the side of that post). Give it
        where the frame shows steps the render lacks, or shows them at a different place. Give
-       "none" where the render shows steps the frame does not, or where the frame's steps leave
-       the deck from one of its sides rather than its front edge: "none" removes them.
+       "none" where the render shows steps the frame does not: "none" removes them. A flight off
+       an END of a PROJECTING porch's deck is the builder's to set, not yours: never answer
+       "leftSide" or "rightSide" on a projecting porch, and leave one the render draws there alone.
      * roof.porchGable, recessed porches only, currently ${gableNow}: whether the gable over the
        porch beam is sided or open framing. Give "open" where the frame shows the porch's ceiling or
        sky through the framing above the beam and the render shows siding there; give "sided" where
@@ -4317,6 +4322,20 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     } else if (depth > 0.5) {
       delete roof.porchOutFt;
       gone.add("roof.porchOutFt");
+    }
+    // ONE KIND'S SIDE FLIGHT NEVER BECOMES THE OTHER'S (review, 2026-10-08), calDraftRoof's rule: a flight off
+    // an END of a projecting deck is not a flight off an OPEN SIDE of a recessed porch, nor the reverse. So a
+    // correction that changes the porch's kind takes the draft's "leftSide" / "rightSide" off, with its count,
+    // unless it gives steps itself. Until 2026-10-07 the sanitiser did this to the projecting-to-recessed switch
+    // (a recessed porch took the front words only), and a recessed draft had no side flight to carry the other
+    // way. Front words still carry over either way, as they always did. Not an exclusion: no correction named it,
+    // so the v2 report lists it as what the asked-for change cost, as it did when the sanitiser took it.
+    const wasOut = (num(draftRoof?.porchOutFt) ?? 0) > 0.5;
+    const wasIn = !wasOut && (num(draftRoof?.porchDepthFt) ?? 0) > 0.5;
+    const kindSwitched = out > 0.5 ? wasIn : depth > 0.5 && wasOut;
+    if (kindSwitched && !wanted.has("roof.porchSteps") && (roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide")) {
+      delete roof.porchSteps;
+      delete roof.porchStepCount;
     }
     excluded = gone;
     return sanitizeD3Spec(merged);

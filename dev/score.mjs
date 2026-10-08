@@ -164,8 +164,10 @@ export function mergeDraft(prior, draft, source = "video") {
   if ((dr.porchOutFt || 0) > 0.5) {
     delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
     for (const k of own) if (!(k in dr)) delete roof[k];
-    // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04).
-    if (!("porchSteps" in dr) && was && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
+    // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04), from a stored
+    // projecting porch only: never a stored recessed porch's side flight (review, 2026-10-08).
+    if (!("porchSteps" in dr) && was && (Number(was.porchOutFt) || 0) > 0.5
+        && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
       roof.porchSteps = was.porchSteps;
       if ("porchStepCount" in was) roof.porchStepCount = was.porchStepCount;
     }

@@ -715,13 +715,20 @@ Deno.test("a recessed porch's side flight: refused under 4 ft deep and beside a 
   assertEquals(why(roof), { leftSide: null, rightSide: null });
   assertEquals(why({ type: "gable", pitch: 0.4 }), null, "no recessed porch: nothing to say");
   assertEquals(why({ ...roof, porchOutFt: 6 }), null, "a projecting porch wins");
-  // Too shallow: under 4 ft as built, whether typed that shallow or held there by the building (4 ft left behind it).
+  // Too shallow: under 4 ft as built. Typed that shallow it is "shallow"; typed 4 ft or more and held under it by the
+  // building (4 ft left behind it) it is "short" (review, 2026-10-08), since a deeper Depth box changes nothing there.
   for (const depth of [1, 3, 3.5, 3.99]) {
     assertEquals(at({ ...roof, porchDepthFt: depth, porchSteps: "leftSide" }).steps, null, `${depth} ft`);
     assertEquals(why({ ...roof, porchDepthFt: depth }), { leftSide: "shallow", rightSide: "shallow" }, `${depth} ft`);
   }
   assertEquals(at({ ...roof, porchDepthFt: 4, porchSteps: "leftSide" }).steps.w, 3.5, "4 ft: the whole 3.5 ft flight");
-  assertEquals(why({ ...roof, porchDepthFt: 6 }, "7x7.5"), { leftSide: "shallow", rightSide: "shallow" }, "held to 3.5 ft by a 7.5 ft deep building");
+  assertEquals(why({ ...roof, porchDepthFt: 6 }, "7x7.5"), { leftSide: "short", rightSide: "short" }, "held to 3.5 ft by a 7.5 ft deep building");
+  // A front-gable 12x7 (the new frame: the porch in the south gable end, eating the 7 ft depth).
+  assertEquals(why({ ...roof, front: "gable", porchDepthFt: 4 }, "12x7"), { leftSide: "short", rightSide: "short" }, "4 ft typed, held to 3 ft by a 7 ft deep building");
+  assertEquals(why({ ...roof, front: "gable", porchDepthFt: 3.5 }, "12x7"), { leftSide: "shallow", rightSide: "shallow" }, "typed under 4 ft: shallow, whatever holds it");
+  assertEquals(at({ ...roof, front: "gable", porchDepthFt: 6, porchSteps: "leftSide" }, "12x7").steps, null, "short draws nothing either");
+  // An eave wall's porch eats the width: a 7 ft wide eave-front building holds a 6 ft porch to 3 ft.
+  assertEquals(why({ ...roof, front: "eave", porchDepthFt: 6 }, "16x7"), { leftSide: "short", rightSide: "short" }, "eave front, 7 ft deep");
   assertEquals(at({ ...roof, porchDepthFt: 6, porchSteps: "rightSide" }, "7x8").steps.w, 3.5, "held to 4 ft by an 8 ft deep building: drawn");
   // A tight overhang holds the posts back (pfFront): the flight narrows, still clear of the post's back face.
   const tight = { ...roof, overhang: 0.2, porchDepthFt: 4 };
@@ -755,6 +762,18 @@ Deno.test("a recessed porch's side flight: refused under 4 ft deep and beside a 
   assertEquals(words({ leftSide: "leanTo", rightSide: null }).tag("leftSide"), "a lean-to is on that side");
   assertEquals(words({ leftSide: "leanTo", rightSide: null }, "leftSide").note, "Steps down the left side are not drawn: a lean-to stands on that side. Pick the other side, or steps off its front edge.");
   assertEquals(words({ leftSide: "leanTo", rightSide: "leanTo" }).note, "Off the floor's edge in the opening, as seen standing in front of the porch. A lean-to stands on each of its open sides.");
+  // ⚠️ A lean-to on BOTH sides, one picked (review, 2026-10-08): never "Pick the other side", which is greyed out too.
+  for (const picked of ["leftSide", "rightSide"]) {
+    assertEquals(words({ leftSide: "leanTo", rightSide: "leanTo" }, picked).note, "Steps down a side are not drawn: a lean-to stands on each of its open sides. Pick steps off its front edge.", picked);
+  }
+  // ⚠️ Held short by the building (review, 2026-10-08): never "Make it deeper", which changes nothing there.
+  const short = { leftSide: "short", rightSide: "short" };
+  assertEquals([words(short).tag("leftSide"), words(short).tag("rightSide")], ["needs a bigger size", "needs a bigger size"]);
+  assertEquals(words(short).note, "Off the floor's edge in the opening, as seen standing in front of the porch. Steps down a side need a bigger size than this one.");
+  assertEquals(words(short, "leftSide").note, "Steps down a side are not drawn at this size: the building is too small to cut the porch 4 ft deep and still leave room behind it. Pick a bigger size, or steps off its front edge.");
+  for (const w of [null, short, { leftSide: "leanTo", rightSide: "leanTo" }, { leftSide: "shallow", rightSide: "shallow" }]) {
+    assert(!/Make it deeper/.test(words(w as Any, "leftSide").note) || (w as Any)?.leftSide === "shallow", JSON.stringify(w));
+  }
 });
 
 Deno.test("a recessed porch on an EAVE wall takes side flights off its two ends, from the same frame", () => {

@@ -151,6 +151,13 @@ Deno.test("⚠️ a flight off an end of the deck, and its count, survive a draf
   assertEquals(calDraftRoof(stored, { type: "gable", porchOutFt: 6, porchSteps: "center" }), { type: "gable", porchOutFt: 6, porchSteps: "center" });
   // A typed draft with no porch has none, steps included.
   assertEquals(calDraftRoof(stored, { type: "gable" }), { type: "gable" });
+  // ⚠️ Only a stored PROJECTING porch's (review, 2026-10-08): a stored RECESSED porch's flight off one of its open
+  // sides never lands on a projecting draft as an end flight, typed or not -- the recessed branch's rule turned
+  // round. A projecting draft that gives one itself still brings its own.
+  const recSide = { type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 };
+  assertEquals(calDraftRoof(recSide, { type: "gable", porchOutFt: 6 }), { type: "gable", porchOutFt: 6 });
+  assertEquals(calDraftRoof(recSide, { porchOutFt: 6 }), { type: "gable", porchOutFt: 6 });
+  assertEquals(calDraftRoof(recSide, { porchOutFt: 6, porchSteps: "leftSide" }), { type: "gable", porchOutFt: 6, porchSteps: "leftSide" });
 });
 
 Deno.test("⚠️ the porch's step count follows its steps: a redraft brings its own or none (2026-09-28)", () => {
@@ -224,6 +231,10 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { porchDepthFt: 5 }],
     [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { type: "gable", porchDepthFt: 5 }],
     [{ type: "gable", porchDepthFt: 4, porchSteps: "center" }, { type: "gable", porchDepthFt: 4, porchSteps: "leftSide" }],
+    // ...and never onto a projecting draft as an end flight (review, 2026-10-08).
+    [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { type: "gable", porchOutFt: 6 }],
+    [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { porchOutFt: 6 }],
+    [{ type: "gable", porchDepthFt: 6, porchSteps: "rightSide", porchStepCount: 2 }, { porchOutFt: 6, porchSteps: "leftSide" }],
     // A flight off an end of a deck stays under a draft silent on the steps, typed or not (2026-10-04).
     [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { type: "gable", porchOutFt: 6 }],
     [{ type: "gable", porchOutFt: 6, porchPosts: 4, porchSteps: "leftSide", porchStepCount: 2 }, { porchOutFt: 5 }],

@@ -1864,7 +1864,7 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
     assert(p.includes("Leave it out when the porch has no steps"), `${name}: absent is no steps`);
     // A recessed porch's open sides (2026-10-07): a flight off one is "leftSide" / "rightSide"; a projecting
     // porch's flight off an end of its deck is still left out.
-    assert(p.includes('"porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide"'), `${name}: the side words are in the schema`);
+    assert(p.includes('"porchSteps": "left" | "center" | "right" | "leftSide" | "rightSide" (the last two on a recessed porch only)'), `${name}: the side words are in the schema, for a recessed porch only`);
     assert(p.includes('A RECESSED porch is open at its two sides as well') && p.includes('answer "leftSide" or "rightSide" for the side they leave from'), `${name}: a recessed porch's side flight`);
     assert(p.includes("when a projecting porch's steps leave its deck from one of its ends rather than its front edge"), `${name}: a projecting porch's end flight is left out`);
     // Generic numbers only: the two test buildings are a 4-post porch, not a 3.
@@ -3906,13 +3906,81 @@ Deno.test("v2 prompt: the porch's posts, pitch and steps are checked, each said 
   const bare = selfCheckPrompt({ dims: CHECK_DIMS, draft: SHED_BACK_HIGH, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(bare.includes("roof.porchPosts, projecting porches only, currently not set, which draws a post at each corner and one every 8.5 ft or less between them"), "posts");
   assert(bare.includes("roof.porchPitch, projecting porches only, currently not set, which draws a 2 in 12 porch roof, lower where the wall is too short for it"), "pitch");
-  assert(bare.includes("roof.porchSteps, projecting porches only, currently not set, which draws no steps"), "steps");
+  assert(bare.includes("roof.porchSteps, currently not set, which draws no steps"), "steps");
   assert(bare.includes("WHERE IT IS, HOW BIG AND HOW IT IS BUILT:"), "the step's heading");
   const set = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" } });
   const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: set, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(p.includes("roof.porchPosts, projecting porches only, currently 4:"), "posts as given");
   assert(p.includes("roof.porchPitch, projecting porches only, currently 0.25:"), "pitch as given");
-  assert(p.includes('roof.porchSteps, projecting porches only, currently "left":'), "steps as given");
+  assert(p.includes('roof.porchSteps, currently "left":'), "steps as given");
+});
+
+Deno.test("v2 prompt: the steps step reads a recessed porch's open sides, and leaves a projecting deck's end flight alone (review, 2026-10-08)", () => {
+  // A recessed draft's side flight was shown to the check under "projecting porches only" wording that told it
+  // to remove side steps, with no word to add or move one.
+  const recessed = cleanSpec({ ...DRAFT, roof: { ...DRAFT.roof, porchSteps: "leftSide" } });
+  assertEquals(recessed.roof.porchSteps, "leftSide", "the fixture keeps its side flight");
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: recessed, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes('roof.porchSteps, currently "leftSide": where steps leave the porch'), "said as given, for either kind");
+  assert(!p.includes("roof.porchSteps, projecting porches only"), "no longer projecting only");
+  assert(p.includes('steps that come down off one\n       of those open sides are "leftSide" or "rightSide", for the side they leave from'), "the recessed side words");
+  assert(p.includes("A RECESSED porch is open at its two sides as well as its front"), "the same frame as the draft prompt");
+  assert(!p.includes("rather than its front edge: \"none\" removes them"), "a side flight is no longer a reason for none");
+  assert(p.includes('never answer\n       "leftSide" or "rightSide" on a projecting porch, and leave one the render draws there alone.'), "a deck's end flight is the builder's");
+});
+
+Deno.test("⚠️ a swap of porch kind never turns one kind's side flight into the other's (review, 2026-10-08)", () => {
+  // calDraftRoof's rule, both ways: a flight off an END of a projecting deck is not a flight off an OPEN SIDE of a
+  // recessed porch. Until 2026-10-07 the sanitiser dropped the projecting-to-recessed one (a recessed porch took
+  // the front words only); with side words on a recessed porch it carried over as a recessed side flight.
+  const deck = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchSteps: "rightSide", porchStepCount: 3 } });
+  assertEquals([deck.roof.porchOutFt, deck.roof.porchSteps, deck.roof.porchStepCount], [6, "rightSide", 3], "the fixture");
+  const toRecessed = applySelfCheck(deck, readOf({
+    verdict: "corrections", corrections: { roof: { porchDepthFt: 6 } }, changed: [change("roof.porchDepthFt")],
+  }));
+  assert(toRecessed.ok && toRecessed.verdict === "corrections", "applied");
+  if (!toRecessed.ok) return;
+  for (const k of ["porchOutFt", "porchSteps", "porchStepCount"]) assert(!(k in toRecessed.d3.roof), `${k}: ${JSON.stringify(toRecessed.d3.roof)}`);
+  assertEquals(toRecessed.d3.roof.porchDepthFt, 6);
+  // Reported as what the asked-for change cost, as it was when the sanitiser took it; never as not applied.
+  assert(toRecessed.changed.some((c) => c.field === "roof.porchSteps" && c.from === "rightSide" && c.to === null), JSON.stringify(toRecessed.changed));
+  assertEquals(toRecessed.dropped, []);
+  // ...unless the correction gives the recessed porch's steps itself.
+  const own = applySelfCheck(deck, readOf({
+    verdict: "corrections", corrections: { roof: { porchDepthFt: 6, porchSteps: "leftSide" } },
+    changed: [change("roof.porchDepthFt"), change("roof.porchSteps")],
+  }));
+  assert(own.ok, "usable");
+  if (!own.ok) return;
+  assertEquals([own.d3.roof.porchDepthFt, own.d3.roof.porchSteps, "porchOutFt" in own.d3.roof], [6, "leftSide", false]);
+  // Front steps carry over, with their count, as they always did.
+  const front = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchSteps: "left", porchStepCount: 3 } });
+  const frontSwap = applySelfCheck(front, readOf({
+    verdict: "corrections", corrections: { roof: { porchDepthFt: 6 } }, changed: [change("roof.porchDepthFt")],
+  }));
+  assert(frontSwap.ok, "usable");
+  if (frontSwap.ok) assertEquals([frontSwap.d3.roof.porchSteps, frontSwap.d3.roof.porchStepCount], ["left", 3]);
+  // The other way: a recessed porch's side flight never lands on a projecting deck as an end flight.
+  const cut = cleanSpec({ ...DRAFT, roof: { ...DRAFT.roof, porchSteps: "leftSide", porchStepCount: 2 } });
+  assertEquals(cut.roof.porchSteps, "leftSide", "the fixture");
+  const toDeck = applySelfCheck(cut, readOf({
+    verdict: "corrections", corrections: { roof: { porchOutFt: 6 } }, changed: [change("roof.porchOutFt")],
+  }));
+  assert(toDeck.ok && toDeck.verdict === "corrections", "applied");
+  if (!toDeck.ok) return;
+  for (const k of ["porchDepthFt", "porchSteps", "porchStepCount"]) assert(!(k in toDeck.d3.roof), `${k}: ${JSON.stringify(toDeck.d3.roof)}`);
+  // A correction that keeps the kind keeps the side flight: a recessed porch's depth, corrected.
+  const deeper = applySelfCheck(cut, readOf({
+    verdict: "corrections", corrections: { roof: { porchDepthFt: 7 } }, changed: [change("roof.porchDepthFt")],
+  }));
+  assert(deeper.ok, "usable");
+  if (deeper.ok) assertEquals([deeper.d3.roof.porchDepthFt, deeper.d3.roof.porchSteps, deeper.d3.roof.porchStepCount], [7, "leftSide", 2]);
+  // ...and the legacy check, which never had the key, loses it on a switch the same way (the sanitiser did).
+  const legacy = applySelfCheck(deck, readOf({
+    verdict: "corrections", corrections: { roof: { porchDepthFt: 6 } }, changed: [change("roof.porchDepthFt")],
+  }), null, "legacy");
+  assert(legacy.ok, "usable");
+  if (legacy.ok) assert(!("porchSteps" in legacy.d3.roof), JSON.stringify(legacy.d3.roof));
 });
 
 Deno.test("⚠️ v2: a swap to a recessed porch reports the attach height and width it removed", () => {
@@ -6484,6 +6552,22 @@ const STEP_NOW = /\n     \* The roof step - currently [\s\S]*?a step the frames 
 // ...and the porch gable's bullet (2026-10-07), which 8fe5d30 did not have either: taken out whole.
 // (In the body the quotes are JSON-escaped, so the regex takes either.)
 const PORCH_GABLE_NOW = /\n     \* roof\.porchGable, recessed porches only, currently [\s\S]*?\\?"sided\\?" puts the siding back\./;
+// ...and the porch steps' bullet, rewritten for both porch kinds (review, 2026-10-08: a recessed porch's open sides
+// take "leftSide" / "rightSide", a projecting deck's end flight is left alone). 8fe5d30's goes back, its "currently"
+// kept, its quotes escaped in the body.
+const PORCH_STEPS_NOW = /\* roof\.porchSteps, currently ([\s\S]*?): where steps leave the porch, as seen standing\n[\s\S]*?leave one the render draws there alone\./;
+const PORCH_STEPS_AT_8FE5D30 = (now: string, body: boolean) => {
+  const t = `* roof.porchSteps, projecting porches only, currently ${now}: where steps leave the\n` +
+    `       porch's front edge, "left", "center" or "right" as seen standing in front of it, by\n` +
+    "       which third of the span between the two front corner posts the MIDDLE of the steps\n" +
+    "       falls in (never judged against the door; with a post at the middle of the front edge,\n" +
+    `       never "center", only the side of that post). Give it\n` +
+    "       where the frame shows steps the render lacks, or shows them at a different place. Give\n" +
+    `       "none" where the render shows steps the frame does not, or where the frame's steps leave\n` +
+    `       the deck from one of its sides rather than its front edge: "none" removes them.`;
+  // `now` comes from the text itself, escaped already in the body; only the bullet's own quotes are escaped here.
+  return body ? t.split(now).map((s) => s.replace(/"/g, '\\"')).join(now) : t;
+};
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -6521,11 +6605,13 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       const wall = m ? (m[1] ?? m[2]) : "";
       assert(STEP_NOW.test(plain), `${k}: today's roof-step bullet is there to take out`);
       assert(PORCH_GABLE_NOW.test(plain), `${k}: today's porch-gable bullet is there to take out`);
+      assert(PORCH_STEPS_NOW.test(plain), `${k}: today's porch-steps bullet is there to put back`);
+      const stepsBack = (p: string) => p.replace(PORCH_STEPS_NOW, (_m, now: string) => PORCH_STEPS_AT_8FE5D30(now, k === "body"));
       if (OVERHANG_NOW.test(plain)) {
-        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, "");
+        const back = stepsBack(plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, ""));
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       } else {
-        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, "");
+        const back = stepsBack(plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "").replace(PORCH_GABLE_NOW, ""));
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       }
     }

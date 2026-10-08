@@ -34,6 +34,11 @@
 //      drawn count; switching back to projecting keeps them
 //  12. a recessed porch with a lean-to on its left wall (2026-10-07): the left side is greyed out, the
 //      right offered, and the hint names the lean-to
+//  13. (review, 2026-10-08) with a lean-to on BOTH walls and a side picked, both sides are greyed out and
+//      the hint offers only the front edge, never "the other side"; on a building too short to cut the
+//      porch 4 ft deep (a 6 ft porch on a 12x7, held to 3 ft), both sides grey out, the hint says a bigger
+//      size takes them and never says "make it deeper", the Depth box already showing 6 (the menu reads the
+//      size the designer behind the panel is set to, so 12x7 is picked there first)
 //
 // The public ?admin=1 operator page, with Supabase stubbed at the network layer (lib.mjs): no login,
 // and nothing leaves the machine, so no save ever reaches a database. It exercises the COMPILED
@@ -54,18 +59,27 @@ const PORCH_ROOF = { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, 
 const PLAIN_ROOF = { type: "gambrel", pitch: 0.4, overhang: 0.5, kneeU: 0.6, kneeRise: 0.6, ridgeRise: 0.9 };
 // A recessed front porch with a lean-to along the whole left wall: its left side opens under the lean-to.
 const LEAN_PORCH_ROOF = { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 6, porchEnd: "front", leanTos: [{ wall: "left", widthFt: 8 }] };
+// ...with a lean-to along both walls, its right-side flight picked: each open side opens under a lean-to.
+const BOTH_LEAN_ROOF = { ...LEAN_PORCH_ROOF, porchSteps: "rightSide", leanTos: [{ wall: "left", widthFt: 8 }, { wall: "right", widthFt: 8 }] };
+// A 6 ft front-gable porch on a 12x7 building: held to 3 ft to leave 4 ft behind it, its left-side flight picked.
+const SHORT_SIZE = "12x7";
+const SHORT_ROOF = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 6, porchEnd: "front", porchSteps: "leftSide" };
 const STYLES = [
   { value: "porchbarn", label: "Harness Porch Barn", d3: { roof: PORCH_ROOF, siding: "lap", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
   { value: "leanporch", label: "Harness Lean Porch", d3: { roof: LEAN_PORCH_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { value: "bothlean", label: "Harness Both Lean Porch", d3: { roof: BOTH_LEAN_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { value: "shortporch", label: "Harness Short Porch", size: SHORT_SIZE, d3: { roof: SHORT_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
   { value: "plainbarn", label: "Harness Plain Barn", d3: { roof: PLAIN_ROOF, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "shingle" } },
-].map((s) => ({ ...s, img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {} }));
+].map(({ size, ...s }) => ({ ...s, img: null, sizes: [size || SIZE], sizeInclusions: {}, sizeInclusionQty: {} }));
+const DIMS = { [SIZE]: [16, 24], [SHORT_SIZE]: [12, 7] };
 const CONFIG = {
   clientId: "harness-porch-panel",
   branding: { companyName: "Harness Sheds", accentColor: "#1D4ED8", headerBg: "#FFFFFF", tagline: null, logo: null },
   contactFields: ["name", "email", "phone"],
   buildingStyles: STYLES,
-  defaultSizes: [SIZE],
-  sizePricing: Object.fromEntries(STYLES.map((s) => [s.value, { [SIZE]: { widthFt: 16, lengthFt: 24, basePrice: 9000 } }])),
+  // 12x7 too (review, 2026-10-08): the steps menu reads the size the designer is set to, picked in section 13.
+  defaultSizes: [SIZE, SHORT_SIZE],
+  sizePricing: Object.fromEntries(STYLES.map((s) => [s.value, { [s.sizes[0]]: { widthFt: DIMS[s.sizes[0]][0], lengthFt: DIMS[s.sizes[0]][1], basePrice: 9000 } }])),
   options: [], colors: [], claddingOptions: {}, wallHeightOptions: {},
   showPricing: true, view3d: true, layoutItems: {}, layoutPricing: {}, layoutPrices: {},
   electrical: null, electricalItems: [], insulation: [],
@@ -354,6 +368,24 @@ export async function main() {
     ok("12: beside a lean-to on the left wall, the left side is greyed out and the right offered",
       (await optVals()) === "|left|center|right|leftSide(off)|rightSide", await optVals());
     ok("12: ...and the hint names the lean-to", /or down its right side, as seen standing in front of the porch\. A lean-to stands on its left side\./.test(leanHint), leanHint);
+
+    // ── 13. (review, 2026-10-08) Both sides refused: the hint offers only what can be picked ──
+    await openStyle(page, "Harness Both Lean Porch");
+    const bothHint = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("13: ⚠️ a lean-to on both walls greys out both sides, the right-side pick kept",
+      (await optVals()) === "|left|center|right|leftSide(off)|rightSide(off)" && (await stepsSel().inputValue()) === "rightSide", `${await optVals()} = ${await stepsSel().inputValue()}`);
+    ok("13: ...and the hint offers only the front edge, never the other side",
+      /Steps down a side are not drawn: a lean-to stands on each of its open sides\. Pick steps off its front edge\./.test(bothHint) && !/Pick the other side/.test(bothHint), bothHint);
+    await openStyle(page, "Harness Short Porch");
+    // The menu reads the size the designer behind the panel is set to: set it to 12x7.
+    await page.locator("select").filter({ has: page.locator("option", { hasText: SHORT_SIZE }) }).first().selectOption({ label: SHORT_SIZE });
+    await settle(page, 600);
+    const shortHint = (await field(page, /^Porch steps/).innerText()).replace(/\s+/g, " ");
+    ok("13: ⚠️ a 6 ft porch the 12x7 building holds to 3 ft greys out both sides, the pick kept",
+      (await optVals()) === "|left|center|right|leftSide(off)|rightSide(off)" && (await stepsSel().inputValue()) === "leftSide", `${await optVals()} = ${await stepsSel().inputValue()}`);
+    ok("13: ...the Depth box shows the 6 ft typed, and the hint never says to make it deeper",
+      (await depthInput(page).inputValue()) === "6" && /Steps down a side are not drawn at this size: the building is too small to cut the porch 4 ft deep and still leave room behind it\. Pick a bigger size, or steps off its front edge\./.test(shortHint)
+        && !/Make it deeper/.test(shortHint), `${await depthInput(page).inputValue()} | ${shortHint}`);
 
     // ── 6. A style with no porch, saved untouched ──
     await openStyle(page, "Harness Plain Barn");

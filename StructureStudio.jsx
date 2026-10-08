@@ -8398,6 +8398,9 @@ function d3RecessedSideRun(roofCfg, g, wood) {
 // "leftSide" or "rightSide", as seen standing in front of the porch; `face` the corner boards' face the posts
 // stand on (d3CornerFaceFt).
 //   "shallow"  the porch, as built (d3RecessedPorch's depth), is under D3_RECESSED_SIDE_STEPS_MIN_FT deep
+//   "short"    ...but the porch's own depth (roof.porchDepthFt) is not (review, 2026-10-08): d3RecessedPorch
+//              holds it to leave 4 ft of building behind it, so making it deeper changes nothing at this
+//              size. A bigger building draws the flight.
 //   "leanTo"   a lean-to stands on the wall that side opens through, along the stretch of it the flight
 //              would take: one in roof.leanTos whose run reaches it, or the single lean-to (leanToWidthFt),
 //              which runs the whole of its eave wall. The projecting porch's side flight runs past the
@@ -8407,7 +8410,7 @@ function d3RecessedSideRun(roofCfg, g, wood) {
 function d3RecessedSideBlock(roofCfg, W, L, H, where, face) {
   const g = (where === "leftSide" || where === "rightSide") ? d3RecessedPorchFrame(roofCfg, W, L, H, face) : null;
   if (!g) return null;
-  if (!(g.depth >= D3_RECESSED_SIDE_STEPS_MIN_FT)) return "shallow";
+  if (!(g.depth >= D3_RECESSED_SIDE_STEPS_MIN_FT)) return (Number(roofCfg.porchDepthFt) || 0) >= D3_RECESSED_SIDE_STEPS_MIN_FT ? "short" : "shallow";
   const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[g.wall];
   const turn = where === "rightSide" ? 1 : -1;
   // The way the flight runs, the wall it leaves through in a lean-to's words, and the stretch of that wall it
@@ -8614,7 +8617,7 @@ function d3RecessedPorchReadout(spec, sizeLabel) {
 // size parsed the way d3RecessedPorchReadout parses it, then d3RecessedSideBlock's reason for each side at
 // the corner face the renderer stands the posts on, null for a side whose flight is drawn. Null without a
 // recessed porch the 3D draws.
-//   { leftSide, rightSide }   each null | "shallow" | "leanTo"
+//   { leftSide, rightSide }   each null | "shallow" | "short" | "leanTo"
 function d3RecessedSideStepsWhy(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
@@ -8630,18 +8633,29 @@ function d3RecessedSideStepsWhy(spec, sizeLabel) {
 // read from. tag(side) is the reason a greyed-out side gives in brackets, or null; note the line under the
 // menu: a side picked and not drawn says so and what to do, the projecting porch's posture on a shallow deck,
 // and otherwise where the steps can go and which side cannot take them.
+// Review, 2026-10-08: "short" (the building holds the porch under `deep`) says a bigger size draws the flight,
+// never "make it deeper", which the Depth box already is; and with a lean-to on BOTH open sides the note
+// offers only the front edge, never the other side, which is greyed out too.
 function ssRecessedStepsWords(why, picked, deep, seen) {
   const w = why || {};
-  const tag = (side) => (w[side] === "shallow" ? `needs a porch ${deep} deep` : w[side] === "leanTo" ? "a lean-to is on that side" : null);
+  const tag = (side) => (w[side] === "shallow" ? `needs a porch ${deep} deep` : w[side] === "short" ? "needs a bigger size"
+    : w[side] === "leanTo" ? "a lean-to is on that side" : null);
   const name = (side) => (side === "leftSide" ? "left" : "right");
+  const other = (side) => (side === "leftSide" ? "rightSide" : "leftSide");
   const base = "Off the floor's edge in the opening";
   let note;
   if ((picked === "leftSide" || picked === "rightSide") && w[picked]) {
     note = w[picked] === "shallow"
       ? `Steps down a side are not drawn until the porch is at least ${deep} deep. Make it deeper, or pick steps off its front edge.`
+      : w[picked] === "short"
+      ? `Steps down a side are not drawn at this size: the building is too small to cut the porch ${deep} deep and still leave room behind it. Pick a bigger size, or steps off its front edge.`
+      : w[other(picked)]
+      ? "Steps down a side are not drawn: a lean-to stands on each of its open sides. Pick steps off its front edge."
       : `Steps down the ${name(picked)} side are not drawn: a lean-to stands on that side. Pick the other side, or steps off its front edge.`;
   } else if (w.leftSide === "shallow" || w.rightSide === "shallow") {
     note = `${base}, ${seen}. Steps down a side need a porch ${deep} deep.`;
+  } else if (w.leftSide === "short" || w.rightSide === "short") {
+    note = `${base}, ${seen}. Steps down a side need a bigger size than this one.`;
   } else if (w.leftSide && w.rightSide) {
     note = `${base}, ${seen}. A lean-to stands on each of its open sides.`;
   } else if (w.leftSide || w.rightSide) {
@@ -28445,8 +28459,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
       for (const k of own) if (!(k in dr)) delete roof[k];
       // A flight off an END of the deck (2026-10-04) is the builder's: the prompt tells the model to
-      // leave it out, so a draft silent on the steps keeps a stored one and its count.
-      if (!("porchSteps" in dr) && stored && (stored.porchSteps === "leftSide" || stored.porchSteps === "rightSide")) {
+      // leave it out, so a draft silent on the steps keeps a stored one and its count. Only a stored
+      // PROJECTING porch's (review, 2026-10-08): a stored recessed porch's flight off one of its open
+      // sides never lands on a projecting draft as an end flight, the recessed branch's offDeck rule
+      // turned round.
+      if (!("porchSteps" in dr) && stored && (Number(stored.porchOutFt) || 0) > 0.5
+          && (stored.porchSteps === "leftSide" || stored.porchSteps === "rightSide")) {
         roof.porchSteps = stored.porchSteps;
         if ("porchStepCount" in stored) roof.porchStepCount = stored.porchStepCount;
       }
@@ -30072,7 +30090,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // a deck too shallow to fit one between the wall and the corner post (D3_PORCH_SIDE_STEPS_MIN_FT),
       // saying why: one picked on a deeper deck stays picked there, and is not drawn (2026-10-04).
       // A RECESSED porch (2026-10-07) offers a flight off either open side too, greyed out at the size "What
-      // we drew" describes where d3RecessedSideStepsWhy refuses it (too shallow, a lean-to there), saying why.
+      // we drew" describes where d3RecessedSideStepsWhy refuses it (too shallow, held short by the building, a
+      // lean-to there), saying why.
       const sideOk = (Number(roof.porchOutFt) || 0) >= D3_PORCH_SIDE_STEPS_MIN_FT;
       const recWords = kind === "recessed"
         ? ssRecessedStepsWords(d3RecessedSideStepsWhy(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`), roof.porchSteps, "4 ft", "as seen standing in front of the porch") : null;
