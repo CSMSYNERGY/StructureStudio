@@ -396,7 +396,7 @@ const run = async () => {
 
     // J. the quote
     const before = calls.length;
-    const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+    const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit Quote|Resubmit)$/ }).last();
     let payload = null;
     if (await submit.count()) {
       await submit.click().catch(() => {});

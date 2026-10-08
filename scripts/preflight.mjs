@@ -87,6 +87,11 @@
 //      run against the same vectors, no line naming a bank number may also touch storage, a
 //      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
 //      off (checkAchBankInputs).
+//  10. "Estimate", never "quote", in text a person reads (Carolyn 2026-10-06): string
+//      literals, template parts and JSX text in the portal parts, both designer twins, the
+//      page sources, my-quotes.html, the portal's install manifest and every edge-function
+//      module, read with the vendored Babel. Identifiers, log-only text and the
+//      carrier-registered SMS copy are exempt (checkEstimateWording).
 //
 // Steps are numbered in the order they RUN.
 //
@@ -102,6 +107,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 // this gate has twice ended up reporting clean while running zero rules.
 import { TARGETS, targetName, readTarget, PORTAL_PARTS } from "./compile.mjs";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -1947,6 +1953,241 @@ function checkSettingsRouteCoverage(files, inject = null) {
   return errors;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// "ESTIMATE", NEVER "QUOTE", WHEREVER A PERSON READS IT (Carolyn Q12, 2026-10-06).
+//
+// The product called StructureStudio's own paperwork a "quote" from migration 121 until
+// 2026-10-06, and the word was in ~450 strings when she asked for it gone: the designer, the
+// customer page, every email, the PDFs, the texts, the portal. The sweep fixed the copy; this
+// keeps it fixed, because the next feature written from a quote-era comment would bring the
+// word straight back.
+//
+// THE WORD STAYS IN IDENTIFIERS, ON PURPOSE. Routes and links already sent (/my-quotes,
+// ?account=quotes), function and action names (customer-quotes, accept_quote), DB columns and
+// values (ss_quote_*, subject 'quote', the email_template_copy kind 'quote'), storage keys
+// (-quote.pdf), CSS classes and element ids. Renaming any of those breaks something live, so
+// the rule reads only TEXT: string literals, template parts and JSX text (via the vendored
+// Babel, the compiler compile.mjs uses), plus my-quotes.html's markup. It skips:
+//   • a single identifier-shaped token: no whitespace, not capitalised ("quotes-list",
+//     "customer-quotes", "-quote.pdf", "&account=quotes&q="). A lowercase token IS flagged
+//     where it is rendered as it stands: a JSX child (`{x ? "quotes" : "invoices"}`) or the
+//     interpolation of a sentence-shaped template literal, and any part of a template literal
+//     that has a space anywhere in it (`quote ${n}` is a sentence, "quote " alone is not).
+//   • object keys, TypeScript literal types, import paths, and the attributes a person never
+//     reads (className, id, htmlFor, key, data-*, href, ...);
+//   • log-only text: the arguments of console.*, logEdgeError and the audit log (audit,
+//     auditStrict: key=value lines for support, not prose), and dbFail in
+//     customer-accept / customer-quotes (there it only logs; in portal-settings its `where`
+//     reaches the screen as "Couldn't …", so it IS checked);
+//   • WORDING_ALLOW below: the copy registered with the carriers for texting (the opt-in
+//     sentence, the A2P campaign text and its disclosure page). Changing those needs an update
+//     filed with Twilio for the active campaign, so they keep "quote" until Ahsan decides
+//     (decision 1 of the 2026-10-06 wording sweep). Remove an entry when its copy moves.
+//
+// THE SERVER HALF CAN SHIP LATER (WORDING_SERVER_HELD). The sweep's edge-function copy must not
+// go live before production's my-quotes prints the server's accept sentence (CLAUDE.md, the
+// estimate-wording HOLD), and beta and production share one Supabase project, so a sibling
+// deploy from beta would ship it early. If the branch goes to beta in two halves, the FRONTEND
+// half is pushed with this set to true: the supabase/functions files that discovery finds (they
+// still say "quote" until the server half lands) are read but what they say is set aside, while
+// any file a caller names (`only`, the self-test's plants, `inject`) is checked as usual. The
+// server half sets it back to false, and it is false in any tree holding both halves. A hold
+// left on after the server copy is clean is refused, so it cannot quietly outlive its half.
+//
+// `inject` maps a repo path to replacement text (or adds a file) — for --self-test only.
+const WORDING_SERVER_HELD = true;
+const WORDING_RE = /\bquot(e|es|ed|ing)\b/i;
+const WORDING_IDENT = /^[a-z0-9_\-.:/?&=[\]#{}$]*$/;
+const WORDING_HIDDEN_ATTR = /^(className|class|id|htmlFor|for|key|name|type|role|rel|target|href|src|action|method|view|mainClass|style|ref|data-[\w-]+|aria-(controls|labelledby|describedby))$/;
+const WORDING_ALLOW = {
+  // Carrier-registered SMS copy (decision 1): every string in these files.
+  files: [
+    "supabase/functions/_shared/smsConsentText.ts",
+    "supabase/functions/_shared/smsCopyTemplate.ts",
+    "supabase/functions/_shared/smsComplianceCheck.ts",
+    "supabase/functions/sms-optin-disclosure/index.ts",
+    "portal/11-sms.jsx",
+  ],
+  // ...and the two places outside them that carry the opt-in's own words: the designer twins'
+  // copy of the opt-in sentence (smsConsentText.ts's twin), and the portal's "they gave us
+  // permission" attestation, which names the same message category.
+  text: [
+    "your quote and your building. Message frequency varies.",
+    "permission to text them about their quote and building",
+  ],
+};
+let _wordingBabel = null;
+function wordingBabel() {
+  if (!_wordingBabel) _wordingBabel = createRequire(import.meta.url)(join(root, "vendor", "babel-standalone-7.23.9.min.js"));
+  return _wordingBabel;
+}
+function wordingFiles() {
+  const out = [...PORTAL_PARTS, "StructureStudio.jsx", "structure-studio.component.js",
+    "index.mount.jsx", "admin.app.jsx", "my-quotes.html", "manifest.json"];
+  const walk = (dir) => {
+    let ents = [];
+    try { ents = readdirSync(join(root, dir), { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== "_test_stubs") walk(rel); }
+      else if (/\.ts$/.test(e.name) && !/(\.test|_test)\.ts$/.test(e.name)) out.push(rel);
+    }
+  };
+  walk(FUNCTIONS_DIR);
+  walk("workers/phone-api/src");
+  return out;
+}
+// `only` narrows the SCAN to the named files (the self-test plants one file at a time; the
+// discovery is still run and still has to find the real set), and `listFiles` exists so
+// the self-test can prove a blind discovery is refused rather than reported clean. `held`
+// is WORDING_SERVER_HELD unless the self-test says otherwise.
+function checkEstimateWording(inject = null, { only = null, listFiles = wordingFiles, held = WORDING_SERVER_HELD } = {}) {
+  const errors = [];
+  const files = listFiles();
+  if (inject) for (const f of Object.keys(inject)) if (!files.includes(f)) files.push(f);
+  if (files.filter((f) => f.startsWith(FUNCTIONS_DIR + "/")).length < 20 || !files.includes("portal/02-sales.jsx")) {
+    return [`estimate wording: only ${files.length} file(s) found to scan — the discovery has gone `
+      + "blind and the rule is checking nothing; re-anchor wordingFiles() in scripts/preflight.mjs"];
+  }
+  let babel;
+  try { babel = wordingBabel(); } catch (e) {
+    return [`estimate wording: the vendored Babel did not load (${String(e.message).slice(0, 120)}) — the rule is checking nothing`];
+  }
+  const allowed = (f, text) => WORDING_ALLOW.files.includes(f) || WORDING_ALLOW.text.some((t) => text.includes(t));
+  const flag = (f, line, text) => errors.push(`${f}:${line}  says "quote" where a person reads it: `
+    + `"${text.replace(/\s+/g, " ").trim().slice(0, 140)}" — say "estimate" (Carolyn 2026-10-06). `
+    + "Identifiers (routes, ids, DB values, action names) keep the word; see checkEstimateWording.");
+  const scanCode = (f, code, lineOffset, isTs) => {
+    let ast;
+    try {
+      ast = babel.transform(code, {
+        filename: f + (isTs ? ".ts" : ".jsx"), ast: true, code: false, babelrc: false, configFile: false,
+        parserOpts: { sourceType: "unambiguous", allowReturnOutsideFunction: true, plugins: isTs ? ["typescript"] : ["jsx"] },
+      }).ast;
+    } catch (e) {
+      errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — `
+        + "it is checking nothing here; fix the parse or the file list");
+      return;
+    }
+    const logOnly = (anc) => {
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type !== "CallExpression" && a.type !== "NewExpression") continue;
+        const c = a.callee;
+        if (c.type === "MemberExpression" && c.object && c.object.name === "console") return true;
+        if (c.type === "Identifier" && /^(logEdgeError|audit|auditStrict)$/.test(c.name)) return true;
+        if (c.type === "Identifier" && c.name === "dbFail" && /^supabase\/functions\/customer-(accept|quotes)\//.test(f)) return true;
+      }
+      return false;
+    };
+    // A lowercase token rendered exactly as it stands: through ?: and &&/|| straight into a JSX
+    // child, or into a template literal that is itself a sentence.
+    const rendered = (node, anc) => {
+      if (node.type !== "StringLiteral") return false;
+      let child = node;
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type === "ConditionalExpression" && a.test !== child) { child = a; continue; }
+        if (a.type === "LogicalExpression") { child = a; continue; }
+        if (a.type === "JSXExpressionContainer") {
+          const p = anc[i - 1];
+          return !!p && (p.type === "JSXElement" || p.type === "JSXFragment");
+        }
+        if (a.type === "TemplateLiteral") return a.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        return false;
+      }
+      return false;
+    };
+    const walk = (node, anc) => {
+      if (!node || typeof node.type !== "string") return;
+      let text = null;
+      if (node.type === "StringLiteral") text = node.value;
+      else if (node.type === "TemplateElement") text = node.value.cooked ?? node.value.raw;
+      else if (node.type === "JSXText") text = node.value;
+      if (text && WORDING_RE.test(text) && !allowed(f, text)) {
+        const parent = anc[anc.length - 1];
+        const t = text.trim();
+        // A template part is prose when ANY part of its template has a space in it: `quote ${n}`
+        // is a sentence even though "quote " trims to a lone word (the sweep missed two that way).
+        const proseTemplate = node.type === "TemplateElement" && parent && parent.type === "TemplateLiteral"
+          && parent.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        const skip =
+          (parent && parent.type === "TSLiteralType")
+          || (parent && /^(ObjectProperty|ObjectMethod|ClassProperty|TSPropertySignature)$/.test(parent.type) && parent.key === node)
+          || (parent && /^(Import|Export)/.test(parent.type))
+          || (parent && parent.type === "JSXAttribute" && WORDING_HIDDEN_ATTR.test(
+            parent.name.type === "JSXNamespacedName" ? parent.name.name.name : parent.name.name))
+          || (WORDING_IDENT.test(t) && !proseTemplate && !rendered(node, anc))
+          || logOnly(anc);
+        if (!skip) flag(f, node.loc.start.line + lineOffset, text);
+      }
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "leadingComments" || k === "trailingComments" || k === "innerComments" || k === "extra") continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c === "object") walk(c, anc.concat(node)); }
+        else if (v && typeof v === "object" && typeof v.type === "string") walk(v, anc.concat(node));
+      }
+    };
+    walk(ast.program, []);
+  };
+  const injected = (f) => !!inject && Object.prototype.hasOwnProperty.call(inject, f);
+  // Under the hold a discovered server file is still read, but what it says is set aside and
+  // only counted: nothing set aside means the server half has landed and the hold is stale.
+  const heldBack = (f) => held && !only && f.startsWith(FUNCTIONS_DIR + "/") && !injected(f);
+  let heldFiles = 0, heldHits = 0;
+  for (const f of only || files) {
+    const mark = errors.length;
+    scanOne(f);
+    if (heldBack(f)) { heldFiles++; heldHits += errors.length - mark; errors.length = mark; }
+  }
+  if (heldFiles && !heldHits) {
+    errors.push(`estimate wording: WORDING_SERVER_HELD is on, but none of the ${heldFiles} supabase/functions `
+      + "file(s) it holds back says \"quote\" any more — the server half has landed; set it back to false "
+      + "in scripts/preflight.mjs so the edge-function copy is checked again");
+  }
+  return errors;
+
+  function scanOne(f) {
+    const src = injected(f) ? inject[f] : readIfExists(f);
+    if (src == null) { errors.push(`${f}: missing — the estimate wording check expected to scan it`); return; }
+    if (/\.json$/.test(f)) {
+      // The portal's install manifest: the words the browser's "Install app" sheet shows.
+      let j = null;
+      try { j = JSON.parse(src); } catch (e) {
+        errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — it is checking nothing here`);
+        return;
+      }
+      for (const k of ["name", "short_name", "description"]) {
+        const v = j && typeof j[k] === "string" ? j[k] : "";
+        if (WORDING_RE.test(v) && !allowed(f, v)) {
+          const at = src.indexOf(`"${k}"`);
+          flag(f, at < 0 ? 1 : src.slice(0, at).split("\n").length, v);
+        }
+      }
+      return;
+    }
+    if (!/\.html$/.test(f)) { scanCode(f, src, 0, /\.ts$/.test(f)); return; }
+    // A page: its inline scripts as code, then the markup a person sees — text between tags and
+    // the attributes that are read (title, aria-label, placeholder, alt, value, content).
+    let markup = src;
+    for (const m of src.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      if (!/\ssrc=/.test(m[1])) scanCode(f, m[2], src.slice(0, m.index + m[0].indexOf(">") + 1).split("\n").length - 1, false);
+    }
+    const blank = (s) => s.replace(/[^\n]/g, " ");
+    markup = markup.replace(/<script\b[\s\S]*?<\/script>/gi, blank).replace(/<style\b[\s\S]*?<\/style>/gi, blank).replace(/<!--[\s\S]*?-->/g, blank);
+    const lineAt = (i) => markup.slice(0, i).split("\n").length;
+    for (const m of markup.matchAll(/<[^>]*>|[^<]+/g)) {
+      if (m[0][0] !== "<") {
+        if (WORDING_RE.test(m[0]) && !allowed(f, m[0])) flag(f, lineAt(m.index), m[0]);
+        continue;
+      }
+      for (const a of m[0].matchAll(/\s(title|aria-label|placeholder|alt|value|content)\s*=\s*"([^"]*)"/gi)) {
+        if (WORDING_RE.test(a[2]) && !allowed(f, a[2])) flag(f, lineAt(m.index), a[2]);
+      }
+    }
+  }
+}
+
 if (process.argv.includes("--self-test")) {
   // The gate must FAIL on the exact incident that motivated it: commit a763b3b shipped
   // `RANK[st]` after the RANK definition was removed. Reconstruct that state by reverting
@@ -2993,6 +3234,88 @@ if (process.argv.includes("--self-test")) {
     + "one that does not, and it refuses to run blind on a renamed tab function, a changed "
     + "tuple shape, or a missing spec");
 
+  // ── "Estimate", never "quote" ──
+  // Both directions, because a wording rule that cries wolf on an identifier gets deleted by the
+  // first person it stops, and one that never fires is indistinguishable from a clean tree.
+  const ewFail = (why, errs = []) => {
+    console.error("self-test FAILED: estimate wording — " + why);
+    for (const e of errs) console.error("  " + e);
+    process.exit(1);
+  };
+  // (a) CLEAN on the real tree. If this fires, a person really is reading "quote" somewhere.
+  const ewClean = checkEstimateWording();
+  if (ewClean.length) ewFail("the real tree is not clean today:", ewClean);
+  // (b) THE PLANT: the designer's customer button reading "Get Quote" again.
+  const ewCmpFile = "structure-studio.component.js";
+  const ewCmp = readIfExists(ewCmpFile) || "";
+  const ewAnchor = 'hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Estimate"}';
+  if (!ewCmp.includes(ewAnchor)) ewFail("the Get Estimate anchor moved — re-anchor this self-test");
+  const ewPlanted = checkEstimateWording({ [ewCmpFile]: ewCmp.replace(ewAnchor, ewAnchor.replace('"Get Estimate"', '"Get Quote"')) }, { only: [ewCmpFile] });
+  if (!ewPlanted.some((e) => /^structure-studio\.component\.js:\d+ .*"Get Quote"/.test(e))) ewFail("a planted \"Get Quote\" button was not caught", ewPlanted);
+  // (c) IDENTIFIERS AND LOG TEXT STAY QUIET; a sentence beside them fires.
+  const ewTs = "supabase/functions/_shared/__wording_selftest__.ts";
+  const ewQuiet = [
+    'const a = "customer-quotes"; const b = `/my-quotes?client=${a}&account=quotes`; const k = { quote: 1 };',
+    'console.warn("SS quote PDF upload failed:", a);',
+    'logEdgeError({ message: `quote countersign failed: ${a}` });',
+    'type D = "quote" | "invoice";',
+    'if (a === "quotes") audit("x", null, `short_code=${a} quote=${b}`);',
+  ].join("\n");
+  const ewQuietErrs = checkEstimateWording({ [ewTs]: ewQuiet }, { only: [ewTs] });
+  if (ewQuietErrs.length) ewFail("identifiers or log-only text tripped the rule:", ewQuietErrs);
+  if (!checkEstimateWording({ [ewTs]: 'export const r = () => ({ error: "That quote was not found." });' }, { only: [ewTs] })
+        .some((e) => e.startsWith(ewTs + ":1 "))) ewFail("a server error sentence saying \"quote\" was not caught");
+  // (d) A LOWERCASE TOKEN RENDERED AS IT STANDS fires; the same token as a key or class does not.
+  const ewJsx = "portal/__wording_selftest__.jsx";
+  if (!checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div>Loading your {v === "invoices" ? "invoices" : "quotes"}…</div>;' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("a lowercase \"quotes\" rendered as a JSX child was not caught");
+  const ewJsxQuiet = checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div className="ssd-ft-cta is-quote" id="quotes-list">{v === "quotes" && tab("quotes", "Estimates")}</div>;' }, { only: [ewJsx] });
+  if (ewJsxQuiet.length) ewFail("a class, an id or a compared key tripped the rule:", ewJsxQuiet);
+  // (d2) A WORD IN A SENTENCE-SHAPED TEMPLATE fires even when its own part trims to one word —
+  //      the shape the 2026-10-06 sweep itself missed twice in 02-sales' confirms.
+  if (!checkEstimateWording({ [ewJsx]: 'const f = (qn) => window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this estimate"}.`);' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("\"quote ${qn}\" nested in a sentence was not caught");
+  // (e) my-quotes MARKUP: the heading fires, the ids on the same line do not.
+  const ewMq = readIfExists("my-quotes.html") || "";
+  const ewMqAnchor = '<h1 id="quotes-heading">Your estimates</h1>';
+  if (!ewMq.includes(ewMqAnchor)) ewFail("the my-quotes heading anchor moved — re-anchor this self-test");
+  const ewMqErrs = checkEstimateWording({ "my-quotes.html": ewMq.replace(ewMqAnchor, '<h1 id="quotes-heading">Your quotes</h1>') }, { only: ["my-quotes.html"] });
+  if (ewMqErrs.length !== 1 || !/my-quotes\.html:\d+ .*"Your quotes"/.test(ewMqErrs[0])) ewFail("my-quotes' heading saying \"Your quotes\" was not caught exactly once", ewMqErrs);
+  // (f) THE CARRIER ALLOWANCE IS NARROW: the opt-in sentence passes, other prose in the same
+  //     place does not.
+  if (!checkEstimateWording({ [ewJsx]: 'const t = "Your quote is ready.";' }, { only: [ewJsx] }).length) ewFail("prose outside the carrier allowance passed");
+  if (checkEstimateWording({ [ewJsx]: 'const t = "about " + "your quote and your building. Message frequency varies. Message and data rates may apply.";' }, { only: [ewJsx] }).length) {
+    ewFail("the carrier-registered opt-in sentence tripped the rule");
+  }
+  // (g) REFUSES TO RUN BLIND when discovery finds nothing.
+  if (!checkEstimateWording(null, { listFiles: () => [] }).some((e) => /gone blind/.test(e))) ewFail("an empty discovery reported clean instead of blind");
+  // (h) THE INSTALL MANIFEST: the portal's "Install app" sheet saying "quotes" fires.
+  const ewMan = readIfExists("manifest.json") || "";
+  if (!/"description":/.test(ewMan)) ewFail("manifest.json has no description to plant in — re-anchor this self-test");
+  const ewManErrs = checkEstimateWording({ "manifest.json": ewMan.replace(/("description":\s*")/, "$1Build quotes. ") }, { only: ["manifest.json"] });
+  if (ewManErrs.length !== 1 || !/^manifest\.json:\d+ .*Build quotes/.test(ewManErrs[0])) ewFail("the manifest's description saying \"quotes\" was not caught exactly once", ewManErrs);
+  // (i) THE SERVER-HALF HOLD (WORDING_SERVER_HELD) sets aside only what discovery found under
+  //     supabase/functions: a named or injected server file is still checked, and the hold says
+  //     whether it is holding anything back. Proven against this tree whichever half it holds.
+  const ewServer = 'export const r = () => ({ error: "That quote was not found." });';
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { only: [ewTs], held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, a named server file saying \"quote\" was not caught");
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, an injected server file saying \"quote\" was not caught");
+  const ewOpen = checkEstimateWording(null, { held: false });
+  const ewHeld = checkEstimateWording(null, { held: true });
+  const ewServerHits = ewOpen.filter((e) => e.startsWith(FUNCTIONS_DIR + "/"));
+  if (ewServerHits.length) {
+    // The frontend half: the server copy still says "quote", and the hold sets exactly that aside.
+    if (ewHeld.some((e) => e.startsWith(FUNCTIONS_DIR + "/") || /WORDING_SERVER_HELD/.test(e))) ewFail("the hold did not set the server files aside:", ewHeld);
+    if (ewHeld.length !== ewOpen.length - ewServerHits.length) ewFail("the hold changed what is checked outside supabase/functions:", ewHeld);
+  } else if (ewHeld.filter((e) => /WORDING_SERVER_HELD is on/.test(e)).length !== 1) {
+    // Both halves (or the server half): nothing to hold back, so a hold left on is refused.
+    ewFail("a hold with nothing left to hold back was not refused", ewHeld);
+  }
+  console.log("self-test passed: no \"quote\" where a person reads it today; a planted \"Get Quote\", a "
+    + "server sentence, a rendered lowercase token, a my-quotes heading and the install manifest all fire; "
+    + "identifiers, classes, keys, log text and the carrier opt-in sentence stay quiet; a blind discovery "
+    + "is refused; the server-half hold sets aside only what discovery found, and a stale hold is refused");
+
   process.exit(0);
 }
 
@@ -3027,6 +3350,7 @@ errors.push(...checkStandalonePagesParse({
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+errors.push(...checkEstimateWording());
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

@@ -754,7 +754,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
 
   const inboundDisconnect = () => {
     if (!window.confirm(
-      "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your quotes and invoices are not affected.",
+      "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your estimates and invoices are not affected.",
     )) return;
     act({ action: "email_inbound_disconnect" }, () => setMsg({ ok: "Replies switched off." }));
   };
@@ -977,7 +977,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     const body = [
       `Hi,`,
       ``,
-      `Please add the following DNS records for ${dom}. They let our quoting software send`,
+      `Please add the following DNS records for ${dom}. They let our estimating software send`,
       `email from our own address instead of a shared one, and they prove to Gmail and`,
       `Outlook that the mail really is from us.`,
       ``,
@@ -1301,7 +1301,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             {inboundSt === "off" && (
               <div>
                 <p style={{ fontSize: 13, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
-                  Right now when a customer replies to a quote, it goes to the personal inbox of
+                  Right now when a customer replies to an estimate, it goes to the personal inbox of
                   whoever sent it. Switch this on and replies land here instead, on the customer's
                   record, so anyone on your team can pick the conversation up.
                 </p>
@@ -1406,7 +1406,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", flexShrink: 0 }}>Turn off</button>
                 </div>
                 <p style={{ fontSize: 12.5, color: "#475569", marginTop: 10, marginBottom: 0, lineHeight: 1.6 }}>
-                  When a customer replies to a quote it appears on their record, and on the design
+                  When a customer replies to an estimate it appears on their record, and on the design
                   they were asking about. Each email gets its own reply address so we know what it
                   belongs to — they look like <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5 }}>{inbound.replyExample}</span>.
                   Customers never type it; their email program fills it in when they press Reply.
@@ -1552,11 +1552,11 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     quote itself. {total} still fills in — saved wording must never print a
                     literal "{total}" — it is just the one token that works against that. */}
                 {tplKind === "quote" && (
-                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.</span>
+                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for estimates — the estimate email leaves the price out, so the customer sees it when they open the estimate.</span>
                 )}
               </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
+                {[["estimate", "CRM estimate"], ["quote", "Estimate"], ["invoice", "Invoice"]].map(([k, label]) => (
                   <button key={k} type="button" onClick={() => setTplKind(k)}
                     style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                 ))}
@@ -1565,14 +1565,17 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 const cur = tpl[tplKind] || {};
                 const setField = (f, v) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), [f]: v } }));
                 const fieldLbl = { fontSize: 11.5, fontWeight: 700, color: "#475569", margin: "6px 0 3px" };
-                const docWord = tplKind === "invoice" ? "invoice" : tplKind;
+                // The word the PLACEHOLDERS say. The kind keys stay as stored ("quote" is
+                // StructureStudio's own paperwork), but every document is an estimate to the
+                // person reading (Carolyn Q12, 2026-10-06).
+                const docWord = tplKind === "invoice" ? "invoice" : "estimate";
                 return (
                   <>
                     <div style={fieldLbl}>Subject</div>
                     <input data-ss-wording="subject" aria-label="Subject" maxLength={300}
                       value={cur.subject || ""}
                       onChange={(e) => setField("subject", e.target.value)}
-                      placeholder={"e.g. Your " + tplKind + " {number} from {business}"}
+                      placeholder={"e.g. Your " + docWord + " {number} from {business}"}
                       style={S.input} />
                     <div style={fieldLbl}>Opening line</div>
                     <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
@@ -1580,8 +1583,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       onChange={(e) => setField("intro", e.target.value)}
                       rows={3}
                       placeholder={tplKind === "quote"
-                        ? "e.g. Thanks for designing with {business}! Your quote {number} is ready."
-                        : "e.g. Thanks for designing with {business}! Your {total} quote is ready."}
+                        ? "e.g. Thanks for designing with {business}! Your estimate {number} is ready."
+                        : "e.g. Thanks for designing with {business}! Your {total} estimate is ready."}
                       style={{ ...S.input, resize: "vertical" }} />
                     <div style={fieldLbl}>Closing message <span style={{ fontWeight: 500, color: "#94A3B8" }}>(under the button)</span></div>
                     <textarea data-ss-wording="closing" aria-label="Closing message" maxLength={1000}
@@ -1594,7 +1597,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     <input data-ss-wording="button" aria-label="Button text" maxLength={40}
                       value={cur.button || ""}
                       onChange={(e) => setField("button", e.target.value)}
-                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Quote" : "e.g. View Your Estimate"}
+                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Estimate" : "e.g. View Your Estimate"}
                       style={{ ...S.input, maxWidth: 340 }} />
                     {tplKind !== "invoice" && (
                       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
@@ -1646,7 +1649,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                           No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
                         </div>
                       )}
-                      <iframe title={"Preview of your " + tplKind + " email"} sandbox="" srcDoc={pv.html}
+                      <iframe title={"Preview of your " + (tplKind === "invoice" ? "invoice" : "estimate") + " email"} sandbox="" srcDoc={pv.html}
                         style={{ display: "block", width: "100%", height: 560, border: "1px solid #E2E8F0", borderRadius: 8, background: "#F1F5F9" }} />
                       <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
                         A made-up customer and number, with your own business details. Nothing is sent. Save to use these words.
@@ -3178,10 +3181,25 @@ function CommissionsReport({ clientId }) {
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
 // _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
 const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
-function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
-  const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false }) {
+  // THE PIPELINE DEFAULT. `picked` is what this person chose, or null when they never have.
+  // Someone who never chose gets the default that follows the CRM (Carolyn Q12, 2026-10-06):
+  // the board with the built-in CRM, the list without. Without the CRM the board is locked,
+  // so the list is what applies whatever was picked, and the card says so.
+  //
+  // crmPending: on your own portal the CRM answer (portal-billing) lands a moment after this
+  // card can, and until it does crmUnlocked's false means "not known yet". The card then lights
+  // only the person's own pick, shows no padlock and refuses nothing; a press saves the pick as
+  // usual (save_prefs keeps it whatever the plan, and without the CRM the line below says the
+  // list applies once the answer is in).
+  const [picked, setVal] = useState(ssSavedDesignsView({ prefs }));
+  const viewApplies = crmPending ? picked : (!crmUnlocked ? "list" : (picked || "pipeline"));
+  const val = viewApplies;
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // A refusal said while the plan read one way must not outlive it: the CRM answer arriving (or
+  // the plan changing) clears whatever message the card was showing.
+  useEffect(() => { setMsg(null); }, [crmUnlocked, crmPending]);
   // ── The reply-to card's own state ───────────────────────────────────────────────
   // Seeded from prefs but NOT re-synced to it, deliberately: a save that the server refuses
   // to persist (see commit) must leave what the person typed on screen next to the message
@@ -3405,12 +3423,36 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           direct link to a list or a board still shows whichever the link names.
         </p>
         <div style={{ display: "flex", gap: 8 }}>
-          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
-            <button key={k} disabled={busy} onClick={() => save(k)}
-              style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
-              {label}
-            </button>
-          ))}
+          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => {
+            // Never a silent disabled button: without the CRM the board button keeps its
+            // padlock and the DesignsTable toggle's own title, and a click says why.
+            const locked = k === "pipeline" && !crmUnlocked && !crmPending;
+            return (
+              <button key={k} disabled={busy} aria-pressed={val === k}
+                title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
+                onClick={() => (locked
+                  ? setMsg({ err: "The pipeline board is part of the built-in CRM, so the Pipeline tab opens on the list." })
+                  : save(k))}
+                style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : (locked ? "#94A3B8" : "#334155")), opacity: busy ? 0.6 : 1 }}>
+                {locked ? `🔒 ${label}` : label}
+              </button>
+            );
+          })}
+        </div>
+        <div data-ss-view-default style={{ marginTop: 10, fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+          {crmPending
+            ? (picked
+              ? `You picked the ${picked === "pipeline" ? "pipeline board" : "list"}. Checking your plan…`
+              : "Checking your plan…")
+            : !crmUnlocked
+            ? (picked === "pipeline"
+              ? "You picked the pipeline board, but the board is part of the built-in CRM, so the Pipeline tab opens on the list."
+              : picked
+                ? "The Pipeline tab opens on the list (your choice)."
+                : "The Pipeline tab opens on the list, the default without the built-in CRM.")
+            : picked
+              ? `The Pipeline tab opens on the ${picked === "pipeline" ? "pipeline board" : "list"} (your choice).`
+              : "You haven't picked one, so the Pipeline tab opens on the pipeline board, the default with the built-in CRM."}
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
@@ -3607,7 +3649,7 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
         <div style={S.h2}>Your email signature</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Added to the end of every email you write to a customer, and to test emails. Plain
-          text, up to 1,000 characters. Quotes and invoices keep their own footer.
+          text, up to 1,000 characters. Estimates and invoices keep their own footer.
         </p>
         <textarea
           value={sig}
@@ -4020,7 +4062,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
           ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }
           : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 500, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }}>
           These codes are saved now and will be used when per-line tax with Avalara is switched on for your account.
-          Until then they don't change the tax on any quote.
+          Until then they don't change the tax on any estimate.
         </div>
       )}
 
@@ -4316,7 +4358,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
@@ -4410,7 +4452,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
       {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
-        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} />}
+        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending} />}
     </div>
   );
 }

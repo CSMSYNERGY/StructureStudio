@@ -518,7 +518,7 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 // operators still have a password-only way into the console.)
 
 const TAB_META = {
-  designer: ["Designer", "Design a building and build a quote"],
+  designer: ["Designer", "Design a building and build an estimate"],
   // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
@@ -544,13 +544,13 @@ const TAB_META = {
   //
   // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
   // do more than one quote for one deal, so let's leave it on the deals side right now."
-  designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
+  designs: ["Pipeline", "Customer designs and estimates — as a list or a pipeline board"],
   contacts: ["Contacts", "Everyone who has enquired, and their activity"],
   // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
-  orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
+  orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
@@ -2173,6 +2173,15 @@ function ssEntitlementChanged() {
   try { window.dispatchEvent(new Event(SS_ENTITLEMENT_CHANGED)); } catch (_e) { /* the next reload catches up */ }
 }
 
+// ─── The Pipeline view this person SAVED (My Profile), or null when they never picked one ───
+// Anything else stored under the key reads as "never picked", so the default fills in for it.
+// Takes anything carrying `prefs` (the shell's tenant, or { prefs }); "none" is the shell's
+// no-mapping sentinel. The default that fills a null follows the CRM (12-shell.jsx).
+function ssSavedDesignsView(holder) {
+  const v = holder && holder !== "none" && holder.prefs ? holder.prefs.designsView : null;
+  return v === "pipeline" || v === "list" ? v : null;
+}
+
 // What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
 // _shared/featureCheck.ts, which validates the save and rejects anything else — a typo
 // stored here would padlock a step for every builder forever, with nothing on screen to
@@ -3087,19 +3096,19 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
         {quoteNo ? (
           invoiced ? (
             <div style={{ marginTop: 8, color: "#92400E" }}>
-              Quote {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
+              Estimate {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
               The invoice stays too.
             </div>
           ) : (
             <div style={{ marginTop: 8, color: "#64748B" }}>
-              Quote {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
-              quote email will stop working.
+              Estimate {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
+              estimate email will stop working.
             </div>
           )
         ) : null}
         {!design.ghl_estimate_number && !quoteNo ? (
           <div style={{ marginTop: 8, color: "#64748B" }}>
-            No quote or estimate has been made for this design yet.
+            No estimate has been made for this design yet.
           </div>
         ) : null}
       </div>
@@ -3138,7 +3147,7 @@ function SourceChip({ unitId, serial, lifecycle = null }) {
   const stageWord = lifecycle && INV_STAGE_LONG[lifecycle] ? INV_STAGE_LONG[lifecycle] : null;
   return (
     <span title={inv
-      ? (stageWord ? `Quoted from building #${serial != null ? serial : "?"} — ${stageWord}` : "Quoted from one of your inventory buildings")
+      ? (stageWord ? `Estimated from building #${serial != null ? serial : "?"} — ${stageWord}` : "Estimated from one of your inventory buildings")
       : "Designed for this customer"}
       style={{ marginLeft: 7, background: inv ? "#DBEAFF" : "#F1F5F9", color: inv ? "#3D3672" : "#475569",
         borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 8px", whiteSpace: "nowrap" }}>

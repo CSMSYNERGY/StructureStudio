@@ -1152,11 +1152,11 @@ function QuickBooksLocked({ canAdmin, onSeeBilling }) {
     <ComingSoon
       title="QuickBooks Sync"
       icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 8.5A2.5 2.5 0 0 0 9.5 15H12M14.5 15.5a2.5 2.5 0 0 0 0-6H12"/></svg>}
-      blurb="Send your accepted quotes to QuickBooks Online as invoices, without typing them twice. Map each building style and add-on to the right QuickBooks item once, and every invoice lands in your books the way your accountant expects."
+      blurb="Send your accepted estimates to QuickBooks Online as invoices, without typing them twice. Map each building style and add-on to the right QuickBooks item once, and every invoice lands in your books the way your accountant expects."
       bullets={[
         "Push an invoice to QuickBooks straight from a design",
         "Map styles, sizes and add-ons to your own QuickBooks items",
-        "Keep your books matching your quotes, with no re-keying",
+        "Keep your books matching your estimates, with no re-keying",
       ]}
       cta={canAdmin ? { label: "Turn on QuickBooks Sync — see Billing", onClick: onSeeBilling } : null}
       available
@@ -1257,7 +1257,7 @@ function OrdersPreview() {
         </div>
         <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>Orders &amp; payments</div>
         <p style={{ fontSize: 13.5, color: "#D6E4F0", lineHeight: 1.55, margin: "9px 0 0", maxWidth: 660 }}>
-          A preview of what's coming: every accepted quote becomes a tracked order — from the sale, through the build, to delivery — with payments and balances in one place. The screen below shows <b style={{ color: "#FFF" }}>example data</b> and isn't switched on yet, so it can't be clicked or edited while we finish building it.
+          A preview of what's coming: every accepted estimate becomes a tracked order — from the sale, through the build, to delivery — with payments and balances in one place. The screen below shows <b style={{ color: "#FFF" }}>example data</b> and isn't switched on yet, so it can't be clicked or edited while we finish building it.
         </p>
       </div>
 
@@ -1963,7 +1963,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
         {all.length === 0 && (
           <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
             No orders yet. An order appears here automatically as soon as a customer signs a
-            StructureStudio quote. (Quotes and invoices issued through your CRM live in your
+            StructureStudio estimate. (Estimates and invoices issued through your CRM live in your
             CRM — this page only tracks the paperwork StructureStudio issues.)
           </p>
         )}
@@ -2150,7 +2150,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: created.id } });
       setMsg(sent && sent.sent
         ? { ok: `CO-${created.co_no} created and emailed to the customer for signature.` }
-        : { ok: `CO-${created.co_no} created. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — the customer can sign it from their quote page link.` });
+        : { ok: `CO-${created.co_no} created. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — the customer can sign it from their estimate page link.` });
     }
     load(); onChanged();
   };
@@ -2197,7 +2197,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
     if (error || (data && data.error)) { setMsg({ err: (data && data.error) || error.message }); return; }
     setMsg(data && data.sent
       ? { ok: `CO-${co.co_no} emailed to the customer for signature.` }
-      : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their quote page.` });
+      : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their estimate page.` });
   };
 
   // ⚠️ THROUGH void_change_order, NOT a direct update. Voiding is not one column: when the CO
@@ -2989,9 +2989,9 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: data.changeOrderId } });
       note = sent && sent.sent
         ? { ok: `Change order CO-${data.coNo} staged and emailed to the customer for signature.` }
-        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their quote page link.` };
+        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their estimate page link.` };
     } else {
-      note = { ok: "Quote updated — the customer hasn't signed yet, so no change order was needed." };
+      note = { ok: "Estimate updated — the customer hasn't signed yet, so no change order was needed." };
     }
     setBusy(false); discardDraft(); onMsg(note); onChanged();
   };
@@ -3258,7 +3258,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B91C1C", marginTop: 6 }}>{baselineDriftMsg}</div>
                 : (
                   <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
-                    {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
+                    {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the estimate."}
                   </div>
                 )}
             </>
@@ -3266,7 +3266,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button type="button" onClick={stage} disabled={anyBusy || !preview || !!baselineDriftMsg}
               style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview || !!baselineDriftMsg ? 0.6 : 1 }}>
-              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the quote")}
+              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the estimate")}
             </button>
             <button type="button" onClick={discardDraft} disabled={anyBusy}
               style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", fontSize: 12.5 }}>Discard</button>
@@ -3324,7 +3324,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       {!locked && (
         !design.accepted_at
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b>Quote sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their quote page (Copy customer link below, or hand them your phone).
+              <b>Estimate sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their estimate page (Copy customer link below, or hand them your phone).
             </div>
           : ssInvoicePdf
           /* The invoice is OUT but the design is not locked, which since migration 136 can
@@ -3333,7 +3333,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
               <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
               <div style={{ marginTop: 4, color: "#854D0E" }}>
-                Send the link to their phone, or they sign it from their quote page. The build schedule unlocks once they do.
+                Send the link to their phone, or they sign it from their estimate page. The build schedule unlocks once they do.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
                 {/* One offer, never both: a plain resend rebuilds nothing, but it still bumps
@@ -3392,7 +3392,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             </div>
           : anyPendingCo
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their estimate page, or record their verbal OK below.
             </div>
           : invoiceRequestedAt
           /* INVOICE TO APPROVE (migration 229; Ahsan 2026-09-15). The customer accepted from
@@ -3444,8 +3444,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             <>
               {ssInvoicePdf
                 ? docBtn("Print invoice", ssInvoicePdf, `Invoice ${invoice.invoice_number || ""}`)
-                : (design.ss_quote_pdf_url && docBtn("Print quote", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`))}
-              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Quote (PDF)", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`)}
+                : (design.ss_quote_pdf_url && docBtn("Print estimate", design.ss_quote_pdf_url, `Estimate ${design.ss_quote_number}`))}
+              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Estimate (PDF)", design.ss_quote_pdf_url, `Estimate ${design.ss_quote_number}`)}
               {design.image_url && docBtn("Floor plan", design.image_url, "Floor plan")}
             </>
           );
@@ -3481,10 +3481,10 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             setBusy(false);
             if (err || (res && res.error)) { onMsg({ err: (res && res.error) || err.message }); return; }
             onMsg(res && res.sent
-              ? { ok: `Quote ${design.ss_quote_number} emailed to the customer.` }
-              : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+              ? { ok: `Estimate ${design.ss_quote_number} emailed to the customer.` }
+              : { err: `Estimate email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
           }}
-          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend estimate email</button>
       </div>
       {attrsLocked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
@@ -4189,7 +4189,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
               {o.total_cents == null
-                ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
+                ? (ssMode ? "The total arrives when the customer signs the estimate" : "Set this order's total to track a balance")
                 : !moneyReady
                   ? <SkelBar w={168} h={10} style={{ background: "rgba(255,255,255,0.22)", margin: "2px 0" }} />
                   : `${money(row.paid)} of ${money(o.total_cents)} collected`}
@@ -4206,7 +4206,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   </div>
                 ))}
                 <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
-                  Set by the accepted quote and acknowledged change orders — no hand editing.
+                  Set by the accepted estimate and acknowledged change orders — no hand editing.
                 </div>
               </div>
             )}
@@ -4299,7 +4299,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     ? <ThumbFrame src={ssDesign.plan_image_url} alt="Floor plan" title="Open the full plan"
                         onOpen={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
-                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next estimate submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
                 </div>
                 <div>
@@ -4348,7 +4348,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           {ssMode && ssDesign && (
             <div style={S.card}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
-              {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
+              {kv("Estimate", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
               {ssAcceptance && ssAcceptance.method === "rep"
                 ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
                 : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
@@ -4764,7 +4764,7 @@ function InventoryTable({
     const reason = window.prompt(
       `Put building #${u.serial} back on the market?\n\n`
       + `This does NOT void or change the invoice in your CRM — there is no way to do that from `
-      + `here. It only makes the building available to quote again.\n\nWhy is it being released?`);
+      + `here. It only makes the building available to sell again.\n\nWhy is it being released?`);
     if (reason === null) return;                      // cancelled
     if (!reason.trim()) { setMsg({ err: "Releasing a sold building needs a reason." }); return; }
     setBusyId(u.id); setMsg(null);
@@ -5005,7 +5005,7 @@ function InventoryTable({
                                     {onQuoteNewBuild && (
                                       <button type="button" onClick={() => onQuoteNewBuild(e)}
                                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: ACCENT, fontWeight: 700 }}>
-                                        Quote a new build for this customer →
+                                        Start a new estimate for this customer →
                                       </button>
                                     )}
                                   </>

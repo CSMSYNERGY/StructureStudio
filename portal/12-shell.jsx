@@ -775,6 +775,12 @@ function Dashboard({ session }) {
   // loading: we do NOT lock during the fetch, or every page load would flash a
   // paywall at paying customers.
   const [entitlement, setEntitlement] = useState(null);
+  // Has the entitlement call ANSWERED at all — with an entitlement, with an error, or by
+  // throwing? `entitlement` alone cannot say: a failed call leaves it null for good (the
+  // never-lock-someone-out posture above), so null means both "still loading" and "never
+  // coming". The Pipeline tab's default view needs to tell those apart: it waits for the
+  // CRM answer before choosing list or board, and must stop waiting when the call fails.
+  const [entitlementSettled, setEntitlementSettled] = useState(false);
 
   const [isOperator, setIsOperator] = useState(false);
   useEffect(() => {
@@ -838,13 +844,22 @@ function Dashboard({ session }) {
   useEffect(() => {
     if (viewing) return;
     let cancelled = false;
+    // A call that never answers at all (a gateway hold, a worker killed mid-request) has no
+    // timeout of its own, so it would hold the Pipeline tab on its loading blocks for as long
+    // as it hangs, for builders WITHOUT the CRM too. After a few seconds stop waiting: the CRM
+    // still reads as off, so the tab shows the list, and a late answer can still move someone
+    // who never picked a view to the board.
+    const stopWaiting = setTimeout(() => { if (!cancelled) setEntitlementSettled(true); }, 4000);
     (async () => {
       try {
         const { data } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
         if (!cancelled && data && data.entitlement) setEntitlement(data.entitlement);
       } catch (_e) { /* leave null — never lock someone out because a call failed */ }
+      // Answered either way (see entitlementSettled). After a failure the CRM reads as off,
+      // so the Pipeline tab settles on the list instead of waiting forever.
+      if (!cancelled) setEntitlementSettled(true);
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(stopWaiting); };
   }, [session.access_token, viewing, entitlementRev]);
 
   // ── SUPPORT OPERATOR (migration 176) ─────────────────────────────────────────
@@ -3200,9 +3215,9 @@ function Dashboard({ session }) {
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-                blurb="Customer records are part of the built-in CRM — their designs and quotes, your notes, the texts and emails you've traded, and what needs doing next."
+                blurb="Customer records are part of the built-in CRM — their designs and estimates, your notes, the texts and emails you've traded, and what needs doing next."
                 bullets={[
-                  "One record per customer: designs, quotes, notes and files",
+                  "One record per customer: designs, estimates, notes and files",
                   "Text and email them from inside the record — the thread stays",
                   "Follow-up activities so nobody quietly goes cold",
                 ]}
@@ -3349,7 +3364,15 @@ function Dashboard({ session }) {
                    deliberately carries no view of its own so the saved preference can fill
                    it -- pinning it to "list" here would quietly outrank the setting. */
                 urlView={sub === "pipeline" || sub === "list" ? sub : null}
-                defaultView={(tenant && tenant !== "none" && tenant.prefs && tenant.prefs.designsView) || null}
+                /* THE DEFAULT for someone who never picked one follows the CRM (Carolyn Q12,
+                   2026-10-06): the board with the built-in CRM, the list without. A saved
+                   choice from My Profile still wins, and the URL above outranks both. On your
+                   own portal crmUnlocked reads false until portal-billing answers, so the
+                   table holds its loading body (viewPending) until then rather than painting
+                   the list and snapping to the board. Never pending in view-as, where
+                   featureOn already reads a still-loading tenant as on (operator only). */
+                defaultView={ssSavedDesignsView(tenant) || (crmUnlocked ? "pipeline" : "list")}
+                viewPending={!viewing && !ssSavedDesignsView(tenant) && !(sub === "pipeline" || sub === "list") && !entitlementSettled}
                 onViewChange={(v) => navigate("designs", v)}
                 onOpenDesign={openInDesigner} />
             )}
@@ -3388,9 +3411,9 @@ function Dashboard({ session }) {
                 <ComingSoon
                   title="Contacts"
                   icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-                  blurb="Every buyer in one place, with the whole story attached — their designs and quotes, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline board comes with it, so you can see who's where at a glance."
+                  blurb="Every buyer in one place, with the whole story attached — their designs and estimates, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline board comes with it, so you can see who's where at a glance."
                   bullets={[
-                    "One record per customer: designs, quotes, notes and files",
+                    "One record per customer: designs, estimates, notes and files",
                     "Text and email them from inside the record — the thread stays",
                     "Follow-up activities so nobody quietly goes cold",
                     "The pipeline board view, alongside your list",
@@ -3579,6 +3602,12 @@ function Dashboard({ session }) {
                 advanced={advancedSwitch}
                 /* The same answer the rail's list was built from, or the two disagree. */
                 phoneOffered={phoneOffered}
+                /* My Profile's "How the Pipeline tab opens" shows the default that applies,
+                   which follows the CRM for someone who never picked one. Until the CRM answer
+                   is in (own portal only, as viewPending), crmUnlocked's false means "not known
+                   yet", so the card must not padlock the board or refuse it on that. */
+                crmUnlocked={crmUnlocked}
+                crmPending={!viewing && !entitlementSettled}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
@@ -3691,11 +3720,11 @@ function Dashboard({ session }) {
                 : <ComingSoon
                     title="3D Design"
                     icon={ICONS["view-3d"]}
-                    blurb="Let a shopper turn their floor plan into a real 3D building - their sizes, their roof, their colors - and put that view straight onto the quote."
+                    blurb="Let a shopper turn their floor plan into a real 3D building - their sizes, their roof, their colors - and put that view straight onto the estimate."
                     bullets={[
                       "Orbit the building the customer just designed",
                       "Roof profile, cladding, doors and windows in their colors",
-                      "The 3D view rides along on the emailed quote",
+                      "The 3D view rides along on the emailed estimate",
                     ]}
                     cta={canAdmin ? { label: "Add 3D — see Billing", onClick: () => navigate("settings", "billing") } : null}
                     available
@@ -3705,9 +3734,9 @@ function Dashboard({ session }) {
               <ComingSoon
                 title="Rent to Own"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>}
-                blurb="Offer rent-to-own without the paperwork headache. Turn any quote into a rent-to-own agreement, set the term, down payment, and monthly schedule, and keep every signed contract organized in one place."
+                blurb="Offer rent-to-own without the paperwork headache. Turn any estimate into a rent-to-own agreement, set the term, down payment, and monthly schedule, and keep every signed contract organized in one place."
                 bullets={[
-                  "Turn any quote into a rent-to-own agreement in a click",
+                  "Turn any estimate into a rent-to-own agreement in a click",
                   "Set the term, down payment, and monthly schedule",
                   "Every signed contract stored and easy to find",
                 ]}

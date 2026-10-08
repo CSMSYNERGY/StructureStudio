@@ -223,7 +223,7 @@ function SettingsView({ section, view3d = false }) {
     // mistake: it means the 30 its placeholder shows, as the server's parseQuoteValidDays reads it.
     const quoteDaysBlank = String(form.quoteValidDays ?? "").trim() === "";
     if (quoteDaysReady && !quoteDaysBlank && !ssQuoteDaysOk(form.quoteValidDays)) {
-      setError("Quotes have to stay good for a whole number of days, from 1 to 365.");
+      setError("Estimates have to stay good for a whole number of days, from 1 to 365.");
       return;
     }
     setBusy(true);
@@ -361,8 +361,8 @@ function SettingsView({ section, view3d = false }) {
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
     setInvMsg({ ok: (mayGhlInvoice && form.invoiceInGhl)
-      ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
-      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
+      ? "Saved — your estimates and invoices are created in your CRM, exactly as before."
+      : "Saved — StructureStudio now issues your estimates and invoices. Contacts and opportunities still go to your CRM if one is connected." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -570,7 +570,7 @@ function SettingsView({ section, view3d = false }) {
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected. Optional — connect one to mirror contacts and quotes into it. With no CRM, contacts stay in Structure Studio and quotes go out through Structure Studio paperwork (switch it on below).</>}
+            : <>Not connected. Optional — connect one to mirror contacts and estimates into it. With no CRM, contacts stay in Structure Studio and estimates go out through Structure Studio paperwork (switch it on below).</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
@@ -595,27 +595,27 @@ function SettingsView({ section, view3d = false }) {
           the preview says so. The tax rate is still required (the server refuses the save
           without one). */}
       <div style={S.card}>
-        <div style={S.h2}>Quotes &amp; Invoices</div>
+        <div style={S.h2}>Estimates &amp; Invoices</div>
         {mayGhlInvoice && (
           <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
             <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
-            Quote and invoice through my CRM
+            Estimates and invoices through my CRM
           </label>
         )}
         <p style={{ fontSize: 12, color: "#64748B", marginTop: mayGhlInvoice ? 6 : 0, marginBottom: 0, lineHeight: 1.5 }}>
           {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
-            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
-                estimate, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
-                their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
+            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your estimates and invoices." : "StructureStudio issues your estimates and invoices."}</b> Each estimate is one document: the price
+                breakdown, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
+                their estimate page, and you invoice from the Orders tab. If a CRM is connected, contacts and
                 opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
         {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
-            <div><span style={S.lbl}>Starting quote number</span>
+            <div><span style={S.lbl}>Starting estimate number</span>
               <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="1000" inputMode="numeric" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last quote). Counts up by one per quote.</div></div>
-            <div><span style={S.lbl}>Quote prefix (optional)</span>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last estimate). Counts up by one per estimate.</div></div>
+            <div><span style={S.lbl}>Estimate prefix (optional)</span>
               <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || blankStart(status && status.ssQuoteNext))}.</div></div>
             <div><span style={S.lbl}>Starting invoice number</span>
@@ -623,7 +623,7 @@ function SettingsView({ section, view3d = false }) {
               {/* The QuickBooks line follows the CONNECTION (status.qboConnected), not the
                   subscription: send_invoice refuses a blank start while a connected company would
                   receive the invoice, because QuickBooks may already hold an invoice 1000. */}
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes. Leave blank to start at 1000 (or carry on after your last invoice).{status && status.qboConnected === true && <> Connected to QuickBooks? Enter your next QuickBooks invoice number.</>}</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from estimates. Leave blank to start at 1000 (or carry on after your last invoice).{status && status.qboConnected === true && <> Connected to QuickBooks? Enter your next QuickBooks invoice number.</>}</div></div>
             <div><span style={S.lbl}>Invoice prefix (optional)</span>
               <input style={S.input} value={form.ssInvoicePrefix} onChange={set("ssInvoicePrefix")} placeholder="e.g. INV-" maxLength={12} />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || blankStart(status && status.ssInvoiceNext))}.</div></div>
@@ -646,10 +646,10 @@ function SettingsView({ section, view3d = false }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Sales tax rate (%)</span>
               <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every quote unless the quote's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every estimate unless the estimate's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
             <div><span style={S.lbl}>Tax label on documents</span>
               <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on estimates and invoices.</div>
               <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
                 <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
                 Charge tax on delivery
@@ -670,16 +670,16 @@ function SettingsView({ section, view3d = false }) {
                 <div>
                   <b>Local rates:</b>{" "}
                   {withRate > 0
-                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on quotes for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
+                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on estimates for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
                     : <>none yet. A sales location can carry your local rate — set one in Company → Locations.</>}
                 </div>
                 <div style={{ marginTop: 4 }}>
                   <b>Verified lookups:</b>{" "}
                   {!taxInfo.lookupEnabled
-                    ? <>off for your account. CSM Synergy switches these on; until then your quotes use your company and local rates.</>
+                    ? <>off for your account. CSM Synergy switches these on; until then your estimates use your company and local rates.</>
                     : taxInfo.configured === false
-                      ? <>on for your account, but the lookup service isn't connected right now — quotes use your company and local rates until it is.</>
-                      : <>on for your account. A quote's rate can be verified against its delivery address before your customer signs.
+                      ? <>on for your account, but the lookup service isn't connected right now — estimates use your company and local rates until it is.</>
+                      : <>on for your account. An estimate's rate can be verified against its delivery address before your customer signs.
                           {/* usage24h is null when the lookup ledger can't be counted: unknown, not zero. */}
                           {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
                 </div>
@@ -691,7 +691,7 @@ function SettingsView({ section, view3d = false }) {
         {ssMode && !String(form.ssTaxRate).trim() && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
             Before saving, set your sales tax rate (0 counts).
-            Without a company tax rate, a quote whose sales location has no rate of its own has nothing to charge.
+            Without a company tax rate, an estimate whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
         {ssMode && status && status.emailReady === false && (
@@ -702,7 +702,7 @@ function SettingsView({ section, view3d = false }) {
              happens (a working send under our name) rather than a failure that no longer
              occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so quotes
+            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so estimates
             and invoices go out from our address on your behalf, with your business name as the
             sender. Verify your domain to send from your own address instead.
           </div>
@@ -711,7 +711,7 @@ function SettingsView({ section, view3d = false }) {
         {invMsg && invMsg.ok && <div style={{ ...S.okMsg, marginTop: 10 }}>{invMsg.ok}</div>}
         <button type="button" onClick={saveInvoicing} disabled={invBusy}
           style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: invBusy ? 0.6 : 1 }}>
-          {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
+          {invBusy ? "Saving…" : "Save Estimate & Invoice Settings"}
         </button>
       </div>
 
@@ -809,7 +809,7 @@ function SettingsView({ section, view3d = false }) {
       <div style={S.card}>
         <div style={S.h2}>Customer login code</div>
         <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
-          How your customers get the 6-digit code that logs them in to see, accept and sign their quotes
+          How your customers get the 6-digit code that logs them in to see, accept and sign their estimates
           and invoices. This is the option they're offered first — they can still pick the other one.
         </p>
         <div role="group" aria-label="Customer login code" data-ss-login-default={form.customerLoginDefault === "email" ? "email" : "sms"}
@@ -839,9 +839,9 @@ function SettingsView({ section, view3d = false }) {
           <div style={S.h2}>Pipeline &amp; Stages</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
             Map each fulfillment stage to a pipeline stage in your CRM. StructureStudio places a new deal at your
-            <b> "Send Quote"</b> stage; then the badge in your Contacts list advances <b>Quote Accepted → Invoiced →
+            <b> "Send Estimate"</b> stage; then the badge in your Contacts list advances <b>Estimate Accepted → Invoiced →
             Delivered</b> as you move that opportunity into the matching stage in your CRM. Each stage can live
-            in a <b>different pipeline</b> (e.g. Send Quote in "Building", Invoiced/Delivered in "Invoiced"). All
+            in a <b>different pipeline</b> (e.g. Send Estimate in "Building", Invoiced/Delivered in "Invoiced"). All
             optional — leave any blank to skip that stage.
           </p>
           {pipesMsg && pipesMsg.err && <div style={S.err}>{pipesMsg.err}</div>}
@@ -858,7 +858,7 @@ function SettingsView({ section, view3d = false }) {
           <div className="ss-stage-grid">
           {/* Send Quote — its own pipeline + stage (where new estimates land; persisted as ghl_pipeline_id + ghl_stage_send_quote_id) */}
           <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
-            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Quote — where new estimates land</div>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Estimate — where new estimates land</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
               <div><span style={S.lbl}>Pipeline</span>
                 <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
@@ -876,7 +876,7 @@ function SettingsView({ section, view3d = false }) {
                 </select></div>
             </div>
           </div>
-          {derivedRow("Quote Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
+          {derivedRow("Estimate Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
           {derivedRow("Invoiced — an invoice was sent", "ghlPipelineInvoicedId", "ghlStageInvoicedId")}
           {derivedRow("Delivered — marks the Delivered badge", "ghlPipelineDeliveredId", "ghlStageDeliveredId")}
           </div>
@@ -897,7 +897,7 @@ function SettingsView({ section, view3d = false }) {
         {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} onKeyDown={brandKeyDown} /></div>
-          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Estimate" /></div>
           <div><span style={S.lbl}>Accent color</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
@@ -1009,7 +1009,7 @@ function SettingsView({ section, view3d = false }) {
             </div>
             {/* The quote PDF fetches the logo server-side, and only from where Upload puts it
                 (_shared/pdfLogo.ts). A pasted link from another site still shows in emails. */}
-            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your quote PDFs.</div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your estimate PDFs.</div>
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -1018,20 +1018,20 @@ function SettingsView({ section, view3d = false }) {
           <div><span style={S.lbl}>State</span><input style={S.input} value={form.addrState} onChange={set("addrState")} /></div>
           <div><span style={S.lbl}>Zip</span><input style={S.input} value={form.addrZip} onChange={set("addrZip")} /></div>
         </div>
-        <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
+        <div><span style={S.lbl}>Estimate terms</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
         {/* Carolyn 2026-08-06: "estimate good for X amount of days". Prints as the "Valid until"
             date on every quote PDF, and is the expiry date on estimates your CRM sends. */}
         {quoteDaysReady && (
           <div style={{ marginTop: 12 }}>
-            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Quotes are good for</label>
+            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Estimates are good for</label>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input id="ss-quote-valid-days" style={{ ...S.input, width: 90 }} value={form.quoteValidDays}
                 onChange={set("quoteValidDays")} inputMode="numeric" placeholder="30" />
               <span style={{ fontSize: 13, color: "#475569" }}>days</span>
             </div>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
-              Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days.
+              Your estimates show a “Valid until” date this many days after the estimate date. Anywhere from 1 to 365 days.
             </div>
           </div>
         )}
@@ -1042,10 +1042,10 @@ function SettingsView({ section, view3d = false }) {
           <div style={{ marginTop: 12 }}>
             <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
               <input type="checkbox" checked={form.quoteCornerViews} onChange={set("quoteCornerViews")} style={{ marginTop: 2 }} data-ss-quote-corners />
-              Show the building from all four corners on page 2 of my quotes
+              Show the building from all four corners on page 2 of my estimates
             </label>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
-              Page 2 of your quotes shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
+              Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
             </div>
           </div>
         )}
@@ -3006,7 +3006,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
                     </label>
-                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on estimates and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.taxable !== false} disabled={styleBusy} onChange={() => toggleStyleTaxable(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Taxable
                     </label>
@@ -4131,7 +4131,7 @@ function Insulation({ viewingLabel = null, clientId = null }) {
         roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
         upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
         offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
-        each one lands as its own line on the quote. Only insulate under the floor? Fill in just the
+        each one lands as its own line on the estimate. Only insulate under the floor? Fill in just the
         Floor rate for that type and leave Walls and Roof blank.
       </p>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
@@ -4268,7 +4268,7 @@ function Foundation({ viewingLabel = null, clientId = null }) {
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 8px", maxWidth: 680 }}>
         Site work you do before the building arrives. <b>Leave a rate blank and that item isn&rsquo;t
         offered</b>; 0 means it is included; anything else is a charge, worked out by the method you pick.
-        Each one the customer chooses lands as its own line on the quote.
+        Each one the customer chooses lands as its own line on the estimate.
       </p>
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         <b>each</b> = rate &times; a count the customer enters (piers, starting at 1); <b>lineal ft</b> = rate &times; the
@@ -4285,7 +4285,7 @@ function Foundation({ viewingLabel = null, clientId = null }) {
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 900 }}>
             <thead><tr>
               <th style={S.th}>Item</th>
-              <th style={S.th} title="How it reads on the designer and the quote. Blank keeps the built-in name.">Shown as</th>
+              <th style={S.th} title="How it reads on the designer and the estimate. Blank keeps the built-in name.">Shown as</th>
               <th style={S.th} title="Which of the seven methods prices it. Three of them ask the customer for a number.">How it&rsquo;s priced</th>
               <th style={S.th} title="Dollars, or a percent for the two pct methods. Blank = not offered; 0 = included.">Rate</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick to park this item without losing its rate. Customers never see it while unticked.">Offer</th>
@@ -4341,7 +4341,7 @@ const SS_DELIVERY_RULES = [
 const SS_DELIVERY_ORIGINS = [
   ["business", "Our business address", "From the address under Settings → Company."],
   ["nearest", "The nearest of our locations", "Whichever of your business address and Locations is closest to the customer."],
-  ["rep", "The rep's home lot", "The location set for whoever is quoting (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
+  ["rep", "The rep's home lot", "The location set for whoever is making the estimate (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
 ];
 
 function DeliveryView({ viewingLabel = null, clientId = null }) {
@@ -4431,7 +4431,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         How delivery is charged. Pick where it is measured from and how the fee is worked out, then
         choose whether it is <b>added automatically</b> — the customer sees it in the designer as soon as
-        they enter their address, and it lands on the quote — or left for the rep, who sees the figure
+        they enter their address, and it lands on the estimate — or left for the rep, who sees the figure
         these rules suggest and decides. Miles are <b>driving miles</b>, rounded up to the next whole mile.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
@@ -4516,7 +4516,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
             Taxable
             {/* The twin of "Charge tax on delivery" on CRM Connection → Quotes & Invoices (both write
                 ss_tax_delivery). It used to point at Company → Business details, which has no such switch. */}
-            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Quotes &amp; Invoices)</span>
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Estimates &amp; Invoices)</span>
           </label>
 
           <div>
@@ -5124,7 +5124,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_taxable", itemKey, taxable }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on quotes and invoices." });
+      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on estimates and invoices." });
     } catch (e) { setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable: !taxable } : r)); setMsg({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -5278,7 +5278,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on estimates and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -5325,7 +5325,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                       </label>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>
-                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
+                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on estimates and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
                         <input type="checkbox" checked={r.taxable !== false} disabled={busy} onChange={() => toggleTaxable(r.item_key, r.taxable === false)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
                       </label>
                     </td>
@@ -6165,7 +6165,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("show_image_on_estimate", "Photo on estimate", "Attach this item's photo to its line on the customer's estimate")}
         {dCbx("active", "Active", "Unchecked = hidden from the designer entirely")}
         {dCbx("internalOnly", "Internal only", "Reps can still place it in the designer; customers can't add it on the client-facing page (already-placed items still show)")}
-        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
+        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the estimate and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
         <button onClick={saveLine} disabled={busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)} title={offeredNowhere(edit.draft) ? "Tick at least one building style under Offered on" : undefined} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
@@ -6193,7 +6193,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       </div>
       {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
       {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
-      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on quotes and invoices")}
+      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on estimates and invoices")}
       {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
       <button onClick={() => setEdit({ id: r.id, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
       <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
@@ -6915,7 +6915,7 @@ Anything not shown here will be removed from their account.`)) return;
               {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
               <th style={thc}>Default</th><th style={thc}>Active</th>
-              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th>
+              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on estimates and invoices.">Taxable</th>
               <th style={thc}></th>
             </tr></thead>
             <tbody>

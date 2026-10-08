@@ -262,7 +262,7 @@ try {
   ok("A: nothing to save yet, and it says so", await page.getByRole("button", { name: "Save tax codes" }).isDisabled() && (await text()).includes("No changes to save"));
   const unassignedA = await page.locator("[data-tax-unassigned]").innerText();
   ok("A: Not assigned lists everything while no row has a code", ["Utility", "Studio", "Doors", "Delivery", "Change order fee"].every((x) => unassignedA.includes(x)), unassignedA.replace(/\n/g, " | "));
-  ok("A: the note says the codes do not change today's tax", (await page.locator("[data-tax-note]").innerText()).includes("Until then they don't change the tax on any quote"));
+  ok("A: the note says the codes do not change today's tax", (await page.locator("[data-tax-note]").innerText()).includes("Until then they don't change the tax on any estimate"));
   ok("A: the note is the amber warning while lookups are off", /255, 251, 235/.test(await page.locator("[data-tax-note]").evaluate((el) => getComputedStyle(el).backgroundColor)));
 
   // ── B ──
