@@ -1439,19 +1439,33 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     // fires `change` when it loses focus, and the tap that takes the focus is usually the one on
     // Pay: clearing the fee line there moved the button out from under that tap, and the payment
     // silently did not start. A NEW card clears at once (the old card's fee is not this one's).
-    var probeSeq = 0;
+    //
+    // ⚠️ AND PAY WAITS FOR THE ANSWER THAT MATCHES WHAT IT SENDS (feeKey). The gateway adds the
+    // fee for the card and ZIP the charge carries, and the ZIP is usually the last thing typed, so
+    // a tap on Pay used to send the new ZIP while the fee on screen was still the answer without
+    // it. feeAnsweredKey is what the line on screen answers for; feeInflight the check under way.
+    var probeSeq = 0, probeTimer = null, feeAnsweredKey = null, feeInflight = null;
+    var shownChargeCents = fig.askCents;   // what the fee line and the Pay button say is charged
+    var FEE_WAIT_MS = 8000;
+    function feeKey() {
+      var bill = billSameBox.checked ? "delivery" : (billZipOk() ? billZip.input.value.trim().replace("-", "") : "");
+      return String(payToken) + "|" + bill;
+    }
     function feeReset() {
       feeEl.textContent = "";
       feeEl.style.color = "#92400E";
+      shownChargeCents = fig.askCents;
       if (!payBtn.disabled) payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
     }
     function probeSurcharge(keep) {
+      clearTimeout(probeTimer);
       if (!keep) feeReset();
-      var mine = ++probeSeq;
+      var mine = ++probeSeq, key = feeKey();
       var probe = { action: "surcharge_probe", token: token, quoteRef: q.quoteRef, payToken: payToken };
       if (billSameBox.checked) probe.billing = "delivery";
       else if (billZipOk()) probe.postal = billZip.input.value.trim();
-      callFn("customer-pay", probe)
+      var check = { key: key, pending: true, done: null };
+      check.done = callFn("customer-pay", probe)
         .then(function (r) {
           if (mine !== probeSeq) return;
           feeReset();
@@ -1459,21 +1473,57 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           if (r.data.applies === true && r.data.chargeCents) {
             feeEl.textContent = "A " + r.data.percent + "% card fee applies to this card — you'll be charged " +
               fmtMoney(r.data.chargeCents / 100) + ".";
+            shownChargeCents = r.data.chargeCents;
             if (!payBtn.disabled) payBtn.textContent = "Pay " + fmtMoney(r.data.chargeCents / 100);
           } else if (r.data.applies === false) {
             feeEl.style.color = "#475569";
             feeEl.textContent = "No card fee on this card.";
           }
         })
-        .catch(function () { /* a fee we could not look up must never block a payment */ });
+        // A fee we could not look up must never block a payment, but the line on screen was the
+        // answer for other details, so it goes.
+        .catch(function () { if (mine === probeSeq) feeReset(); })
+        .then(function () {
+          check.pending = false;
+          if (mine === probeSeq) feeAnsweredKey = key;
+        });
+      feeInflight = check;
+      return check.done;
     }
-    function reprobe() { if (payToken && rail === "card") probeSurcharge(true); }
+    // Ask again only when what would be sent has changed and no check for it is already out.
+    function reprobe() {
+      clearTimeout(probeTimer);
+      if (!payToken || rail !== "card") return;
+      var key = feeKey();
+      if (key === feeAnsweredKey || (feeInflight && feeInflight.pending && feeInflight.key === key)) return;
+      probeSurcharge(true);
+    }
+    // Resolves once the fee on screen is the answer for what Pay is about to send, asking for it
+    // if nothing is. An answer that never comes counts as "could not look it up" after FEE_WAIT_MS.
+    function feeSettled() {
+      reprobe();
+      var check = feeInflight, key = feeKey();
+      if (!check || !check.pending || check.key !== key) return Promise.resolve();
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () {
+          if (feeInflight === check && check.pending) { probeSeq++; feeReset(); feeAnsweredKey = key; }
+          resolve();
+        }, FEE_WAIT_MS);
+        check.done.then(function () { clearTimeout(t); resolve(); });
+      });
+    }
     // Ticking the box hides the street and ZIP: the server fills them in from the estimate.
     billSameBox.addEventListener("change", function () {
       billStreet.wrap.hidden = billSameBox.checked;
       billZip.wrap.hidden = billSameBox.checked;
       setError(errEl, "");
       reprobe();
+    });
+    // While typing: once the ZIP is whole, ask after a short pause, so the answer is usually on
+    // screen before the tap on Pay. Leaving the box asks at once.
+    billZip.input.addEventListener("input", function () {
+      clearTimeout(probeTimer);
+      if (billZipOk()) probeTimer = setTimeout(reprobe, 400);
     });
     billZip.input.addEventListener("change", reprobe);
 
@@ -1489,7 +1539,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         var all = tabs.querySelectorAll(".sign-tab");
         for (var j = 0; j < all.length; j++) all[j].className = "sign-tab";
         t.className = "sign-tab active";
-        feeEl.textContent = "";
+        // A fee check still out for the other tab's card is dropped, not shown.
+        probeSeq++; clearTimeout(probeTimer); feeReset();
         payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
         // A remount rather than a field toggle: Card is the tokenizer's iframe and Bank account
         // is our own two boxes, and a remount correctly discards whatever was typed in the
@@ -1514,6 +1565,30 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // Required here, optional on the server: production's page sends none of these yet.
       var billErr = rail === "card" ? billingProblem() : "";
       if (billErr) { setError(errEl, billErr); return; }
+      if (rail === "card" && feeAnsweredKey !== feeKey()) {
+        // The fee on screen is not yet the answer for this card and ZIP (see feeKey). Wait for it
+        // in place; if it moves the amount, show the new one and let the customer tap again.
+        var shown = shownChargeCents;
+        payBtn.disabled = true;
+        payBtn.textContent = "Checking card fee…";
+        feeSettled().then(function () {
+          payBtn.disabled = !payToken;
+          payBtn.textContent = "Pay " + fmtMoney(shownChargeCents / 100);
+          if (!payToken) return;
+          if (shownChargeCents !== shown || feeAnsweredKey !== feeKey()) {
+            setError(errEl, "The amount to pay has changed. Check it above, then tap Pay again.");
+            return;
+          }
+          sendPayment();
+        });
+        return;
+      }
+      sendPayment();
+    });
+
+    // The charge itself. Card numbers never pass through here: payToken is the tokenizer's.
+    function sendPayment() {
+      setError(errEl, "");
       payBtn.disabled = true;
       var was = payBtn.textContent;
       payBtn.textContent = "Paying…";
@@ -1547,7 +1622,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
           payBtn.disabled = false; payBtn.textContent = was;
           setError(errEl, "Couldn't reach the server. Check your connection and try again.");
         });
-    });
+    }
   }
 
   function invoiceBlock(q, inv) {

@@ -3788,18 +3788,38 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // forbid it on debit, so the same order is one price on one card and another on the next.
   // Probe once a token exists, and never let a failed probe block a payment. A keyed card's
   // billing ZIP goes with it (a fee can turn on where the card is billed), and a new ZIP asks again.
-  const probeZip = keyedCard && billZipOk ? billZip.trim() : "";
+  //
+  // ⚠️ CHARGE WAITS FOR THE ANSWER THAT MATCHES WHAT IT SENDS. Each answer is stored with the card
+  // and ZIP it was for (`key`), and Charge stays on "Checking card fee…" until the answer on screen
+  // is the one for the card and ZIP the charge will carry: the gateway adds the fee for THOSE, so
+  // charging on an older answer could take a fee nobody saw. A failed probe, or one with no answer
+  // in FEE_WAIT_MS, counts as "could not look it up" and releases Charge.
+  const FEE_WAIT_MS = 8000;
+  const probeZip = keyedCard && billZipOk ? billZip.trim().replace("-", "") : "";
+  const feeKey = payToken && method === "card" ? `${payToken}|${probeZip}` : "";
+  const probedTokenRef = useRef(null);
   useEffect(() => {
-    if (!payToken || method !== "card") { setSurcharge(null); return; }
+    if (!payToken || method !== "card") { setSurcharge(null); probedTokenRef.current = null; return; }
     let alive = true;
-    (async () => {
-      const { data } = await sb.functions.invoke("portal-payments", {
-        body: { action: "surcharge_probe", payToken, ...(probeZip ? { postal: probeZip } : {}) },
-      });
-      if (alive && data) setSurcharge(data);
-    })();
-    return () => { alive = false; };
+    const key = `${payToken}|${probeZip}`;
+    // A new card asks at once; a changed ZIP waits for a 400 ms pause, so one typed toward a ZIP+4
+    // is asked about once it settles rather than at every valid length on the way.
+    const wait = probedTokenRef.current === payToken ? 400 : 0;
+    probedTokenRef.current = payToken;
+    const unknown = { applies: null, percent: null, key };
+    const ask = setTimeout(async () => {
+      let data = null;
+      try {
+        ({ data } = await sb.functions.invoke("portal-payments", {
+          body: { action: "surcharge_probe", payToken, ...(probeZip ? { postal: probeZip } : {}) },
+        }));
+      } catch (_e) { /* answered as unknown below */ }
+      if (alive) setSurcharge(data && !data.error ? { ...data, key } : unknown);
+    }, wait);
+    const giveUp = setTimeout(() => { if (alive) setSurcharge((s) => (s && s.key === key ? s : unknown)); }, wait + FEE_WAIT_MS);
+    return () => { alive = false; clearTimeout(ask); clearTimeout(giveUp); };
   }, [payToken, method, probeZip]);
+  const feeReady = !feeKey || !!(surcharge && surcharge.key === feeKey);
 
   // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
   // whatever element has focus, fast, ending in Enter. This modal's amount box carries
@@ -3841,6 +3861,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
     // Required here, optional on the server: production's portal sends none of these yet.
     if (keyedCard && billProblem) { setBillErr(billProblem); return; }
+    // The button is off until then (feeReady); this is the belt to that brace.
+    if (!feeReady) return;
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-payments", {
       body: {
@@ -4628,8 +4650,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
                 {collect === "charge" ? (
-                  <button onClick={chargeCard} disabled={busy || !payToken} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken ? 0.55 : 1 }}>
-                    {busy ? "Charging…" : `Charge ${money(askCents + feeCents)}`}
+                  <button onClick={chargeCard} disabled={busy || !payToken || !feeReady} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken || !feeReady ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : !feeReady ? "Checking card fee…" : `Charge ${money(askCents + feeCents)}`}
                   </button>
                 ) : (
                   <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>

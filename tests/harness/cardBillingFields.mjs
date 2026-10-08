@@ -21,6 +21,11 @@
 //        and no ZIP, and the charge carries billing:"delivery" and the name, with NO address or ZIP
 //        (the server fills them in; the page never holds the delivery address)
 //     M7 the Bank account tab hides all of it
+//     M8 Pay tapped STRAIGHT FROM THE ZIP BOX (no separate blur) with a ZIP whose fee differs: the
+//        tap sends nothing while the fee for that ZIP is checked, the new amount lands on screen
+//        with a sentence asking for a second tap, and that tap sends the charge with that ZIP
+//     M9 the same tap when the fee does not move: one tap is enough, and the charge leaves only
+//        after the check for that ZIP has answered
 //   P  the portal's Record-a-payment modal
 //     P1 Card → Key it in shows the three fields prefilled from pay_options' billingPrefill, with
 //        autocomplete off (the builder's browser would offer the builder's own details)
@@ -31,6 +36,9 @@
 //     P6 Bank / ACH shows none of them
 //     P7 no billingPrefill (an older portal-payments, or an operator): the fields start empty and
 //        the hint does not claim a delivery address
+//     P8 Charge waits on "Checking card fee…" (disabled) until the fee for the card AND the ZIP it
+//        will send is in; a new ZIP puts it back there, a tap meanwhile charges nothing, and the
+//        charge then goes out on the new amount with that ZIP
 //   X  no uncaught page errors; nothing went anywhere but the stubs
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -67,8 +75,18 @@ const TOKENIZER = {
 };
 
 // prefill: what portal-payments' pay_options sends as billingPrefill (undefined = the key is absent).
-const S = { prefill: PREFILL, minted: 0 };
-const fnCalls = [];         // { fn, body } for customer-pay / portal-payments
+// feeZips: ZIP -> card-fee percent the stubbed surcharge probe answers (others: no fee).
+// probeDelayMs: how long that probe takes, so a tap can land while one is out.
+const S = { prefill: PREFILL, minted: 0, feeZips: {}, probeDelayMs: 0 };
+const probeAnswer = async (body, call) => {
+  if (S.probeDelayMs) await new Promise((r) => setTimeout(r, S.probeDelayMs));
+  if (call) call.answeredAt = Date.now();
+  const pct = S.feeZips[body.postal] || null;
+  return pct
+    ? { ok: true, applies: true, percent: pct, feeCents: 1000 * pct, chargeCents: 100000 + 1000 * pct }
+    : { ok: true, applies: false, percent: null, feeCents: null, chargeCents: 100000 };
+};
+const fnCalls = [];         // { fn, body, at, answeredAt? } for customer-pay / portal-payments
 const consoleLines = [];
 const offBox = [];          // non-local requests that were aborted
 
@@ -128,10 +146,11 @@ const handler = async (route) => {
   }
   const payOptions = { ok: true, askCents: 100000, askKind: "balance", balanceCents: 100000, settledCents: 0, pendingCents: 0, depositCents: null, minCents: 100, maxCents: 5000000, tokenizer: TOKENIZER };
   if (url.includes("/customer-pay")) {
-    fnCalls.push({ fn: "customer-pay", body });
+    const call = { fn: "customer-pay", body, at: Date.now() };
+    fnCalls.push(call);
     if (body.action === "pay_options") return json(route, { ...payOptions, canPay: true });
     if (body.action === "pay") return json(route, { ok: true, amountCents: 100000, balanceCents: 0, last4: "1111" });
-    return json(route, { ok: true, applies: false, percent: null, feeCents: null, chargeCents: 100000 });
+    return json(route, await probeAnswer(body, call));
   }
   if (url.includes("/portal-payments")) {
     fnCalls.push({ fn: "portal-payments", body });
@@ -139,7 +158,8 @@ const handler = async (route) => {
       return json(route, { ...payOptions, canCharge: true, ...(S.prefill === undefined ? {} : { billingPrefill: S.prefill }) });
     }
     if (body.action === "charge") return json(route, { ok: true, amountCents: 100000, last4: "1111" });
-    return json(route, { ok: true, applies: false, percent: null });
+    const a = await probeAnswer(body);
+    return json(route, { ok: true, applies: a.applies, percent: a.percent });
   }
   if (url.includes("/portal-settings")) {
     if (body.action === "status") {
@@ -182,6 +202,10 @@ async function postToken(swipe = false) {
 }
 const attrs = (l) => l.evaluate((el) => ({ ac: el.getAttribute("autocomplete"), mode: el.getAttribute("inputmode"), type: el.type, value: el.value, max: el.maxLength }));
 const visible = async (l) => (await l.count()) === 1 && await l.isVisible();
+// innerText that answers "" rather than waiting 30 s when the element is gone (a panel that
+// closed because a charge went through where it should not have).
+const textOf = (l) => l.innerText({ timeout: 1000 }).catch(() => "");
+const offOf = (l) => l.isDisabled({ timeout: 1000 }).catch(() => false);
 
 try {
   // ── M: my-quotes.html ──────────────────────────────────────────────────────────────────────────
@@ -281,6 +305,53 @@ try {
     await panel.getByRole("button", { name: "Card", exact: true }).click();
     await page.waitForTimeout(300);
     ok("M7: …and Card brings them back", await visible(mqName()) && await visible(mqStreet()));
+
+    // M8: Pay tapped straight from the ZIP box, and that ZIP carries a fee the screen has not shown.
+    S.feeZips = { "90210": 3 };
+    S.probeDelayMs = 700;
+    await postToken();
+    ok("M8: the first answer (no ZIP yet) is on screen: no fee",
+      await until(async () => (await textOf(panel)).includes("No card fee on this card."), 5000));
+    await mqStreet().fill("9 Elm Rd");
+    const paysM8 = callsOf("customer-pay", "pay").length;
+    const probesM8 = callsOf("customer-pay", "surcharge_probe").length;
+    await mqZip().fill("90210");
+    await mqPay().click();   // the same tap takes the focus out of the ZIP box
+    ok("M8: the tap sends nothing while the fee for that ZIP is checked, and says so on the button",
+      callsOf("customer-pay", "pay").length === paysM8 && (await textOf(panel)).includes("Checking card fee"), await textOf(panel));
+    ok("M8: …then the new fee is on screen and the panel asks for a second tap",
+      await until(async () => {
+        const t = await textOf(panel);
+        return t.includes("you'll be charged $1,030.00") && t.includes("The amount to pay has changed");
+      }, 6000), await textOf(panel));
+    ok("M8: …the button says the new amount, and still nothing was charged",
+      (await panel.getByRole("button", { name: "Pay $1,030.00" }).count()) === 1 && callsOf("customer-pay", "pay").length === paysM8);
+    ok("M8: the answer that decided was asked with that ZIP",
+      callsOf("customer-pay", "surcharge_probe").slice(probesM8).some((b) => b.postal === "90210"),
+      JSON.stringify(callsOf("customer-pay", "surcharge_probe").slice(probesM8)));
+    await panel.screenshot({ path: join(shotsDir("cardBillingFields"), "M-fee-changed.png") }).catch(() => {});
+    await panel.getByRole("button", { name: "Pay $1,030.00" }).click({ timeout: 3000 }).catch(() => {});
+    ok("M8: the second tap sends the charge, with that ZIP",
+      await until(() => callsOf("customer-pay", "pay").length > paysM8, 6000) && lastOf("customer-pay", "pay").postal === "90210",
+      JSON.stringify(lastOf("customer-pay", "pay")));
+
+    // M9: the same tap when the ZIP does not move the fee: one tap, after the check for that ZIP.
+    await until(async () => (await page.getByRole("button", { name: "Pay $1,000.00" }).count()) > 0, 6000);
+    panel = await openPanel();
+    await postToken();
+    await until(async () => (await panel.innerText()).includes("No card fee on this card."), 5000);
+    await mqStreet().fill("9 Elm Rd");
+    const paysM9 = callsOf("customer-pay", "pay").length;
+    await mqZip().fill("65801");
+    await mqPay().click();
+    ok("M9: one tap is enough when the fee does not move", await until(() => callsOf("customer-pay", "pay").length > paysM9, 6000));
+    const payCall = fnCalls.findLast((c) => c.body.action === "pay");
+    const probeCall = fnCalls.findLast((c) => c.body.action === "surcharge_probe" && c.body.postal === "65801");
+    ok("M9: …and the charge left only after the check for that ZIP had ANSWERED",
+      !!probeCall && !!payCall && probeCall.answeredAt <= payCall.at && payCall.body.postal === "65801",
+      JSON.stringify({ probeAnswered: probeCall && probeCall.answeredAt, paySent: payCall && payCall.at }));
+    S.feeZips = {};
+    S.probeDelayMs = 0;
   }
 
   // ── P: the portal's Record-a-payment modal ────────────────────────────────────────────────────
@@ -379,6 +450,36 @@ try {
       !(await modal.innerText()).includes("Filled in from the delivery address") && (await modal.innerText()).includes("Where the card's statement goes."));
     await modal.getByRole("button", { name: "Cancel", exact: true }).click();
     S.prefill = PREFILL;
+
+    // P8: Charge waits for the fee that matches the card and the ZIP it will send.
+    S.feeZips = { "90210": 3 };
+    S.probeDelayMs = 700;
+    modal = await openModal();
+    await modal.getByRole("button", { name: "Card", exact: true }).click();
+    const chargeBtn = () => modal.getByRole("button", { name: /^(Charge \$|Checking card fee)/ });
+    await postToken();
+    ok("P8: a new card puts Charge on \"Checking card fee…\", disabled",
+      await until(async () => (await textOf(chargeBtn())).includes("Checking card fee") && await offOf(chargeBtn()), 3000));
+    ok("P8: …until the answer for the card and the prefilled ZIP is in",
+      await until(async () => (await textOf(chargeBtn())) === "Charge $1,000.00" && !(await offOf(chargeBtn())), 5000));
+    const chargesP8 = callsOf("portal-payments", "charge").length;
+    await pZip().fill("90210");
+    ok("P8: a new ZIP puts it back on \"Checking card fee…\"",
+      await until(async () => (await textOf(chargeBtn())).includes("Checking card fee") && await offOf(chargeBtn()), 2000));
+    await chargeBtn().click({ force: true, timeout: 2000 }).catch(() => {});
+    await page.waitForTimeout(200);
+    ok("P8: a tap meanwhile charges nothing", callsOf("portal-payments", "charge").length === chargesP8);
+    ok("P8: the new ZIP's fee lands on the button",
+      await until(async () => (await textOf(chargeBtn())) === "Charge $1,030.00" && !(await offOf(chargeBtn())), 6000),
+      await textOf(chargeBtn()));
+    ok("P8: the answer that decided was asked with that ZIP", lastOf("portal-payments", "surcharge_probe").postal === "90210",
+      JSON.stringify(lastOf("portal-payments", "surcharge_probe")));
+    await chargeBtn().click({ timeout: 3000 }).catch(() => {});
+    ok("P8: the charge goes out with that ZIP",
+      await until(() => callsOf("portal-payments", "charge").length > chargesP8, 6000) && lastOf("portal-payments", "charge").postal === "90210",
+      JSON.stringify(lastOf("portal-payments", "charge")));
+    S.feeZips = {};
+    S.probeDelayMs = 0;
   }
 
   // ── X ──
