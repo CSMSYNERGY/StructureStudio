@@ -19,7 +19,7 @@
 Deno.env.set("CARDPOINTE_BASE_URL", "https://isv-uat.example.invalid/cardconnect/rest");
 Deno.env.set("CARDPOINTE_API_USER", "u");
 Deno.env.set("CARDPOINTE_API_PASS", "p");
-Deno.env.set("CARDPOINTE_MERCHID", "490000000101");
+Deno.env.set("CARDPOINTE_MERCHID", "100200300400");
 Deno.env.set("CARDPOINTE_TOKENIZER_BASE", "https://isv-uat.example.invalid/itoke/ajax-tokenizer.html");
 
 const cp = await import("./cardpointe.ts");
@@ -41,7 +41,7 @@ function restore() {
   globalThis.fetch = realFetch;
 }
 
-const REQ = { merchid: "490000000101", amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
+const REQ = { merchid: "100200300400", amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
 
 /** Run cpAuth and hand back the thrown error, or null when it returned. */
 async function authError(): Promise<Error | null> {
@@ -117,7 +117,7 @@ Deno.test("HTTP 200 with an unparseable body is UNKNOWN — the branch nmi.ts ca
 });
 
 Deno.test("200 with valid JSON but no respstat is unknown — missing is not 'no'", async () => {
-  stubFetch(200, JSON.stringify({ merchid: "490000000101", somethingElse: 1 }));
+  stubFetch(200, JSON.stringify({ merchid: "100200300400", somethingElse: 1 }));
   const e = await authError();
   restore();
   check("unknown", cp.isGatewayUnknown(e), String(e?.message));

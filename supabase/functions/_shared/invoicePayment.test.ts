@@ -23,7 +23,7 @@
 Deno.env.set("CARDPOINTE_BASE_URL", "https://isv-uat.example.invalid/cardconnect/rest");
 Deno.env.set("CARDPOINTE_API_USER", "u");
 Deno.env.set("CARDPOINTE_API_PASS", "p");
-Deno.env.set("CARDPOINTE_MERCHID", "490000000101");
+Deno.env.set("CARDPOINTE_MERCHID", "100200300400");
 Deno.env.set("CARDPOINTE_TOKENIZER_BASE", "https://isv-uat.example.invalid/itoke/ajax-tokenizer.html");
 
 const ip = await import("./invoicePayment.ts");
@@ -225,7 +225,7 @@ function restore() {
 
 const OPTS = {
   clientId: "t1",
-  merchid: "490000000101",
+  merchid: "100200300400",
   orderId: "o1",
   shortCode: "SS-ABC",
   amountCents: 100000,
@@ -535,7 +535,7 @@ const UNKNOWN_ATT = {
   short_code: "SS-ABC",
   amount_cents: 100000,
   rail: "card",
-  merchid: "490000000101",
+  merchid: "100200300400",
   orderid: "ssp_lost",
   state: "closed_unknown",
   retref: null,
