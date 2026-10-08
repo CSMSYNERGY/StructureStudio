@@ -2097,6 +2097,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const blankQuote = "ssQuoteNext" in payload && updates.ss_quote_next === null;
       const blankInvoice = "ssInvoiceNext" in payload && updates.ss_invoice_next === null;
       if (curInvErr && (blankQuote || blankInvoice)) return dbFail(req, clientId, "check your numbering", curInvErr);
+      // The same for the rate. The beta Estimates & Invoices card stopped posting it (2026-10-09:
+      // it is set on Company → Tax), so the guard below judges the STORED rate, and an unreadable
+      // row would read as "no rate": the sentence telling a builder with a rate on file to set one.
+      // Answer the read failure instead. A save that sends the rate (production's card) is judged
+      // on what it sent, as before. One that does not was always refused here (no row read means
+      // no CRM capability and no stored rate), so this changes which answer it gets, never whether
+      // it saves.
+      if (curInvErr && !("ssTaxRate" in payload)) return dbFail(req, clientId, "check your sales tax settings", curInvErr);
       if (blankQuote && curInv?.ss_quote_next != null) delete updates.ss_quote_next;
       if (blankInvoice && curInv?.ss_invoice_next != null) delete updates.ss_invoice_next;
       // ── CRM INVOICING IS A CAPABILITY NOW (migration 217, Carolyn 2026-09-07) ───────────

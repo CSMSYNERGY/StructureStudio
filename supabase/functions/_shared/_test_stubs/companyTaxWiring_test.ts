@@ -26,6 +26,11 @@
 //     8. on a database WITHOUT migration 290 (the column missing): 200, taxCodesEnabled null, every
 //        other field as before, and no app_errors row (the tolerant read);
 //     9. a builder with no settings row reads no rate, CRM mode, switch off.
+//   save (CRM Connection → Estimates & Invoices)
+//    10. the beta card no longer posts the rate, so the paperwork guard judges the stored one: with
+//        that row unreadable the answer is the read failure, not "StructureStudio needs a sales tax
+//        rate" (a builder with a rate on file told to set one); production's card, which posts the
+//        rate, is judged on what it sent exactly as before.
 //
 // HOW. paperworkDefaultWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts is
 // imported, so a request runs through withErrorLog, resolveTenant and the action's branch as it does
@@ -88,6 +93,7 @@ type World = {
   row?: Row;
   codes?: boolean;          // client_settings.tax_codes_enabled
   noColumn?: boolean;       // the database has no tax_codes_enabled (a deploy ahead of 290)
+  guardReadFails?: boolean; // `save`'s paperwork-guard read of client_settings errors
   member?: { role: string; title: string | null; access: Record<string, string> | null };
 };
 type Trace = {
@@ -124,6 +130,9 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
       return { data: { ...(row ?? {}), tax_codes_enabled: world.codes ?? false, ...up }, error: null };
     }
     trace.selects.push(cols);
+    if (world.guardReadFails && /\bghl_invoicing_allowed\b/.test(cols) && /\bss_quote_next\b/.test(cols)) {
+      return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+    }
     if (/\btax_codes_enabled\b/.test(cols)) {
       if (world.noColumn) return { data: null, error: MISSING };
       return { data: row ? { tax_codes_enabled: world.codes ?? false } : null, error: null };
@@ -348,4 +357,30 @@ Deno.test("9. tax_codes_get for a builder with no settings row: no rate, CRM mod
   assertEquals(status, 200, JSON.stringify(body));
   assertEquals([body.companyRatePct, body.companyLabel, body.ssTaxDelivery], [null, "Sales tax", false]);
   assertEquals([body.ssMode, body.ghlInvoicingAllowed, body.crmConfigured, body.taxCodesEnabled], [false, false, false, false]);
+});
+
+// ─── save: the Estimates & Invoices card's paperwork guard ─────────────────────────────────────
+/** The card's body for a tenant without the capability: beta's (no rate since 2026-10-09) and
+ *  production's (the rate, its label and the delivery switch as well). */
+const BETA_CARD = { invoiceInGhl: false, ssQuoteNext: "3101", ssQuotePrefix: "Q-", ssInvoiceNext: "7001", ssInvoicePrefix: "INV-" };
+const PROD_CARD = { ...BETA_CARD, ssTaxRate: "6.5", ssTaxLabel: "Sales tax", ssTaxDelivery: false };
+const NEEDS_RATE = /needs a sales tax rate/;
+
+Deno.test("10. the beta card with the settings row unreadable: the read failure, not 'needs a sales tax rate'", async () => {
+  const failed = await drive({ action: "save", ...BETA_CARD }, { row: NEW_DEFAULT, guardReadFails: true });
+  assertEquals(failed.status, 500, JSON.stringify(failed.body));
+  assertEquals(failed.body.ref, "check your sales tax settings");
+  assertFalse(NEEDS_RATE.test(String(failed.body.error)), "a builder with a rate on file is not told to set one");
+  assertEquals(failed.trace.upserts.length, 0, "nothing written");
+  assertEquals(failed.trace.writes, [], "nothing written anywhere");
+
+  // Readable, the same body is judged on the STORED rate: on file, it saves without sending one.
+  const ok = await drive({ action: "save", ...BETA_CARD }, { row: NEW_DEFAULT });
+  assertEquals(ok.status, 200, JSON.stringify(ok.body));
+  assertFalse("ss_tax_rate" in ok.trace.upserts[0], "the card no longer writes the rate");
+
+  // Production's card sends the rate, so an unreadable row is judged on what it sent, as before.
+  const prod = await drive({ action: "save", ...PROD_CARD }, { row: NEW_DEFAULT, guardReadFails: true });
+  assertEquals(prod.status, 200, JSON.stringify(prod.body));
+  assertEquals(prod.trace.upserts[0].ss_tax_rate, 0.065);
 });
