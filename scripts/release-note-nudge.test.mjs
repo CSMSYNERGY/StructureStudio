@@ -45,11 +45,16 @@ test("hasReleaseTrailer: the last paragraph, every line a trailer, the subject n
   assert.equal(hasReleaseTrailer("Subject\r\n\r\nRelease-note: fix: CRLF works the same way\r\n" + CO + "\r\n"), true);
 });
 
+// The pre-push hook runs this file with GIT_DIR, GIT_INDEX_FILE and friends pointing at the real
+// repository, and git obeys them over cwd. Every throwaway repo (and the CLI run inside it)
+// gets an environment with them removed, or "git add" answers "must be run in a work tree".
+const CLEAN_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+
 // ── The real thing, against a throwaway repository ─────────────────────────────────────────
 function repo() {
   const dir = mkdtempSync(join(tmpdir(), "ssnudge-"));
   const g = (...args) => {
-    const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    const r = spawnSync("git", args, { cwd: dir, encoding: "utf8", env: CLEAN_ENV });
     if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
     return r.stdout.trim();
   };
@@ -75,21 +80,21 @@ test("findMissing names exactly the uncovered user-facing commits, oldest first"
     r.commit(["portal/b.jsx"], `Internal portal change\n\nRelease-note: none\n${CO}`);
     const f = r.commit(["index.html", "supabase/functions/y/index.ts"], "Page and function, no trailer");
     const head = r.g("rev-parse", "HEAD");
-    const missing = findMissing({ ranges: [`${base}..${head}`], cwd: r.dir });
+    const missing = findMissing({ ranges: [`${base}..${head}`], cwd: r.dir, env: CLEAN_ENV });
     assert.deepEqual(missing.map((m) => m.sha), [a, f]);
     assert.deepEqual(missing[1].areas, ["index.html", "supabase/functions/"]);
 
     // An empty note commit covers everything before it in the push...
     r.commit([], `Release note\n\nRelease-note: fix: Pages and functions answer faster\n${CO}`);
     const head2 = r.g("rev-parse", "HEAD");
-    assert.deepEqual(findMissing({ ranges: [`${base}..${head2}`], cwd: r.dir }), []);
+    assert.deepEqual(findMissing({ ranges: [`${base}..${head2}`], cwd: r.dir, env: CLEAN_ENV }), []);
     // ...but not what comes after it.
     const late = r.commit(["portal/c.jsx"], "A later portal change");
-    assert.deepEqual(findMissing({ ranges: [`${base}..HEAD`], cwd: r.dir }).map((m) => m.sha), [late]);
+    assert.deepEqual(findMissing({ ranges: [`${base}..HEAD`], cwd: r.dir, env: CLEAN_ENV }).map((m) => m.sha), [late]);
     // --last N <rev>: the workflow's fallback when `before` is unusable.
-    assert.deepEqual(findMissing({ ranges: ["HEAD"], last: 1, cwd: r.dir }).map((m) => m.sha), [late]);
+    assert.deepEqual(findMissing({ ranges: ["HEAD"], last: 1, cwd: r.dir, env: CLEAN_ENV }).map((m) => m.sha), [late]);
     // Junk ranges are skipped, not run: nothing, and no throw.
-    assert.deepEqual(findMissing({ ranges: ["--output=/tmp/x", "nope..alsonope"], cwd: r.dir }), []);
+    assert.deepEqual(findMissing({ ranges: ["--output=/tmp/x", "nope..alsonope"], cwd: r.dir, env: CLEAN_ENV }), []);
   } finally { r.done(); }
 });
 
@@ -111,7 +116,7 @@ test("the CLI always exits 0: with findings, with none, and with a range git can
   try {
     const base = r.commit(["README.md"], "base");
     r.commit(["portal/a.jsx"], "No trailer here");
-    const run = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: r.dir, encoding: "utf8" });
+    const run = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: r.dir, encoding: "utf8", env: CLEAN_ENV });
     const found = run(`${base}..HEAD`);
     assert.equal(found.status, 0);
     assert.match(found.stderr, /release-note nudge: 1 commit\(s\) going to beta/);

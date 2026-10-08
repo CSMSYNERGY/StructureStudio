@@ -81,8 +81,8 @@ function areas(files) {
   return [...out].slice(0, 4);
 }
 
-function git(args, cwd) {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+function git(args, cwd, env) {
+  const r = spawnSync("git", args, { cwd, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: r.stdout ?? "" };
 }
 
@@ -90,14 +90,14 @@ function git(args, cwd) {
  * The commits in `ranges` (oldest first, merges skipped, at most MAX_COMMITS) that are user-facing
  * and not covered by a trailer. `last` + a single rev means "the last N commits of that rev".
  */
-export function findMissing({ ranges = [], last = null, cwd = process.cwd() } = {}) {
+export function findMissing({ ranges = [], last = null, cwd = process.cwd(), env = process.env } = {}) {
   const shas = [];
   const seen = new Set();
   const specs = ranges.flatMap((r) => String(r).split(/\s+/)).filter(Boolean);
   for (const spec of specs) {
     if (!/^[0-9A-Za-z_./^~-]+(?:\.\.[0-9A-Za-z_./^~-]+)?$/.test(spec)) continue;   // no options smuggled in
     const n = last ? Math.min(Number(last) || 0, MAX_COMMITS) : MAX_COMMITS;
-    const r = git(["rev-list", "--no-merges", `--max-count=${n}`, spec, "--"], cwd);
+    const r = git(["rev-list", "--no-merges", `--max-count=${n}`, spec, "--"], cwd, env);
     if (!r.ok) continue;
     for (const s of r.out.split("\n").filter(Boolean)) if (!seen.has(s)) { seen.add(s); shas.push(s); }
   }
@@ -105,8 +105,8 @@ export function findMissing({ ranges = [], last = null, cwd = process.cwd() } = 
   const ordered = shas.slice(0, MAX_COMMITS).reverse();
   let pending = [];
   for (const sha of ordered) {
-    const msg = git(["show", "-s", "--format=%B", sha], cwd).out;
-    const files = git(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "-z", sha], cwd).out.split("\0").filter(Boolean);
+    const msg = git(["show", "-s", "--format=%B", sha], cwd, env).out;
+    const files = git(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "-z", sha], cwd, env).out.split("\0").filter(Boolean);
     const trailer = hasReleaseTrailer(msg);
     if (!files.length && trailer) { pending = []; continue; }
     if (trailer) continue;
