@@ -527,7 +527,12 @@ export function parseCreateContact(raw: Record<string, unknown>):
  * whatever this says.
  */
 export function phoneSelfServeOn(get: (name: string) => string | undefined | null): boolean {
-  return String(get("PHONE_SELF_SERVE") ?? "").trim().toLowerCase() === "on";
+  // Workstream 2 (one Twilio sub-account per builder): the switch opens ONLY once TWILIO_SUBACCOUNTS
+  // is "on" too. A builder who buys a number while sub-accounts are off buys it on the parent account
+  // and stays there for good (one tenant, one account: migration 292's twilio_accounts_no_split), so
+  // self-serve before then would put builders on the parent by accident. Operators are not affected
+  // (phoneRolloutRefusal). Both are unset today, so this changes nothing until both are set.
+  return String(get("PHONE_SELF_SERVE") ?? "").trim().toLowerCase() === "on" && get("TWILIO_SUBACCOUNTS") === "on";
 }
 
 /** The sentence every rollout refusal answers with. */

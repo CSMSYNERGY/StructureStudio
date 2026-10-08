@@ -181,6 +181,9 @@ import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNum
 // (tenantTwilio). trustHubHttp binds the shared helpers' transport to it.
 import { trustHubHttp } from "../_shared/twilioTrustHub.ts";
 import { resolveTwilioAccount, TwilioAccountError, type TwilioAccount, type TwilioCreds } from "../_shared/twilioAccount.ts";
+// Workstream 2, phase 3: a builder's first number makes their own Twilio sub-account first (only
+// while TWILIO_SUBACCOUNTS is "on"; off, it answers "the parent" without reading anything).
+import { ensureRefusalSentence, ensureTwilioAccount } from "../_shared/twilioProvision.ts";
 // Migration 266: a later number joins the builder's texting setup with portal-sms's own helpers.
 import { attachNumberToService, clearNumberSmsUrl, numberInService } from "../_shared/twilioTrustHub.ts";
 // Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
@@ -10268,6 +10271,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
     }
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // ── WORKSTREAM 2, PHASE 3: THE BUILDER'S OWN TWILIO ACCOUNT, BEFORE ANY MONEY MOVES ──────────
+    // With TWILIO_SUBACCOUNTS "on", a builder who is not pinned to the parent (our internal account,
+    // or one already holding something there) gets their own sub-account made here, BEFORE the
+    // wallet hold and the purchase, so the number is bought inside it with its own credentials
+    // (tenantTwilio below then resolves to it). Off, this returns "the parent" without a read: today.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (!prov.ok) {
+      if (prov.reason === "not_configured") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_not_configured", severity: "info",
+          message: `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}` }).catch(() => {});
+        return phoneUnavailable(ensureRefusalSentence(prov));
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+        message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+        context: { step: prov.step, code: prov.code } }).catch(() => {});
+      return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+    }
     // Everything the new number needs, BEFORE any money moves: somewhere for its texts to go
     // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
     // on, the voicemail Bin when it is off).
@@ -10308,6 +10330,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
     const phoneOn = (cs as { phone_status?: string } | null)?.phone_status === "on";
 
+    // The row records which account the number lives in (migration 292): the sub's SID, or nothing
+    // for the parent (exactly the row this wrote before sub-accounts).
+    const subAccountSid = creds.source === "sub" ? creds.accountSid : null;
     const out = await buyCallingNumber({ clientId, wanted, recorded: liveRows.map((r) => String(r.phone_number)) }, {
       // In the tenant's own account (its sub-account once TWILIO_SUBACCOUNTS is on).
       findPurchasedNumbers: (id) => findPurchasedNumbers(id, creds),
@@ -10332,7 +10357,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       },
       record: async (b) => {
         const { data, error } = await admin.from("sms_numbers")
-          .insert(callingOnlyNumberRow(clientId, b))
+          .insert(callingOnlyNumberRow(clientId, b, subAccountSid))
           .select("id, phone_number, twilio_sid").single();
         return error || !data ? { ok: false, error: error ?? { message: "no row returned" } } : { ok: true, row: data };
       },

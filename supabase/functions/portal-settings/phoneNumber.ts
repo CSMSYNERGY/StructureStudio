@@ -361,13 +361,16 @@ export async function buyCallingNumber(
  * messaging_service_sid NULL is what marks it calling-only. voice_enabled stays at its default
  * (false) until the number is connected for calls.
  */
-export function callingOnlyNumberRow(clientId: string, bought: Bought) {
+export function callingOnlyNumberRow(clientId: string, bought: Bought, subAccountSid: string | null = null) {
   return {
     client_id: clientId,
     phone_number: bought.phoneNumber,
     twilio_sid: bought.sid || null,
     messaging_service_sid: null,
     registration_status: "pending_registration",
+    // Workstream 2 (migration 292): a number bought inside the tenant's own sub-account says so.
+    // Absent (the parent, NULL) the row is exactly what it was before sub-accounts.
+    ...(subAccountSid ? { twilio_account_sid: subAccountSid } : {}),
   };
 }
 

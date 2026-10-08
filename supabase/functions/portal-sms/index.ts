@@ -42,6 +42,10 @@ import {
 // Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
 import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
 import { resolveTwilioAccount, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
+// Workstream 2, phase 3: the builder's own sub-account is made on their first submit (and checked
+// again before a number is bought), and a NEW registration waits for the switch (registrationGate.ts).
+import { ensureRefusalSentence, ensureTwilioAccount } from "../_shared/twilioProvision.ts";
+import { smsSignupRefusal, type RegistrationLike } from "./registrationGate.ts";
 // My Synergy Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
 import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
 
@@ -441,6 +445,50 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   let twilioMemo: Promise<TwilioAccount | null> | null = null;
   const tenantCreds = (): Promise<TwilioAccount | null> =>
     (twilioMemo ??= resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k)));
+  const subaccountsSwitch = () => subaccountsOn((k) => Deno.env.get(k));
+
+  // ── WHO MAY START A REGISTRATION (Workstream 2, phase 3: registrationGate.ts) ──────────────
+  // While TWILIO_SUBACCOUNTS is off, a NEW registration would be made on the parent account and
+  // stay there for good, so it is refused; one already under way, our internal account and a
+  // tenant pinned to the parent are not. With the switch on, nothing is read here.
+  const onParentByDecision = async (): Promise<boolean> => {
+    const [cs, pin] = await Promise.all([
+      admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle(),
+      admin.from("twilio_accounts").select("kind").eq("client_id", clientId).maybeSingle(),
+    ]);
+    // A read that fails (twilio_accounts before migration 292 is applied) is "no": refusing a NEW
+    // registration is the safe side, and nothing already under way ever reaches this question.
+    return (cs?.data as { internal_account?: boolean } | null)?.internal_account === true
+      || (pin?.data as { kind?: string } | null)?.kind === "parent";
+  };
+  const signupRefused = async (act: "save_intake" | "advance", reg: RegistrationLike): Promise<Response | null> => {
+    const why = await smsSignupRefusal({ action: act, subaccountsOn: subaccountsSwitch(), reg, onParentByDecision });
+    return why ? json({ error: why, code: "sms_signup_closed" }, 403) : null;
+  };
+
+  // ── THE BUILDER'S OWN TWILIO ACCOUNT (Workstream 2, phase 3: _shared/twilioProvision.ts) ────
+  // Made (or resumed) before anything is registered or bought. Off, ensureTwilioAccount answers
+  // "the parent" without a read; a pinned or internal tenant, or one already holding something on
+  // the parent, stays there. null = go on; otherwise the answer to return.
+  const ensureAccount = async (): Promise<Response | null> => {
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (prov.ok) return null;
+    if (prov.reason === "busy" || prov.reason === "suspended" || prov.reason === "closed") {
+      return json({ error: ensureRefusalSentence(prov) }, prov.status);
+    }
+    const notConfigured = prov.reason === "not_configured";
+    await logEdgeError({
+      fn: "portal-sms", clientId, code: notConfigured ? "twilio_provision_not_configured" : "twilio_provision_failed",
+      severity: notConfigured ? "info" : "error",
+      message: notConfigured
+        ? `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}`
+        : `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+      context: { step: prov.step, code: prov.code },
+    }).catch(() => {});
+    const res = json({ error: notConfigured ? "Text messaging is not switched on for this deployment yet." : ensureRefusalSentence(prov) }, prov.status);
+    if (!notConfigured) filedAtReturnSite.add(res);
+    return res;
+  };
 
   try {
     switch (action) {
@@ -553,6 +601,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (problems.length) return json({ error: problems[0], problems }, 400);
 
         const reg = await load();
+        // Workstream 2: a brand-new registration waits for TWILIO_SUBACCOUNTS (registrationGate.ts).
+        const closed = await signupRefused("save_intake", reg);
+        if (closed) return closed;
         // ⚠️ Refuse to edit an intake that has already been SUBMITTED. Past 'ready' the
         // authoritative copy lives in Twilio's EndUser objects; letting the form overwrite
         // our echo would make the portal disagree with what the carriers actually reviewed.
@@ -864,9 +915,37 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!primary) {
           return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
         }
+        // Workstream 2: a registration that has not reached Twilio waits for TWILIO_SUBACCOUNTS
+        // (registrationGate.ts). Read only while the switch is off; on, nothing is asked here.
+        if (!subaccountsSwitch()) {
+          const { data: current, error: curErr } = await admin.from("sms_registrations").select("*").eq("client_id", clientId).maybeSingle();
+          if (curErr) return json({ error: "Couldn't check your registration just now. Try again in a minute." }, 503);
+          const closed = await signupRefused("advance", current);
+          if (closed) return closed;
+        }
+        // Workstream 2, phase 3: the builder's own sub-account, made (or resumed) on the first
+        // submit, BEFORE the lock and before any stage: everything below runs inside it.
+        const notReady = await ensureAccount();
+        if (notReady) return notReady;
         // The account every stage runs in, BEFORE the lock: a tenant whose account cannot be used
         // never takes it.
         const creds = await tenantCreds();
+        // The registration says which account it lives in (migration 292) BEFORE anything is made
+        // there, so 292's twilio_parent_holdings never reads a sub's registration as the parent's.
+        // Only a sub's: the parent is NULL, the row as it always was.
+        if (creds?.source === "sub") {
+          const { error: markErr } = await admin.from("sms_registrations")
+            .update({ twilio_account_sid: creds.accountSid }).eq("client_id", clientId).is("twilio_account_sid", null);
+          if (markErr) {
+            await logEdgeError({
+              fn: "portal-sms", clientId, code: "sms_registration_account_mark_failed", severity: "error",
+              message: `advance: could not record the registration's Twilio account: ${markErr.message}`,
+            }).catch(() => {});
+            const res = json({ error: "Couldn't save your registration just now. Try again in a minute." }, 502);
+            filedAtReturnSite.add(res);
+            return res;
+          }
+        }
 
         // ⚠️ SINGLE-FLIGHT, TAKEN IN ONE STATEMENT. A read-then-write here races, and the
         // race is two brand registrations and two real charges for one builder. Proceed
@@ -916,6 +995,10 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!reg.messaging_service_sid || reg.status === "none") {
           return json({ error: "Finish the carrier registration before buying a number." }, 409);
         }
+        // Workstream 2, phase 3: the builder's own account exists before a number is bought or
+        // adopted in it (normally made at the first submit; this is the fast path then).
+        const notReady = await ensureAccount();
+        if (notReady) return notReady;
         // The account the number is found, adopted or bought in: the registration's.
         const creds = await tenantCreds();
         const http = trustHubHttp(creds);
@@ -1051,6 +1134,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           twilio_sid: bought.sid,
           messaging_service_sid: reg.messaging_service_sid,
           registration_status: "pending_registration",
+          // Workstream 2 (migration 292): bought inside the builder's own sub-account. Absent for
+          // the parent, so that row is exactly what it was.
+          ...(creds?.source === "sub" ? { twilio_account_sid: creds.accountSid } : {}),
         });
         await admin.from("client_settings")
           .update({ sms_number: bought.phoneNumber }).eq("client_id", clientId);

@@ -254,6 +254,11 @@ Deno.test("the calling-only row: not registered for texting (165's word), no mes
     messaging_service_sid: null, registration_status: "pending_registration",
   });
   assertEquals(callingOnlyNumberRow("demo-tenant", { sid: "", phoneNumber: "+15555550104" }).twilio_sid, null);
+  // Workstream 2: bought inside the tenant's own sub-account, the row says which (migration 292);
+  // on the parent it carries no such key at all (the row it always was).
+  assertEquals(callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }, null), callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }));
+  const SUB = "AC" + "5".repeat(32);
+  assertEquals((callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }, SUB) as Record<string, unknown>).twilio_account_sid, SUB);
 });
 
 Deno.test("only a US number from the search, and a three-digit area code, get through", () => {
@@ -284,7 +289,8 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
   assert(/findPurchasedNumbers: \(id\) => findPurchasedNumbers\(id, creds\),\s*purchaseNumber: \(o\) => purchaseNumber\(o, creds\),\s*releaseNumber: \(sid\) => releaseNumber\(sid, creds\),/.test(buy),
     "a number bought but not recorded can be given back, in the account it was bought in");
   assert(buy.indexOf("await tenantTwilio()") > 0 && buy.indexOf("await tenantTwilio()") < buy.indexOf("buyCallingNumber("), "the account is resolved before anything is bought");
-  assert(/\.insert\(callingOnlyNumberRow\(clientId, b\)\)/.test(buy));
+  assert(/\.insert\(callingOnlyNumberRow\(clientId, b, subAccountSid\)\)/.test(buy));
+  assert(/const subAccountSid = creds\.source === "sub" \? creds\.accountSid : null;/.test(buy), "the sub's SID only, never the parent's");
   assert(!/messagingServiceSid/.test(buy), "the purchase itself never passes a messaging service (joining texting is attachToTexting, after the row is recorded)");
   assert(!/client_settings"\)\s*\.update/.test(buy), "a calling-only number must not become client_settings.sms_number");
   // Up to MAX_NUMBERS live numbers (migration 266), checked before anything is bought; the env a number needs, before money moves.

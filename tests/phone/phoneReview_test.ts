@@ -26,11 +26,14 @@ const slice = (src: string, a: string, b: string, what: string) => {
 
 // ── SSB-1: the rollout, on the server ──────────────────────────────────────────────────────
 Deno.test("rollout: only PHONE_SELF_SERVE=on opens it to builders; until then an operator is needed", () => {
-  const env = (v?: string) => (k: string) => (k === "PHONE_SELF_SERVE" ? v : undefined);
+  // Workstream 2: and only once TWILIO_SUBACCOUNTS is "on" too, so no builder buys a number on the
+  // parent account by accident (one tenant, one account, for good).
+  const env = (v?: string, sub = "on") => (k: string) => (k === "PHONE_SELF_SERVE" ? v : k === "TWILIO_SUBACCOUNTS" ? sub : undefined);
   assertEquals(phoneSelfServeOn(env(undefined)), false);
   assertEquals(phoneSelfServeOn(env("")), false);
   assertEquals(phoneSelfServeOn(env("true")), false, "only the exact word opens it");
   assertEquals(phoneSelfServeOn(env(" ON ")), true);
+  for (const sub of ["", "off", "ON", "true"]) assertEquals(phoneSelfServeOn(env("on", sub)), false, `sub-accounts "${sub}" keeps it closed`);
   assertEquals(phoneRolloutRefusal({ selfServe: false, operator: false }), PHONE_ROLLOUT_SENTENCE);
   assertEquals(phoneRolloutRefusal({ selfServe: false, operator: true }), null);
   assertEquals(phoneRolloutRefusal({ selfServe: true, operator: false }), null);
