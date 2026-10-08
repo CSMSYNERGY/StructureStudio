@@ -298,13 +298,120 @@ export type CpAuthRequest = {
   account: string;
   expiry?: string;
   orderid: string;
+  /** The billing name, street and ZIP. AVS compares street and ZIP with what the card's bank
+   *  holds; nothing was sent for either until 2026-10. All three go through cpBillingFields on
+   *  the way out, whoever built the request. */
   postal?: string;
   name?: string;
-  /** "E" e-commerce (customer paying online) or "R" retail (card present at the counter). */
-  ecomind?: "E" | "R";
+  address?: string;
+  /**
+   * "E" e-commerce: a KEYED card, whether the customer typed it online or a builder typed it in.
+   * Left undefined it is "E". `null` sends NO ecomind, which is what a card-present SWIPE must do.
+   *
+   * ⚠️ "R" IS RECURRING in CardPointe's API, not retail. This comment called it retail until
+   * 2026-10, and every swipe went out flagged as a recurring card-not-present sale. The swipe's
+   * own track data is what tells the gateway the card was there. "T" (mail/telephone order) is
+   * typed for Fiserv's answer on keyed builder charges; nothing sends it yet.
+   */
+  ecomind?: "E" | "T" | null;
   /** ACH needs the routing/account form and its own MID; the gateway auto-captures it. */
   rail?: "card" | "ach";
 };
+
+/** The billing fields a page may send with a card charge, cleaned for the gateway. */
+export type CpBilling = { name?: string; address?: string; postal?: string };
+
+/** C0 and C1 controls plus the two Unicode line breaks: a typed street must never carry a
+ *  newline or a NUL into the gateway's request or our logs. */
+const CP_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+function cpCleanText(v: unknown, max: number): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const s = v.replace(CP_CONTROL, " ").replace(/\s+/g, " ").trim().slice(0, max).trim();
+  return s || undefined;
+}
+
+/**
+ * Name, street and ZIP from a request body (`name`, `address`, `postal`), cleaned for /auth.
+ *
+ * Trimmed, control characters out, runs of space collapsed. Name and street are capped at 60.
+ * The ZIP is KEPT ONLY when it is a US ZIP or ZIP+4 (`12345`, `12345-6789`, `123456789`): a
+ * malformed one is dropped rather than sent, because a garbage ZIP is an AVS mismatch the card's
+ * bank may decline on, where a missing one is only "not checked". Anything absent, blank or not
+ * a string is left out of the result, never sent as an empty field.
+ *
+ * Every field is OPTIONAL here, on purpose: production's pages send none of them, and the server
+ * must keep taking exactly what they send. The pages are what require them.
+ */
+export function cpBillingFields(raw: unknown): CpBilling {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const out: CpBilling = {};
+  const name = cpCleanText(r.name, 60);
+  const address = cpCleanText(r.address, 60);
+  const zip = typeof r.postal === "string" ? r.postal.trim() : "";
+  if (name) out.name = name;
+  if (address) out.address = address;
+  if (/^\d{5}(-?\d{4})?$/.test(zip)) out.postal = zip;
+  return out;
+}
+
+/** The /auth body, built in ONE place so the field names recorded on the attempt
+ *  (cpAuthFieldNames) are the names actually sent and cannot drift from them. */
+function cpAuthBody(req: CpAuthRequest): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    merchid: req.merchid,
+    account: req.account,
+    amount: cpAmount(req.amountCents),
+    currency: "USD",
+    orderid: req.orderid,
+    capture: "Y",
+  };
+  const ecomind = req.ecomind === undefined ? "E" : req.ecomind;
+  if (ecomind) body.ecomind = ecomind;
+  // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
+  // /auth wants MMYY.
+  const exp = cpExpiry(req.expiry);
+  if (exp) body.expiry = exp;
+  const billing = cpBillingFields({ name: req.name, address: req.address, postal: req.postal });
+  if (billing.postal) body.postal = billing.postal;
+  if (billing.name) body.name = billing.name;
+  if (billing.address) body.address = billing.address;
+  if (req.rail === "ach") body.accttype = "ECHK";
+  return body;
+}
+
+/**
+ * The NAMES of the fields /auth will be sent for this request, sorted, and never a value: the
+ * account is a token or track data, and none of it belongs in a log. Stored on the attempt as
+ * `sent_fields` (migration 291), which is how "did that sale carry the address?" is answered
+ * from the database rather than from memory.
+ */
+export function cpAuthFieldNames(req: CpAuthRequest): string[] {
+  return Object.keys(cpAuthBody(req)).sort();
+}
+
+/** What the card's bank said about the street/ZIP (AVS) and the security code (CVV), plus the
+ *  gateway's response code. Read off every /auth answer, approved or declined. */
+export type CpVerification = {
+  respcode: string | null;
+  avsresp: string | null;
+  cvvresp: string | null;
+};
+
+export function cpVerification(j: Record<string, unknown> | null | undefined): CpVerification {
+  const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 16) : null);
+  return { respcode: s(j?.respcode), avsresp: s(j?.avsresp), cvvresp: s(j?.cvvresp) };
+}
+
+/**
+ * The AVS/CVV answer a DECLINE carried, or null when the error was not a decline. A decline is
+ * thrown (see cpAuth), so without this its avsresp and cvvresp were lost with the response, and
+ * a mismatching-CVV decline left nothing to compare against a matching one.
+ */
+export function cpDeclineVerification(e: unknown): CpVerification | null {
+  const v = (e as { cpVerification?: CpVerification } | null)?.cpVerification;
+  return v && typeof v === "object" ? v : null;
+}
 
 /**
  * Authorize AND capture in one call (`capture: "Y"`).
@@ -318,29 +425,14 @@ export type CpAuthRequest = {
  * Throws on decline, unknown, throttled and config. Returns on approved and PARTIAL.
  */
 export async function cpAuth(req: CpAuthRequest): Promise<CpAuthResult> {
-  const body: Record<string, unknown> = {
-    merchid: req.merchid,
-    account: req.account,
-    amount: cpAmount(req.amountCents),
-    currency: "USD",
-    orderid: req.orderid,
-    capture: "Y",
-    ecomind: req.ecomind ?? "E",
-  };
-  // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
-  // /auth wants MMYY.
-  const exp = cpExpiry(req.expiry);
-  if (exp) body.expiry = exp;
-  if (req.postal) body.postal = req.postal;
-  if (req.name) body.name = req.name;
-  if (req.rail === "ach") body.accttype = "ECHK";
-
-  const j = await cpPost("PUT", "/auth", body);
+  const j = await cpPost("PUT", "/auth", cpAuthBody(req));
   const stat = requireRespstat(j);
 
   if (stat === "C") {
     const text = String(j.resptext ?? "").trim() || "The card was declined.";
-    throw new Error(text);
+    // The AVS/CVV answer rides on the thrown decline (cpDeclineVerification) so the caller can
+    // keep it on the attempt: a decline has no payments row to hold it.
+    throw Object.assign(new Error(text), { cpVerification: cpVerification(j) });
   }
   if (stat === "B") {
     // Documented as "retry" and treated as UNKNOWN. See the header.

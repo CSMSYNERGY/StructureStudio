@@ -361,3 +361,120 @@ Deno.test("cardpointeConfigured is all-or-nothing", () => {
   // charge, and credentials without a tokenizer base cannot collect an instrument at all.
   check("configured with all five", cp.cardpointeConfigured === true);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Billing fields, ecomind and the AVS/CVV answer (2026-10, Fiserv certification).
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** Run cpAuth against a stub that records the /auth body and answers `answer`. */
+async function sentBody(
+  req: Parameters<typeof cp.cpAuth>[0],
+  answer: Record<string, unknown> = { respstat: "A", respcode: "000", retref: "rb", amount: "6.00", token: "9413948780281111" },
+): Promise<{ body: Record<string, unknown>; error: Error | null }> {
+  let body: Record<string, unknown> = {};
+  globalThis.fetch = ((_u: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body ?? "{}"));
+    return Promise.resolve(new Response(JSON.stringify(answer), { status: 200 }));
+  }) as typeof fetch;
+  let error: Error | null = null;
+  try {
+    await cp.cpAuth(req);
+  } catch (e) {
+    error = e as Error;
+  } finally {
+    restore();
+  }
+  return { body, error };
+}
+
+/** Fields that must NEVER reach /auth from this code: a CVV we would then hold, a stored-credential
+ *  profile or card-on-file flags (nothing is kept for later charges; the validation form says so),
+ *  and raw track data under its own name (a swipe arrives as `account`). */
+const NEVER_SENT = ["cvv2", "profile", "cof", "cofscheduled", "track"];
+
+Deno.test("the auth body carries name, address and postal when given, and never cvv2, profile, cof or track", async () => {
+  const { body } = await sentBody({ ...REQ, name: "Pat Example", address: "12 Main St", postal: "12345" });
+  check("name", body.name === "Pat Example", JSON.stringify(body));
+  check("address", body.address === "12 Main St", JSON.stringify(body));
+  check("postal", body.postal === "12345", JSON.stringify(body));
+  for (const k of NEVER_SENT) check(`no ${k}`, !(k in body), JSON.stringify(Object.keys(body)));
+
+  // Omitted, not sent blank, when none is given: production's pages send none.
+  const bare = (await sentBody(REQ)).body;
+  for (const k of ["name", "address", "postal", ...NEVER_SENT]) check(`bare: no ${k}`, !(k in bare), JSON.stringify(Object.keys(bare)));
+});
+
+Deno.test("cpAuth cleans the billing fields itself, whoever built the request", async () => {
+  // A caller that skipped cpBillingFields still cannot put a newline, an over-long street or a
+  // malformed ZIP on the wire.
+  const { body } = await sentBody({ ...REQ, name: " Pat\tExample ", address: "12 Main St\nApt 4" + "x".repeat(80), postal: "1234" });
+  check("name collapsed", body.name === "Pat Example", JSON.stringify(body.name));
+  check("street has no newline", !/[\n\r]/.test(String(body.address)), JSON.stringify(body.address));
+  check("street capped at 60", String(body.address).length <= 60, String(String(body.address).length));
+  check("a malformed ZIP is left off, not sent", !("postal" in body), JSON.stringify(body));
+});
+
+Deno.test("cpBillingFields: trim, strip controls, cap the street at 60, keep only a real ZIP", () => {
+  const NUL = String.fromCharCode(0), BEL = String.fromCharCode(7), NEL = String.fromCharCode(0x85);
+  const cases: [string, unknown, Record<string, string>][] = [
+    ["all three, clean", { name: "Pat Example", address: "12 Main St", postal: "12345" }, { name: "Pat Example", address: "12 Main St", postal: "12345" }],
+    ["trimmed", { name: "  Pat  ", address: "  12 Main St  ", postal: " 12345 " }, { name: "Pat", address: "12 Main St", postal: "12345" }],
+    ["ZIP+4 with a dash", { postal: "12345-6789" }, { postal: "12345-6789" }],
+    ["ZIP+4 without one", { postal: "123456789" }, { postal: "123456789" }],
+    ["four digits: dropped", { postal: "1234" }, {}],
+    ["six digits: dropped", { postal: "123456" }, {}],
+    ["letters: dropped", { postal: "1234A" }, {}],
+    ["a Canadian postcode: dropped", { postal: "K1A 0B6" }, {}],
+    ["a space before the +4: dropped", { postal: "12345 6789" }, {}],
+    ["a ZIP sent as a number: dropped (02134 would lose its zero)", { postal: 12345 }, {}],
+    ["controls become spaces, runs collapse", { name: `Pat${NUL}${BEL}Example`, address: "12 Main St\r\n\tApt 4" }, { name: "Pat Example", address: "12 Main St Apt 4" }],
+    ["a C1 control too", { address: `12 Main${NEL}St` }, { address: "12 Main St" }],
+    ["the street capped at 60", { address: "1".repeat(75) }, { address: "1".repeat(60) }],
+    ["the name capped at 60", { name: "N".repeat(61) }, { name: "N".repeat(60) }],
+    ["blank is absent, not empty", { name: "   ", address: "\n", postal: "" }, {}],
+    ["non-strings are absent", { name: 5, address: { x: 1 }, postal: null }, {}],
+    ["no body", null, {}],
+    ["not an object", "12345", {}],
+    ["other keys are ignored", { name: "Pat", cvv2: "123", street: "nope", zip: "12345" }, { name: "Pat" }],
+  ];
+  for (const [label, raw, want] of cases) {
+    const got = cp.cpBillingFields(raw);
+    check(label, JSON.stringify(got) === JSON.stringify(want), `${JSON.stringify(got)} vs ${JSON.stringify(want)}`);
+  }
+});
+
+Deno.test("ecomind: E by default, NONE on a swipe (null), and never R", async () => {
+  // CardPointe defines R as RECURRING. Every swipe used to go out as "R".
+  check("default E", (await sentBody(REQ)).body.ecomind === "E");
+  const swipe = (await sentBody({ ...REQ, ecomind: null })).body;
+  check("a swipe sends none", !("ecomind" in swipe), JSON.stringify(Object.keys(swipe)));
+  check("T when asked", (await sentBody({ ...REQ, ecomind: "T" })).body.ecomind === "T");
+});
+
+Deno.test("cpAuthFieldNames is exactly the keys /auth is sent, sorted, and never a value", async () => {
+  const req = { ...REQ, name: "Pat Example", address: "12 Main St", postal: "12345", expiry: "203212" };
+  const { body } = await sentBody(req);
+  const names = cp.cpAuthFieldNames(req);
+  check("same keys as the wire", JSON.stringify(names) === JSON.stringify(Object.keys(body).sort()), `${names} vs ${Object.keys(body)}`);
+  check("sorted", JSON.stringify(names) === JSON.stringify([...names].sort()));
+  check("carries the billing names", ["address", "name", "postal"].every((k) => names.includes(k)), String(names));
+  const joined = names.join(",");
+  for (const v of [REQ.account, REQ.merchid, "Pat Example", "12 Main St", "12345", "1232"]) {
+    check(`no value (${v}) in the list`, !joined.includes(v), joined);
+  }
+  // A swipe's list says ecomind was NOT sent; a malformed ZIP is not listed because it is not sent.
+  const swipeNames = cp.cpAuthFieldNames({ ...REQ, ecomind: null, postal: "1234" });
+  check("swipe: no ecomind listed", !swipeNames.includes("ecomind"), String(swipeNames));
+  check("dropped ZIP: no postal listed", !swipeNames.includes("postal"), String(swipeNames));
+});
+
+Deno.test("a DECLINE carries its AVS/CVV answer; anything else carries none", async () => {
+  const { error } = await sentBody(REQ, { respstat: "C", respcode: "82", resptext: "CVV mismatch", avsresp: "Y", cvvresp: "N" });
+  check("declined", error !== null && !cp.isGatewayUnknown(error), String(error?.message));
+  check("still the gateway's sentence", String(error?.message) === "CVV mismatch", String(error?.message));
+  const v = cp.cpDeclineVerification(error);
+  check("verification rides on the decline", JSON.stringify(v) === JSON.stringify({ respcode: "82", avsresp: "Y", cvvresp: "N" }), JSON.stringify(v));
+  check("an UNKNOWN carries none", cp.cpDeclineVerification(new Error("GATEWAY_UNKNOWN: x")) === null);
+  check("nothing carries none", cp.cpDeclineVerification(null) === null);
+  check("cpVerification reads blanks as null", JSON.stringify(cp.cpVerification({ avsresp: " ", cvvresp: 3 })) === JSON.stringify({ respcode: null, avsresp: null, cvvresp: null }));
+});

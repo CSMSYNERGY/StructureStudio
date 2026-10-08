@@ -696,6 +696,154 @@ Deno.test("recovery of a PARTIAL approval records nothing and keeps the block", 
   check("names the retref and the attempt", /rp/.test(String(fault?.message)) && /42/.test(String(fault?.message)), String(fault?.message));
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Part 4 — what the sale sends and what the ledger keeps (2026-10, migration 291).
+//
+// The attempt row now says which fields /auth carried (sent_fields, names only) and which
+// ecomind went out, and keeps the AVS/CVV answer even on a decline. A swipe sends NO ecomind:
+// CardPointe's "R" is RECURRING, and every swipe used to be sent as one.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** An approving gateway that records every /auth body it is sent. */
+function recordingGateway(answer: Record<string, unknown>, bodies: Record<string, unknown>[]) {
+  stubGateway((url, init) => {
+    if (url.endsWith("/auth")) bodies.push(JSON.parse(String(init?.body ?? "{}")));
+    return new Response(JSON.stringify(answer), { status: 200 });
+  });
+}
+const APPROVED = { respstat: "A", respcode: "00", retref: "rv", amount: "1000.00", token: "9413948780284242", avsresp: "Y", cvvresp: "M" };
+const attemptInsert = (log: Call[]) =>
+  log.find((c) => c.table === "payment_attempts" && c.op === "insert")?.payload as Record<string, unknown>;
+const lastAttemptUpdate = (log: Call[]) =>
+  log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()?.payload as Record<string, unknown>;
+
+Deno.test("a KEYED sale sends ecomind E with name, street and ZIP, and the attempt names exactly what was sent", async () => {
+  const log: Call[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  recordingGateway(APPROVED, bodies);
+  const admin = makeAdmin(defaultAnswer(), log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, name: "Pat Example", address: "12 Main St", postal: "12345", expiry: "203212" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const sent = bodies[0] ?? {};
+  check("ecomind E", sent.ecomind === "E", JSON.stringify(sent));
+  check("billing on the wire", sent.name === "Pat Example" && sent.address === "12 Main St" && sent.postal === "12345", JSON.stringify(sent));
+  const ins = attemptInsert(log);
+  check("sent_fields = the /auth keys, sorted", JSON.stringify(ins?.sent_fields) === JSON.stringify(Object.keys(sent).sort()),
+    `${JSON.stringify(ins?.sent_fields)} vs ${JSON.stringify(Object.keys(sent).sort())}`);
+  check("ecomind recorded", ins?.ecomind === "E", JSON.stringify(ins));
+  check("no value in sent_fields", !JSON.stringify(ins?.sent_fields).includes(OPTS.account), JSON.stringify(ins?.sent_fields));
+  const close = lastAttemptUpdate(log);
+  check("closed_ok keeps the AVS/CVV answer", close?.state === "closed_ok" && close?.avsresp === "Y" && close?.cvvresp === "M" && close?.respcode === "00",
+    JSON.stringify(close));
+  const row = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("payments row still carries them too", row?.avs_result === "Y" && row?.cvv_result === "M", JSON.stringify(row));
+  check("keyed entry_mode fallback", row?.entry_mode === "ECommerce", JSON.stringify(row?.entry_mode));
+});
+
+Deno.test("a SWIPE sends NO ecomind, records none, and the payment still says it was a swipe", async () => {
+  const log: Call[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  recordingGateway(APPROVED, bodies);
+  const admin = makeAdmin(defaultAnswer(), log);
+  // ecomind "E" passed on purpose: a swipe overrides it, whatever a caller says.
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, actorKind: "staff", entry: "swipe", ecomind: "E" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const sent = bodies[0] ?? {};
+  check("no ecomind on the wire", !("ecomind" in sent), JSON.stringify(Object.keys(sent)));
+  check("and certainly no R", !JSON.stringify(sent).includes('"R"'), JSON.stringify(sent));
+  const ins = attemptInsert(log);
+  check("attempt: ecomind null", ins?.ecomind === null, JSON.stringify(ins));
+  check("attempt: sent_fields set, without ecomind", Array.isArray(ins?.sent_fields) && !(ins?.sent_fields as string[]).includes("ecomind"),
+    JSON.stringify(ins?.sent_fields));
+  const row = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("entry_mode says Swipe when the gateway is silent (it used to say Retail)", row?.entry_mode === "Swipe", JSON.stringify(row?.entry_mode));
+
+  // The gateway's own word wins when it gives one.
+  const log2: Call[] = [];
+  recordingGateway({ ...APPROVED, entrymode: "Track" }, []);
+  await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log2), { ...OPTS, actorKind: "staff", entry: "swipe" });
+  restore();
+  const row2 = log2.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("the gateway's entrymode is kept", row2?.entry_mode === "Track", JSON.stringify(row2?.entry_mode));
+});
+
+Deno.test("a DECLINE keeps its AVS/CVV answer on the attempt (there is no payments row to hold it)", async () => {
+  const log: Call[] = [];
+  recordingGateway({ respstat: "C", respcode: "82", resptext: "CVV mismatch", avsresp: "N", cvvresp: "N" }, []);
+  const admin = makeAdmin(defaultAnswer(), log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, name: "Pat Example", postal: "12345" });
+  restore();
+  check("refused 402", !r.ok && r.status === 402, JSON.stringify(r));
+  const close = lastAttemptUpdate(log);
+  check("closed_declined with respstat C, respcode, avsresp, cvvresp",
+    close?.state === "closed_declined" && close?.respstat === "C" && close?.respcode === "82" && close?.avsresp === "N" && close?.cvvresp === "N",
+    JSON.stringify(close));
+  check("the decline's sentence is still the detail", close?.detail === "CVV mismatch", JSON.stringify(close?.detail));
+  check("no payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
+});
+
+Deno.test("a database WITHOUT 291's columns still takes the payment, and still closes the attempt", async () => {
+  // A deploy that lands before the migration must not stop money: PostgREST refuses the whole
+  // statement over one unknown column (PGRST204), so the insert and the close are retried
+  // without the four keys. Without the retry the insert reads as "already going through", and
+  // a close that fails leaves a CHARGED attempt open until the stale sweep blocks the order.
+  const log: Call[] = [];
+  recordingGateway(APPROVED, []);
+  const missing = { data: null, error: { code: "PGRST204", message: "Could not find the 'sent_fields' column of 'payment_attempts' in the schema cache" } };
+  const has291 = (p: unknown) => ["sent_fields", "ecomind", "avsresp", "cvvresp"].some((k) => k in ((p ?? {}) as Record<string, unknown>));
+  const admin = makeAdmin((table, op, p) => {
+    if (table === "payment_attempts" && (op === "insert" || op === "update") && has291(p)) return missing;
+    return defaultAnswer()(table, op, p);
+  }, log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, postal: "12345" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const inserts = log.filter((c) => c.table === "payment_attempts" && c.op === "insert");
+  check("insert tried twice: with the columns, then without", inserts.length === 2 && has291(inserts[0].payload) && !has291(inserts[1].payload),
+    JSON.stringify(inserts.map((c) => Object.keys(c.payload as object))));
+  const close = lastAttemptUpdate(log);
+  check("the attempt is still closed_ok, written without the 291 keys", close?.state === "closed_ok" && !has291(close) && close?.payment_id === "p1",
+    JSON.stringify(close));
+  check("respcode (a 174 column) survives the retry", close?.respcode === "00", JSON.stringify(close));
+});
+
+Deno.test("any OTHER insert error still refuses before the card is touched (no retry)", async () => {
+  const log: Call[] = [];
+  stubGateway(() => new Response("{}", { status: 200 }));
+  const admin = makeAdmin(
+    defaultAnswer({ "payment_attempts:insert": { data: null, error: { message: "duplicate key", code: "23505" } } }),
+    log,
+  );
+  const r = await ip.chargeInvoicePayment(admin, OPTS);
+  restore();
+  check("refused 409", !r.ok && r.status === 409, JSON.stringify(r));
+  check("ONE insert, not retried", log.filter((c) => c.table === "payment_attempts" && c.op === "insert").length === 1);
+  check("ZERO gateway calls", fetchCount === 0, String(fetchCount));
+});
+
+Deno.test("billingFromRequest: typed fields, the delivery address on request, the contact's name as fallback", () => {
+  const contact = { name: "Pat Example", street: "12 Main St", city: "Springfield", state: "MO", zip: "65801" };
+  const legacy = { name: "Pat Example", address: "9 Old Rd", postalCode: "65802" };
+  const eq = (label: string, got: unknown, want: unknown) => check(label, JSON.stringify(got) === JSON.stringify(want), `${JSON.stringify(got)} vs ${JSON.stringify(want)}`);
+
+  eq("production's page (nothing sent): the contact's name only", ip.billingFromRequest({}, contact), { name: "Pat Example" });
+  eq("typed wins", ip.billingFromRequest({ name: "P Example", address: "1 Card Ln", postal: "10001" }, contact),
+    { name: "P Example", address: "1 Card Ln", postal: "10001" });
+  eq("delivery: street and ZIP from the contact, typed ones ignored",
+    ip.billingFromRequest({ billing: "delivery", name: "P Example", address: "1 Card Ln", postal: "10001" }, contact),
+    { name: "P Example", address: "12 Main St", postal: "65801" });
+  eq("delivery reads the legacy keys too (address / postalCode)", ip.billingFromRequest({ billing: "delivery" }, legacy),
+    { name: "Pat Example", address: "9 Old Rd", postal: "65802" });
+  eq("delivery with no address on file sends none", ip.billingFromRequest({ billing: "delivery" }, { name: "Pat Example" }), { name: "Pat Example" });
+  eq("delivery with a malformed ZIP on file drops it", ip.billingFromRequest({ billing: "delivery" }, { street: "12 Main St", zip: "6580" }),
+    { address: "12 Main St" });
+  eq("no contact (a counter sale): typed only", ip.billingFromRequest({ name: "Walk In", postal: "10001" }, null), { name: "Walk In", postal: "10001" });
+  eq("nothing at all", ip.billingFromRequest(null, null), {});
+  eq("any other billing value is not delivery", ip.billingFromRequest({ billing: "yes" }, contact), { name: "Pat Example" });
+});
+
 Deno.test("recovery of a SURCHARGED charge still records the ask, with the surcharge beside it", async () => {
   // The other side of the partial guard: an amount ABOVE the ask is the card fee, not a
   // discrepancy, and must keep resolving exactly as before.

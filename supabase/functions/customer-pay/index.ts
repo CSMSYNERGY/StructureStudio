@@ -28,6 +28,7 @@ import { checkSession } from "../_shared/customerSession.ts";
 import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import {
   amountRefusalText,
+  billingFromRequest,
   chargeInvoicePayment,
   MAX_PAYMENT_CENTS,
   MIN_PAYMENT_CENTS,
@@ -292,7 +293,9 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     if (!probeToken || probeToken.length > 256) {
       return json({ ok: true, applies: null, percent: null, feeCents: null });
     }
-    const postal = typeof body?.postal === "string" ? body.postal.trim().slice(0, 12) : undefined;
+    // The billing ZIP, typed or (billing:"delivery") the delivery address's. Whether a fee may be
+    // charged can turn on where the card is billed, so the probe asks with it when there is one.
+    const postal = billingFromRequest(body, ctx.design.contact).postal;
     const probe = await cpSurchargeProbe(ctx.merchid, probeToken, postal);
     const feeCents = probe.applies && probe.percent && decision.ok
       ? Math.round(decision.askCents * (probe.percent / 100))
@@ -374,7 +377,10 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     );
   }
 
-  const contact = (ctx.design.contact ?? {}) as Record<string, unknown>;
+  // Name on card, street and ZIP for AVS: what the card tab sent, or with billing:"delivery" the
+  // design's delivery address, filled in HERE and never sent back. A page that sends none of them
+  // (production's, until promotion) charges exactly as before: the contact's name, no address.
+  const billing = billingFromRequest(body, ctx.design.contact);
   const result = await chargeInvoicePayment(admin, {
     clientId: ctx.clientId,
     merchid: ctx.merchid,
@@ -384,8 +390,10 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     rail,
     account: payToken,
     expiry: typeof body?.expiry === "string" ? body.expiry.trim().slice(0, 8) : undefined,
-    postal: typeof body?.postal === "string" ? body.postal.trim().slice(0, 12) : undefined,
-    name: typeof contact.name === "string" ? contact.name.slice(0, 60) : undefined,
+    postal: billing.postal,
+    name: billing.name,
+    address: billing.address,
+    // Always keyed: a customer paying online is never card-present.
     ecomind: "E",
     actorKind: "customer",
     // Who paid: the verified phone, or the verified address for an email session (migration

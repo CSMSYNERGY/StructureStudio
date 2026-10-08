@@ -27,6 +27,7 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import {
   amountRefusalText,
+  billingFromRequest,
   chargeInvoicePayment,
   MAX_PAYMENT_CENTS,
   MIN_PAYMENT_CENTS,
@@ -37,6 +38,7 @@ import {
 import {
   cardpointeConfigured,
   CP_DEFAULT_MERCHID,
+  cpBillingFields,
   cpRefund,
   cpSettleStat,
   cpSurchargeProbe,
@@ -46,6 +48,7 @@ import {
   cpVoid,
 } from "../_shared/cardpointe.ts";
 import { fundingStateFromSetlstat, returnedPaymentPatch } from "../_shared/achState.ts";
+import { addressFrom } from "../_shared/contactAddress.ts";
 
 // Every action needs a line here or resolveTenant refuses it at runtime AND the preflight
 // GATES cross-check refuses the push. Taking money sits at orders:edit, matching
@@ -199,7 +202,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     defaultAction: "pay_options",
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, payload, action, userId, audit, operator } = r.ctx;
+  const { clientId, payload, action, userId, audit, operator, canEdit } = r.ctx;
 
   if (!cardpointeConfigured) {
     return refusal({ error: "Card payments aren't configured on this deployment yet." });
@@ -286,8 +289,22 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // not yet owed. Surfaced through the same three fields the modal already renders, so the
     // rep reads a sentence rather than finding a disabled button.
     const blocked = await changeRefusal(money.shortCode);
+    // The keyed-card modal's Name on card, Street and ZIP, prefilled from the design's contact
+    // (the delivery address) and editable there. ONLY for someone who can take the card: an
+    // operator is refused at charge, and a viewer cannot charge at all, so neither is handed a
+    // customer's address by a payment endpoint. null when there is no design to read it from.
+    let billingPrefill: { name: string; street: string; zip: string } | null = null;
+    if (!operator && canEdit("orders") && money.shortCode) {
+      const { data: dRow } = await admin.from("designs")
+        .select("contact").eq("client_id", clientId).eq("short_code", money.shortCode).maybeSingle();
+      const contact = (dRow?.contact ?? {}) as Record<string, unknown>;
+      const a = addressFrom(contact);
+      const b = cpBillingFields({ name: contact.name, address: a.street ?? undefined, postal: a.zip ?? undefined });
+      billingPrefill = { name: b.name ?? "", street: b.address ?? "", zip: b.postal ?? "" };
+    }
     return json({
       ok: true,
+      billingPrefill,
       canCharge: decision.ok && !blocked,
       reason: blocked ? blocked.reason : (decision.ok ? null : decision.reason),
       message: blocked ? blocked.message : (decision.ok ? null : amountRefusalText(decision.reason)),
@@ -319,7 +336,9 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (action === "surcharge_probe") {
     const t = typeof payload?.payToken === "string" ? payload.payToken.trim() : "";
     if (!t || t.length > 256) return json({ ok: true, applies: null, percent: null });
-    const probe = await cpSurchargeProbe(merchid, t, typeof payload?.postal === "string" ? payload.postal : undefined);
+    // The billing ZIP from the modal, when it holds a real one: a fee can turn on where the card
+    // is billed. A malformed ZIP is left off rather than sent.
+    const probe = await cpSurchargeProbe(merchid, t, cpBillingFields(payload).postal);
     return json({ ok: true, applies: probe.applies, percent: probe.percent });
   }
 
@@ -360,8 +379,9 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const rail: "card" | "ach" = payload?.rail === "ach" ? "ach" : "card";
     const token = typeof payload?.payToken === "string" ? payload.payToken.trim() : "";
     if (!token || token.length > 4096) return json({ error: "No card details were captured." }, 400);
-    // A swiped blob is far longer than a token; ecomind "R" is what tells the gateway (and
-    // the interchange table) that the card was physically present.
+    // A SWIPE sends no ecomind at all: CardPointe defines "R" as RECURRING, not retail (this
+    // sent "R" until 2026-10, so every swipe went out as a recurring card-not-present sale). The
+    // swipe's own track data is what tells the gateway the card was physically present.
     const swiped = payload?.entry === "swipe";
 
     await audit(`charge_${rail}`, null, `order=${orderId} cents=${decision.askCents}`).catch(() => {});
@@ -379,13 +399,17 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // the design); this path did not, so every bank payment taken by a builder failed while
     // the identical customer-side charge succeeded. Card does not need it, but sending it
     // improves AVS, so it goes on both rails.
-    let payerName: string | undefined;
+    //
+    // Since 2026-10 the keyed-card modal also sends Name on card, Street and ZIP (prefilled from
+    // pay_options' billingPrefill, editable): what was typed wins, and the contact's name is the
+    // fallback. A page that sends none of them charges exactly as before.
+    let contact: Record<string, unknown> | null = null;
     if (money.shortCode) {
       const { data: dRow } = await admin.from("designs")
         .select("contact").eq("client_id", clientId).eq("short_code", money.shortCode).maybeSingle();
-      const n = (dRow?.contact as Record<string, unknown> | null)?.name;
-      if (typeof n === "string" && n.trim()) payerName = n.trim().slice(0, 60);
+      contact = (dRow?.contact as Record<string, unknown> | null) ?? null;
     }
+    const billing = billingFromRequest(payload, contact);
 
     const result = await chargeInvoicePayment(admin, {
       clientId,
@@ -396,9 +420,10 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       rail,
       account: token,
       expiry: typeof payload?.expiry === "string" ? payload.expiry.trim().slice(0, 8) : undefined,
-      postal: typeof payload?.postal === "string" ? payload.postal.trim().slice(0, 12) : undefined,
-      name: payerName,
-      ecomind: swiped ? "R" : "E",
+      postal: billing.postal,
+      name: billing.name,
+      address: billing.address,
+      entry: swiped ? "swipe" : "keyed",
       actorKind: "staff",
       actorRef: userId ?? null,
       createdBy: userId ?? null,
@@ -435,8 +460,8 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // A counter sale has no design to read a name off, so the operator supplies one. ACH
     // cannot proceed without it — refuse here with a sentence that says what to do, rather
     // than letting the gateway answer "all name fields are empty".
-    const adhocName = typeof payload?.name === "string" ? payload.name.trim().slice(0, 60) : "";
-    if (rail === "ach" && !adhocName) {
+    const billing = billingFromRequest(payload, null);
+    if (rail === "ach" && !billing.name) {
       return json({ error: "Enter the name on the bank account — a bank payment can't be taken without it." }, 400);
     }
 
@@ -469,9 +494,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       rail,
       account: token,
       expiry: typeof payload?.expiry === "string" ? payload.expiry.trim().slice(0, 8) : undefined,
-      postal: typeof payload?.postal === "string" ? payload.postal.trim().slice(0, 12) : undefined,
-      name: adhocName || undefined,
-      ecomind: payload?.entry === "swipe" ? "R" : "E",
+      postal: billing.postal,
+      name: billing.name,
+      address: billing.address,
+      // A swipe sends no ecomind (see `charge`); a keyed card sends "E".
+      entry: payload?.entry === "swipe" ? "swipe" : "keyed",
       actorKind: "staff",
       actorRef: userId ?? null,
       createdBy: userId ?? null,
