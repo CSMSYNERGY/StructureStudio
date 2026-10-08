@@ -1,8 +1,51 @@
 # .github/workflows/merge-beta-to-main.yml
 #
-# Every Monday: merge beta into main. The merge ALWAYS completes.
-# On conflict, beta's version wins and the conflicted files are listed
-# in the Projects report so nothing is silently overwritten.
+# Every Monday: merge beta into main. On conflict, beta's version wins
+# and the conflicted files are listed in the Projects report so nothing
+# is silently overwritten.
+#
+# FAIL CLOSED (2026-10-08, the fix from PR #26 re-applied and hardened by
+# two review rounds): the promotion is REFUSED, and production left
+# exactly as it was, when a conflicted path cannot be resolved to beta's
+# side, when a file on beta is missing from the merged tree, when any
+# file carries conflict markers, when beta changes a workflow file (see
+# below), or when scripts/preflight.mjs fails on the merged tree. The
+# merge itself is .github/scripts/merge-beta-into-main.sh. A refused week
+# shows up in the Projects report; beta sitting unpromoted is visible and
+# recoverable, production serving a half-resolved merge is not.
+#
+# FOUR JOBS, BECAUSE THE GATE RUNS NPM CODE. preflight needs packages
+# from npm (no lockfile), and code in a job can reach every secret that
+# job's later steps use (GITHUB_ENV/BASH_ENV, git hooks, process memory).
+# So the job that runs npm holds no secret and only a read token, and the
+# jobs that hold secrets run no npm code:
+#   snapshot  Supabase key, no third-party code. Lists the release notes
+#             on beta, THEN pins the main and beta commits and the merge
+#             date. Everything below merges exactly these.
+#   gate      read-only, no secrets. Merges the pinned commits, then runs
+#             preflight.
+#   promote   write token, no npm. Re-runs the same merge from the pinned
+#             inputs, refuses unless it gets the commit the gate checked
+#             (same SHA; the gate's SHA is only ever compared, so a gate
+#             that lies can cause a refusal, never a different push),
+#             pushes it, flips the snapshot's notes.
+#   report    Supabase key. Asks GitHub where main points and posts what
+#             really happened to the Projects module.
+#
+# ⚠️ WORKFLOW FILES REACH MAIN BY HAND, NEVER THROUGH THIS WORKFLOW.
+# GitHub refuses a push by this job's token that changes anything under
+# .github/workflows/ (GITHUB_TOKEN can never hold the "workflows"
+# permission). So a change to any workflow file, this one included, is
+# committed to main directly AND to beta, byte-identical (the twin-commit
+# pattern every earlier workflow change used). The merge refuses early,
+# with that reason, when beta's workflow files differ from main's.
+# The schedule always runs main's copy of this file and of the script.
+#
+# TESTS: after ANY change here or in the script, run from the repo root
+#   bash tests/promotion/merge.sh  .github/workflows/merge-beta-to-main.yml
+#   bash tests/promotion/report.sh .github/workflows/merge-beta-to-main.yml
+# They drive the real script and the real steps against synthetic repos (no network).
+#
 # Runs on GitHub's servers - nothing needs to be open on your computer.
 #
 # Cron is UTC-only (no timezone). 10:00 UTC = 6am US Eastern (summer)
@@ -11,9 +54,8 @@
 # Reporting: posts an update onto the "Beta->main merge reports" item
 # in the internal Projects module (the in-product Monday replacement,
 # 2026-08-27) via the Supabase REST API. Requires the existing repo
-# secret SUPABASE_SERVICE_ROLE_KEY (already used by the release-notes
-# step). If that secret is missing, the merge still runs and only the
-# report is skipped.
+# secret SUPABASE_SERVICE_ROLE_KEY. If that secret is missing, the merge
+# still runs and only the release notes and the report are skipped.
 
 name: Weekly merge beta into main
 
@@ -26,113 +68,287 @@ concurrency:
   group: merge-beta-into-main
   cancel-in-progress: false
 
-permissions:
-  contents: write
+# Nothing by default; each job asks for exactly what it needs.
+permissions: {}
 
 env:
   # pm_items.id of "Beta->main merge reports" (Roadmap board / Ops group) in the
   # internal Projects module - minted by the 2026-08-27 Monday import. A uuid, not
   # a secret. If Projects is ever reseeded, look the item up by that name.
   PM_MERGE_ITEM_ID: "e5777007-d882-44b0-ac0f-10ffe4c4e04b"
+  SUPABASE_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co"
 
 jobs:
-  merge-beta-into-main:
+  # Fixes WHAT this run promotes, in a job that runs no third-party code: the main and beta
+  # commits and the merge date. gate and promote both take these from here, never from each
+  # other, so code in the gate (npm) can at most fail the gate or lie about passing it; it
+  # cannot choose a different commit to ship.
+  #
+  # It also records WHICH release notes are on beta, BEFORE beta is pinned. Notes are published
+  # (status='beta', migration 103) the moment work lands on beta and flip to Live when the
+  # promotion carrying them ships, so a note published or moved to beta after this point is
+  # never announced Live for code this run did not ship. The notes listing never blocks the
+  # promotion: a failure there only skips the flip. A failure to pin main and beta does block it.
+  snapshot:
     runs-on: ubuntu-latest
-    env:
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.snap.outputs.status }}
+      note_ids: ${{ steps.snap.outputs.note_ids }}
+      main_sha: ${{ steps.pin.outputs.main_sha }}
+      beta_sha: ${{ steps.pin.outputs.beta_sha }}
+      merge_date: ${{ steps.pin.outputs.merge_date }}
+    steps:
+      - name: List the release notes that are on beta now
+        id: snap
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "::warning::SUPABASE_SERVICE_ROLE_KEY is not set - release notes will not be flipped."
+            echo "status=skipped (SUPABASE_SERVICE_ROLE_KEY not set)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RESP="$(curl -sS "${SUPABASE_URL}/rest/v1/release_notes?status=eq.beta&select=id" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}")" || RESP=""
+          if ! printf '%s' "$RESP" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::warning::Could not list the beta release notes - they will not be flipped this run."
+            echo "status=failed (could not list notes)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "note_ids=$(printf '%s' "$RESP" | jq -r '[.[].id] | join(",")')" >> "$GITHUB_OUTPUT"
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+
+      - name: Pin the main and beta commits and the merge date
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$AUTH"
+          REFS="$(git -c "http.https://github.com/.extraheader=$AUTH" ls-remote "https://github.com/${REPO}.git" refs/heads/main refs/heads/beta)"
+          MAIN_SHA="$(printf '%s\n' "$REFS" | awk '$2 == "refs/heads/main" { print $1 }')"
+          BETA_SHA="$(printf '%s\n' "$REFS" | awk '$2 == "refs/heads/beta" { print $1 }')"
+          [[ "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BETA_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not read main and beta from GitHub."; exit 1; }
+          {
+            echo "main_sha=$MAIN_SHA"
+            echo "beta_sha=$BETA_SHA"
+            echo "merge_date=$(date -u +%s)"
+          } >> "$GITHUB_OUTPUT"
+
+  gate:
+    needs: snapshot
+    if: ${{ !cancelled() && needs.snapshot.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.merge.outputs.refusal || steps.merge.outputs.result }}
+      merged_sha: ${{ steps.merge.outputs.merged_sha }}
+      main_before: ${{ steps.merge.outputs.main_before }}
+      commits: ${{ steps.merge.outputs.commits }}
+      conflicts: ${{ steps.merge.outputs.conflicts }}
+      beta_diff: ${{ steps.merge.outputs.beta_diff }}
+      merge_outcome: ${{ steps.merge.outcome }}
+      node_outcome: ${{ steps.node.outcome }}
+      deno_outcome: ${{ steps.deno.outcome }}
+      preflight_outcome: ${{ steps.preflight.outcome }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge beta into main (auto-resolve, beta wins)
+      - name: Merge beta into main (beta wins; nothing is pushed here)
         id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_MAIN: ${{ needs.snapshot.outputs.main_sha }}
+          BETA_SHA: ${{ needs.snapshot.outputs.beta_sha }}
+          MERGE_DATE: ${{ needs.snapshot.outputs.merge_date }}
         run: |
           set -euo pipefail
-          git fetch origin beta:beta
-
-          # Cap with git's own -50, NEVER "| head -50". Under `set -o pipefail`,
-          # head closes the pipe as soon as it has its 50 lines; once beta is
-          # more than ~50 commits ahead git log is still writing, takes SIGPIPE,
-          # and exits 141 - aborting the step before the merge ever runs. That
-          # is what silently skipped the 2026-08-03 promotion (beta was 124
-          # ahead). The bug is invisible on small weeks, so do not "simplify"
-          # this back into a pipe.
-          COMMITS="$(git log --oneline --no-decorate -50 main..beta)"
-          if [ -z "$COMMITS" ]; then
-            COMMITS="(nothing new on beta this week)"
+          if [ "$(git rev-parse HEAD)" != "$EXPECT_MAIN" ]; then
+            echo "refusal=main moved after the snapshot" >> "$GITHUB_OUTPUT"
+            echo "::error::main moved after the snapshot; refusing. The next run will take the new main."; exit 1
           fi
+          # From a copy: the merge rewrites the tree this script lives in.
+          cp .github/scripts/merge-beta-into-main.sh "$RUNNER_TEMP/merge.sh"
+          bash "$RUNNER_TEMP/merge.sh"
 
-          RESULT="clean"
-          CONFLICTS=""
-
-          if git merge --no-ff beta -m "chore: weekly auto-merge of beta into main"; then
-            RESULT="clean"
-          else
-            CONFLICTS="$(git diff --name-only --diff-filter=U | sort -u)"
-            git merge --abort
-            if git merge --no-ff -X theirs beta -m "chore: weekly auto-merge of beta into main (conflicts auto-resolved, beta won)"; then
-              RESULT="conflicts-resolved"
-            else
-              git checkout --theirs -- . 2>/dev/null || true
-              git add -A
-              git commit -m "chore: weekly auto-merge of beta into main (conflicts force-resolved, beta won)"
-              RESULT="conflicts-force-resolved"
-            fi
-          fi
-
-          git push origin main
-          MERGED_SHA="$(git rev-parse HEAD)"
-
-          {
-            echo "result=$RESULT"
-            echo "merged_sha=$MERGED_SHA"
-            echo "commits<<__EOF__"
-            echo "$COMMITS"
-            echo "__EOF__"
-            echo "conflicts<<__EOF__"
-            echo "$CONFLICTS"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      # Release notes are published the moment work lands on BETA, carrying an "On beta for
-      # testing" badge (status='beta', migration 103) so tenants can see and try things
-      # before release. THIS is the moment they become true, so this is where they flip.
+      # THE GATE. scripts/preflight.mjs is the repo's correctness gate (lint of every inline
+      # script and both component twins, compiled-artifact drift, the ?v= lockstep, deno check
+      # and deno test over the edge functions, the migration tests, the estimate wording...).
+      # Until 2026-10-08 it ran ONLY in the developer-side .githooks/pre-push hook, which a
+      # runner does not have, so the commit that reaches every paying tenant was never checked,
+      # and a beta commit pushed with --no-verify went to production unseen.
       #
-      # Deliberately keyed to the merge above rather than to its own cron: a clock-based
-      # flip would announce "Live" for code that never shipped on any week the merge failed
-      # or was skipped — and this workflow has silently skipped a promotion before (see the
-      # -50 / SIGPIPE note in the merge step). If the merge did not run, neither does this.
-      #
-      # Needs repo secret SUPABASE_SERVICE_ROLE_KEY. Without it the step SKIPS rather than
-      # failing the run — the merge itself has already pushed and must not be reported as
-      # broken — but it says so, and the Projects report below carries the outcome, which
-      # is the channel the team actually reads.
-      - name: Flip beta release notes to Live
-        id: notes
-        if: ${{ success() }}
-        env:
-          SUPABASE_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co"
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # Deno is pinned to the version the gate is run with on the dev machine, so a newer
+      # Deno's type checker cannot refuse a promotion on its own, and setup-deno is pinned to a
+      # commit (v2.0.5). `deno --version` runs first because preflight treats a missing Deno as
+      # SKIPPED, and here that must be a failure. CI=true makes preflight REQUIRE the
+      # migration tests, hence the tests/sql install.
+      - name: Set up Node for the preflight gate
+        id: node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up Deno for the preflight gate
+        id: deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.2"
+
+      - name: Preflight gate on the merged tree (a failure blocks the promotion)
+        id: preflight
         run: |
-          set -uo pipefail
-          if [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-            echo "::warning::SUPABASE_SERVICE_ROLE_KEY is not set - release notes still say 'On beta for testing'."
-            echo "notes_result=skipped (SUPABASE_SERVICE_ROLE_KEY not set)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          deno --version
+          npm install --no-audit --no-fund
+          npm install --prefix tests/sql --no-audit --no-fund
+          npm run preflight
+
+  promote:
+    needs: [snapshot, gate]
+    if: ${{ !cancelled() && needs.gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # The report trusts THESE (this job runs no npm code) over the gate's copies of the same.
+    outputs:
+      result: ${{ steps.remerge.outputs.refusal || steps.remerge.outputs.result }}
+      merged_sha: ${{ steps.remerge.outputs.merged_sha }}
+      commits: ${{ steps.remerge.outputs.commits }}
+      conflicts: ${{ steps.remerge.outputs.conflicts }}
+      beta_diff: ${{ steps.remerge.outputs.beta_diff }}
+      remerge_outcome: ${{ steps.remerge.outcome }}
+      pushed: ${{ steps.push.outputs.pushed }}
+      push_outcome: ${{ steps.push.outcome }}
+      notes_result: ${{ steps.notes.outputs.notes_result }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Same main, same beta commit, same date (all from snapshot) -> the same merge commit, or
+      # no push. The gate's merged_sha is used ONLY to compare against: a wrong one can make
+      # this refuse, never ship something else. If main moved since the snapshot, the merge
+      # script itself may differ, so that is checked here, before the script runs.
+      - name: Rebuild the gated merge commit
+        id: remerge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_MAIN: ${{ needs.snapshot.outputs.main_sha }}
+          BETA_SHA: ${{ needs.snapshot.outputs.beta_sha }}
+          MERGE_DATE: ${{ needs.snapshot.outputs.merge_date }}
+          EXPECT_SHA: ${{ needs.gate.outputs.merged_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$EXPECT_MAIN" ] || [ -z "$EXPECT_SHA" ] || [ -z "$BETA_SHA" ]; then
+            echo "refusal=the gate passed no merge to promote" >> "$GITHUB_OUTPUT"
+            echo "::error::The gate passed no merge to promote."; exit 1
+          fi
+          # EXPECT_SHA comes from the job that runs npm code, so it is checked to be a plain
+          # commit id before git or GITHUB_OUTPUT sees it: no revision expressions, and no
+          # newline that could write lines into this step's own outputs. It is never echoed
+          # into an output either.
+          [[ "$EXPECT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusal=the gate reported a merge SHA that is not a commit id" >> "$GITHUB_OUTPUT"
+            echo "::error::The gate reported a merge SHA that is not a commit id; refusing."; exit 1
+          }
+          # A re-run after this run's push already landed (maybe with a hotfix on top since):
+          # main already CONTAINS the gated commit. Decided from trusted facts only: the gate's
+          # SHA must be a merge whose parents are exactly the snapshot's main and beta, and it
+          # must be in main. A gate that reports main's own tip, or any other commit, fails
+          # this and falls through to the rebuild, where it is refused.
+          if [ "$EXPECT_SHA" != "$EXPECT_MAIN" ] \
+             && git cat-file -e "${EXPECT_SHA}^{commit}" 2>/dev/null \
+             && [ "$(git rev-parse -q --verify "${EXPECT_SHA}^1" || true) $(git rev-parse -q --verify "${EXPECT_SHA}^2" || true)" = "$EXPECT_MAIN $BETA_SHA" ] \
+             && git merge-base --is-ancestor "$EXPECT_SHA" HEAD; then
+            {
+              echo "result=already on main"
+              echo "merged_sha=$(git rev-parse "${EXPECT_SHA}^{commit}")"
+              echo "push=no"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if [ "$(git rev-parse HEAD)" != "$EXPECT_MAIN" ]; then
+            echo "refusal=main moved after the snapshot" >> "$GITHUB_OUTPUT"
+            echo "::error::main moved after the snapshot; refusing. The next run will gate the new main."; exit 1
+          fi
+          cp .github/scripts/merge-beta-into-main.sh "$RUNNER_TEMP/merge.sh"
+          bash "$RUNNER_TEMP/merge.sh"
+          GOT="$(git rev-parse HEAD)"
+          if [ "$GOT" != "$EXPECT_SHA" ]; then
+            echo "refusal=rebuilt $GOT, which is not the commit the gate checked" >> "$GITHUB_OUTPUT"
+            echo "::error::The rebuilt merge $GOT is not the commit the gate checked ($EXPECT_SHA); refusing."; exit 1
+          fi
+          echo "push=yes" >> "$GITHUB_OUTPUT"
 
-          # PATCH ... ?status=eq.beta  -> every note that beta has now made real.
-          # return=representation gives back the rows so we can report a real count.
+      # Pushes the exact commit the gate checked, by SHA. A main that moved since makes it a
+      # non-fast-forward that git refuses: production stays as it was. Hooks are off for the
+      # push, and the token is passed for this one command.
+      - name: Push main
+        id: push
+        if: ${{ success() && steps.remerge.outputs.push == 'yes' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGED_SHA: ${{ needs.gate.outputs.merged_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$MERGED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::The gate's merge SHA is not a commit id; refusing to push."; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$MERGED_SHA" ] || { echo "::error::HEAD is not the gated commit; refusing to push."; exit 1; }
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$AUTH"
+          git -c core.hooksPath=/dev/null -c "http.https://github.com/.extraheader=$AUTH" \
+            push --no-verify origin "${MERGED_SHA}:refs/heads/main"
+          echo "pushed=yes" >> "$GITHUB_OUTPUT"
+
+      # Only after a successful push (or a re-run that proved main already has the merge), and
+      # only the notes the snapshot saw on beta before beta was
+      # fetched (and still on beta now): a note for work that reached beta while the gate ran
+      # stays "On beta" until the promotion that carries it. If the snapshot was skipped or
+      # failed, nothing flips and the report says so. A failure here does not undo the push,
+      # which has already happened; the report carries it.
+      - name: Flip the snapshot's beta release notes to Live
+        id: notes
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SNAP_STATUS: ${{ needs.snapshot.outputs.status }}
+          NOTE_IDS: ${{ needs.snapshot.outputs.note_ids }}
+        run: |
+          set -uo pipefail
+          if [ "$SNAP_STATUS" != "ok" ]; then
+            echo "notes_result=not flipped (snapshot ${SNAP_STATUS:-did not run})" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$NOTE_IDS" ]; then
+            echo "notes_result=none waiting" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           RESP="$(curl -sS -X PATCH \
-            "${SUPABASE_URL}/rest/v1/release_notes?status=eq.beta" \
+            "${SUPABASE_URL}/rest/v1/release_notes?status=eq.beta&id=in.(${NOTE_IDS})" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Content-Type: application/json" \
@@ -142,7 +358,6 @@ jobs:
               echo "notes_result=FAILED (network)" >> "$GITHUB_OUTPUT"
               exit 1
             }
-
           # A PostgREST error is a JSON OBJECT with .message; success is an ARRAY.
           if ! printf '%s' "$RESP" | jq -e 'type == "array"' >/dev/null 2>&1; then
             MSG="$(printf '%s' "$RESP" | jq -r '.message // .hint // "unknown error"' 2>/dev/null || echo "unparseable response")"
@@ -150,37 +365,188 @@ jobs:
             echo "notes_result=FAILED (${MSG})" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-
           COUNT="$(printf '%s' "$RESP" | jq 'length')"
           echo "Flipped ${COUNT} release note(s) from beta to Live."
-          if [ "$COUNT" = "0" ]; then
-            echo "notes_result=none waiting" >> "$GITHUB_OUTPUT"
-          else
-            echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
-          fi
+          echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
+
+  report:
+    needs: [snapshot, gate, promote]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HAS_SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY != '' }}
+    steps:
+      # The gate's outputs come from the job that runs npm code, so they may be anything,
+      # including too large to start a process with (Linux refuses any single environment
+      # string over 128 KB). This step alone takes them, caps each into a file, and may fail
+      # without stopping the report: the posting step reads only these files, and a missing
+      # file reads as "not reported".
+      - name: Collect the gate's outputs (capped)
+        continue-on-error: true
+        env:
+          G_RESULT: ${{ needs.gate.outputs.result }}
+          G_MERGED_SHA: ${{ needs.gate.outputs.merged_sha }}
+          G_COMMITS: ${{ needs.gate.outputs.commits }}
+          G_CONFLICTS: ${{ needs.gate.outputs.conflicts }}
+          G_BETA_DIFF: ${{ needs.gate.outputs.beta_diff }}
+          G_MERGE_OUTCOME: ${{ needs.gate.outputs.merge_outcome }}
+          G_NODE_OUTCOME: ${{ needs.gate.outputs.node_outcome }}
+          G_DENO_OUTCOME: ${{ needs.gate.outputs.deno_outcome }}
+          G_PREFLIGHT_OUTCOME: ${{ needs.gate.outputs.preflight_outcome }}
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/gate-outputs"; mkdir -p "$D"
+          for k in G_RESULT G_MERGED_SHA G_COMMITS G_CONFLICTS G_BETA_DIFF G_MERGE_OUTCOME G_NODE_OUTCOME G_DENO_OUTCOME G_PREFLIGHT_OUTCOME; do
+            v="${!k}"
+            # Above the merge script's own cap plus its suffix, so an honest value passes unchanged.
+            [ "${#v}" -le 16100 ] || v="${v:0:16100} ... (truncated)"
+            printf '%s' "$v" > "$D/$k"
+          done
 
       - name: Report to Projects
-        if: ${{ always() && env.SUPABASE_SERVICE_ROLE_KEY != '' }}
+        if: ${{ always() && env.HAS_SUPABASE_KEY == 'true' }}
         env:
-          JOB_STATUS: ${{ job.status }}
-          NOTES_RESULT: ${{ steps.notes.outputs.notes_result }}
-          RESULT: ${{ steps.merge.outputs.result }}
-          MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
-          COMMITS: ${{ steps.merge.outputs.commits }}
-          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          GATE_RESULT: ${{ needs.gate.result }}
+          PROMOTE_RESULT: ${{ needs.promote.result }}
+          SNAPSHOT_RESULT: ${{ needs.snapshot.result }}
+          MAIN_BEFORE: ${{ needs.snapshot.outputs.main_sha }}
+          # The merge facts from promote (no npm code, and the merge script caps every value it
+          # emits). The gate's copies are read from the collector's files below.
+          P_RESULT: ${{ needs.promote.outputs.result }}
+          P_MERGED_SHA: ${{ needs.promote.outputs.merged_sha }}
+          P_COMMITS: ${{ needs.promote.outputs.commits }}
+          P_CONFLICTS: ${{ needs.promote.outputs.conflicts }}
+          P_BETA_DIFF: ${{ needs.promote.outputs.beta_diff }}
+          REMERGE_OUTCOME: ${{ needs.promote.outputs.remerge_outcome }}
+          PUSHED: ${{ needs.promote.outputs.pushed }}
+          PUSH_OUTCOME: ${{ needs.promote.outputs.push_outcome }}
+          NOTES_RESULT: ${{ needs.promote.outputs.notes_result }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SUPABASE_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co"
         run: |
           set -euo pipefail
           DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-          if [ "$JOB_STATUS" != "success" ]; then
-            HEADER="[FAILED] Beta->Main merge did not complete"
-          elif [ "$RESULT" = "clean" ]; then
-            HEADER="[OK] Beta->Main merged cleanly"
+          # Where main points NOW, asked of GitHub: a run cancelled mid-push, for one, cannot
+          # tell from its own outputs whether the push landed.
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$AUTH"
+          REMOTE_MAIN="$(git -c "http.https://github.com/.extraheader=$AUTH" ls-remote "https://github.com/${REPO}.git" refs/heads/main | cut -f1 || true)"
+
+          GD="$RUNNER_TEMP/gate-outputs"
+          gate_out() { if [ -f "$GD/$1" ]; then cat "$GD/$1"; fi; }
+          G_READ="yes"; [ -f "$GD/G_RESULT" ] || G_READ="no"
+          G_RESULT="$(gate_out G_RESULT)"; G_MERGED_SHA="$(gate_out G_MERGED_SHA)"; G_COMMITS="$(gate_out G_COMMITS)"
+          G_CONFLICTS="$(gate_out G_CONFLICTS)"; G_BETA_DIFF="$(gate_out G_BETA_DIFF)"
+          MERGE_OUTCOME="$(gate_out G_MERGE_OUTCOME)"; NODE_OUTCOME="$(gate_out G_NODE_OUTCOME)"
+          DENO_OUTCOME="$(gate_out G_DENO_OUTCOME)"; PREFLIGHT_OUTCOME="$(gate_out G_PREFLIGHT_OUTCOME)"
+
+          if [ -n "$REMERGE_OUTCOME" ] && [ "$REMERGE_OUTCOME" != "skipped" ]; then
+            RESULT="$P_RESULT"; MERGED_SHA="$P_MERGED_SHA"; COMMITS="$P_COMMITS"; CONFLICTS="$P_CONFLICTS"; BETA_DIFF="$P_BETA_DIFF"
+            if [ "$P_RESULT" = "already on main" ]; then
+              # The re-run path rebuilds nothing: the lists are the gate's (body text only; the
+              # header never reads them), and the Result line says what the merge was.
+              COMMITS="$G_COMMITS"; CONFLICTS="$G_CONFLICTS"; BETA_DIFF="$G_BETA_DIFF"
+            fi
+            # A refusal before the rebuild (main moved) has no commit list of its own.
+            [ -n "$COMMITS" ] || COMMITS="$G_COMMITS"
           else
-            HEADER="[CONFLICTS RESOLVED] Beta->Main merged (beta won)"
+            RESULT="$G_RESULT"; MERGED_SHA="$G_MERGED_SHA"; COMMITS="$G_COMMITS"; CONFLICTS="$G_CONFLICTS"; BETA_DIFF="$G_BETA_DIFF"
+          fi
+
+          # Why it did not finish: the first thing that did not succeed, in run order.
+          if [ "$SNAPSHOT_RESULT" = "cancelled" ] || [ "$GATE_RESULT" = "cancelled" ] || [ "$PROMOTE_RESULT" = "cancelled" ]; then
+            WHY="the run was cancelled"
+          elif [ "$SNAPSHOT_RESULT" != "success" ]; then
+            WHY="the snapshot could not pin main and beta"
+          elif [ "$GATE_RESULT" != "success" ]; then
+            if [ "$G_READ" = "no" ]; then
+              WHY="the gate failed (its outputs could not be read)"
+            elif [ "$MERGE_OUTCOME" != "success" ]; then
+              case "$G_RESULT" in
+                refused*) WHY="the merge was refused" ;;
+                "")       WHY="the gate job failed before the merge" ;;
+                *)        WHY="the merge step failed" ;;
+              esac
+            elif [ "$NODE_OUTCOME" != "success" ] || [ "$DENO_OUTCOME" != "success" ]; then
+              WHY="setting up the gate (Node/Deno) failed"
+            else
+              WHY="preflight failed on the merged tree"
+            fi
+          elif [ -z "$REMERGE_OUTCOME" ]; then
+            WHY="promote did not report (it failed to start, or its runner was lost)"
+          elif [ "$REMERGE_OUTCOME" != "success" ]; then
+            WHY="promote could not rebuild the gated merge (${P_RESULT:-see the run})"
+          elif [ "$PUSH_OUTCOME" != "success" ] && ! { [ "$P_RESULT" = "already on main" ] && [ "$PUSH_OUTCOME" = "skipped" ]; }; then
+            WHY="the push to main failed"
+          elif [ "$PROMOTE_RESULT" != "success" ]; then
+            WHY="a step after the push failed"
+          else
+            WHY=""
+          fi
+
+          # Did production change? Three facts decide it: whether the merge had anything new,
+          # whether a push was ever ATTEMPTED (a step that started can land server-side even when
+          # it reports failure or is cancelled), and where main points now.
+          NEW_WORK="no"
+          if [ -n "$MERGED_SHA" ] && [ -n "$MAIN_BEFORE" ] && [ "$MERGED_SHA" != "$MAIN_BEFORE" ]; then NEW_WORK="yes"; fi
+          case "$PUSH_OUTCOME" in success|failure|cancelled) PUSH_TRIED="yes" ;; *) PUSH_TRIED="no" ;; esac
+          if [ "$PUSHED" = "yes" ]; then
+            PUSH_LINE="yes"
+          elif [ "$PUSH_TRIED" = "yes" ]; then
+            PUSH_LINE="unconfirmed (the push step ended: ${PUSH_OUTCOME})"
+          else
+            PUSH_LINE="no"
+          fi
+
+          if [ "$REMERGE_OUTCOME" = "success" ] && [ "$P_RESULT" = "already on main" ]; then
+            PROMOTED="yes"             # a re-run: promote proved main already contains the merge
+          elif [ "$PROMOTE_RESULT" = "skipped" ] || [ "$REMERGE_OUTCOME" = "skipped" ]; then
+            PROMOTED="no"              # nothing that could push ran; the gate's SHA decides nothing
+          elif [ -z "$REMERGE_OUTCOME" ]; then
+            # promote ran but published nothing (cancelled early, failed to start, runner lost):
+            # only where main points can tell, never the gate's SHA.
+            if [ -n "$REMOTE_MAIN" ] && [ "$REMOTE_MAIN" = "$MAIN_BEFORE" ]; then PROMOTED="no"; else PROMOTED="unknown"; fi
+          elif [ -n "$MERGED_SHA" ] && [ "$NEW_WORK" = "no" ]; then
+            PROMOTED="nothing-new"     # pushing main's own commit cannot change main
+          elif [ "$NEW_WORK" = "yes" ] && { [ "$PUSHED" = "yes" ] || [ "$REMOTE_MAIN" = "$MERGED_SHA" ]; }; then
+            PROMOTED="yes"
+          elif [ "$PUSH_TRIED" = "no" ]; then
+            PROMOTED="no"              # this run never pushed, so it did not change production
+          elif [ -n "$REMOTE_MAIN" ] && [ "$REMOTE_MAIN" = "$MAIN_BEFORE" ]; then
+            PROMOTED="no"              # a push was tried, and main is still what it was
+          else
+            PROMOTED="unknown"
+          fi
+
+          if [ "$PROMOTED" = "yes" ]; then
+            if [ -n "$WHY" ]; then
+              HEADER="[PROMOTED, BUT ${WHY^^}] main was pushed - check the run"
+            else
+              case "$RESULT" in
+                clean) HEADER="[OK] Beta->Main merged cleanly" ;;
+                conflicts-resolved|conflicts-force-resolved) HEADER="[CONFLICTS RESOLVED] Beta->Main merged (beta won)" ;;
+                "already on main") HEADER="[OK] Already promoted - main contains this merge (a re-run; nothing pushed)"; RESULT="already on main (merged: ${G_RESULT:-n/a})" ;;
+                *) HEADER="[PROMOTED] Beta->Main merged (merge result not reported - check the run)" ;;
+              esac
+            fi
+          elif [ "$PROMOTED" = "nothing-new" ]; then
+            if [ -z "$WHY" ]; then
+              HEADER="[OK] Nothing new on beta - production is unchanged"
+            else
+              HEADER="[NOTHING NEW, BUT ${WHY^^}] production is unchanged"
+            fi
+          elif [ "$PROMOTED" = "no" ]; then
+            HEADER="[NOT PROMOTED] ${WHY:-unknown reason} - this run did not change production"
+          else
+            HEADER="[CHECK MAIN] main could not be confirmed after a push that may have run (${WHY:-no reason recorded})"
+          fi
+          if [ "$SNAPSHOT_RESULT" != "success" ] && [ "$PROMOTED" = "yes" ]; then
+            NOTES_RESULT="${NOTES_RESULT:-not flipped (the snapshot job ${SNAPSHOT_RESULT})}"
           fi
 
           # Plain text - pm_updates bodies render pre-wrap in the Projects item modal.
@@ -189,28 +555,44 @@ jobs:
           Repo: ${REPO}
           Result: ${RESULT:-n/a}
           Merge commit: ${MERGED_SHA:-n/a}
+          Production (main) now: ${REMOTE_MAIN:-could not read}
+          Preflight gate: ${PREFLIGHT_OUTCOME:-not run}
+          Pushed to main: ${PUSH_LINE}
           Release notes: ${NOTES_RESULT:-not attempted}
 
-          Commits promoted from beta:
-          ${COMMITS}"
+          Commits from beta:
+          ${COMMITS:-n/a}"
           if [ -n "${CONFLICTS:-}" ]; then
+            if [ "$PROMOTED" = "yes" ]; then
+              CONFLICT_NOTE="Files that conflicted (resolved in beta's favor - please review):"
+            else
+              CONFLICT_NOTE="Files that conflicted (not promoted):"
+            fi
             BODY="${BODY}
 
-          Files that conflicted (auto-resolved in beta's favor - please review):
+          ${CONFLICT_NOTE}
           ${CONFLICTS}"
+          fi
+          if [ -n "${BETA_DIFF:-}" ]; then
+            BODY="${BODY}
+
+          Main differs from beta after the merge (main-only changes kept):
+          ${BETA_DIFF}"
           fi
           BODY="${BODY}
 
           Run: ${RUN_URL}"
 
-          PAYLOAD="$(jq -n --arg item "$PM_MERGE_ITEM_ID" --arg body "$BODY" \
-            '{item_id:$item, body:$body, client_visible:false, author_email:"github-actions"}')"
+          # Through files, never as a command-line argument, so no length can stop the post.
+          printf '%s' "$BODY" > "$RUNNER_TEMP/report-body.txt"
+          jq -n --arg item "$PM_MERGE_ITEM_ID" --rawfile body "$RUNNER_TEMP/report-body.txt" \
+            '{item_id:$item, body:$body, client_visible:false, author_email:"github-actions"}' > "$RUNNER_TEMP/report-payload.json"
 
           RESP="$(curl -sS -X POST "${SUPABASE_URL}/rest/v1/pm_updates" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Content-Type: application/json" \
             -H "Prefer: return=representation" \
-            -d "$PAYLOAD")"
+            --data-binary @"$RUNNER_TEMP/report-payload.json")"
           echo "$RESP" | jq -e '.[0].id' >/dev/null || { echo "Projects report failed: $RESP"; exit 1; }
           echo "Reported to Projects."
