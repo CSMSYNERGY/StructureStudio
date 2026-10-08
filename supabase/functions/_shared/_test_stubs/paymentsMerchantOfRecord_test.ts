@@ -15,7 +15,14 @@
 //   3. A tenant switched off still voids, refunds and reconciles; pay_options, surcharge_probe,
 //      charge and charge_adhoc are still refused, exactly as before.
 //   4. reconcile asks settlestat once per (merchant, day), each on its own MID, and skips (and
-//      logs) a pending bank payment with no merchant of record instead of asking the current MID.
+//      logs, once a day) a pending bank payment with no merchant of record instead of asking the
+//      current MID.
+//   5. merchantOfRecord reads the CALLER'S tenant's attempts only: an attempt id that belongs to
+//      another tenant is no merchant of record.
+//   6. The billing fields on the shipped handler (phase 1): pay_options hands billingPrefill to a
+//      member who can take the card and to nobody else; a keyed `charge` sends the typed name,
+//      street and ZIP with ecomind "E"; a swipe sends no ecomind; a page that sends nothing gets
+//      the auth it always got.
 //
 // HOW. deleteDesignWiring_test's idiom: Deno.serve is stubbed while portal-payments/index.ts is
 // imported, and the import map swaps supabase-js for supabase_stub.ts, whose stubDb hook routes every
@@ -66,14 +73,25 @@ type Pay = { id: string; order_id: string; amount_cents: number; gateway: string
 type World = {
   settings?: Record<string, unknown> | null;
   payments?: Pay[];
-  attempts?: { id: number; merchid: string }[];
+  /** client_id defaults to TENANT. */
+  attempts?: { id: number; merchid: string; client_id?: string }[];
   attemptsFail?: boolean;
+  /** The caller's client_users row. Default: an owner of TENANT. */
+  member?: Record<string, unknown>;
+  /** An app_operators row: the caller is a platform operator (the body names targetClientId). */
+  op?: Record<string, unknown> | null;
+  /** The order pay_options / charge read, and the contact on its design. */
+  order?: { id: string; short_code: string | null; total_cents: number } | null;
+  contact?: Record<string, unknown> | null;
+  /** app_errors rows already filed, for reconcile's once-a-day check. */
+  priorErrors?: Record<string, unknown>[];
   /** The gateway's answer per path ("/void", "/refund", "/settlestat"): a body, or a status. */
   gateway?: (path: string, body: any, url: URL) => unknown;
 };
 type Trace = {
   gateway: { path: string; body: any; url: URL }[];
   errors: Record<string, unknown>[];
+  errorReads: number;
   writes: { table: string; verb: string; row: any }[];
   audit: Record<string, unknown>[];
 };
@@ -85,29 +103,61 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
   const verb = ["insert", "update", "delete", "upsert"].find((v) => has(ops, v));
   switch (table) {
     case "client_users":
-      return { data: [{ client_id: TENANT, role: "owner", title: "owner", access: null, user_id: USER_ID }], error: null };
+      return { data: [world.member ?? { client_id: TENANT, role: "owner", title: "owner", access: null, user_id: USER_ID }], error: null };
+    case "app_operators":
+      return { data: world.op ?? null, error: null };
+    case "client_configs":
+      return { data: { client_id: eqOf(ops, "client_id") }, error: null };
     case "admin_audit":
       trace.audit.push(argOf(ops, "insert")[0]);
       return { data: null, error: null };
-    case "app_errors":
-      trace.errors.push(argOf(ops, "insert")[0]);
+    case "app_errors": {
+      if (verb) { trace.errors.push(argOf(ops, verb)[0]); return { data: null, error: null }; }
+      // orphansFiledToday: this tenant's rows under the code, newer than the cutoff.
+      trace.errorReads++;
+      const since = String(argOf(ops, "gt")[1] ?? "");
+      return {
+        data: (world.priorErrors ?? []).filter((e) =>
+          e.client_id === eqOf(ops, "client_id") && e.code === eqOf(ops, "code") && e.source === eqOf(ops, "source") &&
+          String(e.created_at) > since
+        ),
+        error: null,
+      };
+    }
+    case "orders":
+      return { data: world.order && world.order.id === eqOf(ops, "id") ? { ...world.order } : null, error: null };
+    case "designs":
+      // The charge path reads the contact; readOrderMoney reads the lines (none: the order total stands).
+      return { data: String(argOf(ops, "select")[0] ?? "").includes("contact") && world.contact !== undefined ? { contact: world.contact } : null, error: null };
+    case "change_orders":
+      return { data: [], error: null };
+    case "invoice_sends":
       return { data: null, error: null };
     case "client_settings":
       return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, business_name: "Acme Sheds" } : world.settings, error: null };
     case "payment_attempts": {
-      if (verb) { trace.writes.push({ table, verb, row: argOf(ops, verb)[0] }); return { data: null, error: null }; }
+      if (verb) {
+        trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });
+        return { data: verb === "insert" ? { id: 501 } : null, error: null };
+      }
       const ids = argOf(ops, "in")[1];
       if (ids) {
         if (world.attemptsFail) return { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } };
         const want = (ids as unknown[]).map(String);
-        return { data: (world.attempts ?? []).filter((a) => want.includes(String(a.id))).map((a) => ({ ...a })), error: null };
+        // Honours the tenant filter, as Postgres would: another tenant's attempt is not found.
+        const tenant = eqOf(ops, "client_id");
+        return {
+          data: (world.attempts ?? []).filter((a) => want.includes(String(a.id)) && (a.client_id ?? TENANT) === tenant).map((a) => ({ ...a })),
+          error: null,
+        };
       }
-      // reconcile's closed_unknown sweep: none.
+      // reconcile's closed_unknown sweep, the charge path's unknown/open checks, the decline count: none.
       return { data: [], error: null };
     }
     case "payments": {
       if (verb) {
         trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });
+        if (verb === "insert") return { data: { id: "pay-new" }, error: null };
         return { data: has(ops, "select") ? [{ id: eqOf(ops, "id") }] : null, error: null };
       }
       const all = world.payments ?? [];
@@ -139,7 +189,7 @@ const ENV: Record<string, string> = {
 };
 
 async function call(body: Record<string, unknown>, world: World) {
-  const trace: Trace = { gateway: [], errors: [], writes: [], audit: [] };
+  const trace: Trace = { gateway: [], errors: [], errorReads: 0, writes: [], audit: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   const realFetch = globalThis.fetch;
@@ -312,4 +362,123 @@ Deno.test("reconcile skips (and logs) a pending bank payment with no merchant of
   assertEquals(r.trace.gateway[0].url.searchParams.get("date"), "20261001", "the orphan's day is never fetched");
   assertEquals((r.body.updated as any[]).map((u) => u.paymentId), ["a1"]);
   assert(faultCodes(r.trace).includes("payment_no_merchant_of_record"), JSON.stringify(r.trace.errors));
+});
+
+Deno.test("reconcile files an orphan ONCE a day, not once a visit, and a new orphan at once", async () => {
+  const orphan = ACH("orphan", null, "rt-orphan", "2026-10-02");
+  const earlier = {
+    client_id: TENANT, source: "edge:portal-payments", code: "payment_no_merchant_of_record",
+    created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), context: { paymentIds: ["orphan"] },
+  };
+  // Filed two hours ago: this visit files nothing more about it.
+  const again = await call({ action: "reconcile" }, { payments: [orphan], attempts: ATTEMPTS, priorErrors: [earlier] });
+  assertEquals(again.status, 200, JSON.stringify(again.body));
+  assertEquals(again.trace.errorReads, 1, "it looked for the earlier row");
+  assertEquals(faultCodes(again.trace), [], JSON.stringify(again.trace.errors));
+  // Filed YESTERDAY: filed again today.
+  const stale = { ...earlier, created_at: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() };
+  const nextDay = await call({ action: "reconcile" }, { payments: [orphan], attempts: ATTEMPTS, priorErrors: [stale] });
+  assertEquals(faultCodes(nextDay.trace), ["payment_no_merchant_of_record"], JSON.stringify(nextDay.trace.errors));
+  // A SECOND orphan the earlier row never named: filed now, naming both.
+  const second = ACH("orphan2", null, "rt-orphan2", "2026-10-03");
+  const fresh = await call({ action: "reconcile" }, { payments: [orphan, second], attempts: ATTEMPTS, priorErrors: [earlier] });
+  assertEquals(faultCodes(fresh.trace), ["payment_no_merchant_of_record"], JSON.stringify(fresh.trace.errors));
+  assertEquals((fresh.trace.errors[0].context as any).paymentIds, ["orphan", "orphan2"]);
+  // Another tenant's row about the same id does not count for this one.
+  const elsewhere = await call({ action: "reconcile" }, { payments: [orphan], attempts: ATTEMPTS, priorErrors: [{ ...earlier, client_id: "bravo-barns" }] });
+  assertEquals(faultCodes(elsewhere.trace), ["payment_no_merchant_of_record"], JSON.stringify(elsewhere.trace.errors));
+});
+
+// ─── 5. The tenant filter is part of the merchant of record ───────────────────────────────────
+Deno.test("an attempt id that belongs to ANOTHER tenant is no merchant of record: refused, nothing sent", async () => {
+  const r = await call({ action: "void_payment", paymentId: "p-card" }, {
+    payments: [CARD],
+    attempts: [{ id: 41, merchid: OLD_MID, client_id: "bravo-barns" }],
+  });
+  assertEquals(r.status, 409, JSON.stringify(r.body));
+  assertEquals(r.trace.gateway, [], "another tenant's MID is never asked");
+  assert(faultCodes(r.trace).includes("payment_no_merchant_of_record"), JSON.stringify(r.trace.errors));
+});
+
+// ─── 6. Billing fields on the shipped handler ─────────────────────────────────────────────────
+const ORDER = { id: "o-1", short_code: "SS-AAAAAAAAAA", total_cents: 100000 };
+const CONTACT = { name: "Pat Example", phone: "5555550101", street: "12 Main St", city: "Springfield", zip: "12345-6789" };
+// sales_rep is orders:edit by preset; the override takes this one down to view.
+const VIEWER = { client_id: TENANT, role: "user", title: "sales_rep", access: { orders: "view" }, user_id: USER_ID };
+const PLATFORM_OP = { user_id: USER_ID, email: "ops@example.test", can_write: true, can_bill: false, support_only: false };
+const APPROVED = (path: string) =>
+  path === "/auth"
+    ? { respstat: "A", respcode: "000", retref: "rt-new", amount: "1000.00", token: "9413948780281111", authcode: "123456", avsresp: "Y", cvvresp: "M" }
+    : { respstat: "A", respcode: "00", retref: "rf-1" };
+const authBody = (t: Trace) => (t.gateway.find((g) => g.path === "/auth") ?? { body: null }).body;
+const attemptInsert = (t: Trace) => (t.writes.find((w) => w.table === "payment_attempts" && w.verb === "insert") ?? { row: null }).row;
+
+Deno.test("pay_options: billingPrefill for a member who can take the card, from the delivery address", async () => {
+  const r = await call({ action: "pay_options", orderId: "o-1" }, { order: ORDER, contact: CONTACT });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  // ZIP+4 through cpBillingFields: nine digits.
+  assertEquals(r.body.billingPrefill, { name: "Pat Example", street: "12 Main St", zip: "123456789" });
+  // An older contact shape (address/postalCode) is read the same way (addressFrom).
+  const old = await call({ action: "pay_options", orderId: "o-1" }, { order: ORDER, contact: { name: "Pat Example", address: "7 Oak Ave", postalCode: "54321" } });
+  assertEquals(old.body.billingPrefill, { name: "Pat Example", street: "7 Oak Ave", zip: "54321" });
+});
+
+Deno.test("pay_options: NO billingPrefill for an orders:view member or an operator, and the address is nowhere in the answer", async () => {
+  const viewer = await call({ action: "pay_options", orderId: "o-1" }, { order: ORDER, contact: CONTACT, member: VIEWER });
+  assertEquals(viewer.status, 200, JSON.stringify(viewer.body));
+  assertEquals(viewer.body.billingPrefill, null);
+  const op = await call({ action: "pay_options", orderId: "o-1", targetClientId: TENANT }, {
+    order: ORDER, contact: CONTACT, op: PLATFORM_OP,
+    member: { client_id: "ops-home", role: "user", title: "office_staff", access: null, user_id: USER_ID },
+  });
+  assertEquals(op.status, 200, JSON.stringify(op.body));
+  assertEquals(op.body.billingPrefill, null);
+  for (const r of [viewer, op]) {
+    const text = JSON.stringify(r.body);
+    for (const v of ["12 Main St", "12345", "Pat Example"]) assert(!text.includes(v), `${v} leaked: ${text}`);
+  }
+});
+
+Deno.test("charge, keyed: the typed name, street and ZIP reach /auth with ecomind E, and the attempt records the names", async () => {
+  const r = await call({
+    action: "charge", orderId: "o-1", payToken: "9413948780281111", entry: "keyed", confirmChargeCents: 100000,
+    name: " Card Holder ", address: "9 Elm Rd", postal: "54321-0001",
+  }, { order: ORDER, contact: CONTACT, gateway: APPROVED });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const b = authBody(r.trace);
+  assertEquals([b.name, b.address, b.postal, b.ecomind, b.merchid], ["Card Holder", "9 Elm Rd", "543210001", "E", NEW_MID]);
+  for (const k of ["cvv2", "profile", "cof", "cofscheduled", "track"]) assert(!(k in b), `${k} sent`);
+  const att = attemptInsert(r.trace);
+  assertEquals(att.ecomind, "E");
+  assertEquals(att.sent_fields, Object.keys(b).sort(), "sent_fields are the keys /auth was sent");
+  for (const k of ["address", "name", "postal"]) assert(att.sent_fields.includes(k), String(att.sent_fields));
+  const pay = r.trace.writes.find((w) => w.table === "payments" && w.verb === "insert");
+  assertEquals(pay?.row.entry_mode, "ECommerce");
+});
+
+Deno.test("charge, swipe: NO ecomind on /auth (R is recurring), recorded as none, entry_mode Swipe", async () => {
+  const track = "02" + "A".repeat(300) + "03";
+  const r = await call({ action: "charge", orderId: "o-1", payToken: track, entry: "swipe", confirmChargeCents: 100000 }, {
+    order: ORDER, contact: CONTACT, gateway: APPROVED,
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const b = authBody(r.trace);
+  assert(!("ecomind" in b), `ecomind sent on a swipe: ${JSON.stringify(Object.keys(b))}`);
+  assertEquals(b.account, track);
+  // The modal sends no billing fields for a swipe: the contact's name, no street, no ZIP.
+  assertEquals([b.name, "address" in b, "postal" in b], ["Pat Example", false, false]);
+  const att = attemptInsert(r.trace);
+  assertEquals(att.ecomind, null);
+  assert(!att.sent_fields.includes("ecomind"), String(att.sent_fields));
+  const pay = r.trace.writes.find((w) => w.table === "payments" && w.verb === "insert");
+  assertEquals(pay?.row.entry_mode, "Swipe");
+});
+
+Deno.test("charge from production's page (no billing fields): the auth it always got, contact name and ecomind E", async () => {
+  const r = await call({ action: "charge", orderId: "o-1", payToken: "9413948780281111", confirmChargeCents: 100000 }, {
+    order: ORDER, contact: CONTACT, gateway: APPROVED,
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const b = authBody(r.trace);
+  assertEquals([b.name, b.ecomind, "address" in b, "postal" in b], ["Pat Example", "E", false, false]);
 });

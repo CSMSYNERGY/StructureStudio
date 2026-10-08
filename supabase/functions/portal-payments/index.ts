@@ -180,6 +180,41 @@ async function recentDeclines(
   return Number(count ?? 0);
 }
 
+/**
+ * Whether reconcile has already filed EVERY one of these orphaned payments (no merchant of
+ * record) for this tenant in the last 24 hours. Reconcile runs on each Orders visit while a bank
+ * payment is pending, and an orphan never stops being pending on its own, so without this one
+ * stuck payment filed an error row per visit. A NEW orphan is not in the earlier row's
+ * paymentIds and is filed at once. Any read failure answers false: a doubtful check files again
+ * rather than staying quiet. void_payment / refund_payment file their own refusal every time,
+ * since a person pressed something.
+ */
+async function orphansFiledToday(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  clientId: string,
+  paymentIds: string[],
+): Promise<boolean> {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await admin.from("app_errors")
+      .select("context")
+      .eq("client_id", clientId)
+      .eq("source", "edge:portal-payments")
+      .eq("code", "payment_no_merchant_of_record")
+      .gt("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (error || !Array.isArray(data)) return false;
+    return data.some((row: Record<string, unknown>) => {
+      const seen = (row?.context as Record<string, unknown> | null)?.paymentIds;
+      return Array.isArray(seen) && paymentIds.every((id) => seen.map(String).includes(id));
+    });
+  } catch {
+    return false;
+  }
+}
+
 Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -724,7 +759,10 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const merchantOf = (row: Record<string, unknown>) =>
       row.attempt_id == null ? undefined : merchants.get(String(row.attempt_id));
     const orphans = merchantsRead ? sweep.filter((row) => !merchantOf(row)) : [];
-    if (orphans.length) {
+    // ONCE A DAY, not once a sweep: the Orders tab fires this on every visit while a bank payment
+    // is pending, and an orphan stays pending until a human acts, so a row per sweep would bury
+    // the queue under one problem (see orphansFiledToday).
+    if (orphans.length && !(await orphansFiledToday(admin, clientId, orphans.slice(0, 50).map((r) => String(r.id))))) {
       await logEdgeError({
         fn: "portal-payments",
         req,
