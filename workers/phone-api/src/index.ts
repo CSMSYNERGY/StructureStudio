@@ -100,7 +100,9 @@ async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0:
     }));
   }
   // The account the webhook came from rides on the handler's Env while the switch is on, so a handler
-  // that resolves a tenant can refuse one in another account (twilioAccount.ts tenantMatchesWebhook).
+  // that resolves a tenant can refuse one in another account (twilioAccount.ts tenantMatchesWebhook),
+  // and a SUB's webhook runs every Twilio REST call of its handler in that sub, with the SID and auth
+  // token its signature was just checked with (phase 5; no lookup). The parent's runs as the parent.
   // Off: `check.account` is absent and this is the same env object.
   const env = webhookEnv(envIn, check.account);
   const p = check.params;

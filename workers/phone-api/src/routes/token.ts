@@ -27,6 +27,7 @@ import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { greetingOut } from "./me";
 import { onDnd } from "./voice";
+import { callerTwilioEnv } from "../twilioAccount";
 
 export const TOKEN_TTL = 3600;
 /** The setup test only needs long enough to run Twilio's preflight. */
@@ -75,9 +76,23 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   if (!ctx || ctx.phone_level === "none") throw new ApiError("no_phone_access");
   if (ctx.phone_status !== "on") throw new ApiError("phone_off");
 
-  const appSid = preflight ? env.TWILIO_ECHO_APP_SID : env.TWILIO_TWIML_APP_SID;
-  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_API_KEY || !env.TWILIO_API_SECRET || !appSid) {
-    ec.waitUntil(logFault({ code: "token_not_configured", message: "The Twilio account SID, API key pair or TwiML App SID is missing.", throttleMs: 10 * 60_000 }));
+  // ── WHICH ACCOUNT SIGNS THE TOKEN (Workstream 2, phase 5) ──────────────────────────────────
+  // A Voice token must be signed with an API key of the SAME account its TwiML App and push
+  // credential live in (Twilio error 31203), so all three come from one account: the business's
+  // own sub-account when it has one (its key, its app, its push credential: scopedTwilioEnv clears
+  // anything the sub lacks rather than lending it the parent's), the parent otherwise. Switch off:
+  // `env` itself, nothing looked up. The SETUP TEST stays on the parent whatever the business is:
+  // its Echo app (TWILIO_ECHO_APP_SID) is the parent's, so it is signed with the parent's key.
+  const acct = preflight ? env : await callerTwilioEnv(env, { admin, ctx });
+  const appSid = preflight ? env.TWILIO_ECHO_APP_SID : acct.TWILIO_TWIML_APP_SID;
+  if (!acct.TWILIO_ACCOUNT_SID || !acct.TWILIO_API_KEY || !acct.TWILIO_API_SECRET || !appSid) {
+    const sub = acct !== env;
+    ec.waitUntil(logFault({
+      code: "token_not_configured", throttleMs: 10 * 60_000, ...(sub ? { clientId: ctx.client_id } : {}),
+      message: sub
+        ? "This business's Twilio sub-account has no API key pair or no TwiML App yet: its tokens can't be minted (finish it in the operator console)."
+        : "The Twilio account SID, API key pair or TwiML App SID is missing.",
+    }));
     throw new ApiError("internal", "The phone service isn't configured yet.");
   }
 
@@ -95,7 +110,7 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   // A phone's token without a push credential still signs the person in and still places calls,
   // but Twilio refuses to register it for incoming ones. That is a missing secret, not the
   // person's problem: logged by name, and `incoming_push: false` tells the app why.
-  const pushCredential = preflight ? undefined : pushCredentialFor(env, platform, buildType);
+  const pushCredential = preflight ? undefined : pushCredentialFor(acct, platform, buildType);
   const wantsPush = !preflight && platform !== "chrome";
   if (wantsPush && !pushCredential) {
     const name = String(pushCredentialSecretFor(platform, buildType));
@@ -105,9 +120,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     }));
   }
   const jwtOut = await mintAccessToken({
-    accountSid: env.TWILIO_ACCOUNT_SID,
-    apiKeySid: env.TWILIO_API_KEY,
-    apiKeySecret: env.TWILIO_API_SECRET,
+    accountSid: acct.TWILIO_ACCOUNT_SID,
+    apiKeySid: acct.TWILIO_API_KEY,
+    apiKeySecret: acct.TWILIO_API_SECRET,
     identity,
     ttlSeconds: ttl,
     voice: preflight

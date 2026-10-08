@@ -55,6 +55,7 @@ import {
 import { response, say } from "./twiml";
 import { hook } from "./urls";
 import { noticeSaysRecorded } from "../../../supabase/functions/_shared/recordingNotice.ts";
+import { envForClient } from "./twilioAccount";
 
 // ── The switches ────────────────────────────────────────────────────────────────────────
 
@@ -510,7 +511,8 @@ export async function recordingBackstop(env: Env, admin: Admin, now = new Date()
     if (!c?.twilio_call_sid || !(since >= BACKSTOP_AFTER_MS)) continue;
     out.checked++;
     try {
-      const recs: TwilioRecording[] = await listCallRecordings(env, c.twilio_call_sid);
+      // In the account the call lives in (Workstream 2, phase 5). Off: `env` itself.
+      const recs: TwilioRecording[] = await listCallRecordings(await envForClient(env, admin, row.client_id), c.twilio_call_sid);
       const mine = row.recording_sid
         ? recs.find((r) => r.sid === row.recording_sid)
         : recs.find((r) => r.source === "StartCallRecordingAPI");

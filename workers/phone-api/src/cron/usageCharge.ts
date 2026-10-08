@@ -121,6 +121,7 @@ import {
   type TwilioLegCost,
 } from "../twilioRest";
 import { requestAutoTopup } from "../wallet";
+import { envForClient, subaccountsOnFor } from "../twilioAccount";
 
 /** Outside requests per run, Supabase and Twilio together. */
 export const REQUEST_CAP = 300;
@@ -614,13 +615,17 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
       return true;
     }
     try {
+      // Twilio is asked in the account the row's business lives in (Workstream 2, phase 5), so a
+      // sub-account's call, text and recording are priced from the sub's own records. Off: `run`
+      // itself, nothing looked up. A sub that cannot be resolved is retried like any Twilio error.
+      const r = subaccountsOnFor(run.env) ? { ...run, env: await envForClient(run.env, run.admin, row.client_id) } : run;
       const state = row.source === "call"
-        ? await chargeCall(run, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
+        ? await chargeCall(r, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
         : row.source === "sms"
-          ? await chargeSms(run, row, msgs.get(row.source_id) ?? null)
+          ? await chargeSms(r, row, msgs.get(row.source_id) ?? null)
           : row.source === "recording"
-            ? await chargeRecording(run, row, recs.get(row.source_id) ?? null)
-            : await chargeTranscription(run, row, recs.get(row.source_id) ?? null);
+            ? await chargeRecording(r, row, recs.get(row.source_id) ?? null)
+            : await chargeTranscription(r, row, recs.get(row.source_id) ?? null);
       counts[state]++;
     } catch (e) {
       if (e instanceof BudgetSpent) {
@@ -1339,6 +1344,9 @@ export type UsageSnapshotSummary =
  * refreshes the day). What the account was really billed, to check the per-item costs and the
  * carrier-fee estimate against. Runs with cost capture, like the shadow rows.
  */
+// ⚠️ THE PARENT'S ONLY, until Workstream 2's phase 7: Usage Records include sub-accounts by
+// default, and the per-account key and loop are that phase's (twilio_usage_daily keeps its
+// (day, category) primary key until then).
 export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date()): Promise<UsageSnapshotSummary> {
   if (env.PHONE_USAGE_METERS !== "on" && env.PHONE_USAGE_COST_CAPTURE === "off") return { ran: false, reason: "switched_off" };
   if (!twilioConfigured(env)) return { ran: false, reason: "not_configured" };

@@ -10,6 +10,13 @@
 //   tenantMatches  (TWILIO_WEBHOOK_ACCOUNT, an object, so the Deno.env shim never exposes it), and
 //   Webhook        a handler that resolves a tenant refuses one that lives in another account
 //                  (account_mismatch).
+//   envForClient / phase 5: every Twilio REST call runs in the account of the business it is for.
+//   callerTwilio   A webhook's handler runs as the account the webhook came from (webhookEnv: a
+//   Env /          sub's own SID + auth token, which the signature check already holds, so no
+//   cronAccounts   lookup); an app route as the caller's business (callerTwilioEnv); a cron row as
+//                  its row's business (envForClient), and the recording sweep lists every account
+//                  (cronAccounts). /token mints with the sub's key, app and push credential
+//                  (routes/token.ts). The setup test (TWILIO_ECHO_APP_SID) and NTS stay the parent's.
 //
 // ⚠️ SWITCH OFF = TODAY, EXACTLY. While TWILIO_SUBACCOUNTS is not "on", twilioEnvFor hands back the
 // SAME env object and webhookEnv the same env, with no lookup; tenantMatchesWebhook answers true
@@ -21,6 +28,8 @@
 
 import type { Env } from "./env";
 import type { Admin } from "./db";
+import { ApiError } from "./http";
+import { logFault } from "./log";
 import {
   accountBySid, resolveTwilioAccount, signedBySub, subaccountsOn, TwilioAccountError, webhookTenantVerdict,
   type AccountLookup, type TenantVerdict, type TwilioAccount, type WebhookAccount,
@@ -80,8 +89,94 @@ export async function twilioEnvFor(env: Env, admin: Admin, who: { clientId: stri
   } else {
     clientId = who.clientId;
   }
-  const acct = await resolveTwilioAccount(admin, clientId, get);
-  return acct && acct.source === "sub" ? scopedTwilioEnv(env, acct) : env;
+  const acct = await tenantAccount(env, admin, clientId, Date.now());
+  return acct ? scopedTwilioEnv(env, acct) : env;
+}
+
+// ── Phase 5: every REST call in the account of the business it is for ──────────────────────
+
+/** Per isolate: a tenant's resolved account (null = the parent). A sub 60 seconds (its key or
+ *  status can change: twilio_account_secret_put, the console's Suspend), the parent 30 (a builder
+ *  just given a sub is seen within that). Failures are never kept. Emptied at 1,000 entries. */
+const ACCOUNT_TTL_MS = 60_000;
+const PARENT_TTL_MS = 30_000;
+const ACCOUNT_CACHE_MAX = 1000;
+const accountCache = new Map<string, { until: number; acct: TwilioAccount | null }>();
+
+/** Tests only. */
+export function _resetWorkerTwilioCache(): void {
+  accountCache.clear();
+}
+
+async function tenantAccount(env: Env, admin: Admin, clientId: string, now: number): Promise<TwilioAccount | null> {
+  const key = String(clientId ?? "");
+  const hit = accountCache.get(key);
+  if (hit && hit.until > now) return hit.acct;
+  const acct = await resolveTwilioAccount(admin, key, envGet(env));
+  const sub = acct && acct.source === "sub" ? acct : null;
+  if (accountCache.size >= ACCOUNT_CACHE_MAX && !accountCache.has(key)) accountCache.clear();
+  accountCache.set(key, { until: now + (sub ? ACCOUNT_TTL_MS : PARENT_TTL_MS), acct: sub });
+  return sub;
+}
+
+/**
+ * The Env one business's Twilio REST calls run with. Switch off: `env` itself, nothing looked up
+ * (today). On: the parent's env for a business on the parent, the sub's scoped Env for one with
+ * its own. Throws TwilioAccountError (switch on only): that business's call is refused, nobody
+ * else's is touched.
+ */
+export async function envForClient(env: Env, admin: Admin, clientId: string, now: number = Date.now()): Promise<Env> {
+  if (!subaccountsOnFor(env)) return env;
+  const acct = await tenantAccount(env, admin, clientId, now);
+  return acct ? scopedTwilioEnv(env, acct) : env;
+}
+
+/**
+ * An app route's Env: the signed-in caller's business's account. Switch off: `env` itself. A sub
+ * still being set up is a refusal the apps can show; a lookup that fails is logged and refused.
+ */
+export async function callerTwilioEnv(env: Env, c: { admin: Admin; ctx: { client_id: string } }): Promise<Env> {
+  try {
+    return await envForClient(env, c.admin, c.ctx.client_id);
+  } catch (e) {
+    if (!(e instanceof TwilioAccountError)) throw e;
+    if (e.kind === "not_ready") throw new ApiError("twilio_error", "Your phone account is still being set up. Try again in a few minutes.");
+    await logFault({
+      code: "twilio_account_lookup_failed", clientId: c.ctx.client_id, throttleMs: 60_000,
+      message: `The business's Twilio account could not be resolved: ${e.message}`,
+    }).catch(() => {});
+    throw new ApiError("twilio_error");
+  }
+}
+
+/**
+ * Every account a cron that LISTS (the recording sweep) has to ask: the parent always, and with
+ * the switch on each ACTIVE sub-account as its own scoped Env. Off: the parent alone, nothing
+ * looked up. A sub that cannot be resolved is left out and logged; the parent is never dropped.
+ */
+export async function cronAccounts(env: Env, admin: Admin): Promise<{ env: Env; clientId: string | null }[]> {
+  const out: { env: Env; clientId: string | null }[] = [{ env, clientId: null }];
+  if (!subaccountsOnFor(env)) return out;
+  const { data, error } = await admin.from("twilio_accounts").select("client_id").eq("kind", "sub").eq("status", "active");
+  if (error) {
+    await logFault({
+      code: "twilio_accounts_list_failed", throttleMs: 60 * 60_000,
+      message: `Listing the active sub-accounts failed (${(error as { code?: string }).code ?? "no code"}); only the parent was asked.`,
+    }).catch(() => {});
+    return out;
+  }
+  for (const r of (data as { client_id: string }[] | null) ?? []) {
+    try {
+      const scoped = await envForClient(env, admin, r.client_id);
+      if (scoped !== env) out.push({ env: scoped, clientId: r.client_id });
+    } catch (e) {
+      await logFault({
+        code: "twilio_account_lookup_failed", clientId: r.client_id, throttleMs: 60 * 60_000,
+        message: `A sub-account was left out of a cron run: ${(e as Error).message}`,
+      }).catch(() => {});
+    }
+  }
+  return out;
 }
 
 /** For verifyTwilioRequest: the account an AccountSid names (the shared accountBySid), and the
@@ -90,10 +185,22 @@ export function webhookAccountLookup(env: Env, admin: () => Admin): AccountLooku
   return (sid, opts) => accountBySid(admin(), sid, envGet(env), Date.now(), opts);
 }
 
-/** The Env a verified webhook's handler runs with: the account it came from rides along (phase 4).
- *  No account (the switch off): `env` itself. */
+/**
+ * The Env a verified webhook's handler runs with. No account (the switch off): `env` itself.
+ * Otherwise the account it came from rides along (phase 4), and for a SUB its REST calls run in
+ * the sub (phase 5): a webhook is about a call, a recording or a conference in the account that
+ * sent it, and those can only be reached with that account's own credentials. The sub's SID and
+ * auth token are what the signature check already verified with, so this needs no lookup; its
+ * key, app and push credentials are cleared (only /token uses them). The parent's: its env.
+ */
 export function webhookEnv(env: Env, account: WebhookAccount | undefined): Env {
-  return account ? { ...env, TWILIO_WEBHOOK_ACCOUNT: account } : env;
+  if (!account) return env;
+  const withAccount: Env = { ...env, TWILIO_WEBHOOK_ACCOUNT: account };
+  if (account.source !== "sub" || !account.authToken) return withAccount;
+  return scopedTwilioEnv(withAccount, {
+    ...account, user: account.accountSid, pass: account.authToken,
+    twimlAppSid: null, pushApnsDevSid: null, pushApnsProdSid: null, pushFcmSid: null,
+  });
 }
 
 /**

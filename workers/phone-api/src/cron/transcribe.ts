@@ -29,6 +29,7 @@ import { addCallEvent, must, type Admin } from "../db";
 import { logFault } from "../log";
 import { callTranscribeOn, CHANNEL_MAP } from "../recording";
 import { recordingMedia, TwilioError, twilioConfigured } from "../twilioRest";
+import { envForClient } from "../twilioAccount";
 
 export const NOVA3_MODEL = "@cf/deepgram/nova-3";
 /** Recordings per tick. */
@@ -240,7 +241,9 @@ async function transcribeOne(env: Env, admin: Admin, row: ClaimedRow, wanted: bo
   }
   try {
     if (!row.recording_sid) throw new Permanent("the row has no recording");
-    const media = await recordingMedia(env, row.recording_sid, null, 2);
+    // In the account the recording lives in (Workstream 2, phase 5): its business's sub-account
+    // once it has one. Off: `env` itself. A sub that cannot be resolved is retried like any fetch.
+    const media = await recordingMedia(await envForClient(env, admin, row.client_id), row.recording_sid, null, 2);
     if (media.status === 404) throw new Permanent("Twilio no longer has the recording");
     if (!media.ok || !media.body) throw new Error(`Twilio answered HTTP ${media.status} for the audio`);
     const out = await env.AI!.run(NOVA3_MODEL, {

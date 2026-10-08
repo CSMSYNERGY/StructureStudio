@@ -6,12 +6,16 @@
 // retention (client_settings.phone_recording_retention_days, 365 unless the owner chose 30, 90,
 // 180 or 730; phone_recordings_expired picks them). The transcript goes with the audio and the
 // summary stays (decided 2026-10-04), so the call still says what it was about.
+//
+// Each recording is deleted in the account it lives in: its business's sub-account once it has one
+// (Workstream 2, phase 5: twilioAccount.ts envForClient). Off: the parent, nothing looked up.
 
 import type { Env } from "../env";
 import { intVar } from "../env";
 import { adminClient, must } from "../db";
 import { logFault } from "../log";
 import { deleteRecording, twilioConfigured } from "../twilioRest";
+import { envForClient } from "../twilioAccount";
 
 const BATCH = 200;
 
@@ -28,7 +32,7 @@ export async function recordingRetention(env: Env, now = new Date()): Promise<{ 
   for (const r of rows) {
     try {
       // A recording already gone at Twilio counts as deleted (deleteRecording takes a 404).
-      if (r.recording_sid) await deleteRecording(env, r.recording_sid);
+      if (r.recording_sid) await deleteRecording(await envForClient(env, admin, r.client_id), r.recording_sid);
       const { error } = await admin.from("phone_call_recordings")
         .update({ deleted_at: new Date().toISOString(), transcript: null, transcript_json: null })
         .eq("id", r.id).is("deleted_at", null);
@@ -57,7 +61,7 @@ export async function retention(env: Env, now = new Date()): Promise<{ deleted: 
   let failed = 0;
   for (const r of rows) {
     try {
-      if (r.recording_sid) await deleteRecording(env, r.recording_sid);
+      if (r.recording_sid) await deleteRecording(await envForClient(env, admin, r.client_id), r.recording_sid);
       const { error } = await admin.from("phone_voicemails").update({ deleted_at: new Date().toISOString() }).eq("id", r.id).is("deleted_at", null);
       if (error) throw new Error(error.message);
       deleted++;
