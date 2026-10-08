@@ -20,8 +20,10 @@
 //     10-120 characters, no URL (the beta address never goes in a note; tell people directly).
 //   * Release-section: the product area chip the Support page draws first on the line
 //     (release_notes.section, 114; rendered upper-case, so "Contacts" shows as CONTACTS). Free
-//     text by design (114 is not an enum); release-ci reuses an existing section's spelling when
-//     only the case differs, so the chips group.
+//     text by design (114 is not an enum): letters, digits ("3D Design" is a real area), spaces
+//     and & / + -, with at least one letter. release-ci reuses an existing section's spelling
+//     when only the case differs, so the chips group, and marks a section no note has used
+//     before as `newSection` in its result, so a misspelt chip is seen in the run summary.
 //   * Release-detail: the optional longer line under the title (release_notes.detail), up to 1000
 //     characters, no URL.
 //   * Projects: a Projects item id, whole or its first 8+ hex characters (the drawer's "copy ref"),
@@ -59,7 +61,8 @@ const CONTINUATION = /^[ \t]+\S/;
 const URLISH = /(?:https?:\/\/|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:app|com|net|org|io|dev|co|us)\b)/i;
 // deno-lint-ignore no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
-const SECTION_SHAPE = /^[A-Za-z][A-Za-z0-9 &/+-]*$/;
+// A letter or digit first ("3D Design"), at least one letter somewhere (a bare "2026" is no area).
+const SECTION_SHAPE = /^(?=[^A-Za-z]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9 &/+-]*$/;
 
 /** Length in characters (code points), not UTF-16 units, so an accent counts once. */
 const chars = (s: string) => Array.from(s).length;
@@ -161,7 +164,7 @@ export function parseReleaseTrailers(message: string): ParsedTrailers {
   if (sections.length) {
     section = sections[0][1].trim();
     if (sections[0][2] || chars(section) < 2 || chars(section) > SECTION_MAX || !SECTION_SHAPE.test(section)) {
-      return out(null, `Release-section must be a product area of 2-${SECTION_MAX} letters, such as Designer or Contacts.`);
+      return out(null, `Release-section must be a product area of 2-${SECTION_MAX} characters, such as Designer, Contacts or 3D Design.`);
     }
   }
   if (details.length > 1) return out(null, "More than one Release-detail trailer.");

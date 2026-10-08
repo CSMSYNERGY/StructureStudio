@@ -79,6 +79,11 @@ Deno.test("Release-section and Release-detail rules", () => {
   const why = (...t: string[]) => parseReleaseTrailers(msg("Release-note: feature: A perfectly good title here", ...t, CO)).refused;
   assertEquals(why("Release-section: Build Schedule"), null);
   assertEquals(why("Release-section: Orders & Invoices"), null);
+  // The product has a 3D area: a section may start with a digit, but it needs a letter.
+  assertEquals(why("Release-section: 3D Design"), null);
+  assertEquals(why("Release-section: 3D"), null);
+  assert(/product area/.test(why("Release-section: 2026") || ""));
+  assert(/product area/.test(why("Release-section: -Designer") || ""));
   assert(/product area/.test(why("Release-section: X") || ""));
   assert(/product area/.test(why(`Release-section: ${"A".repeat(33)}`) || ""));
   assert(/product area/.test(why("Release-section: <b>Designer</b>") || ""));

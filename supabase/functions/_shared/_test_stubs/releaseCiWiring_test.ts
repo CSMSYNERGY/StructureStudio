@@ -106,17 +106,25 @@ type Row = Record<string, any>;
 type Tables = Record<string, Row[]>;
 const WRITE_OPS = new Set(["insert", "update", "upsert", "delete"]);
 
+/** A test's window into the fake, called as each query runs (before its filters are applied): it
+ *  can change `tables` to play a person editing at that moment, or return an error to fail the
+ *  query. `cols` is the select list of a read (null for a write). Reset to null after each test. */
+type Hook = (table: string, op: string, cols: string | null, payload: any) => { code: string; message: string } | void;
+let hook: Hook | null = null;
+
 /** A small in-memory stand-in for the PostgREST builder: the filters release-ci uses, in order. */
 function fakeFrom(tables: Tables, writes: Array<[string, string, any]>) {
   return (table: string) => {
     const filters: Array<(r: Row) => boolean> = [];
     let op = "select";
+    let cols: string | null = null;
     let payload: any = null;
     let order: [string, boolean] | null = null;
     let lim: number | null = null;
     let rng: [number, number] | null = null;
     const q: any = {
-      select: () => q,
+      // A select after an update only asks for the written rows back (the compare-and-swap).
+      select: (c?: string) => ((op === "select" ? (cols = c ?? "*") : null), q),
       // `col->>key` is PostgREST's json path filter (release-ci reads pm_activity.detail->>sha).
       eq: (c: string, v: unknown) => (filters.push((r) => {
         const [col, key] = c.split("->>");
@@ -135,6 +143,8 @@ function fakeFrom(tables: Tables, writes: Array<[string, string, any]>) {
     };
     const run = () => {
       const t = (tables[table] ||= []);
+      const forced = hook?.(table, op, op === "select" ? cols : null, payload);
+      if (forced) return { data: null, error: forced };
       if (WRITE_OPS.has(op)) writes.push([table, op, structuredClone(payload)]);
       if (op === "insert") {
         if (table === "release_notes" && payload.source_commit && t.some((r) => r.source_commit === payload.source_commit)) {
@@ -148,7 +158,7 @@ function fakeFrom(tables: Tables, writes: Array<[string, string, any]>) {
       let rows = t.filter((r) => filters.every((f) => f(r)));
       if (op === "update") {
         for (const r of rows) Object.assign(r, structuredClone(payload));
-        return { data: null, error: null };
+        return { data: structuredClone(rows), error: null };
       }
       if (order) {
         const [c, asc] = order;
@@ -186,8 +196,10 @@ const I = {
 };
 function world(): Tables {
   const col = (id: string, board: string, labels: unknown[]) => ({ id, board_id: board, type: "status", name: "Status", position: 1024, settings: { labels } });
-  const item = (id: string, board: string, status: string, extra: Row = {}) =>
-    ({ id, board_id: board, values: { [`c-${board}`]: status }, feedback_submission_id: null, archived_at: null, ...extra });
+  const item = (id: string, board: string, status: string, extra: Row = {}) => ({
+    id, board_id: board, values: { [`c-${board}`]: status }, feedback_submission_id: null, archived_at: null,
+    updated_at: "2026-10-01T00:00:00.000Z", ...extra,
+  });
   return {
     pm_boards: [{ id: "b-bugs", slug: "bugs" }, { id: "b-feat", slug: "features" }, { id: "b-work", slug: "working" }, { id: "b-road", slug: "roadmap" }],
     pm_columns: [
@@ -203,8 +215,9 @@ function world(): Tables {
     feedback_submissions: [{ id: "sub-1", status: "in_review" }],
     pm_updates: [], pm_activity: [],
     release_notes: [
-      { id: "n-1", title: "An older note somebody wrote by hand", section: "Contacts", source_commit: null },
-      { id: "n-2", title: "Copied earlier from a commit trailer", section: "", source_commit: "e".repeat(40) },
+      { id: "n-1", title: "An older note somebody wrote by hand", section: "Contacts", status: "shipped", source_commit: null },
+      { id: "n-2", title: "Copied earlier from a commit trailer", section: "", status: "beta", source_commit: "e".repeat(40) },
+      { id: "n-3", title: "Saved views on every board", section: "", status: "roadmap", source_commit: null },
     ],
     client_settings: [
       { client_id: "acme-sheds", business_name: "Acme Sheds & Barns", internal_account: false },
@@ -245,6 +258,7 @@ async function call(tables: Tables, body: unknown, env: Record<string, string | 
     return { status: res.status, text, body: JSON.parse(text), writes };
   } finally {
     stubDb.from = null;
+    hook = null;
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) Deno.env.delete(k); else Deno.env.set(k, v); }
   }
 }
@@ -305,6 +319,49 @@ Deno.test("on_beta with writes on: every result, the note copied verbatim as 'be
   }
   assertEquals(r.body.commits[2].why, "names a builder");
   assert(/pricing/.test(r.body.commits[1].why));
+  assertEquals(r.body.commits[3].why, "the same words as an existing note");
+  assertEquals(r.body.commits[0].newSection, undefined, "\"contacts\" is the existing Contacts chip, not a new one");
+});
+
+Deno.test("the holds read the detail and the section, not only the title", async () => {
+  // The source: the held text is title + detail + section, and both holds read that text.
+  assert(CI.includes('const text = [note.title, note.detail || "", note.section || ""].join(" \\n ");'),
+    "the held text no longer joins title, detail and section");
+  assert(CI.includes("const held = heldReason(text);") && CI.includes("namesBuilder(text, needles)"),
+    "a hold no longer reads the joined text");
+  // The behaviour: a clean title, with the builder's name or the price only in the detail or section.
+  const clean = "Release-note: fix: The door picker opens on the first click";
+  const r = await call(world(), {
+    action: "on_beta", commits: [
+      commit(sha("a"), clean, "Release-detail: Asked for by Acme Sheds last week"),
+      commit(sha("b"), clean, "Release-detail: Saves $5 on every order"),
+      commit(sha("c"), clean, "Release-section: Acme Sheds"),
+      commit(sha("d"), clean, "Release-detail: Price lookups are faster too"),
+    ],
+  }, ON);
+  assertEquals(r.status, 200);
+  assertEquals(r.body.commits.map((c: Row) => c.result), ["held_names_builder", "held_commercial", "held_names_builder", "held_commercial"]);
+  assertEquals(r.writes, [], "a held note is never written");
+  assert(!r.text.toLowerCase().includes("acme"), "the response names the builder");
+});
+
+Deno.test("a roadmap entry's words answer duplicate_title and say so; a new section is copied and flagged", async () => {
+  const t = world();
+  const r = await call(t, {
+    action: "on_beta", commits: [
+      commit(sha("a"), "Release-note: feature: Saved views on every board"),
+      commit(sha("b"), "Release-note: feature: Turn the 3D view with one finger", "Release-section: 3D Design"),
+      commit(sha("c"), "Release-note: fix: The 3D view keeps its zoom on reload", "Release-section: 3d design"),
+    ],
+  }, ON);
+  assertEquals(r.body.commits.map((c: Row) => [c.result, c.why ?? null, c.newSection ?? null]), [
+    ["duplicate_title", "the same words as a roadmap entry: a person moves that entry to beta", null],
+    ["inserted", null, true],
+    ["inserted", null, true],
+  ]);
+  assertEquals(t.release_notes.filter((n) => n.source_commit === sha("b") || n.source_commit === sha("c")).map((n) => n.section),
+    ["3D Design", "3D Design"], "the second note takes the first one's spelling, so the chips group");
+  assertEquals(t.release_notes.find((n) => n.id === "n-3")!.status, "roadmap", "release-ci never touches a roadmap row");
 });
 
 Deno.test("on_beta moves Projects refs through the shared propagateStatus, and refuses what it cannot be sure of", async () => {
@@ -383,6 +440,85 @@ Deno.test("released moves On Beta items to Done ONLY when their newest on-beta c
   assertEquals(t.pm_items.find((i) => i.id === I.linked)!.values["c-b-bugs"], "l_done");
   assertEquals(t.feedback_submissions[0].status, "shipped");
   assert(t.pm_updates.some((u) => u.item_id === I.linked && u.body === "Released in 9999999"));
+});
+
+Deno.test("an operator's edit made while release-ci works is never undone", async () => {
+  const onBetaThen = async () => {
+    const t = world();
+    await call(t, { action: "on_beta", commits: [commit(sha("1"), "Release-note: none", "Projects: 3f2a9c1e")] }, ON);
+    return t;
+  };
+  const linked = (t: Tables) => t.pm_items.find((i) => i.id === I.linked)!;
+  const releasedRead = (cols: string | null) => cols === "id, item_id, detail";
+
+  // 1. An edit to ANOTHER column after `released` took its snapshot: the re-read keeps it.
+  let t = await onBetaThen();
+  hook = (table, op, cols) => {
+    if (table === "pm_activity" && op === "select" && releasedRead(cols)) {
+      linked(t).values = { ...linked(t).values, "c-priority": "high" };
+      linked(t).updated_at = "2026-10-09T09:00:00.000Z";
+    }
+  };
+  let r = await call(t, { action: "released", mergedShas: [sha("1")] }, ON);
+  assertEquals(r.body.items.find((x: Row) => x.item === I.linked.slice(0, 8)).result, "moved");
+  assertEquals(linked(t).values, { "c-b-bugs": "l_done", "c-priority": "high" });
+
+  // 2. An edit landing between the re-read and the write: the compare-and-swap refuses, nothing written.
+  t = await onBetaThen();
+  const notesBefore = t.pm_updates.length;
+  hook = (table, op) => {
+    if (table === "pm_items" && op === "update") {
+      linked(t).values = { ...linked(t).values, "c-priority": "high" };
+      linked(t).updated_at = "2026-10-09T09:00:01.000Z";
+    }
+  };
+  r = await call(t, { action: "released", mergedShas: [sha("1")] }, ON);
+  assertEquals(r.body.items.find((x: Row) => x.item === I.linked.slice(0, 8)).result, "changed_meanwhile");
+  assertEquals(linked(t).values, { "c-b-bugs": "l_onbeta", "c-priority": "high" });
+  assertEquals(t.feedback_submissions[0].status, "in_progress", "the builder is not told Completed");
+  assertEquals(t.pm_updates.length, notesBefore);
+  assert(!t.pm_activity.some((a) => a.action === "release_ci_released"));
+
+  // 3. The STATUS changed after the snapshot: the decision is stale, so nothing is written.
+  t = await onBetaThen();
+  hook = (table, op, cols) => {
+    if (table === "pm_activity" && op === "select" && releasedRead(cols)) {
+      linked(t).values = { ...linked(t).values, "c-b-bugs": "l_inprogress" };
+    }
+  };
+  r = await call(t, { action: "released", mergedShas: [sha("1")] }, ON);
+  assertEquals(r.body.items.find((x: Row) => x.item === I.linked.slice(0, 8)).result, "changed_meanwhile");
+  assertEquals(linked(t).values["c-b-bugs"], "l_inprogress");
+  assertEquals(r.writes, []);
+});
+
+Deno.test("a move whose activity row failed is completed by re-running, with one note", async () => {
+  const t = world();
+  const push = { action: "on_beta", commits: [commit(sha("1"), "Release-note: none", "Projects: 3f2a9c1e")] };
+  hook = (table, op, _cols, payload) => {
+    if (table === "pm_activity" && op === "insert" && payload?.action === "release_ci_on_beta") {
+      return { code: "08006", message: "connection lost" };
+    }
+  };
+  let threw = false;
+  try { await call(t, push, ON); } catch { threw = true; }
+  assert(threw, "a failed activity write must fail the run, so the workflow shows it");
+  const linked = t.pm_items.find((i) => i.id === I.linked)!;
+  assertEquals(linked.values["c-b-bugs"], "l_onbeta", "the item moved before the failure");
+  assertEquals(t.pm_activity.filter((a) => a.action === "release_ci_on_beta").length, 0);
+
+  // Re-running the workflow run: the item is not moved again, the key is recorded, one note in all.
+  const again = await call(t, push, ON);
+  assertEquals(again.body.commits[0].refs, [{ ref: "3f2a9c1e", result: "already_on_beta" }]);
+  assertEquals(again.writes.filter(([table]) => table === "pm_items").length, 0);
+  assertEquals(t.pm_activity.filter((a) => a.action === "release_ci_on_beta" && a.detail.sha === sha("1")).length, 1);
+  assertEquals(t.pm_updates.filter((u) => u.item_id === I.linked && u.body === "On beta in 1111111").length, 1);
+  // ...so promotion moves it on, instead of calling it set by hand.
+  const rel = await call(t, { action: "released", mergedShas: [sha("1")] }, ON);
+  assertEquals(rel.body.items.find((x: Row) => x.item === I.linked.slice(0, 8)).result, "moved");
+  // And a third delivery of the same push writes nothing at all.
+  const third = await call(t, push, ON);
+  assertEquals(third.writes, []);
 });
 
 Deno.test("bad requests are refused before anything is read", async () => {
