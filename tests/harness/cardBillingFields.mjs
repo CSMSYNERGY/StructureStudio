@@ -26,6 +26,8 @@
 //        with a sentence asking for a second tap, and that tap sends the charge with that ZIP
 //     M9 the same tap when the fee does not move: one tap is enough, and the charge leaves only
 //        after the check for that ZIP has answered
+//     M10 a ZIP changed and changed BACK before its check answered: the late answer for the other
+//        ZIP never replaces the right one on screen, and Pay goes in one tap
 //   P  the portal's Record-a-payment modal
 //     P1 Card → Key it in shows the three fields prefilled from pay_options' billingPrefill, with
 //        autocomplete off (the builder's browser would offer the builder's own details)
@@ -350,6 +352,28 @@ try {
     ok("M9: …and the charge left only after the check for that ZIP had ANSWERED",
       !!probeCall && !!payCall && probeCall.answeredAt <= payCall.at && payCall.body.postal === "65801",
       JSON.stringify({ probeAnswered: probeCall && probeCall.answeredAt, paySent: payCall && payCall.at }));
+
+    // M10: 65801 answered, then 90210 typed and taken back before its (fee-bearing) answer lands.
+    await until(async () => (await page.getByRole("button", { name: "Pay $1,000.00" }).count()) > 0, 6000);
+    panel = await openPanel();
+    await postToken();
+    await until(async () => (await textOf(panel)).includes("No card fee on this card."), 5000);
+    await mqStreet().fill("9 Elm Rd");
+    await mqZip().fill("65801");
+    await mqZip().blur();
+    await until(() => fnCalls.some((c) => c.body.action === "surcharge_probe" && c.body.postal === "65801" && c.answeredAt && c.at > (payCall ? payCall.at : 0)), 5000);
+    await mqZip().fill("90210");
+    await until(() => fnCalls.some((c) => c.body.action === "surcharge_probe" && c.body.postal === "90210" && !c.answeredAt), 3000);
+    await mqZip().fill("65801");
+    await mqZip().blur();
+    await page.waitForTimeout(1500);   // the 90210 answer (700 ms) has landed by now
+    ok("M10: the late answer for the ZIP no longer typed does not replace the right one",
+      (await textOf(panel)).includes("No card fee on this card.") && !(await textOf(panel)).includes("$1,030.00"), await textOf(panel));
+    const paysM10 = callsOf("customer-pay", "pay").length;
+    await mqPay().click();
+    ok("M10: …and Pay goes in one tap, with that ZIP",
+      await until(() => callsOf("customer-pay", "pay").length > paysM10, 4000) && lastOf("customer-pay", "pay").postal === "65801"
+      && !(await textOf(panel)).includes("The amount to pay has changed"), JSON.stringify(lastOf("customer-pay", "pay")));
     S.feeZips = {};
     S.probeDelayMs = 0;
   }
