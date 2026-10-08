@@ -55,6 +55,11 @@ import {
   parseSetSalesLocation, quoteInCustomerHands, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
   restampSendOutcome,
 } from "../_shared/locationTax.ts";
+// The company rate and the "Use tax codes" switch (Settings → Company → Tax, migration 290). `save`
+// parses the rate through the same function, moved out of it word for word.
+import {
+  companyTaxNeedsRow, companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, type CompanyTaxUpdates,
+} from "../_shared/companyTax.ts";
 // The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
 // `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
 import {
@@ -349,6 +354,11 @@ const GATES: GateTable = {
   // logo. No new area: a new one needs the SQL mirror (area_level_for) re-issued with it.
   tax_settings:      { area: "settings_crm", level: "view" },
   save_location_tax: { area: "settings_crm", level: "edit" },
+  // The company rate, its label, tax on delivery and the "Use tax codes" switch, from Settings →
+  // Company → Tax (migration 290). settings_crm alone, like the location rates and verify_tax:
+  // `save` asks for Branding as well only because it also writes the business identity. No crm_
+  // prefix, so the paid-CRM guard never refuses a builder their own tax rate.
+  save_company_tax:  { area: "settings_crm", level: "edit" },
   // Which lot a quote was sold from. designs:edit — the rep who issues the quote picks where it
   // was sold, the way set_expected_close works — plus the row scope in the branch. It re-prices
   // with FREE rates only (the location's, else the company's); it can never make a paid lookup.
@@ -1953,28 +1963,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         updates.ss_invoice_next = n;
       }
     }
-    // The sales tax rate, entered as a PERCENT and stored as a FRACTION. Blank clears it back
-    // to "not set", which the guard below then refuses to leave SS mode with. An explicit 0 is
-    // a real answer and must survive — hence the blank/zero distinction rather than falsiness.
-    if ("ssTaxRate" in payload) {
-      const raw = String(payload.ssTaxRate ?? "").trim();
-      if (!raw) updates.ss_tax_rate = null;
-      else {
-        const pct = Number(raw);
-        if (!Number.isFinite(pct) || pct < 0 || pct > 25) {
-          return json({ error: "The sales tax rate must be a percentage between 0 and 25 — for example 7.25." }, 400);
-        }
-        // 5dp, matching numeric(7,5): 7.25% -> 0.0725. Rounded here so the stored value is the
-        // one the card will read back, rather than a float that redisplays as 7.249999.
-        updates.ss_tax_rate = Math.round((pct / 100) * 100000) / 100000;
-      }
-    }
-    if ("ssTaxLabel" in payload) {
-      // Printed on the customer's document, so bounded like the numbering prefixes are.
-      const l = String(payload.ssTaxLabel ?? "").trim().slice(0, 40);
-      updates.ss_tax_label = l || "Sales tax";
-    }
-    if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+    // The sales tax rate (entered as a PERCENT, stored as a FRACTION; blank clears it, 0 is an
+    // answer), its label and the delivery switch. The parser that lived here, moved word for word
+    // into _shared/companyTax.ts so save_company_tax reads a rate the same way; its parity test
+    // holds a frozen copy of this block. Production's Estimates & Invoices card still posts all
+    // three here, and the guard below still judges the merged rate.
+    const companyTax = parseCompanyTax(payload);
+    if (!companyTax.ok) return json({ error: companyTax.error }, 400);
+    Object.assign(updates, companyTax.updates);
 
     // How the designer's login sheet sends a customer's code FIRST (migration 231; expo plan 3.6,
     // Ahsan 2026-09-15): 'sms' (Text) or 'email'. Blank clears it back to the default, text.
@@ -7158,6 +7154,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, location: locationTaxView(saved) });
   }
 
+  // ── The company rate and the "Use tax codes" switch (Settings → Company → Tax, 2026-10-09) ──
+  // The Tax tab's own save. It writes ONLY the keys that were sent, out of four:
+  // ss_tax_rate / ss_tax_label / ss_tax_delivery (parsed exactly as `save` parses them) and
+  // tax_codes_enabled (migration 290; named only when the switch is sent, so a database without
+  // 290 refuses nothing else). It NEVER writes invoice_in_ghl, a ghl_* column or a numbering
+  // counter: moving to StructureStudio paperwork stays on CRM Connection, behind `save`'s checks.
+  //   1. parse, then refuse an empty save;
+  //   2. when no usable rate was sent, read the row: a builder with NO row may not save a label or
+  //      the switch alone (the upsert would create a paperwork-mode row with no rate, which `save`'s
+  //      guard exists to prevent), and a BLANK rate is refused in paperwork mode (`save`'s reading
+  //      of the mode, invoice_in_ghl exactly false). 0 is always an answer;
+  //   3. upsert the sent keys (the save_delivery_settings pattern: a builder with no row is never
+  //      told "saved" by a zero-row update), auditStrict, and answer with what is now stored.
+  // Rates already on issued estimates do not move: the next re-stamp of an unsigned one prices at
+  // the chain's rate, and a signed order keeps the tax its customer agreed to (taxChain agreedTax).
+  if (action === "save_company_tax") {
+    const parsed = parseCompanyTax(payload);
+    if (!parsed.ok) return json({ error: parsed.error, reason: "bad_rate" }, 400);
+    const codesSwitch = parseCodesSwitch(payload);
+    if (!codesSwitch.ok) return json({ error: codesSwitch.error, reason: codesSwitch.reason }, codesSwitch.status);
+    const updates: CompanyTaxUpdates = { ...parsed.updates };
+    if (codesSwitch.value !== undefined) updates.tax_codes_enabled = codesSwitch.value;
+
+    let cur: { invoice_in_ghl?: unknown } | null = null;
+    if (Object.keys(updates).length && companyTaxNeedsRow(updates)) {
+      const { data, error } = await admin.from("client_settings").select("invoice_in_ghl").eq("client_id", clientId).maybeSingle();
+      if (error) return dbFail(req, clientId, "check your sales tax settings", error);
+      cur = data;
+    }
+    const refusal = companyTaxRefusal(updates, cur);
+    if (refusal) return json({ error: refusal.error, reason: refusal.reason }, refusal.status);
+
+    const columns = "invoice_in_ghl, ss_tax_rate, ss_tax_label, ss_tax_delivery" + ("tax_codes_enabled" in updates ? ", tax_codes_enabled" : "");
+    const { data: stored, error: saveErr } = await admin.from("client_settings")
+      .upsert({ client_id: clientId, ...updates, updated_at: new Date().toISOString() }, { onConflict: "client_id" })
+      .select(columns).maybeSingle();
+    if (saveErr) return dbFail(req, clientId, "save your sales tax settings", saveErr);
+    await auditStrict("portal_save_company_tax", 1,
+      `keys=${Object.keys(updates).join(",")}${"ss_tax_rate" in updates ? ` rate=${updates.ss_tax_rate ?? "none"}` : ""}${"tax_codes_enabled" in updates ? ` codes=${updates.tax_codes_enabled}` : ""}`);
+    const row = (stored ?? {}) as Record<string, unknown>;
+    return json({
+      ok: true,
+      // Same reading as tax_settings and tax_codes_get: only an explicit false is paperwork mode.
+      ssMode: row.invoice_in_ghl === false,
+      ...companyTaxView(row),
+      ...("tax_codes_enabled" in updates ? { taxCodesEnabled: row.tax_codes_enabled === true } : {}),
+    });
+  }
+
   // ── Tax codes (migration 246, 2026-09-17) ───────────────────────────────────────────────────
   // Settings → Company → Tax: which Avalara tax code each building style and option heading
   // falls under, chosen by the builder (or their accountant) so the codes match how they file.
@@ -7170,15 +7215,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // tax_codes_get's answer, and tax_codes_save's: a save hands back what the database now holds,
   // not an echo of what was sent. `hint` rides on the common codes (the picker's empty-box list)
   // and `headingGroups` names the heading groups in order — both additive to the brief's shape.
+  //
+  // THE COMPANY RATE RIDES ALONG (2026-10-09): the Tax tab's "Your sales tax rate" block reads
+  // companyRatePct / companyLabel / ssTaxDelivery (tax_settings' shapes, through companyTaxView),
+  // plus what its copy depends on: who issues the paperwork (ssMode), whether this builder may
+  // invoice through the CRM (ghlInvoicingAllowed, 217) and whether a CRM is connected at all
+  // (crmConfigured, worked out exactly as status's `configured`; a grandfathered builder with a
+  // CRM still issues the CRM's estimate, one without has every estimate refused). tax_settings
+  // already answers some of these; they are here too because "companyRatePct is in the answer" is
+  // how the page tells this function from an older one, and an older one hides the block.
+  //
+  // taxCodesEnabled (migration 290) is ITS OWN READ, AND TOLERANT, status's quote_corner_views
+  // rule: naming the column in the select above would fail this action, and with it every
+  // builder's Tax tab, on a database without 290 (an apply race, or 290 rolled back first). A
+  // failed read answers null, and the page then shows the code editor as it always has, with no
+  // switch; a builder with no settings row reads off, the column's default.
   const taxCodesResponse = async (): Promise<Response> => {
-    const [csRes, stylesRes, storedRes, countRes, syncRes] = await Promise.all([
-      admin.from("client_settings").select("invoice_in_ghl, tax_lookup_enabled").eq("client_id", clientId).maybeSingle(),
+    const [csRes, stylesRes, storedRes, countRes, syncRes, switchRes] = await Promise.all([
+      admin.from("client_settings")
+        .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_rate, ss_tax_label, ss_tax_delivery, ghl_invoicing_allowed, ghl_location_id, ghl_api_key")
+        .eq("client_id", clientId).maybeSingle(),
       admin.from("building_styles").select("id, label, active, sort_order").eq("client_id", clientId)
         .order("active", { ascending: false }).order("sort_order").order("label"),
       admin.from("tax_code_assignments").select("target_type, target_key, tax_code").eq("client_id", clientId),
       admin.from("avalara_tax_codes").select("code", { count: "exact", head: true }),
       admin.from("avalara_tax_codes").select("synced_at").not("synced_at", "is", null)
         .order("synced_at", { ascending: false }).limit(1).maybeSingle(),
+      admin.from("client_settings").select("tax_codes_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (stylesRes.error) return dbFail(req, clientId, "load your building styles", stylesRes.error);
@@ -7195,11 +7258,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const codesRes = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active").in("code", wanted);
     if (codesRes.error) return dbFail(req, clientId, "load the tax code list", codesRes.error);
 
+    const cs = csRes.data;
+    const { data: switchRow, error: switchErr } = switchRes;
     return json({
       ok: true,
       // Same readings as tax_settings: a row predating either column is CRM mode / lookups off.
-      ssMode: csRes.data?.invoice_in_ghl === false,
-      lookupEnabled: csRes.data?.tax_lookup_enabled === true,
+      ssMode: cs?.invoice_in_ghl === false,
+      lookupEnabled: cs?.tax_lookup_enabled === true,
+      ...companyTaxView(cs),
+      // status's readings: the capability defaults to not allowed, and only a boolean leaves (never
+      // the location id or the key).
+      ghlInvoicingAllowed: cs?.ghl_invoicing_allowed === true,
+      crmConfigured: Boolean(cs?.ghl_location_id && cs?.ghl_api_key),
+      taxCodesEnabled: switchErr ? null : (switchRow as { tax_codes_enabled?: boolean } | null)?.tax_codes_enabled === true,
       headings: headingsView(),
       headingGroups: TAX_HEADING_GROUPS,
       styles,
