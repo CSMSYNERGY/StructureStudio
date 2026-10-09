@@ -1,20 +1,20 @@
--- 296_twilio_cnam.sql — where a number's CNAM registration stands (the business's name on the
+-- 297_twilio_cnam.sql — where a number's CNAM registration stands (the business's name on the
 --                       called party's screen): Workstream 2, phase 6.
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT. Pipe this file to `supabase db query --linked`
 --    (stdin; see 270's header for why not `--file` or an inline "$(cat …)"), then record it:
---      insert into supabase_migrations.schema_migrations (version, name) values ('296', '296_twilio_cnam') returning version, name;
+--      insert into supabase_migrations.schema_migrations (version, name) values ('297', '297_twilio_cnam') returning version, name;
 --    NEVER `supabase db push`. The file carries its own begin;/commit;, so a failed check anywhere
 --    takes the whole migration with it. `db query` prints only the last statement's rows: THE
 --    RECORD at the end is what the apply shows; no row printed means the file did not run. To see
 --    the same row and change nothing, pipe it with the last `commit;` swapped for `rollback;`.
 --
 -- ── NUMBERING (TENTATIVE: RENUMBER AT APPLY) ─────────────────────────────────────────────
--- Written 2026-10-09 on top of 295 (ss/c1009-twilio-p6-p8). A sibling branch may take 296 first.
+-- Written 2026-10-09 on top of 295 (ss/c1009-twilio-p6-p8). A sibling branch may take 297 first.
 -- Read the live ledger and take the next free number, renaming this file, its test
--- (tests/sql/migration296.test.cjs) and every '296' below together:
+-- (tests/sql/migration297.test.cjs) and every '297' below together:
 --   select version from supabase_migrations.schema_migrations order by 1 desc limit 5;
--- 297, 298 and 299 of this branch come after it in that order whatever their final numbers.
+-- 298, 299 and 300 of this branch come after it in that order whatever their final numbers.
 --
 -- ── WHY ──────────────────────────────────────────────────────────────────────────────────
 -- Caller ID trust had two kinds per number (255: SHAKEN/STIR and Voice Integrity). Phase 6 adds the
@@ -60,7 +60,7 @@
 --     drop column if exists cnam_trust_product_sid,
 --     drop column if exists cnam_status,
 --     drop column if exists cnam_display_name;
---   delete from supabase_migrations.schema_migrations where version = '296';
+--   delete from supabase_migrations.schema_migrations where version = '297';
 
 begin;
 
@@ -69,16 +69,16 @@ set local lock_timeout = '5s';
 do $pre$
 begin
   if to_regclass('public.sms_numbers') is null then
-    raise exception '296: sms_numbers is missing (migration 165 not applied?)';
+    raise exception '297: sms_numbers is missing (migration 165 not applied?)';
   end if;
   if (select count(*) from information_schema.columns c where c.table_schema = 'public' and c.table_name = 'sms_numbers'
         and c.column_name in ('shaken_status', 'caller_id_checked_at', 'caller_id_lock_until')) <> 3 then
-    raise exception '296: sms_numbers has no caller-ID columns (migration 255 not applied?)';
+    raise exception '297: sms_numbers has no caller-ID columns (migration 255 not applied?)';
   end if;
 end
 $pre$;
 
-create temp table m296_before on commit drop as select count(*)::bigint as n from public.sms_numbers;
+create temp table m297_before on commit drop as select count(*)::bigint as n from public.sms_numbers;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 1 — the columns and their rules
@@ -108,11 +108,11 @@ end
 $cols$;
 
 comment on column public.sms_numbers.cnam_trust_product_sid is
-  'Migration 296: BU… of this number''s CNAM Trust Product (the business''s name on the called party''s screen), made by portal-settings phone_trust_setup (product cnam). NULL = never registered.';
+  'Migration 297: BU… of this number''s CNAM Trust Product (the business''s name on the called party''s screen), made by portal-settings phone_trust_setup (product cnam). NULL = never registered.';
 comment on column public.sms_numbers.cnam_status is
-  'Migration 296: the CNAM Trust Product''s Twilio review status as last read (255''s vocabulary). The name reaches carriers 48-72 hours after twilio-approved.';
+  'Migration 297: the CNAM Trust Product''s Twilio review status as last read (255''s vocabulary). The name reaches carriers 48-72 hours after twilio-approved.';
 comment on column public.sms_numbers.cnam_display_name is
-  'Migration 296: the CNAM display name Twilio was last sent: 1-15 letters, numbers, spaces, periods and commas, starting with a letter.';
+  'Migration 297: the CNAM display name Twilio was last sent: 1-15 letters, numbers, spaces, periods and commas, starting with a letter.';
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 2 — apply-time assertions. Each RAISE aborts the transaction.
@@ -127,17 +127,17 @@ begin
     if not exists (select 1 from information_schema.columns c
                     where c.table_schema = 'public' and c.table_name = 'sms_numbers' and c.column_name = v_col
                       and c.data_type = 'text' and c.is_nullable = 'YES' and c.column_default is null) then
-      raise exception '296: sms_numbers.% is missing, not text, not nullable, or has a default', v_col;
+      raise exception '297: sms_numbers.% is missing, not text, not nullable, or has a default', v_col;
     end if;
     execute format('select 1 from public.sms_numbers where %I is not null limit 1', v_col) into v_role;
     if v_role is not null then
-      raise exception '296: sms_numbers.% already holds a value; nothing has registered CNAM yet', v_col;
+      raise exception '297: sms_numbers.% already holds a value; nothing has registered CNAM yet', v_col;
     end if;
   end loop;
   foreach v_col in array array['sms_numbers_cnam_status_chk', 'sms_numbers_cnam_sid_chk', 'sms_numbers_cnam_display_name_chk'] loop
     if not exists (select 1 from pg_catalog.pg_constraint
                     where conname = v_col and conrelid = 'public.sms_numbers'::regclass and contype = 'c' and convalidated) then
-      raise exception '296: check constraint % is missing or not validated', v_col;
+      raise exception '297: check constraint % is missing or not validated', v_col;
     end if;
   end loop;
   -- 165's posture still holds: the browser roles cannot touch sms_numbers, so the new columns are
@@ -145,19 +145,19 @@ begin
   foreach v_role in array array['anon', 'authenticated'] loop
     foreach v_priv in array array['SELECT', 'INSERT', 'UPDATE', 'DELETE'] loop
       if has_table_privilege(v_role, 'public.sms_numbers', v_priv) then
-        raise exception '296: % holds % on sms_numbers', v_role, v_priv;
+        raise exception '297: % holds % on sms_numbers', v_role, v_priv;
       end if;
     end loop;
     foreach v_priv in array array['SELECT', 'INSERT', 'UPDATE'] loop
       foreach v_col in array array['cnam_trust_product_sid', 'cnam_status', 'cnam_display_name'] loop
         if has_column_privilege(v_role, 'public.sms_numbers', v_col, v_priv) then
-          raise exception '296: % holds column % on sms_numbers.%', v_role, v_priv, v_col;
+          raise exception '297: % holds column % on sms_numbers.%', v_role, v_priv, v_col;
         end if;
       end loop;
     end loop;
   end loop;
-  if (select n from m296_before) <> (select count(*) from public.sms_numbers) then
-    raise exception '296: the number of sms_numbers rows moved during the apply — run it again';
+  if (select n from m297_before) <> (select count(*) from public.sms_numbers) then
+    raise exception '297: the number of sms_numbers rows moved during the apply — run it again';
   end if;
 end
 $assert$;
@@ -175,7 +175,7 @@ declare
   v_bad     text;
 begin
   insert into public.sms_numbers (client_id, phone_number, registration_status, released_at)
-    values ('m296-probe', '+15555550296', 'pending_registration', now())
+    values ('m297-probe', '+15555550296', 'pending_registration', now())
     returning id into v_id;
   foreach v_bad in array array[
     'cnam_status = ''approved''',
@@ -192,18 +192,18 @@ begin
     end;
   end loop;
   if v_refused <> 6 then
-    raise exception '296: the probe expected 6 refusals, got %', v_refused;
+    raise exception '297: the probe expected 6 refusals, got %', v_refused;
   end if;
   update public.sms_numbers
      set cnam_trust_product_sid = 'BU' || repeat('a', 32), cnam_status = 'pending-review', cnam_display_name = 'Acme Barns, LLC'
    where id = v_id;
   update public.sms_numbers set cnam_display_name = 'J.R. Sheds 2' where id = v_id;
   delete from public.sms_numbers where id = v_id;
-  if exists (select 1 from public.sms_numbers where client_id = 'm296-probe') then
-    raise exception '296: the probe row was left behind';
+  if exists (select 1 from public.sms_numbers where client_id = 'm297-probe') then
+    raise exception '297: the probe row was left behind';
   end if;
-  perform set_config('ss.m296_probe', 'six bad values refused, a real SID, status and two real names taken, probe removed', true);
-  raise notice '296: checks hold';
+  perform set_config('ss.m297_probe', 'six bad values refused, a real SID, status and two real names taken, probe removed', true);
+  raise notice '297: checks hold';
 end
 $probe$;
 
@@ -213,12 +213,12 @@ notify pgrst, 'reload schema';
 -- PASS: columns_added 3, constraints 3, rows_with_cnam 0, probe 'six bad values refused, a real
 -- SID, status and two real names taken, probe removed'. Anything else: roll back first.
 select
-  '296' as migration,
+  '297' as migration,
   (select count(*) from information_schema.columns c where c.table_schema = 'public' and c.table_name = 'sms_numbers'
      and c.column_name in ('cnam_trust_product_sid', 'cnam_status', 'cnam_display_name'))::int as columns_added,
   (select count(*) from pg_catalog.pg_constraint where conrelid = 'public.sms_numbers'::regclass
      and conname in ('sms_numbers_cnam_status_chk', 'sms_numbers_cnam_sid_chk', 'sms_numbers_cnam_display_name_chk'))::int as constraints,
   (select count(*) from public.sms_numbers where cnam_trust_product_sid is not null or cnam_status is not null or cnam_display_name is not null)::int as rows_with_cnam,
-  current_setting('ss.m296_probe', true) as probe;
+  current_setting('ss.m297_probe', true) as probe;
 
 commit;

@@ -142,7 +142,7 @@ function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: str
 // ── Workstream 2, phase 6: each live number's caller-ID registrations, for the console card ──────
 // Statuses only (Twilio's TrustProduct enum, as last read by portal-settings phone_trust_status),
 // the CNAM name callers see, and the number's last four digits: no SID. CNAM's columns are
-// migration 296's; before it, 255's are read alone and `cnam` is null. Any other failure is null
+// migration 297's; before it, 255's are read alone and `cnam` is null. Any other failure is null
 // (the card says "unknown"): it never fails the account view.
 async function callerIdSummary(sb: any, clientId: string): Promise<Array<Record<string, unknown>> | null> {
   const read = (cols: string) => sb.from("sms_numbers").select(cols).eq("client_id", clientId).is("released_at", null)
@@ -360,7 +360,7 @@ async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string):
   while (offset < 20_000) {
     // Workstream 2, phase 7: one row per day, ACCOUNT and category, so (day, category) is no longer
     // unique and offset paging over it could repeat or skip rows past a page (review 2026-10-09).
-    // account_sid completes the order: (day, category, account_sid) is 298's key, the parent's NULL
+    // account_sid completes the order: (day, category, account_sid) is 299's key, the parent's NULL
     // first.
     const { data, error } = await sb.from("twilio_usage_daily")
       .select("day, category, count, usage, price_micros")
@@ -1887,7 +1887,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
         // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
         // CNAM), registered from the builder's Phone tab in view-as. Phase 8: how many "Bring your
-        // number" requests of theirs are open (null = migration 297 not applied, or the read failed).
+        // number" requests of theirs are open (null = migration 298 not applied, or the read failed).
         // Both are extras on the card: a read that fails (or throws) is null, never a failed view.
         const openNumberRequests = await (async () => {
           try {
@@ -1900,7 +1900,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         return json({ ok: true, account: { ...account, callerId, openNumberRequests } });
       }
 
-      // ── Workstream 2, phase 8: "Bring your number" requests (migration 297) ─────────────────────
+      // ── Workstream 2, phase 8: "Bring your number" requests (migration 298) ─────────────────────
       // A builder's request IS the operator's notification: status 'new' until someone takes it. The
       // console lists every open one (and the last month's finished ones) across builders, newest
       // first, and moves it on. The move itself is workers/phone-api/PORTING.md; landing the number
@@ -1947,7 +1947,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const { data, error } = await sb.from("phone_number_requests")
           .update({ status, updated_at: now, handled_at: status === "new" ? null : now, handled_by: identity.via === "operator" ? identity.userId : null })
           .eq("id", id).select("id, client_id, status").maybeSingle();
-        if (error && relationMissing(error)) return json({ error: "Migration 297 isn't applied on this database yet." }, 503);
+        if (error && relationMissing(error)) return json({ error: "Migration 298 isn't applied on this database yet." }, 503);
         if (error) throw error;
         if (!data) return json({ error: "No such request." }, 404);
         try {
@@ -2275,9 +2275,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
         //   to prevent.
         await wipe("qbo_item_map");
-        //   Workstream 2, phase 8: the builder's "Bring your number" requests (migration 297). Asks
+        //   Workstream 2, phase 8: the builder's "Bring your number" requests (migration 298). Asks
         //   nobody needs once the builder is gone, naming who could approve a move; a recreated slug
-        //   must not inherit them. A database without 297 has none to wipe.
+        //   must not inherit them. A database without 298 has none to wipe.
         {
           const { error, count } = await sb.from("phone_number_requests").delete({ count: "exact" }).eq("client_id", clientId);
           if (error && !relationMissing(error)) throw new Error(`phone_number_requests: ${error.message}`);

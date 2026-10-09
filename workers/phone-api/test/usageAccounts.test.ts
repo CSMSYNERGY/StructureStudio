@@ -3,15 +3,15 @@
 // What is pinned:
 //   * switch off (and switch on with no active sub-account): the parent's request is exactly the one
 //     it always was (yesterday, Twilio's default, so sub-accounts stay folded in and nothing is lost:
-//     review 2026-10-09), its rows with no account_sid (NULL = the parent) on migration 298's key
+//     review 2026-10-09), its rows with no account_sid (NULL = the parent) on migration 299's key
 //     (day, account_sid, category); not one extra read while off;
-//   * before 298 (42P10, no such key) or before 292's column (42703 / PGRST204) the same rows go in
+//   * before 299 (42P10, no such key) or before 292's column (42703 / PGRST204) the same rows go in
 //     on today's (day, category) key, and that is logged once at info: the Worker deploys safely
-//     before or after 298 (and 292);
+//     before or after 299 (and 292);
 //   * switch on (or manual) with active subs: the parent asks for its OWN usage (IncludeSubaccounts=
 //     false) over the same window as the subs; each active sub in its OWN account (its key pair on
 //     its own path), its rows carrying its account SID, over USAGE_LOOKBACK_DAYS days; a sub that
-//     collides with the old primary key (23505, migration 299 not applied yet) is skipped and logged
+//     collides with the old primary key (23505, migration 300 not applied yet) is skipped and logged
 //     at ERROR (its usage is in nobody's row), and the parent and the other subs are still written;
 //   * with more subs than USAGE_SUBS_PER_RUN they take turns by day, each asking for every day since
 //     its last turn (or the look-back, whichever is longer), and each row keeps its own day.
@@ -47,7 +47,7 @@ function world(env = makeEnv({ PHONE_USAGE_COST_CAPTURE: "on" })) {
 }
 
 describe("twilio_usage_daily per account", () => {
-  it("switch off: the parent's request as it always was (sub-accounts folded in), no account_sid, on 298's key, nothing else read", async () => {
+  it("switch off: the parent's request as it always was (sub-accounts folded in), no account_sid, on 299's key, nothing else read", async () => {
     const { net, env } = world();
     net.rest("POST", "twilio_usage_daily", () => []);
     const out = await snapshotTwilioUsage(env, adminClient(env), AT);
@@ -62,7 +62,7 @@ describe("twilio_usage_daily per account", () => {
     expect(net.rpcCalls("twilio_account_creds")).toHaveLength(0);
   });
 
-  for (const [code, why] of [["42P10", "migration 298 (no such key)"], ["42703", "migration 292 (no account_sid column)"], ["PGRST204", "292, as PostgREST says it"]] as const) {
+  for (const [code, why] of [["42P10", "migration 299 (no such key)"], ["42703", "migration 292 (no account_sid column)"], ["PGRST204", "292, as PostgREST says it"]] as const) {
     it(`before ${why}, ${code}: the same rows on (day, category), logged at info, nothing lost`, async () => {
       const { net, env } = world();
       net.rest("POST", "twilio_usage_daily", (s) => s.url.searchParams.get("on_conflict") === USAGE_ACCOUNT_KEY
@@ -129,7 +129,7 @@ describe("twilio_usage_daily per account", () => {
     expect(writes[2]).toEqual([{ day: "2026-10-09", account_sid: SUB, category: "calls-inbound", count: 2, usage: 5, price_micros: 85000, fetched_at: AT.toISOString() }]);
     const logged = net.writes("app_errors", "POST").map((s) => s.json);
     // ERROR, not info (review 2026-10-09): with the parent asking for its own alone, that sub's
-    // usage is in nobody's row until 299 is applied.
+    // usage is in nobody's row until 300 is applied.
     expect(logged.map((r) => [r.code, r.severity, r.client_id])).toEqual([["twilio_usage_sub_key_pending", "error", "other-builder"]]);
   });
 

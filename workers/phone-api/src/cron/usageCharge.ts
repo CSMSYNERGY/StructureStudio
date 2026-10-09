@@ -1352,7 +1352,7 @@ export type UsageSnapshotSummary =
   | {
     ran: true; day: string; rows: number;
     /** Which key the parent's rows went in on: "account" (day, account_sid, category: migration
-     *  298's) or "legacy" (day, category: 298, or 292's column, not applied yet; today's key). */
+     *  299's) or "legacy" (day, category: 299, or 292's column, not applied yet; today's key). */
     key: "account" | "legacy";
     /** Was the parent asked for its OWN usage alone (sub-accounts asked separately this run)?
      *  false = Twilio's default, every sub-account's usage folded into the parent's rows. */
@@ -1371,12 +1371,12 @@ export const USAGE_LEGACY_KEY = "day,category";
  *  since its last turn (a window as long as the number of turns), so no day is missed. */
 export const USAGE_SUBS_PER_RUN = 50;
 /** While sub-accounts are asked, every account asks for at least this many days back (review
- *  2026-10-09), so a sub left out of one run (a lookup that failed, Twilio down, migration 299 a day
+ *  2026-10-09), so a sub left out of one run (a lookup that failed, Twilio down, migration 300 a day
  *  late) is filled in by the next ones, and late usage Twilio adds to a recent day is picked up. */
 export const USAGE_LOOKBACK_DAYS = 3;
 
 /** The upsert refusals that mean "this key is not there yet": no matching unique constraint
- *  (42P10: migration 298), no account_sid column (42703, or PostgREST's PGRST204: migration 292). */
+ *  (42P10: migration 299), no account_sid column (42703, or PostgREST's PGRST204: migration 292). */
 const KEY_PENDING = new Set(["42P10", "42703", "PGRST204"]);
 
 /**
@@ -1394,15 +1394,15 @@ const KEY_PENDING = new Set(["42P10", "42703", "PGRST204"]);
  *   2. THE PARENT. With sub-accounts asked: its OWN usage (IncludeSubaccounts=false) for the same
  *      window as the subs, so every day in the window holds the parent's own rows plus each sub's,
  *      even on the day the switch flips. Its rows carry no account_sid (NULL = the parent, 292's one
- *      encoding) and go in on 298's key (UNIQUE NULLS NOT DISTINCT, so the parent's NULL matches
- *      itself). Without 298 (42P10), or without 292's column (42703 / PGRST204), they go in on
+ *      encoding) and go in on 299's key (UNIQUE NULLS NOT DISTINCT, so the parent's NULL matches
+ *      itself). Without 299 (42P10), or without 292's column (42703 / PGRST204), they go in on
  *      today's (day, category) key instead and twilio_usage_key_pending is logged once (info): this
- *      Worker deploys safely before or after 298.
+ *      Worker deploys safely before or after 299.
  *   3. EACH ACTIVE SUB-ACCOUNT in its own account (envForClient: its own credentials), its rows
  *      carrying its SID, over a window of max(USAGE_LOOKBACK_DAYS, the number of turns) days ending
- *      yesterday. Until 299 drops the old (day, category) primary key a sub's row collides with the
+ *      yesterday. Until 300 drops the old (day, category) primary key a sub's row collides with the
  *      parent's (23505): that sub is skipped and twilio_usage_sub_key_pending logged at ERROR, because
- *      its usage is then in nobody's row (SETUP 7f: 299 comes BEFORE the switch leaves off; the
+ *      its usage is then in nobody's row (SETUP 7f: 300 comes BEFORE the switch leaves off; the
  *      look-back refills the days once it is applied). Any other failure is twilio_usage_sub_failed.
  *      The parent and the other subs are always written.
  */
@@ -1433,12 +1433,12 @@ export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date
     }));
     const res = await admin.from("twilio_usage_daily").upsert(rows, { onConflict: USAGE_ACCOUNT_KEY });
     if (res.error && KEY_PENDING.has(String(res.error.code ?? ""))) {
-      // Migration 298 (or 292's column) not applied yet: today's key, today's rows.
+      // Migration 299 (or 292's column) not applied yet: today's key, today's rows.
       must(await admin.from("twilio_usage_daily").upsert(rows, { onConflict: USAGE_LEGACY_KEY }), "upsert twilio_usage_daily");
       key = "legacy";
       await logFault({
         code: "twilio_usage_key_pending", severity: "info", once: true,
-        message: `twilio_usage_daily has no (day, account_sid, category) key yet (migration 298, or 292's column; ${String(res.error.code)}): the parent's usage went in on (day, category).`,
+        message: `twilio_usage_daily has no (day, account_sid, category) key yet (migration 299, or 292's column; ${String(res.error.code)}): the parent's usage went in on (day, category).`,
       }).catch(() => {});
     } else {
       must(res, "upsert twilio_usage_daily");
@@ -1456,12 +1456,12 @@ export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date
       })), { onConflict: USAGE_ACCOUNT_KEY });
       const code = String(res.error?.code ?? "");
       if (code === "23505" || KEY_PENDING.has(code)) {
-        // The old (day, category) key is still there (299 not applied), or 298's is not yet: this
+        // The old (day, category) key is still there (300 not applied), or 299's is not yet: this
         // sub's usage is in nobody's row until it is (the parent asked for its own alone).
         subsFailed++;
         await logFault({
           code: "twilio_usage_sub_key_pending", clientId: s.clientId, throttleMs: 60 * 60_000,
-          message: `A sub-account's usage was not stored: twilio_usage_daily is still keyed for the parent alone (migrations 298/299, ${code}). Apply them; the next runs refill the last ${USAGE_LOOKBACK_DAYS} days.`,
+          message: `A sub-account's usage was not stored: twilio_usage_daily is still keyed for the parent alone (migrations 299/300, ${code}). Apply them; the next runs refill the last ${USAGE_LOOKBACK_DAYS} days.`,
         }).catch(() => {});
         continue;
       }

@@ -1,5 +1,5 @@
 // Workstream 2, phase 8: what the operator console flags on an open "Bring your number" request
-// (admin-catalog number_requests_list; migration 297).
+// (admin-catalog number_requests_list; migration 298).
 //
 // Review 2026-10-09: portal-settings phone_port_request no longer refuses a builder's request over
 // ANOTHER builder's number or request. Refusing told any builder with phone:edit whether a number

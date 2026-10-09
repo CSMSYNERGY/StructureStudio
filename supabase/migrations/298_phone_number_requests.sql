@@ -1,16 +1,16 @@
--- 297_phone_number_requests.sql — "Bring your number": a builder's request to move numbers they
+-- 298_phone_number_requests.sql — "Bring your number": a builder's request to move numbers they
 --                                  already have into Structure Studio (Workstream 2, phase 8).
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT. Pipe this file to `supabase db query --linked`
 --    (stdin; see 270's header for why not `--file`), then record it:
---      insert into supabase_migrations.schema_migrations (version, name) values ('297', '297_phone_number_requests') returning version, name;
+--      insert into supabase_migrations.schema_migrations (version, name) values ('298', '298_phone_number_requests') returning version, name;
 --    NEVER `supabase db push`. The file carries its own begin;/commit;. THE RECORD at the end is
 --    what the apply shows; no row printed means the file did not run. To see the same row and
 --    change nothing, pipe it with the last `commit;` swapped for `rollback;`.
 --
 -- ── NUMBERING (TENTATIVE: RENUMBER AT APPLY) ─────────────────────────────────────────────
--- Written 2026-10-09 after 296 of the same branch. Take the next free number from the live ledger,
--- renaming this file, its test (tests/sql/migration297.test.cjs) and every '297' below.
+-- Written 2026-10-09 after 297 of the same branch. Take the next free number from the live ledger,
+-- renaming this file, its test (tests/sql/migration298.test.cjs) and every '298' below.
 --
 -- ── WHY ──────────────────────────────────────────────────────────────────────────────────
 -- Carolyn, 2026-10-08: most new builders will bring a number they already have. Moving one is an
@@ -63,7 +63,7 @@
 -- Export open requests first (they are builders' asks nobody has answered):
 --   select * from public.phone_number_requests where status in ('new', 'in_progress');
 --   drop table if exists public.phone_number_requests;
---   delete from supabase_migrations.schema_migrations where version = '297';
+--   delete from supabase_migrations.schema_migrations where version = '298';
 
 begin;
 
@@ -116,7 +116,7 @@ create index if not exists phone_number_requests_client_idx
   on public.phone_number_requests (client_id, created_at desc);
 
 comment on table public.phone_number_requests is
-  'Migration 297. A builder''s request to move numbers they already have into Structure Studio ("Bring your number", portal-settings phone_port_request). The row is the operator''s notification (status new until taken; admin-catalog lists the open ones). Holds NO PIN, account number, bill or LOA: those go into Twilio''s Console only (workers/phone-api/PORTING.md). Service role only.';
+  'Migration 298. A builder''s request to move numbers they already have into Structure Studio ("Bring your number", portal-settings phone_port_request). The row is the operator''s notification (status new until taken; admin-catalog lists the open ones). Holds NO PIN, account number, bill or LOA: those go into Twilio''s Console only (workers/phone-api/PORTING.md). Service role only.';
 
 -- Enabled, NOT forced; no policies; nothing for the browser roles.
 alter table public.phone_number_requests enable row level security;
@@ -135,37 +135,37 @@ declare
   v_refused int := 0;
 begin
   if not (select c.relrowsecurity and not c.relforcerowsecurity from pg_catalog.pg_class c where c.oid = 'public.phone_number_requests'::regclass) then
-    raise exception '297: RLS must be enabled and NOT forced on phone_number_requests';
+    raise exception '298: RLS must be enabled and NOT forced on phone_number_requests';
   end if;
   if exists (select 1 from pg_catalog.pg_policy p where p.polrelid = 'public.phone_number_requests'::regclass) then
-    raise exception '297: phone_number_requests has a policy; it is meant to be service-role only';
+    raise exception '298: phone_number_requests has a policy; it is meant to be service-role only';
   end if;
   foreach v_role in array array['anon', 'authenticated'] loop
     foreach v_priv in array array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'] loop
       if has_table_privilege(v_role, 'public.phone_number_requests', v_priv) then
-        raise exception '297: % holds % on phone_number_requests', v_role, v_priv;
+        raise exception '298: % holds % on phone_number_requests', v_role, v_priv;
       end if;
     end loop;
     foreach v_priv in array array['SELECT', 'INSERT', 'UPDATE', 'REFERENCES'] loop
       if has_any_column_privilege(v_role, 'public.phone_number_requests', v_priv) then
-        raise exception '297: % holds column-level % on phone_number_requests', v_role, v_priv;
+        raise exception '298: % holds column-level % on phone_number_requests', v_role, v_priv;
       end if;
     end loop;
   end loop;
   foreach v_priv in array array['SELECT', 'INSERT', 'UPDATE', 'DELETE'] loop
     if not has_table_privilege('service_role', 'public.phone_number_requests', v_priv) then
-      raise exception '297: service_role lacks % on phone_number_requests', v_priv;
+      raise exception '298: service_role lacks % on phone_number_requests', v_priv;
     end if;
   end loop;
   if exists (select 1 from pg_catalog.pg_constraint c where c.contype = 'f'
               and (c.conrelid = 'public.phone_number_requests'::regclass or c.confrelid = 'public.phone_number_requests'::regclass)) then
-    raise exception '297: phone_number_requests must have no foreign key (delete_client deletes client_configs last)';
+    raise exception '298: phone_number_requests must have no foreign key (delete_client deletes client_configs last)';
   end if;
 
   -- ── The rehearsal: what the code writes is taken, what must never be stored is refused ──
   begin
     insert into public.phone_number_requests (client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window)
-      values ('m297-probe', array['+15555550123', '+15555550124'], 'GoHighLevel (LC Phone)', true, 'Pat Example', 'pat@example.test', 'Weekday evenings after the 20th');
+      values ('m298-probe', array['+15555550123', '+15555550124'], 'GoHighLevel (LC Phone)', true, 'Pat Example', 'pat@example.test', 'Weekday evenings after the 20th');
     foreach v_bad in array array[
       'numbers = array[]::text[]',
       'numbers = array[''5555550123'']',
@@ -182,26 +182,26 @@ begin
       'status = ''approved'''
     ] loop
       begin
-        execute format('update public.phone_number_requests set %s where client_id = %L', v_bad, 'm297-probe');
+        execute format('update public.phone_number_requests set %s where client_id = %L', v_bad, 'm298-probe');
       exception when check_violation then
         v_refused := v_refused + 1;
       end;
     end loop;
     if v_refused <> 13 then
-      raise exception '297: the rehearsal expected 13 refusals, got %', v_refused;
+      raise exception '298: the rehearsal expected 13 refusals, got %', v_refused;
     end if;
     -- Dates and times in the timing note are not a secret.
-    update public.phone_number_requests set cutover_window = 'after 10/20/2026, 9am-5pm, or 2026-10-27 at 17:00' where client_id = 'm297-probe';
-    update public.phone_number_requests set status = 'in_progress', handled_at = now() where client_id = 'm297-probe';
+    update public.phone_number_requests set cutover_window = 'after 10/20/2026, 9am-5pm, or 2026-10-27 at 17:00' where client_id = 'm298-probe';
+    update public.phone_number_requests set status = 'in_progress', handled_at = now() where client_id = 'm298-probe';
     raise exception using errcode = 'S2970', message = 'a request stored; empty, non-E.164 and malformed numbers, digit runs and a bad status refused';
   exception when sqlstate 'S2970' then
     v_out := sqlerrm;
   end;
-  if exists (select 1 from public.phone_number_requests where client_id = 'm297-probe') then
-    raise exception '297: the rehearsal left a row behind';
+  if exists (select 1 from public.phone_number_requests where client_id = 'm298-probe') then
+    raise exception '298: the rehearsal left a row behind';
   end if;
-  perform set_config('ss.m297_rehearsal', v_out, true);
-  raise notice '297: checks hold';
+  perform set_config('ss.m298_rehearsal', v_out, true);
+  raise notice '298: checks hold';
 end
 $check$;
 
@@ -211,13 +211,13 @@ notify pgrst, 'reload schema';
 -- PASS: table_ready true, rows 0 (or what an earlier apply left), rehearsal 'a request stored;
 -- empty, non-E.164 and malformed numbers, digit runs and a bad status refused'.
 select
-  '297' as migration,
+  '298' as migration,
   ((select c.relrowsecurity and not c.relforcerowsecurity from pg_catalog.pg_class c where c.oid = 'public.phone_number_requests'::regclass)
      and not exists (select 1 from pg_catalog.pg_policy p where p.polrelid = 'public.phone_number_requests'::regclass)
      and not has_table_privilege('anon', 'public.phone_number_requests', 'SELECT')
      and not has_table_privilege('authenticated', 'public.phone_number_requests', 'SELECT')
      and has_table_privilege('service_role', 'public.phone_number_requests', 'INSERT')) as table_ready,
   (select count(*) from public.phone_number_requests)::int as rows,
-  current_setting('ss.m297_rehearsal', true) as rehearsal;
+  current_setting('ss.m298_rehearsal', true) as rehearsal;
 
 commit;

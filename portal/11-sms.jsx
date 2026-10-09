@@ -1315,7 +1315,7 @@ function phoneCnamProblem(raw) {
   return null;
 }
 // "Bring your number": the server's rule for a PIN or an account number in a free-text box
-// (portal-settings numberRequests.ts looksSecret, and migration 297's checks), so the card says so
+// (portal-settings numberRequests.ts looksSecret, and migration 298's checks), so the card says so
 // before anything is sent. Five or more digits even when spaced, dotted or dashed, or any digit soon
 // after a word like PIN or acct; in the timing note, dates and times are taken out first.
 function phonePortLooksSecret(v, dates) {
@@ -2210,7 +2210,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     finally { setBusy(false); }
   };
   const trustRow = (key, label, blurb, product) => {
-    // CNAM before migration 296 (or from a server older than it): said, with nothing to press.
+    // CNAM before migration 297 (or from a server older than it): said, with nothing to press.
     if (key === "cnam" && !(cid && cid.cnam && cid.cnam.available)) {
       return (
         <div data-ss-phone-trust="cnam" style={{ padding: "8px 0", borderTop: "1px solid #F1F5F9", fontSize: 12, color: "#64748B" }}>

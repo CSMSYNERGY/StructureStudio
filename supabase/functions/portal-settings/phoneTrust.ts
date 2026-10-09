@@ -28,7 +28,7 @@
 //
 // WORKSTREAM 2, PHASE 6:
 //   * CNAM, the third kind (the business's name on the called party's screen): sms_numbers.cnam_*
-//     (migration 296), read in a select of its OWN again (CNAM_COLUMNS), so before 296 is applied
+//     (migration 297), read in a select of its OWN again (CNAM_COLUMNS), so before 297 is applied
 //     CNAM alone reads "not available yet" and SHAKEN/STIR and Voice Integrity work as before.
 //   * A CALLING-ONLY builder (a number for calls, no texting registration yet) has no business
 //     profile, so every caller-ID press was refused with nowhere to go. phone_trust_profile (an
@@ -46,7 +46,7 @@ import {
 /** The number row's caller-ID columns (migration 255), and the id they are keyed by. */
 export const TRUST_COLUMNS =
   "id, shaken_trust_product_sid, shaken_status, voice_integrity_trust_product_sid, voice_integrity_status, caller_id_checked_at";
-/** CNAM's own columns (migration 296), read in a select of their own (see the header). */
+/** CNAM's own columns (migration 297), read in a select of their own (see the header). */
 export const CNAM_COLUMNS = "cnam_trust_product_sid, cnam_status, cnam_display_name";
 
 export type TrustRow = {
@@ -224,14 +224,14 @@ export type CallerIdView = {
   available: boolean;
   shakenStir: { registered: boolean; status: TrustProductStatus | null };
   voiceIntegrity: { registered: boolean; status: TrustProductStatus | null };
-  /** Workstream 2, phase 6. `available: false` = migration 296 is not applied yet (only CNAM is
+  /** Workstream 2, phase 6. `available: false` = migration 297 is not applied yet (only CNAM is
    *  unavailable then). The display name is what callers see, so it is shown; no SID is. */
   cnam: { available: boolean; registered: boolean; status: TrustProductStatus | null; displayName: string | null };
   checkedAt: string | null;
 };
 
 /** What the Phone tab is told. `available: false` = migration 255 is not applied yet;
- *  `cnamAvailable: false` = 296 is not (by default: the row was read without CNAM's columns). No SIDs. */
+ *  `cnamAvailable: false` = 297 is not (by default: the row was read without CNAM's columns). No SIDs. */
 export function callerIdView(row: TrustRow | null, available = true, cnamAvailable = !!row && "cnam_trust_product_sid" in row): CallerIdView {
   const r = row ?? {};
   const cnamOn = available && cnamAvailable;
@@ -394,7 +394,7 @@ export async function runTrustStatus(
   const errorCodes = { shakenStir: [] as number[], voiceIntegrity: [] as number[], cnam: [] as number[] };
   const next: TrustRow = { ...row };
   try {
-    // CNAM only when its columns were read (migration 296 applied): a row without them has no
+    // CNAM only when its columns were read (migration 297 applied): a row without them has no
     // CNAM to check, and writing one would fail the whole update.
     const kinds = (["shaken_stir", "voice_integrity", "cnam"] as const).filter((k) => k !== "cnam" || "cnam_trust_product_sid" in row);
     for (const kind of kinds) {

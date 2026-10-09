@@ -15,7 +15,7 @@
 //     columns were read;
 //   * portal-settings, read from the SHIPPED source: phone_trust_profile is gated (GATES and the
 //     operator gate), refuses a sub-account tenant while the switch is off, needs a live number, and
-//     uses texting's own lock; CNAM is refused before 296; the Phone tab offers the name and the form
+//     uses texting's own lock; CNAM is refused before 297; the Phone tab offers the name and the form
 //     to an operator only.
 // Run: deno test --node-modules-dir=none --allow-read --allow-env tests/phone/
 // ⚠️ NOTHING HERE REACHES TWILIO OR A DATABASE. Every SID is made up.
@@ -202,7 +202,7 @@ Deno.test("CNAM: the name Twilio was sent is recorded; status reads CNAM only wh
   const old = await runTrustStatus({ id: "n1", shaken_trust_product_sid: null }, {
     fetchTrustProduct: () => Promise.reject(new Error("must not be called")), write: () => Promise.reject(new Error("must not be called")),
   });
-  assert(old.ok && !old.view.cnam.available, "a row read before 296: CNAM is not available, nothing asked");
+  assert(old.ok && !old.view.cnam.available, "a row read before 297: CNAM is not available, nothing asked");
 });
 
 Deno.test("portal-settings: phone_trust_profile's gates, its account rules and texting's own lock", () => {
@@ -222,7 +222,7 @@ Deno.test("portal-settings: phone_trust_profile's gates, its account rules and t
   assert(/createSecondaryCustomerProfile\(\{ intake, primaryProfileSid: primary, friendlyName \}, creds\)/.test(b), "in the tenant's own account");
 });
 
-Deno.test("portal-settings: CNAM is phone_trust_setup's third product, refused before 296, its name checked first", () => {
+Deno.test("portal-settings: CNAM is phone_trust_setup's third product, refused before 297, its name checked first", () => {
   const b = slice(SRC, 'if (action === "phone_trust_setup") {', "\n  }\n", "phone_trust_setup branch");
   assert(/if \(kind === "cnam" && payload\?\.cnam\?\.displayName != null\) \{\s*const parsed = parseCnamDisplayName\(payload\.cnam\.displayName\);/.test(b));
   assert(/if \(kind === "cnam" && !\("cnam_trust_product_sid" in trustRow\)\) \{/.test(b));

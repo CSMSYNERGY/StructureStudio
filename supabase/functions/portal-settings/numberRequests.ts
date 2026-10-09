@@ -9,7 +9,7 @@
 // outright, and a free-text box is refused when it carries five or more digits in a row, even
 // spaced, dotted or dashed ("1234-5678-9012"), or any digit after a word like PIN, passcode,
 // password, acct or account ("PIN 4829"); dates and times in the timing note are allowed
-// (looksSecret). Migration 297 refuses the same again, so a PIN or an account number typed into the
+// (looksSecret). Migration 298 refuses the same again, so a PIN or an account number typed into the
 // wrong box is never kept. The operator types the PIN into Twilio's Console, the bill is uploaded
 // there, and Twilio emails the LOA to the contact named here.
 //
@@ -34,7 +34,7 @@ const SECRET_KEYS = /pin|passcode|password|account_?number|accountnumber|acct|ss
 
 /** Five or more digits joined only by spaces, dots, slashes or dashes ("1234-5678-9012",
  *  "48 29 13 7"): an account number or a PIN, never a carrier or a name. Review 2026-10-09: a bare
- *  `\d{5,}` let "acct 287-123-456" through. Migration 297's checks are the same pattern. */
+ *  `\d{5,}` let "acct 287-123-456" through. Migration 298's checks are the same pattern. */
 const DIGIT_RUN = /\d(?:[\s./-]*\d){4,}/;
 /** Any digit soon after a word that names a secret ("PIN 4829", "acct #12", "account no. 4"),
  *  however short. */
@@ -43,7 +43,7 @@ const SECRET_WORD = /\b(?:pin|passcode|pass\s*code|password|acct|account|ssn|sec
 /**
  * The timing note with its dates and times taken out, so "after 10/20/2026, 9am-5pm" is not read as
  * a run of digits: ISO dates, 10/20 and 10/20/2026 (also with dots or dashes), 9am, 9:30 pm, 17:00
- * and years 1900-2099. Migration 297 strips the same before its check.
+ * and years 1900-2099. Migration 298 strips the same before its check.
  */
 export function withoutDatesAndTimes(s: string): string {
   return s
@@ -126,7 +126,7 @@ export function parsePortRequest(raw: unknown): { ok: true; value: PortRequest }
   return { ok: true, value: { numbers, currentCarrier, isLcPhone, contactName, contactEmail, cutoverWindow: window || null } };
 }
 
-/** The phone_number_requests row (migration 297) for a parsed request. */
+/** The phone_number_requests row (migration 298) for a parsed request. */
 export function portRequestRow(clientId: string, userId: string | null, v: PortRequest) {
   return {
     client_id: clientId,

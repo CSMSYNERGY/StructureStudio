@@ -174,7 +174,7 @@ Deno.test("callerIdView tells the Phone tab where each stands, with no SIDs", ()
     available: true,
     shakenStir: { registered: true, status: "in-review" },
     voiceIntegrity: { registered: false, status: null },
-    // A row read without migration 296's columns: CNAM alone is "not available yet".
+    // A row read without migration 297's columns: CNAM alone is "not available yet".
     cnam: { available: false, registered: false, status: null, displayName: null },
     checkedAt: "2026-09-29T12:00:00Z",
   });
@@ -400,7 +400,7 @@ Deno.test("phone_settings_get reports the caller ID from its OWN select, and who
   const get = slice(SRC, 'if (action === "phone_settings_get") {', 'if (action === "phone_settings_save") {', "phone_settings_get");
   // Migration 266: ONE read of every number's caller-ID columns, in their own select, on this tenant.
   assert(/const readTrust = \(cols: string\) => admin\.from\("sms_numbers"\)\.select\(cols\)\.eq\("client_id", clientId\)\.in\("id", rows\.map\(\(r\) => r\.id\)\)/.test(get));
-  // Workstream 2, phase 6: CNAM's columns in the same read; without 296, the 255 read as before.
+  // Workstream 2, phase 6: CNAM's columns in the same read; without 297, the 255 read as before.
   assert(/let tr = await readTrust\(`\$\{TRUST_COLUMNS\}, \$\{CNAM_COLUMNS\}`\);\s*if \(tr\.error && phoneNotReady\(tr\.error\)\) tr = await readTrust\(TRUST_COLUMNS\);/.test(get), get);
   assert(/trustAvailable = !tr\.error;/.test(get) && /trustAvailable \? callerIdView\(/.test(get) && /: callerIdView\(null, false\);/.test(get),
     "a server without 255 shows 'not available', never a failed screen");
@@ -411,7 +411,7 @@ Deno.test("phone_settings_get reports the caller ID from its OWN select, and who
   assert(!/shaken|voice_integrity|caller_id/.test(numberRead));
   assert(!/shaken|voice_integrity|caller_id/.test(slice(SRC, "const NUMBER_COLUMNS = ", ";", "NUMBER_COLUMNS")));
   assert(/readTrust\(TRUST_COLUMNS\)/.test(SRC) && /return res\.error && phoneNotReady\(res\.error\) \? await read\(TRUST_COLUMNS\) : res;/.test(SRC),
-    "both caller-ID reads fall back to 255's columns alone when 296 is not applied");
+    "both caller-ID reads fall back to 255's columns alone when 297 is not applied");
 });
 
 Deno.test("migration 255 has every column phoneTrust reads, and the same status vocabulary", () => {

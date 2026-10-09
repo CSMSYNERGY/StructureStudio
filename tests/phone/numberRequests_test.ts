@@ -32,7 +32,7 @@ import {
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SRC = await read("../../supabase/functions/portal-settings/index.ts");
-const MIG = await read("../../supabase/migrations/297_phone_number_requests.sql");
+const MIG = await read("../../supabase/migrations/298_phone_number_requests.sql");
 const slice = (src: string, a: string, b: string, what: string) => {
   const i = src.indexOf(a), j = src.indexOf(b, i + a.length);
   if (i < 0 || j < 0) throw new Error(`numberRequests_test: ${what} anchors moved (start=${i}, end=${j}) — re-point them.`);
@@ -252,9 +252,9 @@ Deno.test("portal-settings: the gates, the adoption's order, and requests marked
   assert(!/wallet_hold|takeNumberHold/.test(adopt), "no wallet hold: nothing is bought");
 });
 
-Deno.test("migration 297 has every column the code writes and reads", () => {
+Deno.test("migration 298 has every column the code writes and reads", () => {
   for (const col of ["client_id", "numbers", "current_carrier", "is_lc_phone", "contact_name", "contact_email", "cutover_window", "status", "requested_by", "handled_by", "handled_at", "created_at", "updated_at"]) {
-    assert(new RegExp(`\\n  ${col}\\s`).test(MIG), `297 has no ${col}`);
+    assert(new RegExp(`\\n  ${col}\\s`).test(MIG), `298 has no ${col}`);
   }
   assert(/status in \('new', 'in_progress', 'done', 'cancelled'\)/.test(MIG));
 });

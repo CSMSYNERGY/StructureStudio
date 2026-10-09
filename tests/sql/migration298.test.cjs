@@ -1,12 +1,12 @@
-// Execute migration 298 for real in PGlite (Postgres compiled to WASM, in memory) on a
-// twilio_usage_daily shaped like the live one (259 + 292's account_sid), then check step 1 of the
-// order that keeps the phone-api Worker's 09:00 UTC run working (Workstream 2, phase 7; step 2 is
-// 299, tests/sql/migration299.test.cjs):
-//   298: the new key UNIQUE NULLS NOT DISTINCT (day, account_sid, category) sits BESIDE the old
-//        primary key; the old Worker's upsert (day, category) and the new one's (day, account_sid,
-//        category) both refresh the parent's one row; a sub-account row beside the parent's is still
-//        refused (it waits for 299); nothing moves; a re-apply is harmless; without 292 it refuses;
-//        broken copies are refused (mutants);
+// Execute migration 298 for real in PGlite (Postgres compiled to WASM, in memory) on a database
+// whose default privileges hand every new table to the browser roles (as Supabase's do), then check
+// what it promises: phone_number_requests is service-role only (RLS on, NOT forced, no policy, no
+// table or column privilege for anon / authenticated, no foreign key); a request as the code writes
+// it is stored; what must never be stored is refused (no numbers, more than ten, a NULL number, a
+// number that is not +1 E.164, five digits in a free-text box even spaced or dashed, any digit after
+// PIN / acct / account, a bad email or status), while dates and times in the timing note and a
+// carrier whose name merely contains "pin" are stored (review 2026-10-09); the apply-time rehearsal
+// leaves nothing behind; a re-apply is harmless; broken copies are refused (mutants).
 // Nothing here touches the live project.
 //
 // Run (from the repo root):
@@ -17,33 +17,26 @@ const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const M298 = () => fs.readFileSync(path.join(WT, "supabase/migrations/298_twilio_usage_account_key.sql"), "utf8").replace(/\r/g, "");
-const M299 = () => fs.readFileSync(path.join(WT, "supabase/migrations/299_twilio_usage_drop_day_key.sql"), "utf8").replace(/\r/g, "");
-const SUB = "AC" + "5".repeat(32);
+const MIG_TEXT = () => fs.readFileSync(path.join(WT, "supabase/migrations/298_phone_number_requests.sql"), "utf8").replace(/\r/g, "");
 
-const STUBS = (with292) => `
+const STUBS = `
 create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin bypassrls;
-create table public.twilio_usage_daily (
-  day date not null, category text not null, count numeric, usage numeric, price_micros bigint,
-  fetched_at timestamptz not null default now(), primary key (day, category)
-);
-revoke all on public.twilio_usage_daily from public;
-revoke all on public.twilio_usage_daily from anon, authenticated;
-grant select, insert, update, delete on public.twilio_usage_daily to service_role;
-${with292 ? `alter table public.twilio_usage_daily add column account_sid text;
-alter table public.twilio_usage_daily add constraint twilio_usage_daily_account_sid_chk check (account_sid is null or account_sid ~ '^AC[0-9a-fA-F]{32}$');` : ""}
-insert into public.twilio_usage_daily (day, category, count, price_micros) values
-  ('2026-10-07', 'calls-outbound', 12, 434000), ('2026-10-07', 'sms-outbound', 40, 332000), ('2026-10-08', 'calls-outbound', 3, 42000);
+grant usage on schema public to anon, authenticated, service_role;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
 `;
-
-async function makeDb({ with292 = true } = {}) {
+// Every database is closed at the end and the process then exits by itself (process.exitCode, not
+// process.exit): on Windows, process.exit() with PGlite still winding down tripped libuv's
+// "UV_HANDLE_CLOSING" assertion after ALL CHECKS PASSED and turned the pass into exit 127.
+const opened = [];
+async function makeDb() {
   const db = new PGlite();
-  await db.exec(STUBS(with292));
+  opened.push(db);
+  await db.exec(STUBS);
   return db;
 }
-async function apply(db, sql) {
+async function apply(db, sql = MIG_TEXT()) {
   const notices = [];
   const out = await db.exec(sql, { onNotice: (n) => notices.push(`${n.severity}: ${n.message}`) });
   const record = [...out].reverse().find((r) => r.rows && r.rows.length && r.fields.some((f) => f.name === "migration"));
@@ -57,51 +50,90 @@ const ok = (cond, msg, detail) => {
   return cond;
 };
 const one = async (db, sql, params) => (await db.query(sql, params)).rows[0];
-async function refused(db, sql, pattern) {
-  try { await db.query(sql); return { refused: false, message: "(accepted)" }; }
+async function refused(db, sql, params, pattern) {
+  try { await db.query(sql, params); return { refused: false, message: "(accepted)" }; }
   catch (e) { return { refused: !pattern || pattern.test(e.message), message: e.message }; }
 }
-// The two upserts the Worker sends, as PostgREST writes them.
-const oldWorker = (day, cat, count) => `insert into public.twilio_usage_daily (day, category, count) values ('${day}', '${cat}', ${count}) on conflict (day, category) do update set count = excluded.count`;
-const newParent = (day, cat, count) => `insert into public.twilio_usage_daily (day, category, count) values ('${day}', '${cat}', ${count}) on conflict (day, account_sid, category) do update set count = excluded.count`;
-const newSub = (day, cat, count) => `insert into public.twilio_usage_daily (day, account_sid, category, count) values ('${day}', '${SUB}', '${cat}', ${count}) on conflict (day, account_sid, category) do update set count = excluded.count`;
-const countRows = async (db, where = "true") => (await one(db, `select count(*)::int n from public.twilio_usage_daily where ${where}`)).n;
+async function as(db, role, fn) {
+  await db.exec(`set role ${role}`);
+  try { return await fn(); } finally { await db.exec("reset role"); }
+}
+const INSERT = "insert into public.phone_number_requests (client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window) values ($1, $2, $3, $4, $5, $6, $7)";
+const good = () => ["some-builder", ["+18165550123"], "Verizon", false, "Pat Example", "pat@builder.example.test", "after the 20th"];
 
 (async () => {
-  console.log("migration 298: the new key beside the old one");
+  console.log("migration 298: applies");
   const db = await makeDb();
   let res;
-  try { res = await apply(db, M298()); ok(true, "298 applied cleanly, checks and rehearsal included"); }
+  try { res = await apply(db); ok(true, "298 applied cleanly, checks and rehearsal included"); }
   catch (e) { ok(false, "298 applied", e.message); process.exit(1); }
   ok(res.notices.some((n) => /298: checks hold/.test(n)), "the checks ran to their notice", res.notices.join(" | "));
   const R = res.record || {};
-  ok(R.account_key === "day,account_sid,category" && R.nulls_not_distinct === true && R.usage_pk === "day,category" && R.rows === 3,
-    "RECORD: the new key, NULLS NOT DISTINCT, the old key still there, 3 rows", JSON.stringify(R));
-  ok(R.rehearsal === "both upserts refresh one parent row; a sub row waits for 299", "RECORD: the rehearsal ran to its end", R.rehearsal);
+  ok(R.table_ready === true && R.rows === 0, "RECORD: table_ready, no rows", JSON.stringify(R));
+  ok(R.rehearsal === "a request stored; empty, non-E.164 and malformed numbers, digit runs and a bad status refused", "RECORD: the rehearsal ran to its end", R.rehearsal);
 
-  await db.query(oldWorker("2026-10-08", "calls-outbound", 4));
-  ok(await countRows(db, "day = '2026-10-08'") === 1 && (await one(db, "select count::int c from public.twilio_usage_daily where day = '2026-10-08'")).c === 4, "the OLD Worker's upsert still refreshes the day");
-  await db.query(newParent("2026-10-08", "calls-outbound", 5));
-  await db.query(newParent("2026-10-08", "calls-outbound", 6));
-  ok(await countRows(db, "day = '2026-10-08'") === 1 && (await one(db, "select count::int c from public.twilio_usage_daily where day = '2026-10-08'")).c === 6, "the NEW Worker's upsert refreshes the same one parent row (NULL matches NULL)");
-  const r1 = await refused(db, newSub("2026-10-08", "calls-outbound", 1), /twilio_usage_daily_pkey|duplicate key/);
-  ok(r1.refused, "a sub-account row beside the parent's is refused while the old key is there", r1.message);
-  ok((await refused(db, newSub("2026-10-08", "sms-inbound", 1))).refused === false, "a sub row for a category the parent lacks still fits (each key holds)");
-  await db.query("delete from public.twilio_usage_daily where account_sid is not null");
+  console.log("what is stored, and what never is");
+  ok(!(await refused(db, INSERT, good())).refused, "a request as the code writes it is stored");
+  const r = await one(db, "select status, is_lc_phone, numbers from public.phone_number_requests");
+  ok(r.status === "new" && r.is_lc_phone === false && r.numbers.join() === "+18165550123", "status starts 'new' (the operator's notification)", JSON.stringify(r));
+  ok(!(await refused(db, INSERT, ["some-builder", ["+18165550123", "+18165550124"], "GoHighLevel", null, "Pat Example", "pat@builder.example.test", null])).refused, "two numbers, 'not sure', no window: stored");
+  for (const [what, mutate] of [
+    ["dates and times in the window", (g) => { g[6] = "after 10/20/2026, 9am-5pm, or 2026-10-27 at 17:00"; }],
+    ["a carrier whose name contains 'pin'", (g) => { g[2] = "Pinnacle Telecom"; }],
+    ["a year and a short count in the carrier", (g) => { g[2] = "AT&T 2025 plan, 3 lines"; }],
+  ]) {
+    const g = good(); mutate(g);
+    const x = await refused(db, INSERT, g);
+    ok(!x.refused, `stores ${what}`, x.message);
+  }
+  const bad = [
+    ["no numbers", (g) => { g[1] = []; }],
+    ["eleven numbers", (g) => { g[1] = Array.from({ length: 11 }, (_, i) => `+1816555${String(1000 + i)}`); }],
+    ["a number without +1", (g) => { g[1] = ["8165550123"]; }],
+    ["a malformed number", (g) => { g[1] = ["+1816555012"]; }],
+    ["a NULL number", (g) => { g[1] = ["+18165550123", null]; }],
+    ["an account number in the carrier", (g) => { g[2] = "AT&T account 12345678"; }],
+    ["a dashed account number in the carrier", (g) => { g[2] = "Verizon 1234-5678-9012"; }],
+    ["a PIN in the window", (g) => { g[6] = "PIN is 88213"; }],
+    ["a four-digit PIN in the window", (g) => { g[6] = "PIN 4829"; }],
+    ["a dashed account number after acct in the window", (g) => { g[6] = "acct 287-123-456"; }],
+    ["'account no. 4' in the window", (g) => { g[6] = "account no. 4"; }],
+    ["'Acct #9' in the carrier", (g) => { g[2] = "Verizon Acct #9"; }],
+    ["digits in the name", (g) => { g[4] = "Pat 55512"; }],
+    ["a spaced PIN in the name", (g) => { g[4] = "Pat 48 29 13"; }],
+    ["a bad email", (g) => { g[5] = "pat at example"; }],
+    ["a bad slug", (g) => { g[0] = "Some Builder"; }],
+  ];
+  for (const [what, mutate] of bad) {
+    const g = good(); mutate(g);
+    const x = await refused(db, INSERT, g, /check constraint/);
+    ok(x.refused, `refuses ${what}`, x.message);
+  }
+  ok((await refused(db, "update public.phone_number_requests set status = 'approved'", [], /check constraint/)).refused, "refuses a status outside new / in_progress / done / cancelled");
 
-  try { await apply(db, M298()); ok(true, "298 re-applies cleanly"); } catch (e) { ok(false, "298 re-applies", e.message); }
-  ok((await one(db, "select count(*)::int n from pg_constraint where conname = 'twilio_usage_daily_account_key'")).n === 1, "still one account key");
+  console.log("privileges");
+  for (const role of ["anon", "authenticated"]) {
+    for (const sql of ["select * from public.phone_number_requests", "insert into public.phone_number_requests (client_id, numbers, current_carrier, contact_name, contact_email) values ('x', array['+18165550123'], 'v', 'Pat', 'p@e.test')"]) {
+      const x = await as(db, role, () => refused(db, sql, [], /permission denied/));
+      ok(x.refused, `${role} may not ${sql.slice(0, 6)}`, x.message);
+    }
+  }
 
-  const bare = await makeDb({ with292: false });
-  try { await apply(bare, M298()); ok(false, "a database without 292 is refused", "it committed"); }
-  catch (e) { ok(/migration 292 not applied/.test(e.message), "a database without 292 is refused before anything is changed", e.message); }
+  console.log("re-apply");
+  const before = (await one(db, "select count(*)::int n from public.phone_number_requests")).n;
+  try { await apply(db); ok(true, "298 re-applies cleanly"); } catch (e) { ok(false, "298 re-applies", e.message); }
+  ok((await one(db, "select count(*)::int n from public.phone_number_requests")).n === before, "every request is still there");
 
-  console.log("298 mutants");
-  const src = M298();
+  console.log("mutants");
+  const src = MIG_TEXT();
   for (const [label, mutate, re] of [
-    ["a plain unique key (NULLs distinct)", (s) => s.replace("unique nulls not distinct (day, account_sid, category)", "unique (day, account_sid, category)"), /must be NULLS NOT DISTINCT/],
-    ["the old key dropped too early", (s) => s.replace("comment on constraint twilio_usage_daily_account_key", "alter table public.twilio_usage_daily drop constraint twilio_usage_daily_pkey;\ncomment on constraint twilio_usage_daily_account_key"), /old primary key \(day, category\) must still be there/],
-    ["the browser granted the table", (s) => s.replace("notify pgrst, 'reload schema';", "notify pgrst, 'reload schema';").replace("do $check$", "grant select on public.twilio_usage_daily to anon;\ndo $check$"), /anon holds SELECT/],
+    ["the browser roles keep the default grant", (s) => s.replace("revoke all on public.phone_number_requests from anon, authenticated;", ""), /anon holds SELECT on phone_number_requests/],
+    ["RLS forced", (s) => s.replace("alter table public.phone_number_requests no force row level security;", "alter table public.phone_number_requests force row level security;"), /enabled and NOT forced/],
+    ["a policy for the browser", (s) => s.replace("-- ── CHECKS", "create policy p on public.phone_number_requests for select to authenticated using (true);\n-- ── CHECKS"), /has a policy/],
+    ["the secret words allowed in the window", (s) => s.replace("and cutover_window !~* '\\m(pin|", "and 'x' !~* '\\m(pin|"), /expected 13 refusals, got 12/],
+    ["a NULL number allowed", (s) => s.replace("and array_position(numbers, null) is null", ""), /expected 13 refusals, got 12/],
+    // Slash dates "taken out" as five digits: the rehearsal's own dated timing note is then refused.
+    ["dates no longer taken out of the window", (s) => s.replace("([/.-][0-9]{2,4})?\\M', ' ', 'g')", "([/.-][0-9]{2,4})?\\M', '11111', 'g')"), /violates check constraint/],
   ]) {
     const mm = mutate(src);
     if (mm === src) { ok(false, `mutant "${label}" changed nothing (the source moved; update the test)`); continue; }
@@ -110,10 +142,11 @@ const countRows = async (db, where = "true") => (await one(db, `select count(*):
     catch (e) {
       ok(re.test(e.message), `mutant "${label}" was refused`, e.message);
       await mdb.exec("rollback");
-      ok((await one(mdb, "select count(*)::int n from pg_constraint where conname = 'twilio_usage_daily_account_key'")).n === 0, "  and left nothing behind");
+      ok((await one(mdb, "select to_regclass('public.phone_number_requests') is null as gone")).gone, "  and left nothing behind");
     }
   }
 
+  for (const d of opened) await d.close().catch(() => {});
   console.log(failures ? `\n${failures} CHECK(S) FAILED` : "\nALL CHECKS PASSED");
-  process.exit(failures ? 1 : 0);
+  process.exitCode = failures ? 1 : 0;
 })().catch((e) => { console.error(e); process.exit(1); });

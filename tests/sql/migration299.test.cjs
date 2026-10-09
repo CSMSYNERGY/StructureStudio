@@ -1,11 +1,12 @@
-// Execute migration 299 for real in PGlite (Postgres compiled to WASM, in memory), on a
-// twilio_usage_daily shaped like the live one (259 + 292's account_sid) with 298 applied first, then
-// check step 2 of the order that keeps the phone-api Worker's 09:00 UTC run working (Workstream 2,
-// phase 7; step 1 is 298, tests/sql/migration298.test.cjs):
-//   299: refuses without 298 and for a published table; drops the old key; then a parent row and a
-//        sub row for the same day and category sit side by side, one each, the parent's NULL still
-//        matches itself; the old Worker's upsert now fails (42P10), which is why SETUP 7f puts the new
-//        Worker first; broken copies are refused.
+// Execute migration 299 for real in PGlite (Postgres compiled to WASM, in memory) on a
+// twilio_usage_daily shaped like the live one (259 + 292's account_sid), then check step 1 of the
+// order that keeps the phone-api Worker's 09:00 UTC run working (Workstream 2, phase 7; step 2 is
+// 300, tests/sql/migration300.test.cjs):
+//   299: the new key UNIQUE NULLS NOT DISTINCT (day, account_sid, category) sits BESIDE the old
+//        primary key; the old Worker's upsert (day, category) and the new one's (day, account_sid,
+//        category) both refresh the parent's one row; a sub-account row beside the parent's is still
+//        refused (it waits for 300); nothing moves; a re-apply is harmless; without 292 it refuses;
+//        broken copies are refused (mutants);
 // Nothing here touches the live project.
 //
 // Run (from the repo root):
@@ -16,8 +17,8 @@ const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const M298 = () => fs.readFileSync(path.join(WT, "supabase/migrations/298_twilio_usage_account_key.sql"), "utf8").replace(/\r/g, "");
-const M299 = () => fs.readFileSync(path.join(WT, "supabase/migrations/299_twilio_usage_drop_day_key.sql"), "utf8").replace(/\r/g, "");
+const M299 = () => fs.readFileSync(path.join(WT, "supabase/migrations/299_twilio_usage_account_key.sql"), "utf8").replace(/\r/g, "");
+const M300 = () => fs.readFileSync(path.join(WT, "supabase/migrations/300_twilio_usage_drop_day_key.sql"), "utf8").replace(/\r/g, "");
 const SUB = "AC" + "5".repeat(32);
 
 const STUBS = (with292) => `
@@ -67,54 +68,49 @@ const newSub = (day, cat, count) => `insert into public.twilio_usage_daily (day,
 const countRows = async (db, where = "true") => (await one(db, `select count(*)::int n from public.twilio_usage_daily where ${where}`)).n;
 
 (async () => {
+  console.log("migration 299: the new key beside the old one");
   const db = await makeDb();
-  await apply(db, M298());
   let res;
-  console.log("migration 299: the old key goes");
-  const early = await makeDb();
-  try { await apply(early, M299()); ok(false, "299 without 298 is refused", "it committed"); }
-  catch (e) { ok(/migration 298 not applied/.test(e.message), "299 without 298 is refused", e.message); }
-  const pub = await makeDb();
-  await apply(pub, M298());
-  let pubMade = true;
-  try { await pub.exec("create publication m299_test for table public.twilio_usage_daily"); } catch (_e) { pubMade = false; }
-  if (pubMade) {
-    try { await apply(pub, M299()); ok(false, "299 on a published table is refused", "it committed"); }
-    catch (e) { ok(/is in a publication/.test(e.message), "299 on a published table is refused", e.message); }
-  } else {
-    ok(true, "(PGlite has no publications here; the publication refusal is read from the source)");
-    ok(/pg_publication_tables/.test(M299()) && /puballtables/.test(M299()), "  299 checks both kinds of publication");
-  }
-
-  try { res = await apply(db, M299()); ok(true, "299 applied cleanly after 298"); }
+  try { res = await apply(db, M299()); ok(true, "299 applied cleanly, checks and rehearsal included"); }
   catch (e) { ok(false, "299 applied", e.message); process.exit(1); }
-  const S = res.record || {};
-  ok(S.usage_pk === null && S.account_key === "day,account_sid,category" && S.rows === 3, "RECORD: no primary key, the account key, 3 rows", JSON.stringify(S));
-  ok(S.rehearsal === "a parent and a sub row side by side, one each; a second parent row refused", "RECORD: the rehearsal ran to its end", S.rehearsal);
-  await db.query(newParent("2026-10-08", "calls-outbound", 7));
-  await db.query(newSub("2026-10-08", "calls-outbound", 1));
-  await db.query(newSub("2026-10-08", "calls-outbound", 2));
-  ok(await countRows(db, "day = '2026-10-08'") === 2, "a parent row and a sub row for the same day and category, one each");
-  ok((await one(db, `select count::int c from public.twilio_usage_daily where day = '2026-10-08' and account_sid = '${SUB}'`)).c === 2, "the sub's row refreshed in place");
-  const r2 = await refused(db, oldWorker("2026-10-08", "calls-outbound", 9), /no unique or exclusion constraint/);
-  ok(r2.refused, "the OLD Worker's upsert now fails (42P10): it must be replaced BEFORE 299", r2.message);
+  ok(res.notices.some((n) => /299: checks hold/.test(n)), "the checks ran to their notice", res.notices.join(" | "));
+  const R = res.record || {};
+  ok(R.account_key === "day,account_sid,category" && R.nulls_not_distinct === true && R.usage_pk === "day,category" && R.rows === 3,
+    "RECORD: the new key, NULLS NOT DISTINCT, the old key still there, 3 rows", JSON.stringify(R));
+  ok(R.rehearsal === "both upserts refresh one parent row; a sub row waits for 300", "RECORD: the rehearsal ran to its end", R.rehearsal);
+
+  await db.query(oldWorker("2026-10-08", "calls-outbound", 4));
+  ok(await countRows(db, "day = '2026-10-08'") === 1 && (await one(db, "select count::int c from public.twilio_usage_daily where day = '2026-10-08'")).c === 4, "the OLD Worker's upsert still refreshes the day");
+  await db.query(newParent("2026-10-08", "calls-outbound", 5));
+  await db.query(newParent("2026-10-08", "calls-outbound", 6));
+  ok(await countRows(db, "day = '2026-10-08'") === 1 && (await one(db, "select count::int c from public.twilio_usage_daily where day = '2026-10-08'")).c === 6, "the NEW Worker's upsert refreshes the same one parent row (NULL matches NULL)");
+  const r1 = await refused(db, newSub("2026-10-08", "calls-outbound", 1), /twilio_usage_daily_pkey|duplicate key/);
+  ok(r1.refused, "a sub-account row beside the parent's is refused while the old key is there", r1.message);
+  ok((await refused(db, newSub("2026-10-08", "sms-inbound", 1))).refused === false, "a sub row for a category the parent lacks still fits (each key holds)");
+  await db.query("delete from public.twilio_usage_daily where account_sid is not null");
+
   try { await apply(db, M299()); ok(true, "299 re-applies cleanly"); } catch (e) { ok(false, "299 re-applies", e.message); }
+  ok((await one(db, "select count(*)::int n from pg_constraint where conname = 'twilio_usage_daily_account_key'")).n === 1, "still one account key");
+
+  const bare = await makeDb({ with292: false });
+  try { await apply(bare, M299()); ok(false, "a database without 292 is refused", "it committed"); }
+  catch (e) { ok(/migration 292 not applied/.test(e.message), "a database without 292 is refused before anything is changed", e.message); }
 
   console.log("299 mutants");
-  const src9 = M299();
+  const src = M299();
   for (const [label, mutate, re] of [
-    ["the key never dropped", (s) => s.replace("execute format('alter table public.twilio_usage_daily drop constraint %I', v_name);", "null;"), /old primary key is still there/],
-    ["the account key dropped instead", (s) => s.replace("where c.conrelid = 'public.twilio_usage_daily'::regclass and c.contype = 'p';\n  if v_name is not null", "where c.conrelid = 'public.twilio_usage_daily'::regclass and c.conname = 'twilio_usage_daily_account_key';\n  if v_name is not null"), /old primary key is still there|no unique or exclusion constraint/],
+    ["a plain unique key (NULLs distinct)", (s) => s.replace("unique nulls not distinct (day, account_sid, category)", "unique (day, account_sid, category)"), /must be NULLS NOT DISTINCT/],
+    ["the old key dropped too early", (s) => s.replace("comment on constraint twilio_usage_daily_account_key", "alter table public.twilio_usage_daily drop constraint twilio_usage_daily_pkey;\ncomment on constraint twilio_usage_daily_account_key"), /old primary key \(day, category\) must still be there/],
+    ["the browser granted the table", (s) => s.replace("notify pgrst, 'reload schema';", "notify pgrst, 'reload schema';").replace("do $check$", "grant select on public.twilio_usage_daily to anon;\ndo $check$"), /anon holds SELECT/],
   ]) {
-    const mm = mutate(src9);
-    if (mm === src9) { ok(false, `mutant "${label}" changed nothing (the source moved; update the test)`); continue; }
+    const mm = mutate(src);
+    if (mm === src) { ok(false, `mutant "${label}" changed nothing (the source moved; update the test)`); continue; }
     const mdb = await makeDb();
-    await apply(mdb, M298());
     try { await apply(mdb, mm); ok(false, `mutant "${label}" was refused`, "it committed"); }
     catch (e) {
       ok(re.test(e.message), `mutant "${label}" was refused`, e.message);
       await mdb.exec("rollback");
-      ok((await one(mdb, "select count(*)::int n from pg_constraint where conrelid = 'public.twilio_usage_daily'::regclass and contype = 'p'")).n === 1, "  and the old key is still there");
+      ok((await one(mdb, "select count(*)::int n from pg_constraint where conname = 'twilio_usage_daily_account_key'")).n === 0, "  and left nothing behind");
     }
   }
 

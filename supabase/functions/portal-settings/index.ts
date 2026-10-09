@@ -9518,7 +9518,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     (await callerMayManageCallerId()) ? null : phoneRefused(TRUST_OPERATOR_SENTENCE, 403);
   // The number's caller-ID columns (migration 255), in their OWN select so a server without 255
   // answers `callerId.available: false` rather than failing the number read everything else uses.
-  // Workstream 2, phase 6: CNAM's columns (migration 296) ride along; before 296 the row is read
+  // Workstream 2, phase 6: CNAM's columns (migration 297) ride along; before 297 the row is read
   // again without them, and CNAM alone is "not available" (the row then has no cnam_* key).
   const trustRowOf = async (numberId: string) => {
     const read = (cols: string) => admin.from("sms_numbers").select(cols).eq("id", numberId).eq("client_id", clientId).maybeSingle();
@@ -9539,7 +9539,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data, error } = await admin.from("sms_registrations").select(REG_PROFILE_COLUMNS).eq("client_id", clientId).maybeSingle();
     return { row: (data ?? null) as RegistrationRow, error };
   };
-  // Workstream 2, phase 8: this business's "Bring your number" requests (migration 297), newest
+  // Workstream 2, phase 8: this business's "Bring your number" requests (migration 298), newest
   // first, or null when the table is not there yet or the read fails (the card is then not drawn).
   const portRequestsOf = async () => {
     const { data, error } = await admin.from("phone_number_requests")
@@ -10726,7 +10726,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
     }
     const trustRow = (tr.data ?? {}) as TrustRow;
-    // CNAM is recorded in migration 296's columns: before 296, nothing is sent for it.
+    // CNAM is recorded in migration 297's columns: before 297, nothing is sent for it.
     if (kind === "cnam" && !("cnam_trust_product_sid" in trustRow)) {
       return phoneUnavailable("Caller name registration isn't available on this server yet.");
     }
@@ -10935,7 +10935,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   // ── Workstream 2, phase 8: "Bring your number" ───────────────────────────────────────────────
   // The builder asks to move numbers they already have into Structure Studio. The request is
-  // stored (phone_number_requests, migration 297) and IS the operator's notification: the console
+  // stored (phone_number_requests, migration 298) and IS the operator's notification: the console
   // lists every open one. No PIN, bill or account number is accepted (numberRequests.ts refuses
   // them), and nothing is sent anywhere: an operator books the move (workers/phone-api/PORTING.md).
   // ⚠️ ONLY THIS BUILDER'S OWN ROWS ARE READ (review 2026-10-09). Refusing on another builder's
@@ -11046,7 +11046,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       openRequestNames: async (n) => {
         const { data, error } = await admin.from("phone_number_requests").select("id")
           .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [n]).limit(1);
-        // No table yet (297 not applied): no request can name it, so the parent's adoption is refused.
+        // No table yet (298 not applied): no request can name it, so the parent's adoption is refused.
         if (error) return phoneNotReady(error) ? { ok: true as const, open: false } : { ok: false as const, error };
         return { ok: true as const, open: (data ?? []).length > 0 };
       },

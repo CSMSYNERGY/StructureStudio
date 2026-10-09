@@ -285,7 +285,7 @@ describe("scheduled()", () => {
     const q = net.to(/Usage\/Records/)[0].url.searchParams;
     expect([q.get("StartDate"), q.get("EndDate")]).toEqual(["2026-10-01", "2026-10-01"]);
     // Workstream 2, phase 7: with the switch off the request is exactly the one it always was
-    // (Twilio's default, sub-accounts folded in: review 2026-10-09), now on migration 298's key.
+    // (Twilio's default, sub-accounts folded in: review 2026-10-09), now on migration 299's key.
     expect(q.has("IncludeSubaccounts")).toBe(false);
     const up = net.writes("twilio_usage_daily", "POST")[0];
     expect(up.url.searchParams.get("on_conflict")).toBe("day,account_sid,category");

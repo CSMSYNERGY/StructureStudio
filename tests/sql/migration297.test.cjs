@@ -1,39 +1,44 @@
-// Execute migration 297 for real in PGlite (Postgres compiled to WASM, in memory) on a database
-// whose default privileges hand every new table to the browser roles (as Supabase's do), then check
-// what it promises: phone_number_requests is service-role only (RLS on, NOT forced, no policy, no
-// table or column privilege for anon / authenticated, no foreign key); a request as the code writes
-// it is stored; what must never be stored is refused (no numbers, more than ten, a NULL number, a
-// number that is not +1 E.164, five digits in a free-text box even spaced or dashed, any digit after
-// PIN / acct / account, a bad email or status), while dates and times in the timing note and a
-// carrier whose name merely contains "pin" are stored (review 2026-10-09); the apply-time rehearsal
-// leaves nothing behind; a re-apply is harmless; broken copies are refused (mutants).
+// Execute migration 297 for real in PGlite (Postgres compiled to WASM, in memory) on an sms_numbers
+// shaped like the live one (165 + 255), then check what it promises: three NULLable text columns
+// with no default; the CNAM status takes 255's vocabulary only, the SID only a BU… SID, and the
+// display name only Twilio's rules (1-15 of letters, numbers, spaces, periods, commas, starting with
+// a letter); the apply-time probe leaves no row behind; the browser roles still hold nothing; a
+// re-apply is harmless; a database without 255 is refused; and broken copies are refused (mutants).
 // Nothing here touches the live project.
 //
 // Run (from the repo root):
 //   npm install --prefix tests/sql        once (@electric-sql/pglite only)
 //   node tests/sql/migration297.test.cjs  exit 0 = ALL CHECKS PASSED
+// MIG_FILE=<path> applies another copy of 297.
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG_TEXT = () => fs.readFileSync(path.join(WT, "supabase/migrations/297_phone_number_requests.sql"), "utf8").replace(/\r/g, "");
+const MIG_PATH = process.env.MIG_FILE || path.join(WT, "supabase/migrations/297_twilio_cnam.sql");
+const MIG_TEXT = () => fs.readFileSync(MIG_PATH, "utf8").replace(/\r/g, "");
 
-const STUBS = `
+const STUBS = (with255) => `
 create role anon nologin;
 create role authenticated nologin;
 create role service_role nologin bypassrls;
 grant usage on schema public to anon, authenticated, service_role;
 alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+create table public.sms_numbers (
+  id uuid primary key default gen_random_uuid(), client_id text not null, phone_number text not null,
+  twilio_sid text, messaging_service_sid text, registration_status text not null default 'pending_registration',
+  purchased_at timestamptz not null default now(), released_at timestamptz, created_at timestamptz not null default now()
+  ${with255 ? `, shaken_trust_product_sid text, shaken_status text, voice_integrity_trust_product_sid text,
+  voice_integrity_status text, caller_id_checked_at timestamptz, caller_id_lock_until timestamptz` : ""}
+);
+create unique index sms_numbers_live_unique on public.sms_numbers (phone_number) where released_at is null;
+revoke all on public.sms_numbers from anon, authenticated;
+insert into public.sms_numbers (client_id, phone_number) values ('some-builder', '+15555550111');
 `;
-// Every database is closed at the end and the process then exits by itself (process.exitCode, not
-// process.exit): on Windows, process.exit() with PGlite still winding down tripped libuv's
-// "UV_HANDLE_CLOSING" assertion after ALL CHECKS PASSED and turned the pass into exit 127.
-const opened = [];
-async function makeDb() {
+
+async function makeDb({ with255 = true } = {}) {
   const db = new PGlite();
-  opened.push(db);
-  await db.exec(STUBS);
+  await db.exec(STUBS(with255));
   return db;
 }
 async function apply(db, sql = MIG_TEXT()) {
@@ -50,91 +55,76 @@ const ok = (cond, msg, detail) => {
   return cond;
 };
 const one = async (db, sql, params) => (await db.query(sql, params)).rows[0];
-async function refused(db, sql, params, pattern) {
-  try { await db.query(sql, params); return { refused: false, message: "(accepted)" }; }
+async function refused(db, sql, pattern) {
+  try { await db.query(sql); return { refused: false, message: "(accepted)" }; }
   catch (e) { return { refused: !pattern || pattern.test(e.message), message: e.message }; }
 }
-async function as(db, role, fn) {
-  await db.exec(`set role ${role}`);
-  try { return await fn(); } finally { await db.exec("reset role"); }
-}
-const INSERT = "insert into public.phone_number_requests (client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window) values ($1, $2, $3, $4, $5, $6, $7)";
-const good = () => ["some-builder", ["+18165550123"], "Verizon", false, "Pat Example", "pat@builder.example.test", "after the 20th"];
 
 (async () => {
-  console.log("migration 297: applies");
+  console.log("migration 297: applies on 165 + 255");
   const db = await makeDb();
   let res;
-  try { res = await apply(db); ok(true, "297 applied cleanly, checks and rehearsal included"); }
+  try { res = await apply(db); ok(true, "297 applied cleanly, checks and probe included"); }
   catch (e) { ok(false, "297 applied", e.message); process.exit(1); }
   ok(res.notices.some((n) => /297: checks hold/.test(n)), "the checks ran to their notice", res.notices.join(" | "));
   const R = res.record || {};
-  ok(R.table_ready === true && R.rows === 0, "RECORD: table_ready, no rows", JSON.stringify(R));
-  ok(R.rehearsal === "a request stored; empty, non-E.164 and malformed numbers, digit runs and a bad status refused", "RECORD: the rehearsal ran to its end", R.rehearsal);
+  ok(R.columns_added === 3 && R.constraints === 3 && R.rows_with_cnam === 0, "RECORD: 3 columns, 3 constraints, no row with CNAM", JSON.stringify(R));
+  ok(/^six bad values refused, a real SID, status and two real names taken, probe removed$/.test(String(R.probe)), "RECORD: the probe ran to its end", R.probe);
+  ok((await one(db, "select count(*)::int n from public.sms_numbers")).n === 1, "the probe row is gone and the real row stays");
 
-  console.log("what is stored, and what never is");
-  ok(!(await refused(db, INSERT, good())).refused, "a request as the code writes it is stored");
-  const r = await one(db, "select status, is_lc_phone, numbers from public.phone_number_requests");
-  ok(r.status === "new" && r.is_lc_phone === false && r.numbers.join() === "+18165550123", "status starts 'new' (the operator's notification)", JSON.stringify(r));
-  ok(!(await refused(db, INSERT, ["some-builder", ["+18165550123", "+18165550124"], "GoHighLevel", null, "Pat Example", "pat@builder.example.test", null])).refused, "two numbers, 'not sure', no window: stored");
-  for (const [what, mutate] of [
-    ["dates and times in the window", (g) => { g[6] = "after 10/20/2026, 9am-5pm, or 2026-10-27 at 17:00"; }],
-    ["a carrier whose name contains 'pin'", (g) => { g[2] = "Pinnacle Telecom"; }],
-    ["a year and a short count in the carrier", (g) => { g[2] = "AT&T 2025 plan, 3 lines"; }],
+  console.log("the rules");
+  const id = (await one(db, "select id from public.sms_numbers limit 1")).id;
+  const set = (frag) => `update public.sms_numbers set ${frag} where id = '${id}'`;
+  for (const [frag, what] of [
+    ["cnam_status = 'approved'", "a status outside Twilio's enum"],
+    ["cnam_trust_product_sid = 'BU12'", "a malformed SID"],
+    ["cnam_display_name = 'ABCDEFGHIJKLMNOP'", "16 characters"],
+    ["cnam_display_name = '1 Barns'", "a name starting with a digit"],
+    ["cnam_display_name = 'Barns & Co'", "an ampersand"],
+    ["cnam_display_name = ''", "an empty name"],
   ]) {
-    const g = good(); mutate(g);
-    const x = await refused(db, INSERT, g);
-    ok(!x.refused, `stores ${what}`, x.message);
+    const r = await refused(db, set(frag), /check constraint/);
+    ok(r.refused, `refuses ${what}`, r.message);
   }
-  const bad = [
-    ["no numbers", (g) => { g[1] = []; }],
-    ["eleven numbers", (g) => { g[1] = Array.from({ length: 11 }, (_, i) => `+1816555${String(1000 + i)}`); }],
-    ["a number without +1", (g) => { g[1] = ["8165550123"]; }],
-    ["a malformed number", (g) => { g[1] = ["+1816555012"]; }],
-    ["a NULL number", (g) => { g[1] = ["+18165550123", null]; }],
-    ["an account number in the carrier", (g) => { g[2] = "AT&T account 12345678"; }],
-    ["a dashed account number in the carrier", (g) => { g[2] = "Verizon 1234-5678-9012"; }],
-    ["a PIN in the window", (g) => { g[6] = "PIN is 88213"; }],
-    ["a four-digit PIN in the window", (g) => { g[6] = "PIN 4829"; }],
-    ["a dashed account number after acct in the window", (g) => { g[6] = "acct 287-123-456"; }],
-    ["'account no. 4' in the window", (g) => { g[6] = "account no. 4"; }],
-    ["'Acct #9' in the carrier", (g) => { g[2] = "Verizon Acct #9"; }],
-    ["digits in the name", (g) => { g[4] = "Pat 55512"; }],
-    ["a spaced PIN in the name", (g) => { g[4] = "Pat 48 29 13"; }],
-    ["a bad email", (g) => { g[5] = "pat at example"; }],
-    ["a bad slug", (g) => { g[0] = "Some Builder"; }],
-  ];
-  for (const [what, mutate] of bad) {
-    const g = good(); mutate(g);
-    const x = await refused(db, INSERT, g, /check constraint/);
-    ok(x.refused, `refuses ${what}`, x.message);
+  for (const frag of [
+    "cnam_status = 'twilio-approved', cnam_trust_product_sid = 'BU" + "f".repeat(32) + "'",
+    "cnam_display_name = 'ABCDEFGHIJKLMNO'",
+    "cnam_display_name = 'Acme Barns, LLC'",
+    "cnam_display_name = 'J.R. Sheds 2'",
+    "cnam_status = null, cnam_trust_product_sid = null, cnam_display_name = null",
+  ]) {
+    const r = await refused(db, set(frag));
+    ok(!r.refused, `takes ${frag}`, r.message);
   }
-  ok((await refused(db, "update public.phone_number_requests set status = 'approved'", [], /check constraint/)).refused, "refuses a status outside new / in_progress / done / cancelled");
 
-  console.log("privileges");
+  console.log("privileges and shape");
   for (const role of ["anon", "authenticated"]) {
-    for (const sql of ["select * from public.phone_number_requests", "insert into public.phone_number_requests (client_id, numbers, current_carrier, contact_name, contact_email) values ('x', array['+18165550123'], 'v', 'Pat', 'p@e.test')"]) {
-      const x = await as(db, role, () => refused(db, sql, [], /permission denied/));
-      ok(x.refused, `${role} may not ${sql.slice(0, 6)}`, x.message);
+    for (const col of ["cnam_trust_product_sid", "cnam_status", "cnam_display_name"]) {
+      const has = await one(db, `select has_column_privilege('${role}', 'public.sms_numbers', '${col}', 'SELECT') as h`);
+      ok(has.h === false, `${role} cannot read ${col}`);
     }
   }
+  const cols = (await db.query("select column_name, data_type, is_nullable, column_default from information_schema.columns where table_name = 'sms_numbers' and column_name like 'cnam%' order by 1")).rows;
+  ok(cols.length === 3 && cols.every((c) => c.data_type === "text" && c.is_nullable === "YES" && c.column_default === null), "three nullable text columns, no default", JSON.stringify(cols));
 
   console.log("re-apply");
-  const before = (await one(db, "select count(*)::int n from public.phone_number_requests")).n;
   try { await apply(db); ok(true, "297 re-applies cleanly"); } catch (e) { ok(false, "297 re-applies", e.message); }
-  ok((await one(db, "select count(*)::int n from public.phone_number_requests")).n === before, "every request is still there");
+  ok((await one(db, "select count(*)::int n from pg_constraint where conname like 'sms_numbers_cnam%'")).n === 3, "still exactly three constraints");
+
+  console.log("without 255");
+  const bare = await makeDb({ with255: false });
+  try { await apply(bare); ok(false, "a database without 255 is refused", "it committed"); }
+  catch (e) { ok(/migration 255 not applied/.test(e.message), "a database without 255 is refused before anything is changed", e.message); }
 
   console.log("mutants");
   const src = MIG_TEXT();
-  for (const [label, mutate, re] of [
-    ["the browser roles keep the default grant", (s) => s.replace("revoke all on public.phone_number_requests from anon, authenticated;", ""), /anon holds SELECT on phone_number_requests/],
-    ["RLS forced", (s) => s.replace("alter table public.phone_number_requests no force row level security;", "alter table public.phone_number_requests force row level security;"), /enabled and NOT forced/],
-    ["a policy for the browser", (s) => s.replace("-- ── CHECKS", "create policy p on public.phone_number_requests for select to authenticated using (true);\n-- ── CHECKS"), /has a policy/],
-    ["the secret words allowed in the window", (s) => s.replace("and cutover_window !~* '\\m(pin|", "and 'x' !~* '\\m(pin|"), /expected 13 refusals, got 12/],
-    ["a NULL number allowed", (s) => s.replace("and array_position(numbers, null) is null", ""), /expected 13 refusals, got 12/],
-    // Slash dates "taken out" as five digits: the rehearsal's own dated timing note is then refused.
-    ["dates no longer taken out of the window", (s) => s.replace("([/.-][0-9]{2,4})?\\M', ' ', 'g')", "([/.-][0-9]{2,4})?\\M', '11111', 'g')"), /violates check constraint/],
-  ]) {
+  const mutants = [
+    ["no display-name rule", (s) => s.replace(/alter table public\.sms_numbers add constraint sms_numbers_cnam_display_name_chk\n\s+check \(cnam_display_name is null\n\s+or \(char_length\(cnam_display_name\) between 1 and 15 and cnam_display_name ~ '\^\[A-Za-z\]\[A-Za-z0-9\., \]\*\$'\)\);/, "null;"), /sms_numbers_cnam_display_name_chk is missing|probe expected 6 refusals/],
+    ["a 16-character name allowed", (s) => s.replace("between 1 and 15", "between 1 and 16"), /probe expected 6 refusals/],
+    ["a default on the status", (s) => s.replace("add column if not exists cnam_status            text,", "add column if not exists cnam_status            text default 'draft',"), /has a default|already holds a value/],
+    ["anon granted the name", (s) => s.replace("do $assert$", "grant select (cnam_display_name) on public.sms_numbers to anon;\ndo $assert$"), /anon holds column SELECT/],
+  ];
+  for (const [label, mutate, re] of mutants) {
     const mm = mutate(src);
     if (mm === src) { ok(false, `mutant "${label}" changed nothing (the source moved; update the test)`); continue; }
     const mdb = await makeDb();
@@ -142,11 +132,10 @@ const good = () => ["some-builder", ["+18165550123"], "Verizon", false, "Pat Exa
     catch (e) {
       ok(re.test(e.message), `mutant "${label}" was refused`, e.message);
       await mdb.exec("rollback");
-      ok((await one(mdb, "select to_regclass('public.phone_number_requests') is null as gone")).gone, "  and left nothing behind");
+      ok((await one(mdb, "select count(*)::int n from information_schema.columns where table_name = 'sms_numbers' and column_name like 'cnam%'")).n === 0, "  and left nothing behind");
     }
   }
 
-  for (const d of opened) await d.close().catch(() => {});
   console.log(failures ? `\n${failures} CHECK(S) FAILED` : "\nALL CHECKS PASSED");
-  process.exitCode = failures ? 1 : 0;
+  process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

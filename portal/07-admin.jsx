@@ -2021,7 +2021,7 @@ function AdmNumberRequests({ onPick, onFlash }) {
       <CardHead title={`Bring-your-number requests${open.length ? ` (${open.length} open)` : ""}`}
         desc="Builders asking to move numbers they already have. GoHighLevel (LC Phone) numbers move by a HighLevel support ticket; any other by a Twilio Port In request made in the Twilio Console, into the builder's own Twilio account (PORTING.md). Ask for the account number (and a mobile number's PIN) by phone and type them into Twilio only." />
       {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
-      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 297 isn't applied on this database yet, so there are no requests to show.</div>}
+      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 298 isn't applied on this database yet, so there are no requests to show.</div>}
       {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
       {list && list.map((r) => (
         <div key={r.id} data-adm-number-request={r.status} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -2587,7 +2587,7 @@ Type ${clientId} to close it.`);
           {/* Workstream 2, phase 8: their open "Bring your number" requests (listed on the Builders tab). */}
           {acct.openNumberRequests > 0 && row("Number requests", <AdmChip tone="warn">{`${acct.openNumberRequests} open: see Builders, Bring-your-number requests`}</AdmChip>)}
           {/* Workstream 2, phase 6: each number's caller-ID registrations (statuses only; registered
-              from the builder's Phone tab in view-as). `cnam` undefined = migration 296 not applied. */}
+              from the builder's Phone tab in view-as). `cnam` undefined = migration 297 not applied. */}
           {Array.isArray(acct.callerId) && acct.callerId.length > 0 && row("Caller ID", (
             <span data-adm-caller-id style={{ display: "grid", gap: 4 }}>
               {acct.callerId.map((n, i) => (
