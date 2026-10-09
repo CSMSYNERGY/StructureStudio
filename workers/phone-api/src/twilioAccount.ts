@@ -18,9 +18,11 @@
 //                  (cronAccounts). /token mints with the sub's key, app and push credential
 //                  (routes/token.ts). The setup test (TWILIO_ECHO_APP_SID) and NTS stay the parent's.
 //
-// ⚠️ SWITCH OFF = TODAY, EXACTLY. While TWILIO_SUBACCOUNTS is not "on", twilioEnvFor hands back the
-// SAME env object and webhookEnv the same env, with no lookup; tenantMatchesWebhook answers true
-// without one. One Worker serves every tenant on beta and production alike.
+// ⚠️ SWITCH OFF = TODAY, EXACTLY. While TWILIO_SUBACCOUNTS is neither "on" nor "manual" (both use
+// every existing sub-account here; only the edge's provisioning tells them apart), twilioEnvFor
+// hands back the SAME env object and webhookEnv the same env, with no lookup;
+// tenantMatchesWebhook answers true without one. One Worker serves every tenant on beta and
+// production alike.
 //
 // ⚠️ NEVER THROUGH THE DENO SHIM. installDenoShim (env.ts) points the shared modules' Deno.env at
 // the Worker's own env for the whole isolate; a tenant's credentials put there would be read by
@@ -149,12 +151,23 @@ export async function callerTwilioEnv(env: Env, c: { admin: Admin; ctx: { client
   }
 }
 
+/** At most this many sub-accounts are asked per cron run (review L4). With more, they take turns:
+ *  each run asks a different slice, in client_id order, so a run's subrequests stay bounded however
+ *  many builders there are. The sweep lists a day back, so a sub asked every few 15-minute runs
+ *  still has every message filed (fine up to CRON_SUBS_PER_RUN × 96 subs). */
+export const CRON_SUBS_PER_RUN = 40;
+/** How often the sweep runs: the turn changes once per period. */
+export const CRON_PERIOD_MS = 15 * 60_000;
+
 /**
  * Every account a cron that LISTS (the recording sweep) has to ask: the parent always, and with
- * the switch on each ACTIVE sub-account as its own scoped Env. Off: the parent alone, nothing
- * looked up. A sub that cannot be resolved is left out and logged; the parent is never dropped.
+ * the switch on each ACTIVE sub-account as its own scoped Env (CRON_SUBS_PER_RUN at a time, in
+ * turns). Off: the parent alone, nothing looked up. A sub that cannot be resolved is left out and
+ * logged; the parent is never dropped.
  */
-export async function cronAccounts(env: Env, admin: Admin): Promise<{ env: Env; clientId: string | null }[]> {
+export async function cronAccounts(
+  env: Env, admin: Admin, opts: { now?: number; max?: number } = {},
+): Promise<{ env: Env; clientId: string | null }[]> {
   const out: { env: Env; clientId: string | null }[] = [{ env, clientId: null }];
   if (!subaccountsOnFor(env)) return out;
   const { data, error } = await admin.from("twilio_accounts").select("client_id").eq("kind", "sub").eq("status", "active");
@@ -165,7 +178,11 @@ export async function cronAccounts(env: Env, admin: Admin): Promise<{ env: Env; 
     }).catch(() => {});
     return out;
   }
-  for (const r of (data as { client_id: string }[] | null) ?? []) {
+  const all = [...((data as { client_id: string }[] | null) ?? [])].sort((a, b) => String(a.client_id).localeCompare(String(b.client_id)));
+  const max = Math.max(1, opts.max ?? CRON_SUBS_PER_RUN);
+  const turns = Math.ceil(all.length / max);
+  const turn = turns > 1 ? Math.floor((opts.now ?? Date.now()) / CRON_PERIOD_MS) % turns : 0;
+  for (const r of all.slice(turn * max, turn * max + max)) {
     try {
       const scoped = await envForClient(env, admin, r.client_id);
       if (scoped !== env) out.push({ env: scoped, clientId: r.client_id });

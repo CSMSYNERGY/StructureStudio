@@ -84,7 +84,7 @@ export async function recordingSweep(env: Env, now = new Date()): Promise<{ chec
   // The parent first; a sub's failure is logged and the others go on. A failure of the parent's is
   // the job's failure, as it always was, but only after every sub has had its turn.
   let parentError: unknown = null;
-  for (const a of await cronAccounts(env, admin)) {
+  for (const a of await cronAccounts(env, admin, { now: now.getTime() })) {
     try {
       const r = await sweepAccount(a.env, admin, now, a.clientId);
       out.checked += r.checked;

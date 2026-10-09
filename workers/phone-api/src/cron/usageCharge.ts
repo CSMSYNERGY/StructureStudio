@@ -499,6 +499,9 @@ interface Run {
   ledger: Map<number, LedgerLine>;
   /** Tenants a line was posted for this run (the auto top-up check). */
   charged: Set<string>;
+  /** Businesses whose Twilio account this run has resolved (Workstream 2): each one's first
+   *  lookup is counted against the budget like any other request (review L4). */
+  accountsResolved: Set<string>;
 }
 
 /** A posted usage debit, as the queue row must record it. */
@@ -542,7 +545,7 @@ export async function runUsageCharges(env: Env, admin: Admin, now = new Date(), 
   };
   const run: Run = {
     env, admin, now, metersOn, settings: DEFAULT_SETTINGS, budget,
-    exempt: new Map(), armed: new Map(), ledger: new Map(), charged: new Set(),
+    exempt: new Map(), armed: new Map(), ledger: new Map(), charged: new Set(), accountsResolved: new Set(),
   };
   let failure: string | null = null;
   try {
@@ -618,7 +621,16 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
       // Twilio is asked in the account the row's business lives in (Workstream 2, phase 5), so a
       // sub-account's call, text and recording are priced from the sub's own records. Off: `run`
       // itself, nothing looked up. A sub that cannot be resolved is retried like any Twilio error.
-      const r = subaccountsOnFor(run.env) ? { ...run, env: await envForClient(run.env, run.admin, row.client_id) } : run;
+      // The first lookup per business is a request (twilio_account_creds), counted like one; the
+      // isolate's cache answers the rest.
+      let r = run;
+      if (subaccountsOnFor(run.env)) {
+        if (!run.accountsResolved.has(row.client_id)) {
+          run.budget.spend();
+          run.accountsResolved.add(row.client_id);
+        }
+        r = { ...run, env: await envForClient(run.env, run.admin, row.client_id) };
+      }
       const state = row.source === "call"
         ? await chargeCall(r, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
         : row.source === "sms"

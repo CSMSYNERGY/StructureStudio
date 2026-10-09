@@ -60,15 +60,16 @@ export interface Env {
   /** The setup-test TwiML App that answers with <Echo/>. */
   TWILIO_ECHO_APP_SID?: string;
   /**
-   * Workstream 2's switch, the same name and meaning as the edge secret: exactly "on" lets a
-   * builder's own Twilio sub-account (migration 292's twilio_accounts) sign its webhooks and, from
-   * phase 5, carry its calls. Anything else (unset included): everything is the parent account in
-   * the TWILIO_* values above and nothing is looked up, which is how the Worker ran before it.
+   * Workstream 2's switch, the same name and meaning as the edge secret: exactly "on" or "manual"
+   * lets a builder's own Twilio sub-account (migration 292's twilio_accounts) sign its webhooks and,
+   * from phase 5, carry its calls ("manual" differs only on the edge, where no sub-account is made
+   * by itself). Anything else (unset included): everything is the parent account in the TWILIO_*
+   * values above and nothing is looked up, which is how the Worker ran before it.
    */
   TWILIO_SUBACCOUNTS?: string;
   /**
    * NOT A VAR. Set by the router on the Env a verified Twilio webhook's handler gets, only while
-   * TWILIO_SUBACCOUNTS is "on": the account the webhook came from (src/twilioAccount.ts webhookEnv),
+   * TWILIO_SUBACCOUNTS is "on" or "manual": the account the webhook came from (src/twilioAccount.ts webhookEnv),
    * so a handler can refuse a tenant in another account. An object, so the Deno.env shim (strings
    * only) never exposes it.
    */

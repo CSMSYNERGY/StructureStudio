@@ -12,7 +12,9 @@
 //     sent them, with the SID + auth token the signature check already holds (no lookup);
 //   * crons: the sweep lists the parent AND each active sub, each with its own credentials, and a
 //     sub's run files only its own business's recordings; retention and the backstop delete or
-//     list in the row's business's account; switch off, not one extra request anywhere.
+//     list in the row's business's account; switch off, not one extra request anywhere;
+//   * "manual" is "on" here (only the edge tells them apart); the sweep asks at most
+//     CRON_SUBS_PER_RUN subs per run, taking turns (review L4).
 // Every SID, key and token below is made up.
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -25,7 +27,7 @@ import { recordingSweep } from "../src/cron/sweep";
 import { retention } from "../src/cron/retention";
 import { recordingBackstop } from "../src/recording";
 import { updateCall } from "../src/twilioRest";
-import { cronAccounts, envForClient, webhookEnv, type WebhookAccount } from "../src/twilioAccount";
+import { CRON_PERIOD_MS, cronAccounts, envForClient, webhookEnv, type WebhookAccount } from "../src/twilioAccount";
 import {
   Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, appRequest, call, callerCtx, filter, jsonRes, makeEnv, routeInfo,
 } from "./helpers";
@@ -254,6 +256,29 @@ describe("crons per account", () => {
     expect(accts[0].env).toBe(env);
   });
 
+  it("cronAccounts with many subs: at most `max` per run, taking turns in client_id order, the parent every time", async () => {
+    const net = new FakeNet().install();
+    const ids = ["e-builder", "a-builder", "d-builder", "c-builder", "b-builder"];
+    net.rest("GET", "twilio_accounts", () => ids.map((client_id) => ({ client_id })));
+    net.rpc("twilio_account_creds", (s) => [subRow({ client_id: s.json.p_client_id })]);
+    const env = on();
+    const turn = async (k: number) =>
+      (await cronAccounts(env, adminClient(env), { now: k * CRON_PERIOD_MS + 5, max: 2 })).map((a) => a.clientId);
+    expect(await turn(0)).toEqual([null, "a-builder", "b-builder"]);
+    expect(await turn(1)).toEqual([null, "c-builder", "d-builder"]);
+    expect(await turn(2)).toEqual([null, "e-builder"]);
+    expect(await turn(3)).toEqual([null, "a-builder", "b-builder"]);
+  });
+
+  it('"manual" uses every existing sub exactly as "on" does (only the edge makes no new one)', async () => {
+    const net = new FakeNet().install();
+    net.rpc("twilio_account_creds", () => [subRow()]);
+    const env = makeEnv({ TWILIO_SUBACCOUNTS: "manual" });
+    expect((await envForClient(env, adminClient(env), CLIENT, 9_000_000)).TWILIO_ACCOUNT_SID).toBe(SUB);
+    net.rest("GET", "twilio_accounts", () => [{ client_id: CLIENT }]);
+    expect((await cronAccounts(env, adminClient(env))).map((a) => a.clientId)).toEqual([null, CLIENT]);
+  });
+
   it("the sweep lists the parent and each sub with its own credentials, and a sub files only its own business's", async () => {
     const net = new FakeNet().install();
     const env = on();
@@ -379,7 +404,11 @@ describe("source wiring", () => {
     expect(greeting).toContain("const acct = on ? await envForClient(env, admin, String(row.client_id ?? \"\")) : env;");
     expect(greeting).toContain("media = await recordingMedia(acct, sid, req.headers.get(\"range\"));");
     const usage = read("src/cron/usageCharge.ts");
-    expect(usage).toContain("const r = subaccountsOnFor(run.env) ? { ...run, env: await envForClient(run.env, run.admin, row.client_id) } : run;");
+    expect(usage).toContain("if (subaccountsOnFor(run.env)) {");
+    expect(usage).toContain("r = { ...run, env: await envForClient(run.env, run.admin, row.client_id) };");
+    // Review L4: each business's first account lookup in a run is counted against the request cap.
+    expect(usage).toMatch(/if \(!run\.accountsResolved\.has\(row\.client_id\)\) \{\s*run\.budget\.spend\(\);\s*run\.accountsResolved\.add\(row\.client_id\);/);
+    expect(read("src/cron/sweep.ts")).toContain("for (const a of await cronAccounts(env, admin, { now: now.getTime() })) {");
     for (const f of ["chargeCall(r,", "chargeSms(r,", "chargeRecording(r,", "chargeTranscription(r,"]) expect(usage).toContain(f);
     expect(read("src/cron/transcribe.ts")).toContain("recordingMedia(await envForClient(env, admin, row.client_id), row.recording_sid, null, 2)");
     // The base URL constant is only here to keep helpers' imports used.

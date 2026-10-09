@@ -84,7 +84,7 @@ async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0:
         : check.reason === "account_lookup_failed"
         ? `Refused a Twilio webhook on ${path}: the account its AccountSid names could not be looked up.`
         : check.reason === "parent_token_missing"
-        ? `Refused the parent account's Twilio webhook on ${path}: TWILIO_SUBACCOUNTS is on but TWILIO_AUTH_TOKEN is not set, and with sub-accounts every webhook must be signed.`
+        ? `Refused the parent account's Twilio webhook on ${path}: TWILIO_SUBACCOUNTS is on (or manual) but TWILIO_AUTH_TOKEN is not set, and with sub-accounts every webhook must be signed.`
         : `Refused a Twilio webhook (${check.reason}) on ${path}.`,
       req,
       throttleMs: misconfigured ? 5 * 60_000 : 60_000,
