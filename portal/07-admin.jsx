@@ -2503,6 +2503,21 @@ Type ${clientId} to close it.`);
           {sub && row("Push credentials", <>{have(acct.push && acct.push.apns_dev, "iPhone dev")}{have(acct.push && acct.push.apns_prod, "iPhone")}{have(acct.push && acct.push.fcm, "Android")}</>)}
           {sub && row("Event Streams", <>{have(acct.sink, "sink")}{have(acct.subscription, "subscription")}</>)}
           {row("Live numbers", <span>{acct.liveNumbers == null ? "unknown" : acct.liveNumbers}</span>)}
+          {/* Workstream 2, phase 6: each number's caller-ID registrations (statuses only; registered
+              from the builder's Phone tab in view-as). `cnam` undefined = migration 296 not applied. */}
+          {Array.isArray(acct.callerId) && acct.callerId.length > 0 && row("Caller ID", (
+            <span data-adm-caller-id style={{ display: "grid", gap: 4 }}>
+              {acct.callerId.map((n, i) => (
+                <span key={i} style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontFamily: "ui-monospace, monospace" }}>{n.number}</span>
+                  {[["SHAKEN/STIR", n.shaken], ["Voice Integrity", n.voiceIntegrity], ...(n.cnam !== undefined ? [["CNAM", n.cnam]] : [])].map(([k, s]) => (
+                    <AdmChip key={k} tone={s === "twilio-approved" ? "good" : s === "twilio-rejected" ? "danger" : s ? "warn" : "neutral"}>{`${k}: ${s || "none"}`}</AdmChip>
+                  ))}
+                  {n.cnamName && <span data-adm-cnam-name>&ldquo;{n.cnamName}&rdquo;</span>}
+                </span>
+              ))}
+            </span>
+          ))}
           {acct.tokenCheck && row("Token check", <><span>auth token</span>{checkChip(acct.tokenCheck.authToken)}<span>API key</span>{checkChip(acct.tokenCheck.apiKey)}</>)}
           {status === "closed" && row("Closed", <span>Closed for good. This builder stays off calls and texts while the closed account is on record: deleting the builder removes it, or run <code>select public.twilio_account_forget('{clientId}');</code> (SETUP.md 7f).</span>)}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>

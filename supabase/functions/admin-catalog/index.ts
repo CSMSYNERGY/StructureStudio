@@ -136,6 +136,30 @@ function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: str
   }
 }
 
+// ── Workstream 2, phase 6: each live number's caller-ID registrations, for the console card ──────
+// Statuses only (Twilio's TrustProduct enum, as last read by portal-settings phone_trust_status),
+// the CNAM name callers see, and the number's last four digits: no SID. CNAM's columns are
+// migration 296's; before it, 255's are read alone and `cnam` is null. Any other failure is null
+// (the card says "unknown"): it never fails the account view.
+async function callerIdSummary(sb: any, clientId: string): Promise<Array<Record<string, unknown>> | null> {
+  const read = (cols: string) => sb.from("sms_numbers").select(cols).eq("client_id", clientId).is("released_at", null)
+    .order("purchased_at", { ascending: true }).limit(20);
+  let res = await read("phone_number, shaken_status, voice_integrity_status, cnam_status, cnam_display_name");
+  let cnam = true;
+  if (res.error && relationMissing(res.error)) {
+    cnam = false;
+    res = await read("phone_number, shaken_status, voice_integrity_status");
+  }
+  if (res.error) return null;
+  return (res.data ?? []).map((n: any) => ({
+    number: `…${String(n.phone_number ?? "").slice(-4)}`,
+    shaken: n.shaken_status ?? null,
+    voiceIntegrity: n.voice_integrity_status ?? null,
+    cnam: cnam ? (n.cnam_status ?? null) : undefined,
+    cnamName: cnam ? (n.cnam_display_name ?? null) : undefined,
+  }));
+}
+
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
 // write/upload can never land under a typo'd or malformed tenant prefix.
 async function assertClient(sb: any, clientId: string) {
@@ -1850,7 +1874,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "twilio_account_get": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
-        return json({ ok: true, account });
+        // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
+        // CNAM), registered from the builder's Phone tab in view-as.
+        return json({ ok: true, account: { ...account, callerId: await callerIdSummary(sb, clientId) } });
       }
 
       case "twilio_account_provision": {

@@ -25,15 +25,29 @@
 // Where it is recorded: sms_numbers.shaken_* / voice_integrity_* / caller_id_checked_at, and the
 // setup's claim caller_id_lock_until (migration 255). They are read in a SEPARATE select from the number itself, so a deploy that
 // lands before 255 is applied answers "not available yet" instead of failing the Phone tab.
+//
+// WORKSTREAM 2, PHASE 6:
+//   * CNAM, the third kind (the business's name on the called party's screen): sms_numbers.cnam_*
+//     (migration 296), read in a select of its OWN again (CNAM_COLUMNS), so before 296 is applied
+//     CNAM alone reads "not available yet" and SHAKEN/STIR and Voice Integrity work as before.
+//   * A CALLING-ONLY builder (a number for calls, no texting registration yet) has no business
+//     profile, so every caller-ID press was refused with nowhere to go. phone_trust_profile (an
+//     operator's, runTrustProfile below) makes that profile from the business's details, in the
+//     builder's own Twilio account, and writes it where the texting registration keeps it
+//     (sms_registrations.customer_profile_sid), so trustProfileFor finds it and texting later
+//     reuses it instead of making a second.
 
 import {
-  TrustHubError, trustProductStatus, VOICE_INTEGRITY_INFO_REQUIRED, voiceTrustFriendlyName,
-  type TrustProductStatus, type VoiceIntegrityInfo, type VoiceTrustKind, type VoiceTrustResult, type VoiceTrustSetup,
+  CNAM_INFO_REQUIRED, PrimaryProfileLinkError, TrustHubError, trustProductStatus, validateIntake, VOICE_INTEGRITY_INFO_REQUIRED,
+  voiceTrustFriendlyName, type BuilderIntake, type TrustProductStatus, type VoiceIntegrityInfo, type VoiceTrustKind,
+  type VoiceTrustResult, type VoiceTrustSetup,
 } from "../_shared/twilioTrustHub.ts";
 
 /** The number row's caller-ID columns (migration 255), and the id they are keyed by. */
 export const TRUST_COLUMNS =
   "id, shaken_trust_product_sid, shaken_status, voice_integrity_trust_product_sid, voice_integrity_status, caller_id_checked_at";
+/** CNAM's own columns (migration 296), read in a select of their own (see the header). */
+export const CNAM_COLUMNS = "cnam_trust_product_sid, cnam_status, cnam_display_name";
 
 export type TrustRow = {
   id?: string;
@@ -41,15 +55,19 @@ export type TrustRow = {
   shaken_status?: string | null;
   voice_integrity_trust_product_sid?: string | null;
   voice_integrity_status?: string | null;
+  cnam_trust_product_sid?: string | null;
+  cnam_status?: string | null;
+  cnam_display_name?: string | null;
   caller_id_checked_at?: string | null;
 };
 
 /** Where each product lives on the row. */
-type SidCol = "shaken_trust_product_sid" | "voice_integrity_trust_product_sid";
-type StatusCol = "shaken_status" | "voice_integrity_status";
+type SidCol = "shaken_trust_product_sid" | "voice_integrity_trust_product_sid" | "cnam_trust_product_sid";
+type StatusCol = "shaken_status" | "voice_integrity_status" | "cnam_status";
 export const TRUST_COLS: Record<VoiceTrustKind, { sid: SidCol; status: StatusCol }> = {
   shaken_stir: { sid: "shaken_trust_product_sid", status: "shaken_status" },
   voice_integrity: { sid: "voice_integrity_trust_product_sid", status: "voice_integrity_status" },
+  cnam: { sid: "cnam_trust_product_sid", status: "cnam_status" },
 };
 
 /** The one refusal a non-operator gets from either action. */
@@ -80,11 +98,11 @@ export const TRUST_LOCK_MS = 5 * 60_000;
 export const TRUST_BUSY_SENTENCE =
   "This number's caller ID registration is already being worked on. Give it a minute, then check its status.";
 
-/** Which product the request is about: "shaken_stir" (the default, plan item a) or
- *  "voice_integrity". Anything else is refused rather than guessed. */
+/** Which product the request is about: "shaken_stir" (the default, plan item a),
+ *  "voice_integrity" or "cnam" (Workstream 2, phase 6). Anything else is refused rather than guessed. */
 export function parseTrustProduct(raw: unknown): VoiceTrustKind | null {
   if (raw === undefined || raw === null || raw === "") return "shaken_stir";
-  return raw === "shaken_stir" || raw === "voice_integrity" ? raw : null;
+  return raw === "shaken_stir" || raw === "voice_integrity" || raw === "cnam" ? raw : null;
 }
 
 const BU = /^BU[0-9a-f]{32}$/i;
@@ -105,7 +123,7 @@ const BU = /^BU[0-9a-f]{32}$/i;
  */
 export function trustProfileFor(o: {
   secondaryProfileSid: string | null; internal: boolean; primaryProfileSid: string | null; numberOnPrimary?: boolean;
-}): { ok: true; profileSid: string; which: "secondary" | "primary" } | { ok: false; error: string } {
+}): { ok: true; profileSid: string; which: "secondary" | "primary" } | { ok: false; error: string; code?: string } {
   const sec = String(o.secondaryProfileSid ?? "").trim();
   const pri = String(o.primaryProfileSid ?? "").trim();
   if (o.internal && o.numberOnPrimary && BU.test(pri)) return { ok: true, profileSid: pri, which: "primary" };
@@ -114,15 +132,20 @@ export function trustProfileFor(o: {
     if (BU.test(pri)) return { ok: true, profileSid: pri, which: "primary" };
     return { ok: false, error: "This account has no business profile at Twilio, and the platform's own profile isn't configured on this server." };
   }
-  return {
-    ok: false,
-    error: "Caller ID registration uses the business details from the Text Messaging registration, and this account hasn't submitted them yet. Submit them on the Text Messaging tab first.",
-  };
+  // A builder with no profile yet: one who only calls, or whose texting is not submitted. Not a
+  // dead end any more (Workstream 2, phase 6): Structure Studio makes the profile from the
+  // business's details (phone_trust_profile), or the Text Messaging registration makes it.
+  return { ok: false, code: NO_PROFILE_CODE, error: NO_PROFILE_SENTENCE };
 }
+
+/** The refusal's code, which the Phone tab answers with the business-profile form (operators). */
+export const NO_PROFILE_CODE = "no_business_profile";
+export const NO_PROFILE_SENTENCE =
+  "Caller ID registration needs this business's details at Twilio first. Structure Studio adds them here, or the Text Messaging registration adds them when it is submitted.";
 
 export type TrustProfileChoice =
   | { ok: true; profileSid: string; which: "secondary" | "primary" }
-  | { ok: false; kind: "refused"; status: 409; error: string }
+  | { ok: false; kind: "refused"; status: 409; error: string; code?: string }
   | { ok: false; kind: "twilio"; status: 502; error: string; code: number; detail: string };
 
 /**
@@ -153,7 +176,7 @@ export async function chooseTrustProfile(
     }
   }
   const prof = trustProfileFor({ secondaryProfileSid: o.secondaryProfileSid, internal: o.internal, primaryProfileSid: o.primaryProfileSid, numberOnPrimary });
-  return prof.ok ? prof : { ok: false, kind: "refused", status: 409, error: prof.error };
+  return prof.ok ? prof : { ok: false, kind: "refused", status: 409, error: prof.error, ...(prof.code ? { code: prof.code } : {}) };
 }
 
 const STATUS_WORDS: Record<TrustProductStatus, string> = {
@@ -177,16 +200,27 @@ export type CallerIdView = {
   available: boolean;
   shakenStir: { registered: boolean; status: TrustProductStatus | null };
   voiceIntegrity: { registered: boolean; status: TrustProductStatus | null };
+  /** Workstream 2, phase 6. `available: false` = migration 296 is not applied yet (only CNAM is
+   *  unavailable then). The display name is what callers see, so it is shown; no SID is. */
+  cnam: { available: boolean; registered: boolean; status: TrustProductStatus | null; displayName: string | null };
   checkedAt: string | null;
 };
 
-/** What the Phone tab is told. `available: false` = migration 255 is not applied yet. No SIDs. */
-export function callerIdView(row: TrustRow | null, available = true): CallerIdView {
+/** What the Phone tab is told. `available: false` = migration 255 is not applied yet;
+ *  `cnamAvailable: false` = 296 is not (by default: the row was read without CNAM's columns). No SIDs. */
+export function callerIdView(row: TrustRow | null, available = true, cnamAvailable = !!row && "cnam_trust_product_sid" in row): CallerIdView {
   const r = row ?? {};
+  const cnamOn = available && cnamAvailable;
   return {
     available,
     shakenStir: { registered: !!r.shaken_trust_product_sid, status: trustProductStatus(r.shaken_status) },
     voiceIntegrity: { registered: !!r.voice_integrity_trust_product_sid, status: trustProductStatus(r.voice_integrity_status) },
+    cnam: {
+      available: cnamOn,
+      registered: cnamOn && !!r.cnam_trust_product_sid,
+      status: cnamOn ? trustProductStatus(r.cnam_status) : null,
+      displayName: cnamOn ? (r.cnam_display_name ?? null) : null,
+    },
     checkedAt: r.caller_id_checked_at ?? null,
   };
 }
@@ -241,6 +275,8 @@ export async function runTrustSetup(
   o: {
     kind: VoiceTrustKind; clientId: string; numberSid: string; profileSid: string;
     existingSid: string | null; info: VoiceIntegrityInfo | null;
+    /** CNAM's display name (parseCnamDisplayName's), or null. */
+    cnamName?: string | null;
   },
   deps: {
     lock: TrustLock;
@@ -284,12 +320,16 @@ async function trustSetupClaimed(
       friendlyName: voiceTrustFriendlyName(o.clientId, o.kind),
       existingSid: o.existingSid,
       voiceIntegrity: o.info,
+      cnam: o.kind === "cnam" && o.cnamName ? { displayName: o.cnamName } : null,
       onTrustProduct: async (sid, status) => {
         const w = await deps.write({ [cols.sid]: sid, [cols.status]: status, caller_id_checked_at: now() });
         if (!w.ok) throw new TrustWriteError(w.error);
       },
     });
-    const w = await deps.write({ [cols.sid]: result.trustProductSid, [cols.status]: result.status, caller_id_checked_at: now() });
+    // CNAM: the name Twilio now holds, once it has been sent (created, or replaced on a resubmit).
+    const named = o.kind === "cnam" && o.cnamName && (result.endUserCreated || result.endUserUpdated)
+      ? { cnam_display_name: o.cnamName } : {};
+    const w = await deps.write({ [cols.sid]: result.trustProductSid, [cols.status]: result.status, caller_id_checked_at: now(), ...named });
     if (!w.ok) return { ok: false, kind: "db", error: w.error };
     return { ok: true, result };
   } catch (e) {
@@ -298,6 +338,9 @@ async function trustSetupClaimed(
       if (e.message === VOICE_INTEGRITY_INFO_REQUIRED) {
         return { ok: false, kind: "refused", status: 400, error: "Answer the Voice Integrity questions first: what the business uses calls for, how many people work there, and about how many calls it makes a day." };
       }
+      if (e.message === CNAM_INFO_REQUIRED) {
+        return { ok: false, kind: "refused", status: 400, error: "Enter the name callers should see (up to 15 characters) first." };
+      }
       return twilioFail(e);
     }
     throw e;
@@ -305,7 +348,7 @@ async function trustSetupClaimed(
 }
 
 export type TrustStatusOutcome =
-  | { ok: true; view: CallerIdView; errorCodes: { shakenStir: number[]; voiceIntegrity: number[] }; changed: boolean }
+  | { ok: true; view: CallerIdView; errorCodes: { shakenStir: number[]; voiceIntegrity: number[]; cnam: number[] }; changed: boolean }
   | { ok: false; kind: "twilio"; status: number; error: string; code: number; detail: string }
   | { ok: false; kind: "db"; error: unknown };
 
@@ -324,10 +367,13 @@ export async function runTrustStatus(
 ): Promise<TrustStatusOutcome> {
   const now = deps.now ?? (() => new Date().toISOString());
   const patch: Record<string, unknown> = {};
-  const errorCodes = { shakenStir: [] as number[], voiceIntegrity: [] as number[] };
+  const errorCodes = { shakenStir: [] as number[], voiceIntegrity: [] as number[], cnam: [] as number[] };
   const next: TrustRow = { ...row };
   try {
-    for (const kind of ["shaken_stir", "voice_integrity"] as const) {
+    // CNAM only when its columns were read (migration 296 applied): a row without them has no
+    // CNAM to check, and writing one would fail the whole update.
+    const kinds = (["shaken_stir", "voice_integrity", "cnam"] as const).filter((k) => k !== "cnam" || "cnam_trust_product_sid" in row);
+    for (const kind of kinds) {
       const cols = TRUST_COLS[kind];
       const sid = String(row[cols.sid] ?? "");
       if (!BU.test(sid)) continue;
@@ -335,7 +381,7 @@ export async function runTrustStatus(
         const t = await deps.fetchTrustProduct(sid);
         patch[cols.status] = t.status;
         next[cols.status] = t.status;
-        errorCodes[kind === "shaken_stir" ? "shakenStir" : "voiceIntegrity"] = t.errorCodes;
+        errorCodes[kind === "shaken_stir" ? "shakenStir" : kind === "cnam" ? "cnam" : "voiceIntegrity"] = t.errorCodes;
       } catch (e) {
         if (!(e instanceof TrustHubError && e.status === 404)) throw e;
         patch[cols.sid] = null;
@@ -359,4 +405,130 @@ export async function runTrustStatus(
     if (!w.ok) return { ok: false, kind: "db", error: w.error };
   }
   return { ok: true, view: callerIdView(next), errorCodes, changed };
+}
+
+// ── phone_trust_profile: the business profile for a builder who only calls ─────────────────────
+// (Workstream 2, phase 6.) Caller ID trust is built on the builder's own Secondary Customer Profile,
+// and until now only the texting registration's first submit made one, so a builder who only CALLS
+// could never be registered (trustProfileFor's refusal had nowhere to send anyone). An operator
+// now makes it from the business's details, in the builder's own Twilio account (their sub-account,
+// or the parent for a builder who lives there), linked to the parent's primary profile exactly as
+// texting would link it, and it is written where texting keeps it: sms_registrations.
+// customer_profile_sid. trustProfileFor then finds it, and texting's first submit REUSES it (portal-
+// sms advanceOne's ready stage) instead of making a second.
+//
+// The details are typed by the operator (prefilled from what the builder saved): the registration
+// keeps only an echo of them (name, EIN's last four, email domain, website), never the EIN, the
+// address or a person's mobile, and neither does this. The profile goes to Twilio's review; caller
+// ID can be registered once Twilio approves it (profileRefusal), usually within a few days.
+
+/** The texting registration's columns phone_trust_profile reads. */
+export type RegistrationRow = {
+  status?: string | null; customer_profile_sid?: string | null; twilio_account_sid?: string | null;
+  legal_business_name?: string | null; ein_last4?: string | null; rep_email_domain?: string | null; website_url?: string | null;
+} | null;
+
+export type TrustProfileOutcome =
+  /** created: a profile was made now. finished: an existing one was linked or submitted now. */
+  | { ok: true; created: boolean; finished: boolean }
+  | { ok: false; kind: "refused"; status: number; error: string; problems?: string[] }
+  /** recorded: the profile Twilio made was written down anyway (a refused primary link), so the
+   *  next press finishes it rather than making another. */
+  | { ok: false; kind: "twilio"; status: 502; error: string; code: number; detail: string; recorded: boolean }
+  | { ok: false; kind: "db"; error: unknown };
+
+export const TRUST_PROFILE_INTERNAL_SENTENCE =
+  "Our own account's calls use the platform's business profile, so there is nothing to add here.";
+
+/**
+ * phone_trust_profile, in the order it has to happen:
+ *   1. Our internal account: refused (it uses the primary profile).
+ *   2. A profile already recorded: nothing is made. In a sub-account it is FINISHED (the primary
+ *      link and the submit, each read first), under the registration's lock; on the parent it is
+ *      left exactly as it is.
+ *   3. The details, checked by the same rules texting uses (validateIntake, EIN required: CNAM and
+ *      the carriers need it, and no-EIN registration is not built).
+ *   4. The registration's lock (advance_lock_until, the one portal-sms's submit takes, so this and a
+ *      texting submit can never both make a profile). Busy → 409.
+ *   5. In a sub-account, the registration names its account BEFORE anything is made there (292's
+ *      twilio_parent_holdings must never read it as the parent's; 295's trigger requires it).
+ *   6. The profile, linked to the primary. A refused link is written down (step 7's column) and
+ *      reported; anything else from Twilio is reported with nothing written.
+ *   7. customer_profile_sid, and the echo where the registration has none of its own yet.
+ *   8. The lock is released, however it ended.
+ */
+export async function runTrustProfile(
+  o: { clientId: string; intake: Partial<BuilderIntake>; internal: boolean; registration: RegistrationRow; subAccountSid: string | null },
+  deps: {
+    lock: TrustLock;
+    create: (intake: BuilderIntake, friendlyName: string) => Promise<{ profileSid: string }>;
+    finish: (profileSid: string) => Promise<{ linked: boolean; submitted: boolean }>;
+    /** An update of this tenant's sms_registrations row. */
+    write: Write;
+  },
+): Promise<TrustProfileOutcome> {
+  if (o.internal) return { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_INTERNAL_SENTENCE };
+  const reg = o.registration ?? {};
+  const recorded = String(reg.customer_profile_sid ?? "").trim();
+  if (BU.test(recorded) && !o.subAccountSid) return { ok: true, created: false, finished: false };
+  if (!BU.test(recorded)) {
+    const problems = validateIntake(o.intake, true);
+    if (problems.length) return { ok: false, kind: "refused", status: 400, error: problems[0], problems };
+  }
+
+  const claimed = await deps.lock.claim();
+  if (!claimed.ok) {
+    return claimed.busy
+      ? { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_BUSY_SENTENCE }
+      : { ok: false, kind: "db", error: claimed.error };
+  }
+  try {
+    if (BU.test(recorded)) {
+      const f = await deps.finish(recorded);
+      return { ok: true, created: false, finished: f.linked || f.submitted };
+    }
+    if (o.subAccountSid && !reg.twilio_account_sid) {
+      const w = await deps.write({ twilio_account_sid: o.subAccountSid });
+      if (!w.ok) return { ok: false, kind: "db", error: w.error };
+    }
+    const intake = o.intake as BuilderIntake;
+    let profileSid: string;
+    try {
+      ({ profileSid } = await deps.create(intake, `${o.clientId} — ${intake.legalBusinessName}`));
+    } catch (e) {
+      if (e instanceof PrimaryProfileLinkError && BU.test(e.profileSid)) {
+        const w = await deps.write({ customer_profile_sid: e.profileSid });
+        return profileTwilioFail(e, w.ok);
+      }
+      throw e;
+    }
+    const ein = String(intake.ein ?? "").replace(/\D/g, "");
+    const echo: Record<string, unknown> = { customer_profile_sid: profileSid };
+    if (!reg.legal_business_name) echo.legal_business_name = intake.legalBusinessName;
+    if (!reg.ein_last4 && ein) echo.ein_last4 = ein.slice(-4);
+    if (!reg.rep_email_domain) echo.rep_email_domain = String(intake.repEmail ?? "").split("@")[1] ?? null;
+    if (!reg.website_url) echo.website_url = intake.websiteUrl;
+    const w = await deps.write(echo);
+    if (!w.ok) return { ok: false, kind: "db", error: w.error };
+    return { ok: true, created: true, finished: false };
+  } catch (e) {
+    if (e instanceof TrustHubError) return profileTwilioFail(e, false);
+    throw e;
+  } finally {
+    try { await deps.lock.release(); } catch { /* the lock expires on its own */ }
+  }
+}
+
+export const TRUST_PROFILE_BUSY_SENTENCE =
+  "This business's registration is already being worked on. Give it a minute, then try again.";
+
+function profileTwilioFail(e: TrustHubError, recorded: boolean): TrustProfileOutcome {
+  const code = e.code ? ` (error ${e.code})` : "";
+  return {
+    ok: false, kind: "twilio", status: 502, code: e.code, detail: e.message, recorded,
+    // Codes only: Twilio's bodies echo the EIN and the representative's details.
+    error: e instanceof PrimaryProfileLinkError
+      ? `Twilio made the business profile but wouldn't link it to Structure Studio's own profile${code}. ${recorded ? "It is saved here: press it again to retry the link." : "Press it again in a minute."}`
+      : `Twilio didn't accept the business details${code}. Check them and press it again.`,
+  };
 }

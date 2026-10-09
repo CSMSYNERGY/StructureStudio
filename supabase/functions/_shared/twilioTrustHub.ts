@@ -1057,11 +1057,12 @@ export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Caller ID trust — SHAKEN/STIR and Voice Integrity (My Synergy Phone, plan §14, phase 6)
+// Caller ID trust — SHAKEN/STIR, Voice Integrity and CNAM (My Synergy Phone, plan §14, phase 6;
+// CNAM is Workstream 2's phase 6, POLICY_CNAM_TRUST_PRODUCT below)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Two Trust Products per builder number, both built on the business profile the texting
-// registration already created (stage 1 above), and both OPERATOR-ONLY: portal-settings'
+// Two Trust Products per builder number (three with CNAM), all built on the business profile the texting
+// registration already created (stage 1 above), and all OPERATOR-ONLY: portal-settings'
 // phone_trust_setup is the one caller, behind an app_operators check, and nothing runs this on
 // a timer or a webhook.
 //
@@ -1070,6 +1071,8 @@ export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = 
 //                     SHAKEN/STIR Trust Product.
 //   Voice Integrity   registers the number with the carriers' spam engines (T-Mobile, Verizon,
 //                     AT&T), which is what fights "Spam Likely". Level A alone does not.
+//   CNAM              the business's name (up to 15 characters) on the called party's screen,
+//                     where their carrier looks CNAM up; 48-72 hours after approval.
 //
 // The flow, verbatim from Twilio's ISV guides (checked 2026-09-29; the Voice Integrity one says
 // "The API flow for Voice Integrity Private Beta is subject to change"):
@@ -1100,16 +1103,60 @@ export const POLICY_SHAKEN_STIR_TRUST_PRODUCT = "RN7a97559effdf62d00f4298208492a
 /** Twilio's Voice Integrity Trust Product policy (the Voice Integrity ISV guide, same wording). */
 export const POLICY_VOICE_INTEGRITY_TRUST_PRODUCT = "RN5b3660f9598883b1df4e77f77acefba0";
 
-export type VoiceTrustKind = "shaken_stir" | "voice_integrity";
+/**
+ * Twilio's CNAM Trust Product policy (Workstream 2, phase 6), "Do not change the policy_sid", from
+ * "Brand your calls using CNAM" (https://www.twilio.com/docs/voice/brand-your-calls-using-cnam,
+ * checked 2026-10-09). The same Trust Hub steps as SHAKEN/STIR, plus one EndUser of type
+ * `cnam_information` carrying the display name, in that guide's order:
+ *   the number on the business profile (ChannelEndpointAssignments) → POST TrustProducts
+ *   {FriendlyName, Email, PolicySid} → assign the business profile → POST EndUsers {Type:
+ *   cnam_information, Attributes: {cnam_display_name}} and assign it → assign the number → POST
+ *   TrustProducts/{BU} {Status: pending-review}. No Evaluation.
+ * What it needs: the business profile tied to an EIN or a DUNS number (ours carry the EIN), a US
+ * local long-code number already on that profile (not Canadian, not toll-free), and a display name
+ * (parseCnamDisplayName). After Twilio approves it, the name takes 48-72 hours to reach every US
+ * carrier, and only carriers that look CNAM up show it. In a builder's sub-account it runs with the
+ * sub's credentials like everything else here.
+ */
+export const POLICY_CNAM_TRUST_PRODUCT = "RNf3db3cd1fe25fcfd3c3ded065c8fea53";
+
+export type VoiceTrustKind = "shaken_stir" | "voice_integrity" | "cnam";
 export const VOICE_TRUST_POLICY: Record<VoiceTrustKind, string> = {
   shaken_stir: POLICY_SHAKEN_STIR_TRUST_PRODUCT,
   voice_integrity: POLICY_VOICE_INTEGRITY_TRUST_PRODUCT,
+  cnam: POLICY_CNAM_TRUST_PRODUCT,
 };
 /** The FriendlyName suffix each product is created with, after the client_id. */
 export const VOICE_TRUST_NAME: Record<VoiceTrustKind, string> = {
   shaken_stir: "SHAKEN/STIR",
   voice_integrity: "Voice Integrity",
+  cnam: "CNAM",
 };
+
+/** The longest CNAM display name the carriers' databases hold (Twilio's guide: 15 characters). */
+export const CNAM_MAX = 15;
+
+/**
+ * An operator's CNAM display name → what Twilio is sent, or a sentence. Twilio's rules: at most 15
+ * characters; letters, numbers, periods, commas and spaces only; it should begin with a letter (we
+ * require it); unique to the business, and never a generic City/State (the default when no name is
+ * set). Spaces are collapsed, so what is checked is what is sent.
+ */
+export function parseCnamDisplayName(raw: unknown): { ok: true; name: string } | { ok: false; error: string } {
+  const name = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!name) return { ok: false, error: "Enter the name callers should see, up to 15 characters." };
+  if (name.length > CNAM_MAX) return { ok: false, error: `That name is ${name.length} characters; the carriers keep at most ${CNAM_MAX}. Shorten it.` };
+  if (!/^[A-Za-z]/.test(name)) return { ok: false, error: "The name has to start with a letter." };
+  if (!/^[A-Za-z0-9., ]+$/.test(name)) return { ok: false, error: "Use only letters, numbers, spaces, periods and commas." };
+  return { ok: true, name };
+}
+
+/** Thrown by setupVoiceTrust when a CNAM product still needs its EndUser and the caller sent no
+ *  display name. Matched by message, like VOICE_INTEGRITY_INFO_REQUIRED. */
+export const CNAM_INFO_REQUIRED = "cnam_display_name_required";
+
+/** The EndUser type CNAM's policy asks for, verbatim ("must stay as cnam_information"). */
+const CNAM_END_USER_TYPE = "cnam_information";
 export function voiceTrustFriendlyName(clientId: string, kind: VoiceTrustKind): string {
   return `${clientId} — ${VOICE_TRUST_NAME[kind]}`;
 }
@@ -1239,6 +1286,10 @@ export type VoiceTrustSetup = {
    *  does and the product is draft or twilio-rejected, they REPLACE its attributes before the
    *  product is resubmitted (an operator's "Submit again" sends corrected answers). */
   voiceIntegrity?: VoiceIntegrityInfo | null;
+  /** CNAM's display name (parseCnamDisplayName's). Required when the product has no
+   *  cnam_information EndUser yet; on a draft or twilio-rejected product it REPLACES the name the
+   *  EndUser carries before the resubmit, exactly like Voice Integrity's answers. */
+  cnam?: { displayName: string } | null;
   /** Called with the Trust Product the moment it is known (found or created), BEFORE any later
    *  step can throw, so the caller writes it down and a retry reuses it. */
   onTrustProduct?: (sid: string, status: TrustProductStatus | null) => Promise<void>;
@@ -1252,7 +1303,7 @@ export type VoiceTrustResult = {
   numberOnProfile: boolean;
   profileLinked: boolean;
   endUserCreated: boolean;
-  /** Voice Integrity only: the existing EndUser was given the answers this run sent. */
+  /** Voice Integrity and CNAM: the existing EndUser was given the answers this run sent. */
   endUserUpdated: boolean;
   numberLinked: boolean;
   submitted: boolean;
@@ -1338,34 +1389,42 @@ export async function setupVoiceTrust(o: VoiceTrustSetup, http: TrustHubHttp = v
   out.status = tp.status;
   if (o.onTrustProduct) await o.onTrustProduct(tp.sid, tp.status);
 
-  // 3 + 4. What the product carries: Voice Integrity's EndUser, and the business profile.
+  // 3 + 4. What the product carries: its EndUser (Voice Integrity's answers, CNAM's display name;
+  //        SHAKEN/STIR has none), and the business profile.
   const ents = await listResults(http, `${TRUSTHUB}/TrustProducts/${tp.sid}/EntityAssignments?PageSize=50`);
   const objects = ents.map((e) => String(e?.object_sid ?? ""));
-  if (o.kind === "voice_integrity") {
-    const vi = o.voiceIntegrity ?? null;
+  const spec = o.kind === "voice_integrity"
+    ? { type: VOICE_INTEGRITY_END_USER_TYPE, attributes: o.voiceIntegrity ? voiceIntegrityAttributes(o.voiceIntegrity) : null,
+        required: VOICE_INTEGRITY_INFO_REQUIRED, friendlyName: `${o.friendlyName} information` }
+    : o.kind === "cnam"
+    ? { type: CNAM_END_USER_TYPE, attributes: o.cnam?.displayName ? JSON.stringify({ cnam_display_name: o.cnam.displayName }) : null,
+        required: CNAM_INFO_REQUIRED, friendlyName: `${o.friendlyName} display name` }
+    : null;
+  if (spec) {
+    const attributes = spec.attributes;
     const linked = objects.filter((s) => SID.endUser.test(s));
     // Answers sent for a product that already carries EndUsers, and that is going to be
-    // (re)submitted: find ITS voice_integrity_information one (read, so another kind of EndUser
-    // a Console-made product may carry is never overwritten with these fields) and replace its
+    // (re)submitted: find ITS EndUser of this kind's type (read, so another kind of EndUser a
+    // Console-made product may carry is never overwritten with these fields) and replace its
     // attributes. Under review or approved, nothing is changed: step 6 sends nothing either.
     let viEndUser: string | null = null;
-    const correcting = !!vi && linked.length > 0 && resubmittable(out.status);
+    const correcting = !!attributes && linked.length > 0 && resubmittable(out.status);
     if (correcting) {
       for (const s of linked.slice(0, 5)) {
         const eu = await http("GET", `${TRUSTHUB}/EndUsers/${s}`);
-        if (String(eu?.type ?? "") === VOICE_INTEGRITY_END_USER_TYPE) { viEndUser = s; break; }
+        if (String(eu?.type ?? "") === spec.type) { viEndUser = s; break; }
       }
     }
     if (viEndUser) {
-      await http("POST", `${TRUSTHUB}/EndUsers/${viEndUser}`, { Attributes: voiceIntegrityAttributes(vi!) });
+      await http("POST", `${TRUSTHUB}/EndUsers/${viEndUser}`, { Attributes: attributes! });
       out.endUserUpdated = true;
     } else if (!linked.length || correcting) {
       // None yet (or, correcting, none of the right type): create it and assign it.
-      if (!vi) throw badInput(VOICE_INTEGRITY_INFO_REQUIRED);
+      if (!attributes) throw badInput(spec.required);
       const eu = await http("POST", `${TRUSTHUB}/EndUsers`, {
-        FriendlyName: `${o.friendlyName} information`,
-        Type: VOICE_INTEGRITY_END_USER_TYPE,
-        Attributes: voiceIntegrityAttributes(vi),
+        FriendlyName: spec.friendlyName,
+        Type: spec.type,
+        Attributes: attributes,
       });
       const euSid = String(eu?.sid ?? "");
       if (!SID.endUser.test(euSid)) {

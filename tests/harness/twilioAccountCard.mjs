@@ -18,6 +18,8 @@
 //   E  switch "manual": shown as such, and Create is typed;
 //   F  admin-catalog older than the page ("Unknown action"), and a database without 292: said
 //      quietly, no error, no buttons;
+//   G  phase 6: each number's caller-ID statuses (SHAKEN/STIR, Voice Integrity, CNAM) and the CNAM
+//      name, as chips; before migration 296 (no `cnam`), no CNAM chip;
 //   every scenario: no uncaught page error.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -223,6 +225,19 @@ try {
   ok("E: no uncaught page errors", E.pageErrors.length === 0, E.pageErrors.join(" | "));
   if (process.env.SS_SHOT_DIR) await E.card.screenshot({ path: join(process.env.SS_SHOT_DIR, "twilio-card-manual.png") });
   await E.ctx.close();
+
+  // ── G ──
+  const G = await run("G", { account: { ...ACTIVE, liveNumbers: 2, callerId: [
+    { number: "…0123", shaken: "twilio-approved", voiceIntegrity: null, cnam: "pending-review", cnamName: "Harness Sheds" },
+    { number: "…0456", shaken: null, voiceIntegrity: "twilio-rejected" },
+  ] } });
+  t = await G.text();
+  ok("G: each number's caller ID is listed by its last four digits", /…0123/.test(t) && /…0456/.test(t), t.slice(0, 600));
+  ok("G: the statuses as chips, CNAM with its name", /SHAKEN\/STIR: twilio-approved/.test(t) && /CNAM: pending-review/.test(t) && /Harness Sheds/.test(t) && /Voice Integrity: twilio-rejected/.test(t), t);
+  ok("G: a number read before 296 shows no CNAM chip", (t.match(/CNAM:/g) || []).length === 1, t);
+  ok("G: no uncaught page errors", G.pageErrors.length === 0, G.pageErrors.join(" | "));
+  if (process.env.SS_SHOT_DIR) await G.card.screenshot({ path: join(process.env.SS_SHOT_DIR, "twilio-card-caller-id.png") });
+  await G.ctx.close();
 
   // ── F ──
   const F1 = await run("F1", { account: NONE, unknownAction: true });
