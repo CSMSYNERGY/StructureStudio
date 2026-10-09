@@ -4378,8 +4378,9 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
 // into; it says what is set and how to ask for a change. The brand is Carolyn's, "Structure Studio
 // Payments", never the platform company's name.
 //
-// What it shows comes from portal-settings payments_status: on or off, test or live, and the last
-// four digits of the merchant id (never the whole id). A portal-settings older than this page
+// What it shows comes from portal-settings payments_status: on or off, test or live (only once a
+// merchant id is set or payments are on), and the last four digits of the merchant id (never the
+// whole id). A portal-settings older than this page
 // answers 403 "Unrecognised action": the card then says only who manages the account, with no
 // status at all, rather than a refusal or a guess (the taxCodesUnavailable rule, reused).
 //
@@ -4448,7 +4449,10 @@ function PaymentsCard() {
           {row("Card payments",
             d.enabled ? pill("ON", "#DCFCE7", "#15803D") : pill("OFF", "#FEF3C7", "#92400E"),
             "data-payments-onoff")}
-          {row("Mode",
+          {/* Test or live only once there is an account to be on one: with payments off and no merchant
+              id, every builder reads "test" by default, and a TEST row would describe an account that
+              doesn't exist. */}
+          {(d.enabled || d.midLast4) && row("Mode",
             d.env === "live"
               ? <span>{pill("LIVE", "#DBEAFE", "#1D4ED8")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>Real payments go to your bank account.</span></span>
               : <span>{pill("TEST", "#F3E8FF", "#7E22CE")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>No real money moves. This is how an account is checked before it goes live.</span></span>,

@@ -10,7 +10,9 @@
 //      LIVE and the merchant id's last four, never more of it; there is no box, no button and no
 //      select on the card; payments_status is called once and nothing else is posted
 //   B. test mode, switched off: OFF, TEST, what "off" means for the builder's customers
-//   C. no merchant id yet: "Not set up yet"
+//   C. no merchant id yet, payments off: "Not set up yet", and NO Mode row (every builder reads test
+//      by default, and a TEST row would describe an account that doesn't exist); switched on with a
+//      merchant id in test, the Mode row is back
 //   D. a portal-settings older than this page (403 "Unrecognised action"): who manages the account,
 //      no status rows, no refusal sentence on screen
 //   E. any other failure shows the server's own sentence and no status
@@ -185,6 +187,7 @@ try {
   await openPayments();
   await waitStatus();
   ok("B: OFF", (await page.locator("[data-payments-onoff]").innerText()).includes("OFF"));
+  ok("B: a merchant id is set, so the Mode row shows", (await page.locator("[data-payments-mode]").count()) === 1);
   ok("B: TEST, and what it means", (await page.locator("[data-payments-mode]").innerText()).includes("TEST") && /No real money moves/.test(await cardText()));
   ok("B: what off means for their customers", /your customers can't pay online/.test(await cardText()));
 
@@ -193,6 +196,14 @@ try {
   await openPayments();
   await waitStatus();
   ok("C: no merchant id: Not set up yet", (await page.locator("[data-payments-mid]").innerText()).includes("Not set up yet"));
+  ok("C: …and no Mode row, so no test account is described", (await page.locator("[data-payments-mode]").count()) === 0
+    && !/No real money moves/.test(await cardText()), await cardText());
+  ok("C: …still says what off means", /your customers can't pay online/.test(await cardText()));
+  // Also no MID and off, on live: still nothing to describe.
+  await boot({ row: { payments_online_enabled: false, cardpointe_merchid: "", cardpointe_env: "prod" } });
+  await openPayments();
+  await waitStatus();
+  ok("C: no merchant id on live: no Mode row either", (await page.locator("[data-payments-mode]").count()) === 0);
 
   // ── D ──
   await boot({ old: true });
