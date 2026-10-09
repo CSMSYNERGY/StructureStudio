@@ -1936,6 +1936,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
+      {sub === "clients" && <AdmNumberRequests onPick={pickClient} onFlash={flash} />}
       {sub === "clients" && (
         <AdmClients clients={clients} features={features} sel={sel}
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
@@ -1971,6 +1972,77 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
         <AdmClientPicker clients={clients || []} current={sel}
           onPick={pickClient} onClose={() => setPickerOpen(false)} />
       )}
+    </div>
+  );
+}
+
+// ── "Bring your number" requests (global; Workstream 2, phase 8) ──────────────────────────
+// A builder's request to move numbers they already have is the operator's notification: it shows
+// here, on the first tab, until someone takes it. Each says what is needed to book the move
+// (workers/phone-api/PORTING.md): a GoHighLevel LC Phone number is a HighLevel ticket, any other a
+// Twilio Port In request made in the Twilio Console, into the builder's own Twilio account. No PIN,
+// bill or account number is ever here: those are asked for by phone and typed into Twilio only.
+// When the number arrives, "Adopt a moved number" on the builder's Phone tab (view-as) lands it and
+// marks the request done.
+const ADM_REQ_WORDS = { new: "New", in_progress: "Being moved", done: "Done", cancelled: "Cancelled" };
+function AdmNumberRequests({ onPick, onFlash }) {
+  const [list, setList] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);   // admin-catalog older than this page
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("number_requests_list", {});
+      setInstalled(r.installed !== false);
+      setList(r.requests || []);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      onFlash({ err: e.message || "Couldn't load the number requests." });
+      setList([]);
+    }
+  }, [onFlash]);
+  // Once, on mount: `onFlash` is the shell's flash, a new function every render, so `load` as a
+  // dependency would reload on every render.
+  useEffect(() => { load(); }, []);
+  if (hidden) return null;
+  const open = (list || []).filter((r) => r.status === "new" || r.status === "in_progress");
+  const set = async (r, status) => {
+    if (status === "cancelled" && !window.confirm(`Cancel ${r.companyName || r.clientId}'s request for ${r.numbers.join(", ")}? Tell them why first.`)) return;
+    setBusy(r.id);
+    try {
+      await adminApi("number_request_set", { id: r.id, status });
+      onFlash({ ok: `Marked ${ADM_REQ_WORDS[status].toLowerCase()}.` });
+      await load();
+    } catch (e) { onFlash({ err: e.message }); }
+    setBusy(null);
+  };
+  return (
+    <div style={S.card} data-adm-number-requests={open.length}>
+      <CardHead title={`Bring-your-number requests${open.length ? ` (${open.length} open)` : ""}`}
+        desc="Builders asking to move numbers they already have. GoHighLevel (LC Phone) numbers move by a HighLevel support ticket; any other by a Twilio Port In request made in the Twilio Console, into the builder's own Twilio account (PORTING.md). Ask for the PIN or account number by phone and type it into Twilio only." />
+      {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 297 isn't applied on this database yet, so there are no requests to show.</div>}
+      {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
+      {list && list.map((r) => (
+        <div key={r.id} data-adm-number-request={r.status} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 240, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 800 }}>{r.companyName || r.clientId} <span style={{ fontWeight: 400, color: "#64748B" }}>{r.clientId}</span></div>
+            <div style={{ fontFamily: "ui-monospace, monospace" }}>{r.numbers.join(", ")}</div>
+            <div>
+              {r.isLcPhone === true ? "GoHighLevel (LC Phone): a HighLevel ticket" : r.isLcPhone === false ? `${r.currentCarrier}: a Twilio Port In` : `${r.currentCarrier} (not sure if GoHighLevel: ask)`}
+              {r.cutoverWindow ? ` · when: ${r.cutoverWindow}` : ""}
+            </div>
+            <div style={{ color: "#475569" }}>Approves the move: {r.contactName} &lt;{r.contactEmail}&gt; · asked {phoneWhen(r.createdAt) || r.createdAt}</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <AdmChip tone={r.status === "new" ? "warn" : r.status === "in_progress" ? "on" : r.status === "done" ? "good" : "neutral"}>{ADM_REQ_WORDS[r.status] || r.status}</AdmChip>
+            {r.status === "new" && <button type="button" disabled={!!busy} onClick={() => set(r, "in_progress")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12 }}>Take it</button>}
+            {(r.status === "new" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => set(r, "done")} style={{ ...S.btn("#ECFDF5", "#047857"), padding: "5px 10px", fontSize: 12 }}>Done</button>}
+            {(r.status === "new" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => set(r, "cancelled")} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Cancel…</button>}
+            <button type="button" onClick={() => onPick(r.clientId)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Open builder</button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -2503,6 +2575,8 @@ Type ${clientId} to close it.`);
           {sub && row("Push credentials", <>{have(acct.push && acct.push.apns_dev, "iPhone dev")}{have(acct.push && acct.push.apns_prod, "iPhone")}{have(acct.push && acct.push.fcm, "Android")}</>)}
           {sub && row("Event Streams", <>{have(acct.sink, "sink")}{have(acct.subscription, "subscription")}</>)}
           {row("Live numbers", <span>{acct.liveNumbers == null ? "unknown" : acct.liveNumbers}</span>)}
+          {/* Workstream 2, phase 8: their open "Bring your number" requests (listed on the Builders tab). */}
+          {acct.openNumberRequests > 0 && row("Number requests", <AdmChip tone="warn">{`${acct.openNumberRequests} open: see Builders, Bring-your-number requests`}</AdmChip>)}
           {/* Workstream 2, phase 6: each number's caller-ID registrations (statuses only; registered
               from the builder's Phone tab in view-as). `cnam` undefined = migration 296 not applied. */}
           {Array.isArray(acct.callerId) && acct.callerId.length > 0 && row("Caller ID", (

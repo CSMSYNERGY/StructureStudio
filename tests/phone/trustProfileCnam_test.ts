@@ -166,7 +166,7 @@ Deno.test("CNAM: the name Twilio was sent is recorded; status reads CNAM only wh
 
 Deno.test("portal-settings: phone_trust_profile's gates, its account rules and texting's own lock", () => {
   assert(/  phone_trust_profile: \{ area: "phone", level: "edit" \},/.test(SRC), "a GATES line");
-  const b = slice(SRC, 'if (action === "phone_trust_profile") {', "\n  // ── The Calls report", "phone_trust_profile branch");
+  const b = slice(SRC, 'if (action === "phone_trust_profile") {', 'if (action === "phone_port_request") {', "phone_trust_profile branch");
   const order = ["phoneOperatorGate()", "subAccountWhileOff(", "tenantTwilio()", "phoneNumberRows()", "isInternalTenant(", "runTrustProfile("];
   let at = -1;
   for (const step of order) {

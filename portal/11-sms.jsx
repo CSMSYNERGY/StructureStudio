@@ -1600,6 +1600,13 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [cnamOpen, setCnamOpen] = useState(false);
   const [cnamName, setCnamName] = useState("");
   const [bpOpen, setBpOpen] = useState(false);
+  // Workstream 2, phase 8: "Bring your number" (the builder's request) and, for an operator, landing
+  // a moved number that has arrived (phone_adopt_number).
+  const [portOpen, setPortOpen] = useState(false);
+  const [portForm, setPortForm] = useState({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+  const [portNote, setPortNote] = useState(null);      // { ok } | { err }
+  const [adoptNum, setAdoptNum] = useState("");
+  const [adoptNote, setAdoptNote] = useState(null);    // { ok } | { err }
   const [bpForm, setBpForm] = useState({
     legalBusinessName: "", ein: "", businessType: "Limited Liability Corporation", businessIndustry: "CONSTRUCTION",
     websiteUrl: "", street: "", city: "", region: "", postalCode: "", isoCountry: "US",
@@ -2359,6 +2366,142 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     </div>
   ) : null;
 
+  // ── Workstream 2, phase 8: "Bring your number" ─────────────────────────────────────────────
+  // For anyone who can change the phone setup (phone edit): ask Structure Studio to move numbers
+  // the business already has (phone_port_request). Only the numbers, the company they are with now,
+  // whether it is GoHighLevel, who can approve the move and when: no PIN, password, account number
+  // or bill is asked for or kept (the server refuses them too). `portRequests` null = the server or
+  // database doesn't have requests yet, and the card is not drawn. An operator also gets "Adopt a
+  // moved number" here, once the move has finished at Twilio (phone_adopt_number).
+  const PORT_WORDS = { new: "Sent to Structure Studio", in_progress: "Being moved", done: "Moved", cancelled: "Cancelled" };
+  const sendPortRequest = async () => {
+    setBusy(true); setPortNote(null);
+    try {
+      const d = await phoneAction("phone_port_request", { request: {
+        numbers: portForm.numbers.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean),
+        currentCarrier: portForm.currentCarrier,
+        isLcPhone: portForm.isLcPhone === "yes" ? true : portForm.isLcPhone === "no" ? false : null,
+        contactName: portForm.contactName, contactEmail: portForm.contactEmail, cutoverWindow: portForm.cutoverWindow,
+      } });
+      setData((x) => ({ ...x, portRequests: [d.request, ...(x.portRequests || [])] }));
+      setPortOpen(false);
+      setPortForm({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+      setPortNote({ ok: d.request && d.request.isLcPhone
+        ? `Sent. Structure Studio will contact ${d.request.contactName} to book it. A GoHighLevel number usually moves within one or two business days.`
+        : `Sent. Structure Studio will contact ${(d.request && d.request.contactName) || "you"} to book it. A number from another phone company takes at least a week, and the account holder signs the transfer by email.` });
+    } catch (e) { setPortNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const adoptMoved = async () => {
+    if (!window.confirm(`Add ${adoptNum.trim()} to ${viewingLabel || "this business"}? It has to be in their own Twilio account already (the move has finished). It then takes calls here, and it bills monthly from now on.`)) return;
+    setBusy(true); setAdoptNote(null);
+    try {
+      const d = await phoneAction("phone_adopt_number", { phoneNumber: adoptNum });
+      setAdoptNum("");
+      await load();
+      if (d.number && d.number.id) setSelId(d.number.id);
+      setAdoptNote(d.warning ? { err: d.warning } : { ok: d.already ? "That number is already on this account." : "Added. It is on this account now." });
+    } catch (e) { setAdoptNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const portValid = !!portForm.numbers.trim() && !!portForm.currentCarrier.trim() && portForm.contactName.trim().length >= 2
+    && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(portForm.contactEmail.trim());
+  const portSecret = /\d{5,}/.test(`${portForm.currentCarrier} ${portForm.contactName} ${portForm.cutoverWindow}`);
+  const bringCard = data.scope === "team" && canEdit && Array.isArray(data.portRequests) ? (
+    <div style={PHONE_CARD} data-ss-phone-bring>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Bring your number</h4>
+      <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        Already have a business number? Structure Studio can move it here, so customers keep calling and texting the number they know.
+        A GoHighLevel number usually moves within one or two business days; a number from another phone company takes at least a week.
+      </p>
+      {data.portRequests.length > 0 && (
+        <div data-ss-phone-bring-list style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {data.portRequests.map((r) => (
+            <div key={r.id} data-ss-phone-bring-request={r.status} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12.5 }}>
+              <span style={{ fontWeight: 800, color: "#1E293B" }}>{(r.numbers || []).map(phoneDisplay).join(", ")}</span>
+              <span style={{ color: "#64748B" }}>{r.isLcPhone ? "GoHighLevel" : r.currentCarrier}</span>
+              <span style={{ fontWeight: 800, borderRadius: 999, padding: "2px 9px", background: r.status === "done" ? "#ECFDF5" : "#F1F5F9", color: r.status === "done" ? "#047857" : "#475569" }}>
+                {PORT_WORDS[r.status] || r.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!portOpen && (
+        <button type="button" disabled={busy} data-ss-phone-bring-open onClick={() => { setPortOpen(true); setPortNote(null); }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+          Bring a number you already have
+        </button>
+      )}
+      {portOpen && (
+        <div data-ss-phone-bring-form style={{ padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0 12px" }}>
+            <SmsField label="The number (or numbers, separated by commas)">
+              <input style={SMS_INPUT} value={portForm.numbers} placeholder="(816) 555-0123" data-ss-phone-bring-numbers
+                onChange={(e) => setPortForm((f) => ({ ...f, numbers: e.target.value }))} />
+            </SmsField>
+            <SmsField label="The phone company it is with now">
+              <input style={SMS_INPUT} value={portForm.currentCarrier} placeholder="e.g. Verizon, or GoHighLevel" maxLength={80} data-ss-phone-bring-carrier
+                onChange={(e) => setPortForm((f) => ({ ...f, currentCarrier: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Is it a GoHighLevel (LC Phone) number?">
+              <select style={SMS_INPUT} value={portForm.isLcPhone} data-ss-phone-bring-lc onChange={(e) => setPortForm((f) => ({ ...f, isLcPhone: e.target.value }))}>
+                <option value="">Not sure</option>
+                <option value="yes">Yes, it's in GoHighLevel</option>
+                <option value="no">No, another phone company</option>
+              </select>
+            </SmsField>
+            <SmsField label="Who can approve the move (the account holder)">
+              <input style={SMS_INPUT} value={portForm.contactName} maxLength={120} data-ss-phone-bring-name
+                onChange={(e) => setPortForm((f) => ({ ...f, contactName: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Their email">
+              <input style={SMS_INPUT} value={portForm.contactEmail} maxLength={254} data-ss-phone-bring-email
+                onChange={(e) => setPortForm((f) => ({ ...f, contactEmail: e.target.value }))} />
+            </SmsField>
+            <SmsField label="When it can move (optional)">
+              <input style={SMS_INPUT} value={portForm.cutoverWindow} maxLength={200} placeholder="e.g. weekday evenings after the 20th" data-ss-phone-bring-window
+                onChange={(e) => setPortForm((f) => ({ ...f, cutoverWindow: e.target.value }))} />
+            </SmsField>
+          </div>
+          <div data-ss-phone-bring-nosecrets style={{ fontSize: 12, color: portSecret ? "#B45309" : "#64748B", margin: "2px 0 8px", lineHeight: 1.5 }}>
+            {portSecret
+              ? "That looks like an account number or a PIN. Leave those out: Structure Studio asks for them by phone when the move is booked, and never stores them."
+              : "Don't include a PIN, password, account number or bill. Structure Studio asks for what the move needs by phone, and the account holder signs the transfer by email."}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" disabled={busy || !portValid || portSecret} data-ss-phone-bring-send onClick={sendPortRequest}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy || !portValid || portSecret ? 0.55 : 1 }}>
+              Send to Structure Studio
+            </button>
+            <button type="button" disabled={busy} onClick={() => setPortOpen(false)}
+              style={{ background: "none", border: "none", padding: 0, color: "#64748B", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {portNote && portNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{portNote.ok}</div>}
+      {portNote && portNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{portNote.err}</div>}
+      {data.canAdoptNumber && (
+        <div data-ss-phone-adopt style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 6 }}>
+            Structure Studio only: once a move has finished and the number is in this business&rsquo;s own Twilio account, add it here.
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input value={adoptNum} placeholder="(816) 555-0123" data-ss-phone-adopt-number onChange={(e) => setAdoptNum(e.target.value)} style={{ ...S.input, width: 190 }} />
+            <button type="button" disabled={busy || adoptNum.replace(/\D/g, "").length < 10} data-ss-phone-adopt-send onClick={adoptMoved}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", opacity: busy || adoptNum.replace(/\D/g, "").length < 10 ? 0.55 : 1 }}>
+              Adopt a moved number
+            </button>
+          </div>
+          {adoptNote && adoptNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{adoptNote.ok}</div>}
+          {adoptNote && adoptNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{adoptNote.err}</div>}
+        </div>
+      )}
+    </div>
+  ) : null;
+
   // ── Call recording (migration 263) ─────────────────────────────────────────────────────
   // Shown to everyone on the team screen; only the business OWNER can change it (the server's
   // phone_recording_save rule, reported as canChangeRecording), because recording customers is
@@ -2610,6 +2753,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {numberCard}
       {thisNumberCard}
       {callerIdCard}
+      {bringCard}
 
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>

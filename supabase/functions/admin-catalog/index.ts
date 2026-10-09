@@ -433,6 +433,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     "get_billing_overview", "get_payments", "avalara_tax_codes_status",
     // Masked SIDs and what exists; `check` asks Twilio two GETs and changes nothing.
     "twilio_account_get",
+    // Workstream 2, phase 8: the open "Bring your number" requests (a builder's numbers and who may
+    // approve the move; no PIN, bill or account number exists to show).
+    "number_requests_list",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -1875,8 +1878,60 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
         // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
-        // CNAM), registered from the builder's Phone tab in view-as.
-        return json({ ok: true, account: { ...account, callerId: await callerIdSummary(sb, clientId) } });
+        // CNAM), registered from the builder's Phone tab in view-as. Phase 8: how many "Bring your
+        // number" requests of theirs are open (null = migration 297 not applied, or the read failed).
+        const reqs = await sb.from("phone_number_requests").select("id", { count: "exact", head: true })
+          .eq("client_id", clientId).in("status", ["new", "in_progress"]);
+        return json({ ok: true, account: { ...account, callerId: await callerIdSummary(sb, clientId), openNumberRequests: reqs.error ? null : Number(reqs.count ?? 0) } });
+      }
+
+      // ── Workstream 2, phase 8: "Bring your number" requests (migration 297) ─────────────────────
+      // A builder's request IS the operator's notification: status 'new' until someone takes it. The
+      // console lists every open one (and the last month's finished ones) across builders, newest
+      // first, and moves it on. The move itself is workers/phone-api/PORTING.md; landing the number
+      // is portal-settings phone_adopt_number, which marks the request done by itself.
+      case "number_requests_list": {
+        const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+        const cols = "id, client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at";
+        const [open, recent, names] = await Promise.all([
+          sb.from("phone_number_requests").select(cols).in("status", ["new", "in_progress"]).order("created_at", { ascending: false }).limit(100),
+          sb.from("phone_number_requests").select(cols).in("status", ["done", "cancelled"]).gte("updated_at", since).order("updated_at", { ascending: false }).limit(50),
+          sb.from("client_configs").select("client_id, company_name"),
+        ]);
+        if (open.error && relationMissing(open.error)) return json({ ok: true, installed: false, requests: [] });
+        if (open.error) throw open.error;
+        if (recent.error) throw recent.error;
+        const nameOf = new Map(((names.data ?? []) as any[]).map((c) => [String(c.client_id), String(c.company_name ?? "")]));
+        const view = (r: any) => ({
+          id: r.id, clientId: r.client_id, companyName: nameOf.get(String(r.client_id)) || null,
+          numbers: Array.isArray(r.numbers) ? r.numbers : [], currentCarrier: r.current_carrier, isLcPhone: r.is_lc_phone,
+          contactName: r.contact_name, contactEmail: r.contact_email, cutoverWindow: r.cutover_window ?? null,
+          status: r.status, createdAt: r.created_at, handledAt: r.handled_at ?? null,
+        });
+        return json({ ok: true, installed: true, requests: [...(open.data ?? []), ...(recent.data ?? [])].map(view) });
+      }
+
+      case "number_request_set": {
+        const id = reqStr(p.id, "id");
+        if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("invalid request id");
+        const status = String(p.status ?? "");
+        if (!["new", "in_progress", "done", "cancelled"].includes(status)) throw new Error("status must be new, in_progress, done or cancelled");
+        const now = new Date().toISOString();
+        const { data, error } = await sb.from("phone_number_requests")
+          .update({ status, updated_at: now, handled_at: status === "new" ? null : now, handled_by: identity.via === "operator" ? identity.userId : null })
+          .eq("id", id).select("id, client_id, status").maybeSingle();
+        if (error && relationMissing(error)) return json({ error: "Migration 297 isn't applied on this database yet." }, 503);
+        if (error) throw error;
+        if (!data) return json({ error: "No such request." }, 404);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "number_request_set", target_client_id: data.client_id,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} status=${status}`,
+          });
+        } catch (_e) { /* best-effort */ }
+        return json({ ok: true, id: data.id, status: data.status });
       }
 
       case "twilio_account_provision": {
@@ -2193,6 +2248,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
         //   to prevent.
         await wipe("qbo_item_map");
+        //   Workstream 2, phase 8: the builder's "Bring your number" requests (migration 297). Asks
+        //   nobody needs once the builder is gone, naming who could approve a move; a recreated slug
+        //   must not inherit them. A database without 297 has none to wipe.
+        {
+          const { error, count } = await sb.from("phone_number_requests").delete({ count: "exact" }).eq("client_id", clientId);
+          if (error && !relationMissing(error)) throw new Error(`phone_number_requests: ${error.message}`);
+          if (!error) deleted.phone_number_requests = count ?? 0;
+        }
         try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
 
         // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.
