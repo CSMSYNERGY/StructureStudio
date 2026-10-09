@@ -20,7 +20,7 @@ import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscripti
 // credentials for, and verify_payments asks the gateway one harmless question. cardpointe.ts is the
 // one CardPointe client and paymentSettings.ts reads the tenant's account; see their importer ledgers.
 import { cardpointeConfigured, cpEnvSecretNames, cpVerifyMerchant } from "../_shared/cardpointe.ts";
-import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
+import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
@@ -238,6 +238,9 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 // (migration 259 revokes them from anon/authenticated), so the service-role client here is
 // their only reader outside the phone-api worker.
 const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
+
+/** verify_payments: at most one gateway check per builder in this many seconds (see the action). */
+const VERIFY_COOLDOWN_S = 10;
 
 async function readPhoneBilling(sb: any): Promise<{ settings: PhoneBillingSettings; meters: any[] }> {
   const [st, mt] = await Promise.all([
@@ -1483,6 +1486,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           .select("billing_exempt").eq("client_id", clientId).maybeSingle();
         const wasExempt = Boolean(priorCs?.billing_exempt);
 
+        // ⛔ MAKING A BUILDER BILLABLE WHILE THEY TAKE CARDS IN TEST MODE (workstream 1 phase 3). Only a
+        // non-billable account may take payments on Fiserv's test system (UAT), which moves no real
+        // money: set_payments refuses switching a billable builder on there, and this is the other
+        // door into the same state. Refused before anything is written, so the discount and dates
+        // sent with it are not saved either. Only the CHANGE is refused: the card sends billingExempt
+        // on every save, and an account that is already billable is not being made so here. The money
+        // gates refuse the charge itself too (paymentSettings.ts testModeNeedsExempt).
+        if (wasExempt && p.billingExempt === false) {
+          const { row: pay, error: payErr } = await readPaymentSettings(sb, clientId, []);
+          if (payErr) throw payErr;
+          if (pay?.payments_online_enabled === true && testModeNeedsExempt({ ...pay, billing_exempt: false })) {
+            throw new Error(
+              "This builder takes card payments in test mode (UAT), which moves no real money, so the account has to stay non-billable. " +
+              "Move them to Live, or switch their card payments off, under Card payments first. Nothing was changed.");
+          }
+        }
+
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
         if (p.discountPercent !== undefined) {
@@ -1648,8 +1668,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           }
           // ⛔ TEST MODE TAKES NO REAL MONEY. A builder's customer who "pays" on Fiserv's test
           // system has paid nothing, while the order reads paid. So only a non-billable account
-          // (our own, and the certification tenant) may take payments in test mode.
-          if (effectiveEnv === "uat" && current?.billing_exempt !== true) {
+          // (our own, and the certification tenant) may take payments in test mode. set_billing
+          // refuses the other way in (making such a builder billable), and the money gates refuse
+          // the charge itself (paymentSettings.ts testModeNeedsExempt).
+          if (testModeNeedsExempt({ cardpointe_env: effectiveEnv, billing_exempt: current?.billing_exempt })) {
             throw new Error(
               "Test mode (UAT) moves no real money, so only a non-billable account may take payments in it. " +
               "Switch this builder to Live, or mark the account non-billable on the Billing card first. Nothing was changed.");
@@ -1706,6 +1728,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // for its system? ONE inquireByOrderid for an order id nobody ever used (cardpointe.ts
         // cpVerifyMerchant): no money moves and nothing is created at the gateway. It asks whether
         // the switch is on only to report it, so an account can be checked BEFORE it is switched on.
+        // `expected` is true only for the gateway's known "not found" answer (respcode 29); any other
+        // answer is reachable but not a pass, and the console shows it in amber with the gateway's words.
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const { row, error } = await readPaymentSettings(sb, clientId, []);
         if (error) throw error;
@@ -1727,9 +1751,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
               `the ${cpEnvSecretNames(merchant.env).join(", ")} secrets are missing.`,
           };
         } else {
+          // ONE CHECK PER BUILDER EVERY VERIFY_COOLDOWN_S SECONDS. Each check spends one of the requests a
+          // minute the gateway allows a MID, and real customer charges on that MID share them. Only a
+          // check that went out is counted (the verify_payments audit row, written below after the
+          // call); a refused click writes nothing, so a stuck clicker cannot keep the window shut.
+          // If the audit read fails, the check goes ahead: this guard protects a quota, not money.
+          const since = new Date(Date.now() - VERIFY_COOLDOWN_S * 1000).toISOString();
+          const recent = await sb.from("admin_audit").select("created_at")
+            .eq("action", "verify_payments").eq("target_client_id", clientId).gte("created_at", since).limit(1);
+          if (!recent.error && Array.isArray(recent.data) && recent.data.length) {
+            return json({
+              error: `This builder's account was checked a few seconds ago. Wait ${VERIFY_COOLDOWN_S} seconds and try again.`,
+              retryAfterSeconds: VERIFY_COOLDOWN_S,
+            }, 429);
+          }
           const v = await cpVerifyMerchant(merchant);
           out = v.reachable
-            ? { ...base, reachable: true, gateway: v.answer }
+            ? { ...base, reachable: true, expected: v.expected, gateway: v.answer }
             : v.kind === "config"
             ? { ...base, reachable: false, configError: `The gateway refused our request: ${v.message}` }
             : v.kind === "throttled"
@@ -1745,7 +1783,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             actor_email: identity.via === "operator" ? identity.email : null,
             actor_user_id: identity.via === "operator" ? identity.userId : null,
             note: `via=${identity.via} env=${base.env ?? "(unknown)"} mid=…${base.midLast4 ?? "(none)"}`
-              + ` reachable=${out.reachable === true}${out.configError ? " config_error" : out.error ? " no_answer" : ""}`,
+              + ` reachable=${out.reachable === true}${out.configError ? " config_error" : out.error ? " no_answer" : ""}`
+              + `${out.reachable === true && out.expected !== true ? " unexpected_answer" : ""}`,
           });
         } catch (_e) { /* best-effort */ }
         return json(out);

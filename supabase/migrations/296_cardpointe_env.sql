@@ -33,7 +33,11 @@
 --   * client_settings.cardpointe_env: 'uat' (Fiserv's test system, no real money) or 'prod' (live).
 --     _shared/cardpointe.ts reads CARDPOINTE_* for 'uat' and the new CARDPOINTE_PROD_* for 'prod',
 --     per call; a 'prod' builder with those secrets unset is refused, never sent to UAT. Set only
---     through admin-catalog set_payments, which refuses switching a billable builder on in 'uat'.
+--     through admin-catalog set_payments. 'uat' takes no real money, so it is for non-billable
+--     accounts only, at every door: set_payments refuses switching a billable builder on in 'uat',
+--     set_billing refuses making a builder billable while they take cards in 'uat', and the money
+--     gates (portal-payments, customer-pay) refuse the charge itself (paymentSettings.ts
+--     testModeNeedsExempt).
 --   * payment_attempts.cp_env: the system the sale went to, written with the attempt BEFORE the card
 --     is touched. Void, refund, settlestat and the recovery inquire read it back
 --     (_shared/invoicePayment.ts merchantOfRecord), so they ask the system that holds the
@@ -79,9 +83,13 @@
 -- ── ORDER ────────────────────────────────────────────────────────────────────────────────
 -- Push to beta (Ahsan's go), then this file (a separate go), then the functions (customer-pay,
 -- portal-payments, admin-catalog, portal-settings), then the beta pages (admin console, portal).
--- BEFORE the functions: THE RECORD's enabled_without_mid must be 0. The new functions no longer fall
--- back to CARDPOINTE_MERCHID, so a builder switched on with no merchant id of their own stops taking
--- cards the moment they deploy (set their MID with set_payments, or switch them off, first).
+-- BEFORE the functions: THE RECORD's enabled_without_mid AND enabled_test_billable must both be 0.
+--   enabled_without_mid: the new functions no longer fall back to CARDPOINTE_MERCHID, so a builder
+--     switched on with no merchant id of their own stops taking cards the moment they deploy (set
+--     their MID with set_payments, or switch them off, first).
+--   enabled_test_billable: the new money gates refuse a card payment for a billable builder on the
+--     test system (their customers were "paying" with no real money moving), so such a builder stops
+--     taking cards the moment they deploy too. Decide each one first: live, non-billable, or off.
 --
 -- ── VERIFY (read-only) ───────────────────────────────────────────────────────────────────
 --   select table_name, column_name, data_type, is_nullable, column_default from information_schema.columns
@@ -89,6 +97,8 @@
 --   select cardpointe_env, count(*) from public.client_settings group by 1;
 --   select count(*) from public.client_settings
 --    where payments_online_enabled and nullif(trim(cardpointe_merchid), '') is null;      -- must be 0
+--   select count(*) from public.client_settings
+--    where payments_online_enabled and cardpointe_env = 'uat' and billing_exempt is not true; -- must be 0
 --
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
 -- ⚠️ ONLY WHILE NO BUILDER IS ON LIVE. Dropping cardpointe_env reads every builder as UAT again, and
@@ -338,9 +348,9 @@ notify pgrst, 'reload schema';
 --   settings_on_prod 0, attempts_with_env 0, settings_changed 0, attempts_changed 0,
 --   browser_can_read false, new_row_starts 'uat',
 --   enabled_without_mid 0     ← MUST be 0 before the functions deploy (see ORDER)
---   enabled_test_billable n   ← builders switched on in test mode who are billable. Not refused by
---                               anything at charge time; set_payments refuses re-saving them that way.
---                               Decide each one (live, non-billable, or off) before promotion.
+--   enabled_test_billable 0   ← MUST be 0 before the functions deploy (see ORDER): builders switched on
+--                               in test mode who are billable. The new money gates refuse their card
+--                               payments, and set_payments / set_billing refuse creating the state.
 -- settings_total and attempts_total are the live counts, to compare with a read-only count taken just
 -- before. Anything else: roll back (see ROLLBACK above) before recording the ledger row.
 select

@@ -49,7 +49,7 @@ import {
   cpTokenizerUrl,
   cpVoid,
 } from "../_shared/cardpointe.ts";
-import { type CpMerchant, cpMerchant, readPaymentSettings } from "../_shared/paymentSettings.ts";
+import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import { fundingStateFromSetlstat, returnedPaymentPatch } from "../_shared/achState.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 
@@ -276,11 +276,26 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   const TAKES_MONEY = new Set(["pay_options", "surcharge_probe", "charge", "charge_adhoc"]);
   let currentMerchant: CpMerchant = { merchid: "", env: "uat" };
   if (TAKES_MONEY.has(action)) {
-    const { row: settings, error: sErr } = await readPaymentSettings(admin, clientId, ["business_name"]);
+    const { row: settings, error: sErr } = await readPaymentSettings(admin, clientId, ["business_name", "billing_exempt"]);
     if (sErr) return dbFail(req, clientId, "read your payment settings", sErr);
     const merchant = cpMerchant(settings);
     if (settings?.payments_online_enabled !== true || !merchant) {
       return refusal({ error: "Taking cards isn't switched on for this account yet." });
+    }
+    // ⛔ TEST MODE ON A BILLABLE ACCOUNT. The test system moves no real money, so a card "taken" there
+    // pays nothing while the order reads paid. set_payments and set_billing both refuse to create this
+    // state; this catches it however it arose (a row changed by hand). Refused with nothing sent, and
+    // filed as a fault: it is ours to fix, by moving the builder to live or switching them off.
+    if (testModeNeedsExempt(settings)) {
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "payments_test_mode_billable",
+        message: `${clientId}: ${action} refused: the tenant takes cards on the test system (UAT) but is billable. Nothing was sent.`,
+        context: { action, env: merchant.env },
+      });
+      return refusal({ error: "Taking cards isn't available for this account right now. Nothing was charged, and we've been told.", reason: "test_mode_billable" });
     }
     if (!cardpointeConfigured(merchant.env)) {
       return await systemMissing(merchant, "Taking cards isn't available for this account right now. Nothing was charged, and we've been told.");

@@ -135,7 +135,7 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "invoice_sends":
       return { data: null, error: null };
     case "client_settings":
-      return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, business_name: "Acme Sheds" } : world.settings, error: null };
+      return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, billing_exempt: true, business_name: "Acme Sheds" } : world.settings, error: null };
     case "payment_attempts": {
       if (verb) {
         trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });

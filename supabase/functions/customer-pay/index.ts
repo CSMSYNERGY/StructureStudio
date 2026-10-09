@@ -44,7 +44,7 @@ import {
   cpTokenizerOrigin,
   cpTokenizerUrl,
 } from "../_shared/cardpointe.ts";
-import { type CpMerchant, cpMerchant, readPaymentSettings } from "../_shared/paymentSettings.ts";
+import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -138,7 +138,7 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
 
   // payments_online_enabled, cardpointe_merchid and cardpointe_env (migration 296; a database
   // without it reads as UAT, which is what every charge before it was).
-  const { row: settings, error: sErr } = await readPaymentSettings(admin, identity.clientId, ["invoice_in_ghl", "business_name"]);
+  const { row: settings, error: sErr } = await readPaymentSettings(admin, identity.clientId, ["invoice_in_ghl", "business_name", "billing_exempt"]);
   if (sErr) return dbFail(req, identity.clientId, "check your builder's settings", sErr);
 
   if (!settings || settings.invoice_in_ghl !== false) {
@@ -155,6 +155,20 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   const merchant = cpMerchant(settings);
   if (!merchant) {
     return refusal({ error: "Your builder hasn't finished setting up payments yet." }, 503);
+  }
+  // ⛔ The test system on a billable builder: the shopper would "pay" with no real money moving while
+  // the order reads paid. set_payments and set_billing refuse to create this; this catches a row
+  // changed by hand. Nothing is sent, and it is filed as a fault for us.
+  if (testModeNeedsExempt(settings)) {
+    await logEdgeError({
+      fn: "customer-pay",
+      req,
+      clientId: identity.clientId,
+      code: "payments_test_mode_billable",
+      message: `${identity.clientId}: customer-pay refused: the builder takes cards on the test system (UAT) but is billable. Nothing was sent.`,
+      context: { env: merchant.env },
+    });
+    return refusal({ error: "Online payments aren't available right now. Nothing was charged. Please try again later, or call your builder." }, 503);
   }
   // The builder's system (test or live) has no credentials on this deployment: nothing is sent,
   // and it is filed as a fault for us (set_payments refuses to create this state).

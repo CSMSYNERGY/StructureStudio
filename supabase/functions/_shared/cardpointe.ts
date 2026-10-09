@@ -628,23 +628,32 @@ export async function cpInquireByOrderId(
 }
 
 export type CpVerifyResult =
-  | { reachable: true; orderid: string; answer: Record<string, unknown> }
+  | { reachable: true; expected: boolean; orderid: string; answer: Record<string, unknown> }
   | { reachable: false; orderid: string; kind: "config" | "throttled" | "unknown"; message: string };
+
+/** The gateway's "no such transaction" answer: respcode 29 ("Txn not found"), with no retref. It is
+ *  the ONE answer a Verify for a never-used order id should get. */
+export const CP_TXN_NOT_FOUND = "29";
 
 /**
  * The operator's Verify button (admin-catalog verify_payments): ONE inquireByOrderid, the same
  * request cpInquireByOrderId makes, for an order id nobody ever used. It moves no money and creates
- * nothing at the gateway. What it proves is that this deployment's credentials for the merchant's
- * system are accepted for that MID:
+ * nothing at the gateway. What it proves is that this deployment's login for the merchant's system
+ * is accepted and the gateway answers an inquiry under that MID:
  *
- *   reachable    the gateway answered with a body (most likely "not found"). `answer` is its
- *                whitelisted summary, so the operator reads the gateway's own words.
+ *   reachable, expected      a 2xx carrying the known "not found" answer (respcode 29, no retref):
+ *                            the one answer a never-used order id should get
+ *   reachable, NOT expected  a 2xx carrying anything else. The login worked, but this is not the
+ *                            answer a check expects, so it is not a pass: a 200 can carry an error
+ *                            about the MID itself. `answer` is the whitelisted summary, so the
+ *                            operator reads the gateway's own words.
  *   config       not configured here, or the gateway refused us (401/403/4xx): wrong credentials or
  *                a MID those credentials do not cover
  *   throttled    the per-MID rate limiter; try again shortly
  *   unknown      no usable answer (network, 5xx, an unparseable body)
  *
- * Never throws.
+ * Even "expected" cannot tell a mistyped MID from the right one if the gateway answers "not found"
+ * for any MID under a login that covers several. The operator console says so. Never throws.
  */
 export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyResult> {
   const orderid = "ssverify_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -652,7 +661,11 @@ export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyRe
     const j = await cpPost(merchant, "GET", inquirePath(merchant, orderid));
     // The MID is the operator's own input; the answer does not need to carry it back.
     const { merchid: _mid, ...answer } = cpSummary(j);
-    return { reachable: true, orderid, answer };
+    // A body that is not one object (an array, a bare null) is "answered, not as expected".
+    const one = j && typeof j === "object" && !Array.isArray(j) ? j : {};
+    const retref = typeof one.retref === "string" ? one.retref.trim() : "";
+    const expected = String(one.respcode ?? "").trim() === CP_TXN_NOT_FOUND && !retref;
+    return { reachable: true, expected, orderid, answer };
   } catch (e) {
     const message = String((e as Error)?.message ?? "").replace(/^GATEWAY_[A-Z]+:\s*/, "").slice(0, 200);
     const kind = isGatewayConfig(e) ? "config" : isGatewayThrottled(e) ? "throttled" : "unknown";

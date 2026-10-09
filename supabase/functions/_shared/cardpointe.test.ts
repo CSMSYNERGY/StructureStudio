@@ -519,12 +519,34 @@ Deno.test("cpVerifyMerchant: one inquireByOrderid for an unused order id; reacha
   const ok = await cp.cpVerifyMerchant(UAT_M);
   restore();
   check("reachable", ok.reachable === true, JSON.stringify(ok));
+  check("…and the expected answer (29, Txn not found)", ok.reachable === true && ok.expected === true, JSON.stringify(ok));
   check("one GET", seen.length === 1 && seen[0].method === "GET", JSON.stringify(seen));
   check("an unused order id, on the merchant's MID", /\/inquireByOrderid\/ssverify_[0-9a-f]{16}\/100200300400$/.test(seen[0].url), seen[0].url);
   if (ok.reachable) {
     check("the gateway's own words", ok.answer.resptext === "Txn not found" && ok.answer.respcode === "29", JSON.stringify(ok.answer));
     check("no MID and no token in the answer", !("merchid" in ok.answer) && !("token" in ok.answer), JSON.stringify(ok.answer));
   }
+  // Answered, but NOT the answer a check expects: green would claim more than a 200 proves. A 200 can
+  // carry an error about the MID itself, an order (a retref) that should not exist, or a shape this
+  // module does not know. Each is reachable, never expected, and the gateway's words are kept.
+  for (
+    const [label, body] of [
+      ["another refusal in a 200", { respstat: "C", respcode: "8", resptext: "Invalid merchant" }],
+      ["a 29 that carries a retref", { respstat: "C", respcode: "29", resptext: "Txn not found", retref: "123456789012" }],
+      ["no respcode at all", { respstat: "C", resptext: "Txn not found" }],
+      ["an array", [{ respcode: "29" }]],
+      ["a bare null", null],
+    ] as [string, unknown][]
+  ) {
+    recordAll(body as Record<string, unknown>, []);
+    const odd = await cp.cpVerifyMerchant(UAT_M);
+    restore();
+    check(`${label}: reachable, not expected`, odd.reachable === true && odd.expected === false, JSON.stringify(odd));
+  }
+  recordAll({ respstat: "C", respcode: 29, resptext: "Txn not found" }, []);
+  const numeric = await cp.cpVerifyMerchant(UAT_M);
+  restore();
+  check("a numeric 29 is the expected answer too", numeric.reachable === true && numeric.expected === true, JSON.stringify(numeric));
   // Refused: our credentials or this MID.
   seen = [];
   recordAll(401, seen);

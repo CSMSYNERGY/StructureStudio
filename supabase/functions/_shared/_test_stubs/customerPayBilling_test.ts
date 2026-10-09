@@ -78,7 +78,8 @@ function answer(trace: Trace, table: string, ops: any[][]): any {
     case "customer_sessions":
       return { data: { client_id: TENANT, phone_digits: "5555550101", email_lower: null, name: "Pat Example" }, error: null };
     case "client_settings":
-      return { data: { invoice_in_ghl: false, payments_online_enabled: true, cardpointe_merchid: MID, business_name: "Acme Sheds" }, error: null };
+      // Non-billable: the test system (no cardpointe_env = uat) takes payments only for such an account.
+      return { data: { invoice_in_ghl: false, payments_online_enabled: true, cardpointe_merchid: MID, billing_exempt: true, business_name: "Acme Sheds" }, error: null };
     case "designs":
       // The gate's read carries the contact; readOrderMoney's reads the lines (none: the order total stands).
       return { data: cols.includes("contact") ? { short_code: CODE, status: "invoiced", contact: CONTACT, ss_quote_number: "Q-1", estimate_lines: null } : null, error: null };

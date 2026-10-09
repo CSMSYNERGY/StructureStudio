@@ -47,6 +47,22 @@ export function cpMerchant(row: unknown): CpMerchant | null {
   return env ? { merchid, env } : null;
 }
 
+/**
+ * ⛔ TEST MODE TAKES NO REAL MONEY: true when this row must NOT take a payment because it is on the
+ * test system ('uat', which includes a row from a database without 296) and the account is billable.
+ * A customer who "pays" there has paid nothing while the order reads paid, so only a non-billable
+ * account (our own, and the certification tenant) may take payments in test mode.
+ *
+ * One rule, checked in three places so no single door can open it: set_payments refuses switching a
+ * billable builder on in test, set_billing refuses making a builder billable while they take payments
+ * in test, and the two money gates (portal-payments, customer-pay) refuse the charge itself, which is
+ * what catches a row changed by hand. Anything that is not provably live counts as test.
+ */
+export function testModeNeedsExempt(row: unknown): boolean {
+  const r = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+  return cpEnvOf(r.cardpointe_env) !== "prod" && r.billing_exempt !== true;
+}
+
 /** What a builder may be told about their account: never the MID, only its last four. */
 export function midLast4(merchid: unknown): string | null {
   const s = typeof merchid === "string" ? merchid.trim() : "";

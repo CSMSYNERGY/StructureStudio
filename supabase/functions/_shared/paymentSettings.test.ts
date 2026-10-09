@@ -7,11 +7,13 @@
 //   * a missing system (a row or attempt from before 296) is UAT, the system every charge before it
 //     went to; an UNKNOWN system is no merchant at all, never a guess;
 //   * the tolerant read asks again without cardpointe_env only when the database says that column
-//     is missing, and returns every other error as it is.
+//     is missing, and returns every other error as it is;
+//   * test mode takes no real money, so only a non-billable account may take payments in it, and
+//     anything not provably live counts as test.
 //
 // Dependency-free (no jsr:/npm: imports), like the other _shared tests. Merchant ids are made up.
 
-import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings } from "./paymentSettings.ts";
+import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings, testModeNeedsExempt } from "./paymentSettings.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
   if (!cond) throw new Error(`${name}${detail ? `: ${detail}` : ""}`);
@@ -35,6 +37,24 @@ Deno.test("cpMerchant: the row's own MID and system, and nothing when either is 
   }
   check("an unknown system is no merchant", cpMerchant({ cardpointe_merchid: "100200300400", cardpointe_env: "live" }) === null);
   check("no row", cpMerchant(null) === null && cpMerchant(undefined) === null && cpMerchant("x") === null);
+});
+
+Deno.test("testModeNeedsExempt: test (or no column, or unknown) on a billable account; never live, never non-billable", () => {
+  const cases: [Record<string, unknown> | null, boolean][] = [
+    [{ cardpointe_env: "uat", billing_exempt: false }, true],
+    [{ cardpointe_env: "uat" }, true],                              // billing_exempt unread = billable
+    [{ cardpointe_env: "uat", billing_exempt: null }, true],
+    [{ cardpointe_env: "uat", billing_exempt: "true" }, true],      // only a real true exempts
+    [{ billing_exempt: false }, true],                              // pre-296 row: the test system
+    [{ cardpointe_env: null, billing_exempt: false }, true],
+    [{ cardpointe_env: "live", billing_exempt: false }, true],      // unknown: not provably live
+    [null, true],
+    [{ cardpointe_env: "uat", billing_exempt: true }, false],
+    [{ billing_exempt: true }, false],
+    [{ cardpointe_env: "prod", billing_exempt: false }, false],
+    [{ cardpointe_env: "prod" }, false],
+  ];
+  for (const [row, want] of cases) check(`testModeNeedsExempt(${JSON.stringify(row)})`, testModeNeedsExempt(row) === want);
 });
 
 Deno.test("midLast4 never hands out more than four digits", () => {

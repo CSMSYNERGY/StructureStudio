@@ -26,8 +26,13 @@
 //        no credentials, switching on with no merchant id, an unknown system, and a system change on
 //        a database without 296 (an older console that sends no `env` still saves);
 //    10. verify_payments asks ONE inquireByOrderid for an unused order id on the saved merchant and
-//        its system, answers reachable / configError, audits the last four only, and is refused to
-//        an operator without can_bill.
+//        its system, answers reachable / configError, passes (expected) ONLY on the gateway's "not
+//        found" answer, audits the last four only, is refused to an operator without can_bill, and
+//        checks one builder at most once every 10 seconds.
+//   test mode is for non-billable accounts only, at every door
+//    11. a billable builder switched on in test (a row changed by hand) is refused at both money
+//        gates with nothing sent and a fault filed, while void and refund still work; set_billing
+//        refuses making a builder billable while they take cards in test.
 //
 // HOW. paymentsMerchantOfRecord_test's idiom: Deno.serve is stubbed while each handler is imported,
 // the import map swaps supabase-js for supabase_stub.ts, stubDb routes every table call into the
@@ -104,12 +109,17 @@ type World = {
   op?: Record<string, unknown> | null;
   /** The gateway's answer per call: a body or a status. */
   gateway?: (system: "uat" | "live", path: string, url: URL) => unknown;
+  /** admin_audit reads (verify_payments' cooldown): "recent" = a check went out seconds ago, "fail" = the read errors. */
+  audit?: "recent" | "fail";
+  /** The prior billing_exempt set_billing reads (client_settings select of billing_exempt alone). */
+  wasExempt?: boolean;
 };
 type Trace = {
   gateway: { system: "uat" | "live"; path: string; body: any; url: URL; auth: string | null }[];
   writes: { table: string; verb: string; row: any }[];
   faults: Record<string, unknown>[];
   audits: Record<string, unknown>[];
+  auditReads: any[][][];
   selects: { table: string; cols: string }[];
 };
 const eqOf = (ops: any[][], col: string) => (ops.find((o) => o[0] === "eq" && o[1] === col) ?? [])[2];
@@ -123,7 +133,12 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     if (verb) { trace.faults.push(argOf(ops, verb)[0]); return { data: null, error: null }; }
     return { data: [], error: null };
   }
-  if (table === "admin_audit") { trace.audits.push(argOf(ops, "insert")[0]); return { data: null, error: null }; }
+  if (table === "admin_audit") {
+    if (ops.some((o) => o[0] === "insert")) { trace.audits.push(argOf(ops, "insert")[0]); return { data: null, error: null }; }
+    trace.auditReads.push(ops);
+    if (world.audit === "fail") return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+    return { data: world.audit === "recent" ? [{ created_at: new Date().toISOString() }] : [], error: null };
+  }
   if (verb) {
     const row = argOf(ops, verb)[0];
     trace.writes.push({ table, verb, row });
@@ -149,6 +164,7 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
       return { data: { client_id: TENANT, phone_digits: "5555550101", email_lower: null, name: "Pat Example" }, error: null };
     case "client_settings": {
       if (world.no296 && /\bcardpointe_env\b/.test(cols)) return MISSING("client_settings.cardpointe_env");
+      if (cols === "billing_exempt" && world.wasExempt !== undefined) return { data: { billing_exempt: world.wasExempt }, error: null };
       const s = world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: MID, cardpointe_env: "uat", billing_exempt: true } : world.settings;
       return { data: s ? { invoice_in_ghl: false, business_name: "Acme Sheds", ...s } : null, error: null };
     }
@@ -214,7 +230,7 @@ async function drive(
   world: World = {},
   { live = false, uat = true, operator = false }: { live?: boolean; uat?: boolean; operator?: boolean } = {},
 ) {
-  const trace: Trace = { gateway: [], writes: [], faults: [], audits: [], selects: [] };
+  const trace: Trace = { gateway: [], writes: [], faults: [], audits: [], auditReads: [], selects: [] };
   const touched = [...Object.keys(ENV), ...Object.keys(UAT_ENV), ...Object.keys(LIVE_ENV)];
   const saved = Object.fromEntries(touched.map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
@@ -393,16 +409,23 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
 
 // ─── 6. A database without 296 ─────────────────────────────────────────────────────────────────
 Deno.test("6. a database WITHOUT 296: the charge still goes through, on UAT, and the attempt is written without cp_env", async () => {
-  const r = await payments(CHARGE, { no296: true, settings: { payments_online_enabled: true, cardpointe_merchid: MID } }, { live: true });
+  // Today's one switched-on tenant: on, its own MID, non-billable, and (no column) the test system.
+  const TODAY = { payments_online_enabled: true, cardpointe_merchid: MID, billing_exempt: true };
+  const r = await payments(CHARGE, { no296: true, settings: TODAY }, { live: true });
   assertEquals(r.status, 200, r.text);
   assertEquals(r.trace.gateway.map((g) => `${g.system} ${g.path}`), ["uat /auth"]);
   const inserts = attemptInsert(r.trace);
   assertEquals(inserts.length, 2, "tried with cp_env, then without");
   assertEquals(["cp_env" in inserts[0].row, "cp_env" in inserts[1].row], [true, false]);
   assert(Array.isArray(inserts[1].row.sent_fields), "the 291 fields stay");
-  const c = await customer({ action: "pay", rail: "card", payToken: "9413948780281111", confirmChargeCents: 100000 }, { no296: true, settings: { payments_online_enabled: true, cardpointe_merchid: MID } });
+  const c = await customer({ action: "pay", rail: "card", payToken: "9413948780281111", confirmChargeCents: 100000 }, { no296: true, settings: TODAY });
   assertEquals(c.status, 200, c.text);
   assertEquals(c.trace.gateway.map((g) => g.system), ["uat"]);
+  // Without 296 every builder is on the test system, so a BILLABLE one switched on is refused: the
+  // test-mode rule does not wait for the column.
+  const billable = await payments(CHARGE, { no296: true, settings: { ...TODAY, billing_exempt: false } }, { live: true });
+  assertEquals([billable.status, billable.body.reason], [503, "test_mode_billable"], billable.text);
+  assertEquals(billable.trace.gateway, []);
   // A void reads the attempt's system tolerantly too.
   const v = await payments({ action: "void_payment", paymentId: "p-card" }, { no296: true, payments: [CARD], attempts: [{ id: 41, merchid: MID }] });
   assertEquals(v.status, 200, v.text);
@@ -533,4 +556,89 @@ Deno.test("10c. verify_payments and set_payments are refused to an operator with
   }
   const bill = await admin({ action: "verify_payments" }, { settings: UAT_ON, op: { ...noBill, can_bill: true } }, { operator: true });
   assertEquals([bill.status, bill.body.reachable], [200, true], bill.text);
+});
+
+Deno.test("10d. verify_payments passes ONLY on the gateway's not-found answer; any other 200 is reachable, not expected, and audited so", async () => {
+  const pass = await admin({ action: "verify_payments" }, { settings: UAT_ON, gateway: () => ({ respstat: "C", respcode: "29", resptext: "Txn not found" }) });
+  assertEquals([pass.status, pass.body.reachable, pass.body.expected], [200, true, true], pass.text);
+  for (const body of [{ respstat: "C", respcode: "8", resptext: "Invalid merchant" }, { respstat: "A", respcode: "00", retref: "rf-1" }, {}]) {
+    const r = await admin({ action: "verify_payments" }, { settings: UAT_ON, gateway: () => body });
+    assertEquals([r.status, r.body.reachable, r.body.expected], [200, true, false], `${JSON.stringify(body)}: ${r.text}`);
+    assertEquals(r.body.gateway?.resptext, (body as any).resptext, r.text);
+    const audit = r.trace.audits.find((a) => a.action === "verify_payments");
+    assert(audit && /reachable=true unexpected_answer$/.test(String(audit.note)), JSON.stringify(r.trace.audits));
+  }
+});
+
+Deno.test("10e. verify_payments checks one builder at most once every 10 seconds; a refused click sends and writes nothing", async () => {
+  const r = await admin({ action: "verify_payments" }, { settings: UAT_ON, audit: "recent" });
+  assertEquals(r.status, 429, r.text);
+  assert(/checked a few seconds ago/.test(r.body.error), r.text);
+  assertEquals(r.body.retryAfterSeconds, 10);
+  assertEquals(r.trace.gateway, [], "a refused click reached the gateway");
+  assertEquals(r.trace.audits.filter((a) => a.action === "verify_payments"), [], "a refused click wrote the row the window is read from");
+  // The window is read for THIS builder's checks that went out, in the last 10 seconds.
+  const ops = r.trace.auditReads[0] ?? [];
+  assertEquals([eqOf(ops, "action"), eqOf(ops, "target_client_id")], ["verify_payments", TENANT]);
+  const since = Date.parse(String(argOf(ops, "gte")[1]));
+  assert(Math.abs(Date.now() - 10_000 - since) < 5_000, `window starts ${argOf(ops, "gte")[1]}`);
+  // No recent check: it goes out. The audit read failing does not stop it (a quota guard, not money).
+  for (const world of [{ settings: UAT_ON }, { settings: UAT_ON, audit: "fail" as const }]) {
+    const ok = await admin({ action: "verify_payments" }, world);
+    assertEquals([ok.status, ok.trace.gateway.length], [200, 1], ok.text);
+  }
+  // Nothing to check (no MID, or a system with no credentials) answers at once, window or not.
+  const noMid = await admin({ action: "verify_payments" }, { settings: { ...UAT_ON, cardpointe_merchid: null }, audit: "recent" });
+  assertEquals([noMid.status, noMid.body.configError], [200, "No merchant id is set for this builder."], noMid.text);
+});
+
+// ─── 11. Test mode is for non-billable accounts only, at every door ───────────────────────────
+const UAT_BILLABLE = { ...UAT_ON, billing_exempt: false };
+Deno.test("11a. a BILLABLE builder switched on in test (a row changed by hand): refused at both money gates, nothing sent, filed", async () => {
+  for (const body of TAKES_MONEY) {
+    const r = await payments(body, { settings: UAT_BILLABLE }, { live: true });
+    assertEquals(r.status, 503, `${body.action}: ${r.text}`);
+    assertEquals(r.body.reason, "test_mode_billable", `${body.action}: ${r.text}`);
+    assertEquals(r.trace.gateway, [], `${body.action} reached a gateway`);
+    assert(faultCodes(r.trace).includes("payments_test_mode_billable"), `${body.action}: ${JSON.stringify(r.trace.faults)}`);
+    assertEquals(attemptInsert(r.trace), [], `${body.action} wrote an attempt`);
+  }
+  for (const body of [{ action: "pay_options" }, { action: "pay", rail: "card", payToken: "9413948780281111", confirmChargeCents: 100000 }]) {
+    const r = await customer(body, { settings: UAT_BILLABLE }, { live: true });
+    assertEquals(r.status, 503, `customer ${body.action}: ${r.text}`);
+    assertEquals(r.trace.gateway, [], `customer ${body.action} reached a gateway`);
+    assert(faultCodes(r.trace).includes("payments_test_mode_billable"), `customer ${body.action}: ${JSON.stringify(r.trace.faults)}`);
+  }
+  // The same builder on LIVE takes the charge: the rule is about the test system only.
+  const live = await payments(CHARGE, { settings: { ...UAT_BILLABLE, cardpointe_env: "prod" } }, { live: true });
+  assertEquals(live.status, 200, live.text);
+  // Money already taken is still given back: void and refund are not "taking money".
+  const v = await payments({ action: "void_payment", paymentId: "p-card" }, { settings: UAT_BILLABLE, payments: [CARD], attempts: [{ id: 41, merchid: MID, cp_env: "uat" }] });
+  assertEquals(v.status, 200, v.text);
+  assertEquals(v.trace.gateway.map((g) => `${g.system} ${g.path}`), ["uat /void"]);
+});
+
+const billingUpserts = (t: Trace) => t.writes.filter((w) => w.table === "client_settings" && w.verb === "upsert").map((w) => w.row);
+Deno.test("11b. set_billing refuses making a builder billable while they take cards in test, and writes nothing", async () => {
+  const r = await admin({ action: "set_billing", billingExempt: false, discountPercent: 10 }, { settings: UAT_ON, wasExempt: true });
+  assertEquals(r.status, 400, r.text);
+  assert(/takes card payments in test mode \(UAT\)/.test(r.body.error) && /Nothing was changed/.test(r.body.error), r.body.error);
+  assertEquals(billingUpserts(r.trace), [], "the discount sent with it was saved");
+  // A database without 296 reads as test, so the same refusal.
+  const old = await admin({ action: "set_billing", billingExempt: false }, { no296: true, settings: { payments_online_enabled: true, cardpointe_merchid: MID, billing_exempt: true }, wasExempt: true });
+  assertEquals(old.status, 400, old.text);
+});
+
+Deno.test("11c. set_billing still saves when the change does not create the state: payments off, live, already billable, or staying exempt", async () => {
+  const cases: [string, World, Record<string, unknown>][] = [
+    ["payments off", { settings: { ...UAT_ON, payments_online_enabled: false }, wasExempt: true }, { billingExempt: false }],
+    ["on live", { settings: { ...UAT_ON, cardpointe_env: "prod" }, wasExempt: true }, { billingExempt: false }],
+    ["already billable (the card sends false on every save)", { settings: UAT_BILLABLE, wasExempt: false }, { billingExempt: false, discountPercent: 5 }],
+    ["staying non-billable", { settings: UAT_ON, wasExempt: true }, { billingExempt: true, discountPercent: 5 }],
+  ];
+  for (const [label, world, body] of cases) {
+    const r = await admin({ action: "set_billing", ...body }, world);
+    assertEquals(r.status, 200, `${label}: ${r.text}`);
+    assertEquals(billingUpserts(r.trace).length, 1, label);
+  }
 });

@@ -936,6 +936,14 @@ function AdminApp() {
                     ? <span style={{ color: "#1D4ED8", fontWeight: 700 }}>LIVE</span>
                     : <span style={{ color: "#7E22CE", fontWeight: 700 }}>TEST (UAT)</span>}
                   {payLoaded.billingExempt ? <span style={{ color: "#64748B" }}> · non-billable account</span> : null}
+                  {/* The state set_payments and set_billing refuse to create, reached some other way
+                      (a row changed by hand): every card payment is refused until it is fixed. */}
+                  {payLoaded.paymentsEnabled && payLoaded.env !== "prod" && !payLoaded.billingExempt && (
+                    <div style={{ marginTop: 6, color: "#991B1B" }}>
+                      <b>Their customers can't pay right now:</b> test mode (UAT) is only for a non-billable account, so
+                      every card payment is refused. Switch them to Live, or switch payments off.
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -971,25 +979,39 @@ function AdminApp() {
                     {payVerify && payVerify.busy ? "Verifying…" : "Verify"}
                   </button>
                 </div>
-                {/* Verify's answer. Green only when the gateway answered with our credentials for
-                    this MID; its own words follow, because "answered" is not the same as "this is
-                    the right builder's account". */}
-                {payVerify && !payVerify.busy && (
-                  <div style={{ fontSize: 12.5, marginTop: 10, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
-                    background: payVerify.reachable ? "#F0FDF4" : "#FEF2F2", border: `1px solid ${payVerify.reachable ? "#BBF7D0" : "#FECACA"}`,
-                    color: payVerify.reachable ? "#166534" : "#991B1B" }}>
-                    {payVerify.error && !("reachable" in payVerify)
-                      ? <span><b>Couldn't verify:</b> {payVerify.error}</span>
-                      : payVerify.reachable
-                      ? <span>
-                          <b>Reachable.</b> The {payVerify.env === "prod" ? "live" : "test"} gateway accepted our credentials for the merchant id ending {payVerify.midLast4 || "?"}.
-                          {payVerify.gateway && (payVerify.gateway.resptext || payVerify.gateway.respcode)
-                            ? <span> It said: “{String(payVerify.gateway.resptext || "")}”{payVerify.gateway.respcode ? ` (${payVerify.gateway.respcode})` : ""}.</span>
-                            : null}
-                        </span>
-                      : <span><b>Not reachable.</b> {payVerify.configError || payVerify.error || "No answer."}</span>}
-                  </div>
-                )}
+                {/* Verify's answer. GREEN only for the gateway's known "not found" answer to a
+                    never-used order id (expected: respcode 29). Any other answer is AMBER: our login
+                    worked, but a 200 can carry an error about the MID itself. RED when nothing
+                    usable came back. The gateway's own words always follow, and even green does not
+                    prove this is the right builder's account, so it says so. */}
+                {payVerify && !payVerify.busy && (() => {
+                  const tone = payVerify.reachable && payVerify.expected ? "ok" : payVerify.reachable ? "warn" : "bad";
+                  const C = { ok: ["#F0FDF4", "#BBF7D0", "#166534"], warn: ["#FFFBEB", "#FDE68A", "#92400E"], bad: ["#FEF2F2", "#FECACA", "#991B1B"] }[tone];
+                  const sys = payVerify.env === "prod" ? "live" : "test";
+                  const said = payVerify.gateway && (payVerify.gateway.resptext || payVerify.gateway.respcode)
+                    ? <span> It said: “{String(payVerify.gateway.resptext || "")}”{payVerify.gateway.respcode ? ` (${payVerify.gateway.respcode})` : ""}.</span>
+                    : <span> It gave no message.</span>;
+                  return (
+                    <div data-pay-verify={tone} style={{ fontSize: 12.5, marginTop: 10, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
+                      background: C[0], border: `1px solid ${C[1]}`, color: C[2] }}>
+                      {payVerify.error && !("reachable" in payVerify)
+                        ? <span><b>Couldn't verify:</b> {payVerify.error}</span>
+                        : tone === "ok"
+                        ? <span>
+                            <b>Reachable.</b> The {sys} gateway accepted our login and answered for the merchant id ending {payVerify.midLast4 || "?"} with
+                            the reply a check expects (no such order).{said} This does not prove the id is the right builder's, so
+                            check it against their boarding paperwork.
+                          </span>
+                        : tone === "warn"
+                        ? <span>
+                            <b>Answered, but not as expected.</b> The {sys} gateway accepted our login, but its reply for the
+                            merchant id ending {payVerify.midLast4 || "?"} is not the “Txn not found” (29) a check should get.{said} Read
+                            it before relying on this account.
+                          </span>
+                        : <span><b>Not reachable.</b> {payVerify.configError || payVerify.error || "No answer."}</span>}
+                    </div>
+                  );
+                })()}
                 <div style={{ fontSize: 11.5, color: "#78350F", marginTop: 6 }}>
                   Digits only — no spaces, dashes or letters. A mistyped id is not rejected by anyone
                   downstream; it just sends the money somewhere else. Clearing the box removes the id.
