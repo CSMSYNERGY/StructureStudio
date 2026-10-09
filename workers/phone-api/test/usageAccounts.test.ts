@@ -1,21 +1,25 @@
 // Workstream 2, phase 7: Twilio's daily usage per account (cron/usageCharge.ts snapshotTwilioUsage).
 //
 // What is pinned:
-//   * the parent alone (IncludeSubaccounts=false), its rows with no account_sid (NULL = the parent),
-//     on migration 298's key (day, account_sid, category);
-//   * before 298 (42P10, no such key) the same rows go in on today's (day, category) key, and that
-//     is logged once at info: the Worker deploys safely before or after 298;
-//   * switch off: not one extra read (no twilio_accounts, no twilio_account_creds);
-//   * switch on (or manual): each active sub in its OWN account (its key pair on its own path), its
-//     rows carrying its account SID; a sub that collides with the old primary key (23505, migration
-//     299 not applied yet) is skipped and logged, and the parent and the other subs are still written;
+//   * switch off (and switch on with no active sub-account): the parent's request is exactly the one
+//     it always was (yesterday, Twilio's default, so sub-accounts stay folded in and nothing is lost:
+//     review 2026-10-09), its rows with no account_sid (NULL = the parent) on migration 298's key
+//     (day, account_sid, category); not one extra read while off;
+//   * before 298 (42P10, no such key) or before 292's column (42703 / PGRST204) the same rows go in
+//     on today's (day, category) key, and that is logged once at info: the Worker deploys safely
+//     before or after 298 (and 292);
+//   * switch on (or manual) with active subs: the parent asks for its OWN usage (IncludeSubaccounts=
+//     false) over the same window as the subs; each active sub in its OWN account (its key pair on
+//     its own path), its rows carrying its account SID, over USAGE_LOOKBACK_DAYS days; a sub that
+//     collides with the old primary key (23505, migration 299 not applied yet) is skipped and logged
+//     at ERROR (its usage is in nobody's row), and the parent and the other subs are still written;
 //   * with more subs than USAGE_SUBS_PER_RUN they take turns by day, each asking for every day since
-//     its last turn, and each row keeps its own day.
+//     its last turn (or the look-back, whichever is longer), and each row keeps its own day.
 // Every SID, key and token below is made up.
 import { describe, expect, it } from "vitest";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
-import { snapshotTwilioUsage, USAGE_ACCOUNT_KEY, USAGE_SUBS_PER_RUN } from "../src/cron/usageCharge";
+import { snapshotTwilioUsage, USAGE_ACCOUNT_KEY, USAGE_LOOKBACK_DAYS, USAGE_SUBS_PER_RUN } from "../src/cron/usageCharge";
 import { FakeNet, filter, jsonRes, makeEnv } from "./helpers";
 
 const PARENT = "AC" + "0".repeat(32);
@@ -43,13 +47,13 @@ function world(env = makeEnv({ PHONE_USAGE_COST_CAPTURE: "on" })) {
 }
 
 describe("twilio_usage_daily per account", () => {
-  it("switch off: the parent alone, IncludeSubaccounts=false, no account_sid, on 298's key, nothing else read", async () => {
+  it("switch off: the parent's request as it always was (sub-accounts folded in), no account_sid, on 298's key, nothing else read", async () => {
     const { net, env } = world();
     net.rest("POST", "twilio_usage_daily", () => []);
     const out = await snapshotTwilioUsage(env, adminClient(env), AT);
-    expect(out).toEqual({ ran: true, day: "2026-10-09", rows: 1, key: "account", subs: 0, subRows: 0, subsFailed: 0 });
+    expect(out).toEqual({ ran: true, day: "2026-10-09", rows: 1, key: "account", parentAlone: false, from: "2026-10-09", subs: 0, subRows: 0, subsFailed: 0 });
     const q = net.to(/Usage\/Records/)[0].url.searchParams;
-    expect([q.get("StartDate"), q.get("EndDate"), q.get("IncludeSubaccounts")]).toEqual(["2026-10-09", "2026-10-09", "false"]);
+    expect([q.get("StartDate"), q.get("EndDate"), q.has("IncludeSubaccounts")]).toEqual(["2026-10-09", "2026-10-09", false]);
     const up = net.writes("twilio_usage_daily", "POST");
     expect(up).toHaveLength(1);
     expect(up[0].url.searchParams.get("on_conflict")).toBe(USAGE_ACCOUNT_KEY);
@@ -58,17 +62,42 @@ describe("twilio_usage_daily per account", () => {
     expect(net.rpcCalls("twilio_account_creds")).toHaveLength(0);
   });
 
-  it("before migration 298 (42P10): the same rows on (day, category), logged once at info", async () => {
-    const { net, env } = world();
-    net.rest("POST", "twilio_usage_daily", (s) => s.url.searchParams.get("on_conflict") === USAGE_ACCOUNT_KEY
-      ? jsonRes({ code: "42P10", message: "there is no unique or exclusion constraint matching the ON CONFLICT specification" }, 400)
-      : []);
+  for (const [code, why] of [["42P10", "migration 298 (no such key)"], ["42703", "migration 292 (no account_sid column)"], ["PGRST204", "292, as PostgREST says it"]] as const) {
+    it(`before ${why}, ${code}: the same rows on (day, category), logged at info, nothing lost`, async () => {
+      const { net, env } = world();
+      net.rest("POST", "twilio_usage_daily", (s) => s.url.searchParams.get("on_conflict") === USAGE_ACCOUNT_KEY
+        ? jsonRes({ code, message: "the key or the column is not there yet" }, 400)
+        : []);
+      const out = await snapshotTwilioUsage(env, adminClient(env), AT);
+      expect(out.ran && out.key).toBe("legacy");
+      const up = net.writes("twilio_usage_daily", "POST").map((s) => [s.url.searchParams.get("on_conflict"), s.json]);
+      expect(up[1]).toEqual(["day,category", up[0][1]]);
+      expect(JSON.stringify(up[1][1])).not.toContain("account_sid");
+      const logged = net.writes("app_errors", "POST").map((s) => s.json);
+      expect(logged.map((r) => [r.code, r.severity])).toEqual([["twilio_usage_key_pending", "info"]]);
+    });
+  }
+
+  it("switch on with no active sub-account yet: exactly the switch-off request, nothing lost", async () => {
+    const { net, env: base } = world();
+    const env = { ...base, TWILIO_SUBACCOUNTS: "manual" };
+    net.rest("GET", "twilio_accounts", () => []);
+    net.rest("POST", "twilio_usage_daily", () => []);
     const out = await snapshotTwilioUsage(env, adminClient(env), AT);
-    expect(out.ran && out.key).toBe("legacy");
-    const up = net.writes("twilio_usage_daily", "POST").map((s) => [s.url.searchParams.get("on_conflict"), s.json]);
-    expect(up[1]).toEqual(["day,category", up[0][1]]);
-    const logged = net.writes("app_errors", "POST").map((s) => s.json);
-    expect(logged.map((r) => [r.code, r.severity])).toEqual([["twilio_usage_key_pending", "info"]]);
+    expect(out.ran && [out.parentAlone, out.from, out.subs]).toEqual([false, "2026-10-09", 0]);
+    const q = net.to(/Usage\/Records/)[0].url.searchParams;
+    expect([q.get("StartDate"), q.has("IncludeSubaccounts")]).toEqual(["2026-10-09", false]);
+  });
+
+  it("switch on, the sub-account list unreadable: the parent with sub-accounts folded in, so the total stays whole", async () => {
+    const { net, env: base } = world();
+    const env = { ...base, TWILIO_SUBACCOUNTS: "on" };
+    net.rest("GET", "twilio_accounts", () => jsonRes({ code: "57014", message: "statement timeout" }, 500));
+    net.rest("POST", "twilio_usage_daily", () => []);
+    const out = await snapshotTwilioUsage(env, adminClient(env), AT);
+    expect(out.ran && out.parentAlone).toBe(false);
+    expect(net.to(/Usage\/Records/)[0].url.searchParams.has("IncludeSubaccounts")).toBe(false);
+    expect(net.writes("app_errors", "POST").map((s) => s.json.code)).toContain("twilio_usage_subs_failed");
   });
 
   it("switch on: each active sub in its own account, its rows with its SID; a sub on the old key is skipped, the rest written", async () => {
@@ -85,17 +114,23 @@ describe("twilio_usage_daily per account", () => {
       ? jsonRes({ code: "23505", message: "duplicate key value violates unique constraint \"twilio_usage_daily_pkey\"" }, 409)
       : []));
     const out = await snapshotTwilioUsage(env, adminClient(env), AT);
-    expect(out).toEqual({ ran: true, day: "2026-10-09", rows: 1, key: "account", subs: 2, subRows: 1, subsFailed: 1 });
+    expect(out).toEqual({ ran: true, day: "2026-10-09", rows: 1, key: "account", parentAlone: true, from: "2026-10-07", subs: 2, subRows: 1, subsFailed: 1 });
+    // The parent: its OWN usage, over the same window as the subs.
+    const parentQ = net.to(new RegExp(`Accounts/${PARENT}/Usage`))[0].url.searchParams;
+    expect([parentQ.get("StartDate"), parentQ.get("EndDate"), parentQ.get("IncludeSubaccounts")]).toEqual(["2026-10-07", "2026-10-09", "false"]);
     const subCall = net.to(new RegExp(`Accounts/${SUB}/Usage`))[0];
     expect(subCall.headers.get("authorization")).toBe(basic(SUB_KEY, SUB_SECRET));
-    expect(subCall.url.searchParams.get("IncludeSubaccounts")).toBe("false");
+    expect([subCall.url.searchParams.get("StartDate"), subCall.url.searchParams.get("IncludeSubaccounts")]).toEqual(["2026-10-07", "false"]);
+    expect(USAGE_LOOKBACK_DAYS).toBe(3);
     const writes = net.writes("twilio_usage_daily", "POST").map((s) => s.json);
     expect(writes[0][0].account_sid).toBeUndefined();
     // client_id order: other-builder (refused on the old key) first, then sub-builder (written).
     expect(writes[1][0].account_sid).toBe(OTHER);
     expect(writes[2]).toEqual([{ day: "2026-10-09", account_sid: SUB, category: "calls-inbound", count: 2, usage: 5, price_micros: 85000, fetched_at: AT.toISOString() }]);
     const logged = net.writes("app_errors", "POST").map((s) => s.json);
-    expect(logged.map((r) => [r.code, r.severity, r.client_id])).toEqual([["twilio_usage_sub_key_pending", "info", "other-builder"]]);
+    // ERROR, not info (review 2026-10-09): with the parent asking for its own alone, that sub's
+    // usage is in nobody's row until 299 is applied.
+    expect(logged.map((r) => [r.code, r.severity, r.client_id])).toEqual([["twilio_usage_sub_key_pending", "error", "other-builder"]]);
   });
 
   it(`more than ${USAGE_SUBS_PER_RUN} subs: they take turns by day, each asking every day since its last turn`, async () => {
@@ -109,10 +144,11 @@ describe("twilio_usage_daily per account", () => {
       () => usage([rec("calls-inbound", "0.01", "2026-10-08"), rec("calls-inbound", "0.02", "2026-10-09")]));
     net.rest("POST", "twilio_usage_daily", () => []);
     const out = await snapshotTwilioUsage(env, adminClient(env), AT);
-    // 51 subs → 2 turns; 2026-10-09 is day 20735 since the epoch → turn 1: the last one only.
+    // 51 subs → 2 turns; 2026-10-09 is day 20735 since the epoch → turn 1: the last one only. The
+    // window is the look-back (3 days), longer than the 2 turns.
     expect(out.ran && [out.subs, out.subRows]).toEqual([1, 2]);
     const q = net.to(/Usage\/Records/).filter((s) => !s.url.pathname.includes(PARENT))[0].url.searchParams;
-    expect([q.get("StartDate"), q.get("EndDate")]).toEqual(["2026-10-08", "2026-10-09"]);
+    expect([q.get("StartDate"), q.get("EndDate")]).toEqual(["2026-10-07", "2026-10-09"]);
     const subWrite = net.writes("twilio_usage_daily", "POST")[1].json;
     expect(subWrite.map((r: { day: string }) => r.day)).toEqual(["2026-10-08", "2026-10-09"]);
   });

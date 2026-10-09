@@ -10,6 +10,10 @@
 --       twilio_usage_key_pending row after it (that row means it fell back to the old key).
 --    An OLD Worker still upserts on (day, category): with that key gone its 09:00 run fails (42P10)
 --    and the day's usage is not stored. That is the one way this goes wrong, and step 2 rules it out.
+--    ⚠️ So, once this is applied, NEVER ROLL phone-api BACK to a version from before phase 7 (its
+--    upsert names (day, category)); to go further back, run the ROLLBACK below first.
+--    ⚠️ Apply this BEFORE TWILIO_SUBACCOUNTS leaves off (SETUP.md 7f step 9): from then on each
+--    sub-account's usage is stored apart, and with the old key still here it collides and is lost.
 --    Pipe this file to `supabase db query --linked` (stdin), then record it:
 --      insert into supabase_migrations.schema_migrations (version, name) values ('299', '299_twilio_usage_drop_day_key') returning version, name;
 --    NEVER `supabase db push`. THE RECORD at the end is what the apply shows.

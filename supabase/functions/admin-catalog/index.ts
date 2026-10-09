@@ -355,10 +355,15 @@ async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string):
   // server cap of 500 with `offset += PAGE` would silently skip rows 500–999 of every page.
   let offset = 0;
   while (offset < 20_000) {
+    // Workstream 2, phase 7: one row per day, ACCOUNT and category, so (day, category) is no longer
+    // unique and offset paging over it could repeat or skip rows past a page (review 2026-10-09).
+    // account_sid completes the order: (day, category, account_sid) is 298's key, the parent's NULL
+    // first.
     const { data, error } = await sb.from("twilio_usage_daily")
       .select("day, category, count, usage, price_micros")
       .gte("day", firstDay).lt("day", nextFirstDay)
       .order("day", { ascending: true }).order("category", { ascending: true })
+      .order("account_sid", { ascending: true, nullsFirst: true })
       .range(offset, offset + PAGE - 1);
     if (error) throw phoneBillingDbError(error);
     const batch = (data ?? []) as TwilioDailyRow[];

@@ -1352,8 +1352,13 @@ export type UsageSnapshotSummary =
   | {
     ran: true; day: string; rows: number;
     /** Which key the parent's rows went in on: "account" (day, account_sid, category: migration
-     *  298's) or "legacy" (day, category: 298 not applied yet, today's key). */
+     *  298's) or "legacy" (day, category: 298, or 292's column, not applied yet; today's key). */
     key: "account" | "legacy";
+    /** Was the parent asked for its OWN usage alone (sub-accounts asked separately this run)?
+     *  false = Twilio's default, every sub-account's usage folded into the parent's rows. */
+    parentAlone: boolean;
+    /** The first day this run asked for (= `day` unless sub-accounts were asked: the window). */
+    from: string;
     /** Sub-accounts asked this run, the rows they gave, and how many were left out. */
     subs: number; subRows: number; subsFailed: number;
   };
@@ -1365,76 +1370,98 @@ export const USAGE_LEGACY_KEY = "day,category";
 /** Sub-accounts asked per daily run. With more, they take turns by day, each asking for every day
  *  since its last turn (a window as long as the number of turns), so no day is missed. */
 export const USAGE_SUBS_PER_RUN = 50;
+/** While sub-accounts are asked, every account asks for at least this many days back (review
+ *  2026-10-09), so a sub left out of one run (a lookup that failed, Twilio down, migration 299 a day
+ *  late) is filled in by the next ones, and late usage Twilio adds to a recent day is picked up. */
+export const USAGE_LOOKBACK_DAYS = 3;
+
+/** The upsert refusals that mean "this key is not there yet": no matching unique constraint
+ *  (42P10: migration 298), no account_sid column (42703, or PostgREST's PGRST204: migration 292). */
+const KEY_PENDING = new Set(["42P10", "42703", "PGRST204"]);
 
 /**
- * Yesterday's Usage Records into twilio_usage_daily, one row per (day, account, category), so a
- * rerun refreshes the day. What each account was really billed, to check the per-item costs and
- * the carrier-fee estimate against. Runs with cost capture, like the shadow rows.
+ * Twilio's Usage Records into twilio_usage_daily, one row per (day, account, category), so a rerun
+ * refreshes the day. What each account was really billed, to check the per-item costs and the
+ * carrier-fee estimate against. Runs with cost capture, like the shadow rows.
  *
- * WORKSTREAM 2, PHASE 7, AND THE ORDER THAT KEEPS THE 09:00 RUN WORKING (SETUP.md 7f):
- *   1. THE PARENT, ALONE: IncludeSubaccounts=false, so its rows are its own usage and never its
- *      sub-accounts' again. Its rows carry no account_sid (NULL = the parent, migration 292's one
- *      encoding) and go in on migration 298's key (day, account_sid, category; UNIQUE NULLS NOT
- *      DISTINCT, so the parent's NULL matches itself). Before 298 is applied that key does not
- *      exist (42P10): the rows go in on today's primary key instead, exactly as before, and
- *      twilio_usage_key_pending is logged once (info). So this Worker deploys safely before or
- *      after 298, and 299 (which drops the old key) can only follow once it is live.
- *   2. EACH ACTIVE SUB-ACCOUNT, in its own account (envForClient: its own credentials), only while
- *      TWILIO_SUBACCOUNTS is on or manual. Its rows carry its account SID. Until 299 drops the old
- *      (day, category) primary key a sub's row collides with the parent's for the same day and
- *      category (23505): that sub is skipped and twilio_usage_sub_key_pending logged (info), and
- *      nothing else is touched. A sub that fails any other way is logged and skipped; the parent
- *      and the other subs are always written.
- * Switch off: the parent's step only, the same rows as before 298 (plus IncludeSubaccounts=false,
- * which changes nothing while there are no sub-accounts and keeps a test sub out of the parent's).
+ * WORKSTREAM 2, PHASE 7, AND THE ORDER THAT KEEPS THE 09:00 RUN WORKING (SETUP.md 7f step 9):
+ *   1. WHICH ACCOUNTS, FIRST. Only while TWILIO_SUBACCOUNTS is on or manual, and only when at least
+ *      one ACTIVE sub-account exists, are sub-accounts asked separately. Otherwise (the switch off,
+ *      no sub-account yet, or the list could not be read) nothing changes from before phase 7: the
+ *      parent is asked for yesterday with Twilio's default, which folds every sub-account's usage
+ *      into its own records, so the account's total is whole and nothing is counted twice or lost
+ *      (review 2026-10-09: asking for the parent alone with no sub asked lost a test sub's usage).
+ *   2. THE PARENT. With sub-accounts asked: its OWN usage (IncludeSubaccounts=false) for the same
+ *      window as the subs, so every day in the window holds the parent's own rows plus each sub's,
+ *      even on the day the switch flips. Its rows carry no account_sid (NULL = the parent, 292's one
+ *      encoding) and go in on 298's key (UNIQUE NULLS NOT DISTINCT, so the parent's NULL matches
+ *      itself). Without 298 (42P10), or without 292's column (42703 / PGRST204), they go in on
+ *      today's (day, category) key instead and twilio_usage_key_pending is logged once (info): this
+ *      Worker deploys safely before or after 298.
+ *   3. EACH ACTIVE SUB-ACCOUNT in its own account (envForClient: its own credentials), its rows
+ *      carrying its SID, over a window of max(USAGE_LOOKBACK_DAYS, the number of turns) days ending
+ *      yesterday. Until 299 drops the old (day, category) primary key a sub's row collides with the
+ *      parent's (23505): that sub is skipped and twilio_usage_sub_key_pending logged at ERROR, because
+ *      its usage is then in nobody's row (SETUP 7f: 299 comes BEFORE the switch leaves off; the
+ *      look-back refills the days once it is applied). Any other failure is twilio_usage_sub_failed.
+ *      The parent and the other subs are always written.
  */
 export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date()): Promise<UsageSnapshotSummary> {
   if (env.PHONE_USAGE_METERS !== "on" && env.PHONE_USAGE_COST_CAPTURE === "off") return { ran: false, reason: "switched_off" };
   if (!twilioConfigured(env)) return { ran: false, reason: "not_configured" };
   const day = previousUtcDay(now);
   const fetchedAt = now.toISOString();
-  const records = await listUsageDaily(env, day, { includeSubaccounts: false });
+
+  // ── 1. Which accounts ────────────────────────────────────────────────────────────────────
+  let plan: UsagePlan = { accounts: [], total: 0, from: day };
+  if (subaccountsOnFor(env)) {
+    try {
+      plan = await usageAccounts(env, admin, day);
+    } catch (e) {
+      await logFault({ code: "twilio_usage_subs_failed", throttleMs: 60 * 60_000, message: `Listing the sub-accounts for usage failed: ${(e as Error)?.message ?? "unknown"}` }).catch(() => {});
+    }
+  }
+  const parentAlone = plan.total > 0;
+  const from = parentAlone ? plan.from : day;
+
+  // ── 2. The parent ────────────────────────────────────────────────────────────────────────
+  const records = await listUsageDaily(env, day, parentAlone ? { from, includeSubaccounts: false } : {});
   let key: "account" | "legacy" = "account";
   if (records.length) {
     const rows = records.map((r) => ({
       day: r.day, category: r.category, count: r.count, usage: r.usage, price_micros: r.priceMicros, fetched_at: fetchedAt,
     }));
     const res = await admin.from("twilio_usage_daily").upsert(rows, { onConflict: USAGE_ACCOUNT_KEY });
-    if (res.error && String(res.error.code ?? "") === "42P10") {
-      // Migration 298 not applied yet: today's key, today's rows.
+    if (res.error && KEY_PENDING.has(String(res.error.code ?? ""))) {
+      // Migration 298 (or 292's column) not applied yet: today's key, today's rows.
       must(await admin.from("twilio_usage_daily").upsert(rows, { onConflict: USAGE_LEGACY_KEY }), "upsert twilio_usage_daily");
       key = "legacy";
       await logFault({
         code: "twilio_usage_key_pending", severity: "info", once: true,
-        message: "twilio_usage_daily has no (day, account_sid, category) key yet (migration 298): the parent's usage went in on (day, category).",
+        message: `twilio_usage_daily has no (day, account_sid, category) key yet (migration 298, or 292's column; ${String(res.error.code)}): the parent's usage went in on (day, category).`,
       }).catch(() => {});
     } else {
       must(res, "upsert twilio_usage_daily");
     }
   }
 
-  // ── Each active sub-account, in its own account ──────────────────────────────────────────
-  let subs: UsageAccount[] = [];
-  try {
-    subs = await usageAccounts(env, admin, day);
-  } catch (e) {
-    await logFault({ code: "twilio_usage_subs_failed", throttleMs: 60 * 60_000, message: `Listing the sub-accounts for usage failed: ${(e as Error)?.message ?? "unknown"}` }).catch(() => {});
-  }
+  // ── 3. Each active sub-account, in its own account ───────────────────────────────────────
   let subRows = 0, subsFailed = 0;
-  for (const s of subs) {
+  for (const s of plan.accounts) {
     try {
-      const recs = await listUsageDaily(s.env, day, { from: s.from, includeSubaccounts: false });
+      const recs = await listUsageDaily(s.env, day, { from, includeSubaccounts: false });
       if (!recs.length) continue;
       const res = await admin.from("twilio_usage_daily").upsert(recs.map((r) => ({
         day: r.day, account_sid: s.accountSid, category: r.category, count: r.count, usage: r.usage, price_micros: r.priceMicros, fetched_at: fetchedAt,
       })), { onConflict: USAGE_ACCOUNT_KEY });
       const code = String(res.error?.code ?? "");
-      if (code === "23505" || code === "42P10") {
-        // The old (day, category) key is still there (299 not applied), or 298's is not yet.
+      if (code === "23505" || KEY_PENDING.has(code)) {
+        // The old (day, category) key is still there (299 not applied), or 298's is not yet: this
+        // sub's usage is in nobody's row until it is (the parent asked for its own alone).
         subsFailed++;
         await logFault({
-          code: "twilio_usage_sub_key_pending", severity: "info", clientId: s.clientId, throttleMs: 60 * 60_000,
-          message: `A sub-account's usage was not stored: twilio_usage_daily is still keyed for the parent alone (migrations 298/299, ${code}).`,
+          code: "twilio_usage_sub_key_pending", clientId: s.clientId, throttleMs: 60 * 60_000,
+          message: `A sub-account's usage was not stored: twilio_usage_daily is still keyed for the parent alone (migrations 298/299, ${code}). Apply them; the next runs refill the last ${USAGE_LOOKBACK_DAYS} days.`,
         }).catch(() => {});
         continue;
       }
@@ -1448,29 +1475,38 @@ export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date
       }).catch(() => {});
     }
   }
-  return { ran: true, day, rows: records.length, key, subs: subs.length, subRows, subsFailed };
+  return { ran: true, day, rows: records.length, key, parentAlone, from, subs: plan.accounts.length, subRows, subsFailed };
 }
 
-type UsageAccount = { clientId: string; accountSid: string; env: Env; from: string | undefined };
+type UsageAccount = { clientId: string; accountSid: string; env: Env };
+type UsagePlan = {
+  /** The sub-accounts this run asks, each as its own scoped Env. */
+  accounts: UsageAccount[];
+  /** Every active sub-account, asked this run or not (> 0 = the parent asks for its own alone). */
+  total: number;
+  /** The first day every account asks for. */
+  from: string;
+};
 
 /**
- * The sub-accounts this run asks, each as its own scoped Env. Switch off: none, nothing read. With
- * more than USAGE_SUBS_PER_RUN, they take turns by day (in client_id order), and each asks for
- * every day since its last turn, so the usage of each day is stored once its turn comes.
+ * The sub-accounts this run asks. With more than USAGE_SUBS_PER_RUN, they take turns by day (in
+ * client_id order). The window is max(USAGE_LOOKBACK_DAYS, the number of turns) days ending
+ * yesterday, so each day is stored once a sub's turn comes, and a day a sub was left out of is
+ * filled in by the next runs. A sub whose account cannot be resolved is logged and left out.
  */
-async function usageAccounts(env: Env, admin: Admin, day: string): Promise<UsageAccount[]> {
-  if (!subaccountsOnFor(env)) return [];
+async function usageAccounts(env: Env, admin: Admin, day: string): Promise<UsagePlan> {
   const { data, error } = await admin.from("twilio_accounts").select("client_id").eq("kind", "sub").eq("status", "active");
   if (error) throw new Error(`twilio_accounts (${(error as { code?: string }).code ?? "no code"})`);
   const all = [...((data as { client_id: string }[] | null) ?? [])].map((r) => String(r.client_id)).sort();
   const turns = Math.max(1, Math.ceil(all.length / USAGE_SUBS_PER_RUN));
   const turn = Math.floor(Date.parse(`${day}T00:00:00Z`) / 86_400_000) % turns;
-  const from = turns > 1 ? new Date(Date.parse(`${day}T00:00:00Z`) - (turns - 1) * 86_400_000).toISOString().slice(0, 10) : undefined;
-  const out: UsageAccount[] = [];
+  const days = Math.max(USAGE_LOOKBACK_DAYS, turns);
+  const from = new Date(Date.parse(`${day}T00:00:00Z`) - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+  const accounts: UsageAccount[] = [];
   for (const clientId of all.slice(turn * USAGE_SUBS_PER_RUN, (turn + 1) * USAGE_SUBS_PER_RUN)) {
     try {
       const scoped = await envForClient(env, admin, clientId);
-      if (scoped !== env && scoped.TWILIO_ACCOUNT_SID) out.push({ clientId, accountSid: scoped.TWILIO_ACCOUNT_SID, env: scoped, from });
+      if (scoped !== env && scoped.TWILIO_ACCOUNT_SID) accounts.push({ clientId, accountSid: scoped.TWILIO_ACCOUNT_SID, env: scoped });
     } catch (e) {
       await logFault({
         code: "twilio_account_lookup_failed", clientId, throttleMs: 60 * 60_000,
@@ -1478,5 +1514,5 @@ async function usageAccounts(env: Env, admin: Admin, day: string): Promise<Usage
       }).catch(() => {});
     }
   }
-  return out;
+  return { accounts, total: all.length, from };
 }
