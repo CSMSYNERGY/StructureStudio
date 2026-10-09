@@ -159,11 +159,55 @@ jobs:
             echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
           fi
 
+      # Workstream 4 B3 (2026-10-09): Projects items that a commit's `Projects:` trailer put On Beta
+      # move to Done once that commit is in this promotion. release-ci decides per item (only an item
+      # whose newest On Beta commit is among the merged shas; anything set by hand is reported, not
+      # moved). Skips with a warning while RELEASE_NOTES_FROM_GIT is not "on" or the secret is missing,
+      # and never fails the run: the merge has already shipped.
+      - name: Move On Beta items to Done
+        id: onbeta
+        if: ${{ success() }}
+        env:
+          RELEASE_CI_SECRET: ${{ secrets.RELEASE_CI_SECRET }}
+          MODE: ${{ vars.RELEASE_NOTES_FROM_GIT }}
+          FUNCTION_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/release-ci"
+        run: |
+          set -uo pipefail
+          if [ -z "${RELEASE_CI_SECRET:-}" ] || [ "${MODE:-off}" != "on" ]; then
+            echo "::warning::On Beta items were not moved (RELEASE_NOTES_FROM_GIT is '${MODE:-unset}', or RELEASE_CI_SECRET is missing)."
+            echo "onbeta_result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The commits this merge brought in: first parent (main before) .. second parent (beta).
+          # Capped with git's own --max-count, never a pipe into head (see the merge step's note).
+          SHAS="$(git rev-list --max-count=5000 HEAD^1..HEAD^2)"
+          BODY="$(printf '%s\n' "$SHAS" | jq -R 'select(length > 0)' | jq -s '{action: "released", mergedShas: .}')"
+          RESP="$(curl -sS -X POST "$FUNCTION_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-release-ci-key: ${RELEASE_CI_SECRET}" \
+            -d "$BODY")" || {
+              echo "::error::Could not reach release-ci to move On Beta items."
+              echo "onbeta_result=FAILED (network)" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          if ! printf '%s' "$RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+            MSG="$(printf '%s' "$RESP" | jq -r '.error // "unknown error"' 2>/dev/null || echo "unparseable response")"
+            echo "::error::release-ci refused the On Beta move: ${MSG}"
+            echo "onbeta_result=FAILED (${MSG})" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Counts only: item ids and titles stay out of this public log.
+          SUMMARY="$(printf '%s' "$RESP" | jq -r '[.counts // {} | to_entries[] | "\(.value) \(.key)"] | join(", ")')"
+          DRY="$(printf '%s' "$RESP" | jq -r 'if .dryRun then " (dry run: RELEASE_CI_WRITES is off)" else "" end')"
+          echo "On Beta items: ${SUMMARY:-none on beta}${DRY}"
+          echo "onbeta_result=${SUMMARY:-none on beta}${DRY}" >> "$GITHUB_OUTPUT"
+
       - name: Report to Projects
         if: ${{ always() && env.SUPABASE_SERVICE_ROLE_KEY != '' }}
         env:
           JOB_STATUS: ${{ job.status }}
           NOTES_RESULT: ${{ steps.notes.outputs.notes_result }}
+          ONBETA_RESULT: ${{ steps.onbeta.outputs.onbeta_result }}
           RESULT: ${{ steps.merge.outputs.result }}
           MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
           COMMITS: ${{ steps.merge.outputs.commits }}
@@ -190,6 +234,7 @@ jobs:
           Result: ${RESULT:-n/a}
           Merge commit: ${MERGED_SHA:-n/a}
           Release notes: ${NOTES_RESULT:-not attempted}
+          On Beta items: ${ONBETA_RESULT:-not attempted}
 
           Commits promoted from beta:
           ${COMMITS}"
