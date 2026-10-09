@@ -41,11 +41,11 @@ import {
 } from "../_shared/twilioTrustHub.ts";
 // Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
 import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
-import { resolveTwilioAccount, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
+import { resolveTwilioAccount, subaccountsMode, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
 // Workstream 2, phase 3: the builder's own sub-account is made on their first submit (and checked
 // again before a number is bought), and a NEW registration waits for the switch (registrationGate.ts).
-import { ensureRefusalSentence, ensureTwilioAccount } from "../_shared/twilioProvision.ts";
-import { smsSignupRefusal, type RegistrationLike } from "./registrationGate.ts";
+import { ensureRefusalSentence, ensureTwilioAccount, SUB_WHILE_OFF_SENTENCE, subAccountWhileOff } from "../_shared/twilioProvision.ts";
+import { registrationUnreachable, smsSignupRefusal, type RegistrationLike } from "./registrationGate.ts";
 // My Synergy Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
 import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
 
@@ -445,24 +445,34 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   let twilioMemo: Promise<TwilioAccount | null> | null = null;
   const tenantCreds = (): Promise<TwilioAccount | null> =>
     (twilioMemo ??= resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k)));
-  const subaccountsSwitch = () => subaccountsOn((k) => Deno.env.get(k));
+  // TWILIO_SUBACCOUNTS: "on" makes sub-accounts by themselves, "manual" only uses the ones an
+  // operator made, off is today (twilioAccount.ts subaccountsMode).
+  const switchMode = () => subaccountsMode((k) => Deno.env.get(k));
+  const subaccountsSwitch = () => switchMode() === "on";
 
   // ── WHO MAY START A REGISTRATION (Workstream 2, phase 3: registrationGate.ts) ──────────────
-  // While TWILIO_SUBACCOUNTS is off, a NEW registration would be made on the parent account and
-  // stay there for good, so it is refused; one already under way, our internal account and a
-  // tenant pinned to the parent are not. With the switch on, nothing is read here.
-  const onParentByDecision = async (): Promise<boolean> => {
-    const [cs, pin] = await Promise.all([
+  // Unless TWILIO_SUBACCOUNTS is "on", a NEW registration would be made on the parent account and
+  // stay there for good, so it is refused; one already under way, and a tenant whose account is
+  // already decided, are not. With the switch on, nothing is read here.
+  const accountDecided = async (): Promise<boolean> => {
+    const [cs, acct, held] = await Promise.all([
       admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle(),
       admin.from("twilio_accounts").select("kind").eq("client_id", clientId).maybeSingle(),
+      // Something already on the parent (a number an operator bought, say): the tenant lives there
+      // for good (292's twilio_accounts_no_split), so its registration belongs there too (review L1).
+      admin.rpc("twilio_parent_holdings", { p_client_id: clientId }),
     ]);
     // A read that fails (twilio_accounts before migration 292 is applied) is "no": refusing a NEW
     // registration is the safe side, and nothing already under way ever reaches this question.
+    const kind = (acct?.data as { kind?: string } | null)?.kind;
     return (cs?.data as { internal_account?: boolean } | null)?.internal_account === true
-      || (pin?.data as { kind?: string } | null)?.kind === "parent";
+      || kind === "parent"
+      || (!held?.error && !!held?.data)
+      // "manual": a sub-account made by hand is where this registration will be made.
+      || (kind === "sub" && switchMode() === "manual");
   };
   const signupRefused = async (act: "save_intake" | "advance", reg: RegistrationLike): Promise<Response | null> => {
-    const why = await smsSignupRefusal({ action: act, subaccountsOn: subaccountsSwitch(), reg, onParentByDecision });
+    const why = await smsSignupRefusal({ action: act, mode: switchMode(), reg, accountDecided });
     return why ? json({ error: why, code: "sms_signup_closed" }, 403) : null;
   };
 
@@ -473,7 +483,8 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   const ensureAccount = async (): Promise<Response | null> => {
     const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
     if (prov.ok) return null;
-    if (prov.reason === "busy" || prov.reason === "suspended" || prov.reason === "closed") {
+    // "manual": this builder's sub-account is made (or finished) by an operator first.
+    if (prov.reason === "busy" || prov.reason === "suspended" || prov.reason === "closed" || prov.reason === "manual") {
       return json({ error: ensureRefusalSentence(prov) }, prov.status);
     }
     const notConfigured = prov.reason === "not_configured";
@@ -507,7 +518,10 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // billed per call — and `status` is gated contacts:'view', so anyone who can see
         // the Contacts tab could otherwise spend the tenant's money by refreshing a page.
         // Submitting stays an explicit act by someone with settings_billing:'edit'.
-        const sweepable = reg && ["brand_pending", "campaign_pending"].includes(reg.status);
+        // Not a registration in a sub-account while the switch is off: the parent cannot see it,
+        // and a read that 404s must never be recorded as a carrier failure (registrationGate.ts).
+        const sweepable = reg && ["brand_pending", "campaign_pending"].includes(reg.status)
+          && !registrationUnreachable(switchMode(), reg);
         const due = reg?.next_poll_at && new Date(reg.next_poll_at).getTime() <= Date.now();
         // The tenant's account is resolved first: a sub that is not active yet is not swept (it
         // has nothing at Twilio to read), and a lookup that fails skips the sweep like any other
@@ -568,7 +582,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         const stale = reg && reg.status === "campaign_failed"
           && (!Array.isArray(reg.last_errors) || reg.last_errors.length === 0)
           && (!reg.next_poll_at || new Date(reg.next_poll_at).getTime() <= Date.now());
-        if (stale && reg.messaging_service_sid && trustHubConfigured()) {
+        if (stale && reg.messaging_service_sid && trustHubConfigured() && !registrationUnreachable(switchMode(), reg)) {
           try {
             const live = await fetchCampaign(reg.messaging_service_sid, await tenantCreds());
             const patch: Record<string, unknown> = {
@@ -916,7 +930,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
         }
         // Workstream 2: a registration that has not reached Twilio waits for TWILIO_SUBACCOUNTS
-        // (registrationGate.ts). Read only while the switch is off; on, nothing is asked here.
+        // (registrationGate.ts). Read only while the switch is not "on"; on, nothing is asked here.
         if (!subaccountsSwitch()) {
           const { data: current, error: curErr } = await admin.from("sms_registrations").select("*").eq("client_id", clientId).maybeSingle();
           if (curErr) return json({ error: "Couldn't check your registration just now. Try again in a minute." }, 503);
@@ -995,6 +1009,11 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!reg.messaging_service_sid || reg.status === "none") {
           return json({ error: "Finish the carrier registration before buying a number." }, 409);
         }
+        // Workstream 2 (review H1): a builder on a sub-account while the switch is off would get
+        // this number on the parent and be split across two accounts. Read only while off.
+        const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+        if (offSub === "lookup_failed") return json({ error: "Couldn't check your texting setup just now. Try again in a minute." }, 503);
+        if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
         // Workstream 2, phase 3: the builder's own account exists before a number is bought or
         // adopted in it (normally made at the first submit; this is the fast path then).
         const notReady = await ensureAccount();

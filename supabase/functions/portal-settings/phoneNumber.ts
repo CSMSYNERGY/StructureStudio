@@ -20,7 +20,7 @@
 // them once per request through _shared/twilioAccount.ts (the parent from the environment while
 // TWILIO_SUBACCOUNTS is not "on", which is what this file's own copy, twilioCreds, read until
 // phase 2 moved it there as parentCreds).
-import type { TwilioCreds } from "../_shared/twilioAccount.ts";
+import { accountFetchableUrl, type TwilioCreds } from "../_shared/twilioAccount.ts";
 export type { TwilioCreds };
 
 /** The Worker's public base when PHONE_API_BASE is not set (SPEC section 1). The portal's
@@ -31,7 +31,9 @@ const TWILIO_API = "https://api.twilio.com/2010-04-01";
 
 type EnvGet = (name: string) => string | undefined | null;
 
-export type VoiceEnv = { apiBase: string; secret: string; fallbackUrl: string };
+/** fallbackMethod: how Twilio fetches fallbackUrl. POST for the parent's TwiML Bin (as always);
+ *  GET for a sub-account's static voicemail TwiML (subVoicemailUrlOf), which any host answers. */
+export type VoiceEnv = { apiBase: string; secret: string; fallbackUrl: string; fallbackMethod?: "POST" | "GET" };
 
 /**
  * What connecting a number for calls needs from the edge environment:
@@ -43,23 +45,37 @@ export type VoiceEnv = { apiBase: string; secret: string; fallbackUrl: string };
  *                         connecting a number with no fallback would make a Worker outage dead
  *                         air for the builder's customers, so it is refused instead.
  * Missing or malformed values are named (never their contents) so the refusal can say which.
+ *
+ * `onSub` (Workstream 2): a number in a builder's own Twilio SUB-account. Its fallback is
+ * TWILIO_SUB_VOICEMAIL_URL (subVoicemailUrlOf), never PHONE_FALLBACK_URL: that is a TwiML Bin, and a
+ * Bin answers only the account that owns it (the parent), so a sub's number pointed at it would
+ * take no voicemail at all.
  */
-export function voiceEnv(get: EnvGet): { ok: true; env: VoiceEnv } | { ok: false; missing: string[] } {
+export function voiceEnv(get: EnvGet, onSub = false): { ok: true; env: VoiceEnv } | { ok: false; missing: string[] } {
   const missing: string[] = [];
   const base = String(get("PHONE_API_BASE") ?? "").trim().replace(/\/+$/, "") || DEFAULT_PHONE_API_BASE;
   if (!/^https:\/\/[^/?#\s]+(\/[^?#\s]*)?$/.test(base)) missing.push("PHONE_API_BASE");
   const secret = String(get("PHONE_WEBHOOK_SECRET") ?? "").trim();
   if (!secret) missing.push("PHONE_WEBHOOK_SECRET");
-  const fallbackUrl = fallbackUrlOf(get);
-  if (!fallbackUrl) missing.push("PHONE_FALLBACK_URL");
+  const fallbackUrl = onSub ? subVoicemailUrlOf(get) : fallbackUrlOf(get);
+  if (!fallbackUrl) missing.push(onSub ? "TWILIO_SUB_VOICEMAIL_URL" : "PHONE_FALLBACK_URL");
   if (missing.length || !fallbackUrl) return { ok: false, missing };
-  return { ok: true, env: { apiBase: base, secret, fallbackUrl } };
+  return { ok: true, env: { apiBase: base, secret, fallbackUrl, ...(onSub ? { fallbackMethod: "GET" as const } : {}) } };
 }
 
 /** PHONE_FALLBACK_URL, https only, or null. Moving a number to voicemail needs this alone. */
 export function fallbackUrlOf(get: EnvGet): string | null {
   const fallbackUrl = String(get("PHONE_FALLBACK_URL") ?? "").trim();
   return /^https:\/\/\S+$/.test(fallbackUrl) ? fallbackUrl : null;
+}
+
+/**
+ * TWILIO_SUB_VOICEMAIL_URL, or null: the voicemail TwiML a number in a SUB-account falls back to
+ * (and answers with while calling is off), static TwiML any account may fetch, with GET (SETUP.md
+ * 7f). A Twilio Bin URL is refused (accountFetchableUrl): it would answer the sub with 401.
+ */
+export function subVoicemailUrlOf(get: EnvGet): string | null {
+  return accountFetchableUrl(get("TWILIO_SUB_VOICEMAIL_URL"));
 }
 
 /**
@@ -88,7 +104,7 @@ export function numberVoiceConfig(env: VoiceEnv): Record<string, string> {
     StatusCallback: `${env.apiBase}/voice/status?leg=pstn&key=${key}`,
     StatusCallbackMethod: "POST",
     VoiceFallbackUrl: env.fallbackUrl,
-    VoiceFallbackMethod: "POST",
+    VoiceFallbackMethod: env.fallbackMethod ?? "POST",
   };
 }
 
@@ -109,10 +125,10 @@ export function numberVoiceConfig(env: VoiceEnv): Record<string, string> {
  * Worker is not sent status events for calls it never saw. The messaging settings are not
  * touched.
  */
-export function numberVoicemailConfig(env: Pick<VoiceEnv, "fallbackUrl">): Record<string, string> {
+export function numberVoicemailConfig(env: Pick<VoiceEnv, "fallbackUrl" | "fallbackMethod">): Record<string, string> {
   return {
     VoiceUrl: env.fallbackUrl,
-    VoiceMethod: "POST",
+    VoiceMethod: env.fallbackMethod ?? "POST",
     StatusCallback: "",
     VoiceFallbackUrl: "",
   };

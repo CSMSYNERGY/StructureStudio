@@ -4,8 +4,10 @@
 // through it, a missing or blank secret reads NULL); twilio_account_forget() removes a parent pin,
 // a sub never created at Twilio, and a CLOSED sub with its two Vault secrets (by name only, never a
 // secret its id columns were pointed at), and refuses a live or suspended sub; push_skipped takes
-// only the three kinds; nobody but the service role may call either function; the apply-time
-// rehearsal leaves nothing behind; a re-apply is harmless; and broken copies are refused (mutants).
+// only the three kinds; nobody but the service role may call either function; a number or a
+// registration recorded outside a tenant's sub-account is refused (twilio_*_follows_account, review
+// H1) while tenants without one are untouched; the apply-time rehearsal leaves nothing behind; a
+// re-apply is harmless; and broken copies are refused (mutants).
 // Nothing here touches the live project. Every SID and secret below is made up.
 //
 // Run (from the repo root):
@@ -134,7 +136,11 @@ const material = async (db) => {
   const R = res.record || {};
   ok(R.functions_ready === true && R.column_added === true, "RECORD: functions_ready, column_added", JSON.stringify(R));
   ok(R.material_rows === 3 && R.material_loaded === 0, "RECORD: three material rows, none loaded yet", JSON.stringify(R));
-  ok(/^a live sub refused, a closed sub removed with its secret/.test(String(R.rehearsal)), "RECORD: the rehearsal ran to its end", R.rehearsal);
+  ok(R.holdings_guarded === true && R.split_today === 0, "RECORD: holdings_guarded, nobody split today", JSON.stringify(R));
+  ok(/^a live sub refused, a closed sub removed with its secret, nothing answered none, a parent holding for a sub tenant refused$/.test(String(R.rehearsal)),
+    "RECORD: the rehearsal ran to its end", R.rehearsal);
+  ok((await one(db, "select count(*)::int n from public.sms_numbers")).n === 0 && (await one(db, "select count(*)::int n from public.sms_registrations")).n === 0,
+    "  and its refused number and registration were never written");
   ok((await one(db, "select count(*)::int n from vault.secrets")).n === 0, "the rehearsal left no Vault secret behind");
   ok((await one(db, "select count(*)::int n from public.twilio_accounts where client_id = 'm295-rehearsal'")).n === 0, "and no rehearsal row");
 
@@ -192,6 +198,52 @@ const material = async (db) => {
   ok(JSON.stringify(left) === JSON.stringify([`twilio_auth_token_${LIVE_SID}`]),
     "with its two secrets by name, and never the secret its id was pointed at", JSON.stringify(left));
 
+  // ── 3b. One tenant, one account: holdings follow the sub-account (review H1) ─────────
+  console.log("twilio_number_follows_account / twilio_registration_follows_account");
+  const OTHER = "AC" + "3".repeat(32);
+  // No row, and a parent pin: untouched, exactly as today.
+  await db.query("insert into public.sms_numbers (client_id, phone_number) values ('plain-tenant', '+15555550101')");
+  await db.query("insert into public.twilio_accounts (client_id, kind, status) values ('pinned-tenant', 'parent', 'active')");
+  await db.query("insert into public.sms_numbers (client_id, phone_number) values ('pinned-tenant', '+15555550102')");
+  await db.query("insert into public.sms_registrations (client_id, brand_sid) values ('pinned-tenant', $1)", ["BN" + "1".repeat(32)]);
+  ok(true, "a tenant with no row, or pinned to the parent, records parent holdings as before");
+  // A sub tenant (made with nothing held, as 292's guard requires).
+  await db.query("insert into public.twilio_accounts (client_id, kind, account_sid, status) values ('sub-tenant', 'sub', $1, 'active')", [OTHER]);
+  let r = await refused(db, "insert into public.sms_numbers (client_id, phone_number) values ('sub-tenant', '+15555550103')", [], /twilio_number_follows_account/);
+  ok(r.refused, "a number on the PARENT for a sub tenant is refused", r.message);
+  r = await refused(db, "insert into public.sms_numbers (client_id, phone_number, twilio_account_sid) values ('sub-tenant', '+15555550103', $1)", [LIVE_SID], /twilio_number_follows_account/);
+  ok(r.refused, "and so is one in ANOTHER sub-account", r.message);
+  await db.query("insert into public.sms_numbers (client_id, phone_number, twilio_account_sid) values ('sub-tenant', '+15555550103', $1)", [OTHER]);
+  ok(true, "a number in its own sub-account is recorded");
+  r = await refused(db, "update public.sms_numbers set twilio_account_sid = null where client_id = 'sub-tenant'", [], /twilio_number_follows_account/);
+  ok(r.refused, "it cannot be moved to the parent afterwards", r.message);
+  await db.query("update public.sms_numbers set registration_status = 'registered' where client_id = 'sub-tenant'");
+  await db.query("update public.sms_numbers set released_at = now() where client_id = 'sub-tenant'");
+  ok(true, "other columns, and releasing it, are not the trigger's business");
+  // The registration: a draft is not a holding; anything made at Twilio must name the sub.
+  await db.query("insert into public.sms_registrations (client_id, status) values ('sub-tenant', 'intake')");
+  r = await refused(db, "update public.sms_registrations set brand_sid = $1 where client_id = 'sub-tenant'", ["BN" + "2".repeat(32)], /twilio_registration_follows_account/);
+  ok(r.refused, "a brand made on the parent for a sub tenant's registration is refused", r.message);
+  r = await refused(db, "update public.sms_registrations set twilio_account_sid = $1 where client_id = 'sub-tenant'", [LIVE_SID], /twilio_registration_follows_account/);
+  ok(r.refused, "and naming another account is refused", r.message);
+  await db.query("update public.sms_registrations set twilio_account_sid = $1 where client_id = 'sub-tenant'", [OTHER]);
+  await db.query("update public.sms_registrations set brand_sid = $1, status = 'brand_pending' where client_id = 'sub-tenant'", ["BN" + "2".repeat(32)]);
+  ok(true, "marked with its sub-account first (portal-sms advance), its SIDs are then recorded");
+  // A sub still being made (no SID yet): nothing at all may be recorded for it.
+  await db.query("insert into public.twilio_accounts (client_id, kind, status, provision_step) values ('making-tenant', 'sub', 'provisioning', 'account')");
+  r = await refused(db, "insert into public.sms_numbers (client_id, phone_number) values ('making-tenant', '+15555550104')", [], /twilio_number_follows_account/);
+  ok(r.refused, "a sub still being made: a parent number is refused too", r.message);
+  const rec2 = await one(db, `select ((select count(*) from public.sms_numbers n join public.twilio_accounts a on a.client_id = n.client_id and a.kind = 'sub'
+      where n.released_at is null and n.twilio_account_sid is distinct from a.account_sid))::int n`);
+  ok(rec2.n === 0, "the RECORD's split_today query finds nobody split", JSON.stringify(rec2));
+  for (const role of ["anon", "authenticated"]) {
+    for (const fn of ["twilio_number_follows_account()", "twilio_registration_follows_account()"]) {
+      const priv = await one(db, `select has_function_privilege('${role}', 'public.${fn}', 'EXECUTE') p`);
+      ok(priv.p === false, `${role} may not execute ${fn}`);
+    }
+  }
+  await db.exec("delete from public.sms_numbers; delete from public.sms_registrations; delete from public.twilio_accounts where client_id in ('pinned-tenant', 'sub-tenant', 'making-tenant')");
+
   // ── 4. push_skipped ─────────────────────────────────────────────────────────────────
   console.log("push_skipped");
   await db.query("update public.twilio_accounts set push_skipped = array['apns_dev','fcm'] where client_id = 'live-sub'");
@@ -228,6 +280,8 @@ const material = async (db) => {
     ["forget removes a live sub", (s) => s.replace("if v_row.status <> 'closed' then", "if false then"), /removed a live sub-account/],
     ["forget leaves the secrets", (s) => s.replace(/delete from vault\.secrets s\s+where s\.name in \('twilio_auth_token_'/, "delete from vault.secrets s where false and s.name in ('twilio_auth_token_'"), /did not remove a closed sub and its secret/],
     ["material not a definer", (s) => s.replace(/(returns table \(kind text, certificate text, private_key text, secret text\)\nlanguage sql\nstable\n)security definer\n/, "$1"), /not SECURITY DEFINER/],
+    ["number trigger left out", (s) => s.replace(/create trigger twilio_number_follows_account\n[^;]*;/, ""), /triggers are missing or disabled/],
+    ["registration guard lets a parent brand through", (s) => s.replace("if new.twilio_account_sid is null or new.twilio_account_sid is distinct from v_sid then\n    raise exception using errcode = '23514',\n      message = format('twilio_registration_follows_account:", "if false then\n    raise exception using errcode = '23514',\n      message = format('twilio_registration_follows_account:"), /a parent registration was recorded/],
   ];
   for (const [label, mutate, re] of mutants) {
     const mm = mutate(src);

@@ -78,6 +78,12 @@ export interface World {
     numbers?: string[];
     /** Twilio's HTTP status for the close; 200 by default. */
     closeStatus?: number;
+    /** The twilio_accounts read fails with this code (PGRST205: the table is not there yet). */
+    readError?: string;
+    /** The accounts Twilio lists under the tenant's FriendlyName (a create whose answer was lost). */
+    named?: { sid: string; status: string }[];
+    /** twilio_account_forget fails with this code (PGRST202: migration 295 not applied). */
+    forgetError?: string;
   };
 }
 
@@ -144,6 +150,7 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
         case "billing_customers":
           return { data: eqv("client_id") === TENANT && world.vault ? { vault_id: world.vault } : null, error: null };
         case "twilio_accounts":
+          if (world.twilio?.readError) return { data: null, error: { code: world.twilio.readError, message: "twilio_accounts read failed" } };
           return { data: eqv("client_id") === TENANT && world.twilio?.row ? { ...world.twilio.row } : null, error: null };
         default:
           return { data: table === "client_users" ? [] : null, error: null };
@@ -177,6 +184,10 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       if (/\/IncomingPhoneNumbers\.json$/.test(u.pathname)) {
         return Promise.resolve(new Response(JSON.stringify({ incoming_phone_numbers: (world.twilio.numbers ?? []).map((n) => ({ phone_number: n })) }), { status: 200 }));
       }
+      if (/\/Accounts\.json$/.test(u.pathname) && (init?.method ?? "GET") === "GET") {
+        const named = (world.twilio.named ?? []).map((a) => ({ sid: a.sid, status: a.status, friendly_name: u.searchParams.get("FriendlyName") }));
+        return Promise.resolve(new Response(JSON.stringify({ accounts: named }), { status: 200 }));
+      }
       const status = world.twilio.closeStatus ?? 200;
       return Promise.resolve(new Response(JSON.stringify(status === 200 ? { status: "closed" } : { code: 20005 }), { status }));
     }
@@ -207,9 +218,10 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
   stubRpc.rpc = (fn: string, args?: any) => {
     run.log.push(`db rpc ${fn}`);
     if (fn === "twilio_account_forget" && args?.p_client_id === TENANT) {
-      const kind = world.twilio?.row?.kind;
+      if (world.twilio?.forgetError) return Promise.resolve({ data: null, error: { code: world.twilio.forgetError, message: "forget failed" } });
+      const r = world.twilio?.row;
       world.twilio = world.twilio ? { ...world.twilio, row: null } : world.twilio;
-      return Promise.resolve({ data: kind === "parent" ? "parent_pin" : "closed_sub", error: null });
+      return Promise.resolve({ data: !r ? "none" : r.kind === "parent" ? "parent_pin" : r.account_sid ? "closed_sub" : "never_created", error: null });
     }
     return Promise.reject(new Error(`deleteClientHarness: unexpected rpc ${fn}`));
   };

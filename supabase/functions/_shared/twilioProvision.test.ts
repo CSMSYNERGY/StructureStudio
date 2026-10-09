@@ -16,15 +16,23 @@
 //   * a Vault write that fails stops the run BEFORE the next create;
 //   * parent API key without the auth token: refused (not_configured, parent_token_missing);
 //   * missing push material is skipped and recorded, and the operator's Create fills it in later;
-//   * the console helpers: masked view, token check, suspend / reactivate, close refused while
-//     the sub has a number.
+//   * the console helpers: masked view, token check (a Standard key is never asked for the
+//     Accounts resource, which Twilio refuses it), suspend / reactivate, close refused while the
+//     sub has a number; delete_client's read-only close plan (an orphan found by name, numbers,
+//     duplicates) and its row removal on a database without 295;
+//   * the review's fixes: "manual" uses existing subs and makes none; the sub's fallbacks are never
+//     a Twilio Bin and are fetched with GET; event types carry versions; every write pushes the
+//     lock forward and a Suspend clears it; a rotated auth token is re-read by the operator's
+//     re-check, which also re-sets the app's URLs; the switch-off holding check.
 // Every SID, key and token is made up. No network; no jsr imports (the preflight's offline group).
 // Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/twilioProvision.test.ts
 
 import {
-  A2P_EVENT_TYPES, ensureRefusalSentence, ensureTwilioAccount, maskSid, provisionConfig, pushName, setTwilioAccountStatus,
-  twilioAccountView, type BasicAuth, type ProvisionHttp,
+  A2P_EVENT_TYPES, closePlannedSub, ensureRefusalSentence, ensureTwilioAccount, fetchHttp, forgetTwilioAccount, maskSid,
+  parseEventTypes, provisionConfig, pushName, setTwilioAccountStatus, subAccountWhileOff, twilioAccountView, twilioClosePlan,
+  type BasicAuth, type ProvisionHttp,
 } from "./twilioProvision.ts";
+import { accountFetchableUrl, provisioningOn, subaccountsMode, subaccountsOn } from "./twilioAccount.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -46,7 +54,9 @@ const ENV: Record<string, string> = {
   TWILIO_API_SECRET: "parent-api-secret",
   PHONE_API_BASE: "https://phone.example.test",
   PHONE_WEBHOOK_SECRET: "voicekey123",
-  PHONE_FALLBACK_URL: "https://fallback.example.test/bin",
+  PHONE_FALLBACK_URL: "https://handler.twilio.com/twiml/EH" + "0".repeat(32),
+  TWILIO_SUB_APP_FALLBACK_URL: "https://static.example.test/twiml/calling-problem.xml",
+  TWILIO_SUB_VOICEMAIL_URL: "https://static.example.test/twiml/voicemail.xml",
   SUPABASE_URL: "https://project.example.test",
   TWILIO_EVENTS_SECRET: "eventskey456",
 };
@@ -75,6 +85,10 @@ class FakeDb {
   };
   /** rpc name (or "<rpc>:<kind>" for secret_put) → how many more calls fail. */
   failRpc = new Map<string, number>();
+  /** twilio_accounts answers PostgREST's "no such table" (migration 292 not applied). */
+  missingTable = false;
+  /** twilio_account_forget answers "no such function" (migration 295 not applied). */
+  missingForget = false;
   log: string[] = [];
 
   private trip(name: string): boolean {
@@ -113,6 +127,14 @@ class FakeDb {
       if (this.trip(name)) return err();
       return Promise.resolve({ data: Object.values(this.material), error: null });
     }
+    if (name === "twilio_account_forget") {
+      if (this.missingForget) return err("PGRST202");
+      const row = this.accounts.get(args.p_client_id);
+      if (!row) return Promise.resolve({ data: "none", error: null });
+      if (row.kind === "sub" && row.account_sid && row.status !== "closed") return err("55000");
+      this.accounts.delete(args.p_client_id);
+      return Promise.resolve({ data: row.kind === "parent" ? "parent_pin" : row.account_sid ? "closed_sub" : "never_created", error: null });
+    }
     throw new Error(`unexpected rpc ${name}`);
   }
 
@@ -129,7 +151,13 @@ class FakeDb {
     };
     const run = (single: boolean) => {
       db.log.push(`${q.op} ${table}`);
+      if (table === "twilio_accounts" && db.missingTable) return { data: null, error: { code: "PGRST205", message: "no such table" } };
       const hit = rowsOf().filter((r) => q.filters.every((f) => f(r)));
+      if (q.op === "delete") {
+        if (table !== "twilio_accounts") throw new Error("delete only on twilio_accounts");
+        for (const r of hit) db.accounts.delete(String(r.client_id));
+        return { data: null, error: null };
+      }
       if (q.op === "select") {
         if (q.head) return { data: null, count: hit.length, error: null };
         return { data: single ? (hit[0] ? { ...hit[0] } : null) : hit.map((r) => ({ ...r })), error: null };
@@ -159,6 +187,7 @@ class FakeDb {
       select: (cols?: string, o?: Row) => { if (q.op === "select") { q.head = !!o?.head; } else q.select = cols ?? "*"; return b; },
       update: (patch: Row) => { q.op = "update"; q.patch = patch; return b; },
       upsert: (row: Row, o?: Row) => { q.op = "upsert"; q.patch = row; q.opts = o; return b; },
+      delete: () => { q.op = "delete"; return b; },
       eq: (c: string, v: unknown) => { q.filters.push((r) => r[c] === v); return b; },
       is: (c: string, v: unknown) => { q.filters.push((r) => (r[c] ?? null) === v); return b; },
       or: (expr: string) => {
@@ -198,7 +227,7 @@ class FakeTwilio {
   apps = new Map<string, { sid: string; friendly_name: string; account: string; form: Record<string, string> }>();
   creds = new Map<string, { sid: string; friendly_name: string; account: string; form: Record<string, string> }>();
   sinks = new Map<string, { sid: string; description: string; account: string; config: string }>();
-  subs = new Map<string, { sid: string; description: string; sink: string; account: string; types: string[] }>();
+  subs = new Map<string, { sid: string; description: string; sink: string; account: string; types: string[]; versions: number[] }>();
   numbers = new Map<string, string[]>();
   inherit = true;
   /** op → remaining times the request never reaches Twilio (throws first). */
@@ -279,6 +308,8 @@ class FakeTwilio {
         return { status: 201, body: a };
       }
       case "fetch_account": {
+        // Twilio: a Standard API key can reach everything EXCEPT the Accounts resource and Keys.
+        if (!who.main) return no;
         if (!reaches(acctInPath!)) return no;
         const a = this.accounts.get(acctInPath!);
         return a ? { status: 200, body: a } : { status: 404, body: { code: 20404 } };
@@ -349,6 +380,7 @@ class FakeTwilio {
         const s = {
           sid: sid("DF"), description: form.Description, sink: form.SinkSid, account: who.account,
           types: pairs.filter(([k]) => k === "Types").map(([, v]) => JSON.parse(v).type),
+          versions: pairs.filter(([k]) => k === "Types").map(([, v]) => JSON.parse(v).schema_version),
         };
         this.subs.set(s.sid, s);
         return { status: 201, body: s };
@@ -452,7 +484,8 @@ Deno.test("a full run: every object once, inside the sub, with the sub's own cre
   const app = [...w.tw.apps.values()][0];
   assertEquals(app.form.VoiceUrl, "https://phone.example.test/voice/outbound?key=voicekey123");
   assertEquals(app.form.StatusCallback, "https://phone.example.test/voice/status?leg=client&key=voicekey123");
-  assertEquals(app.form.VoiceFallbackUrl, "https://fallback.example.test/bin");
+  // Never the parent's Bin (a Bin answers only its owner): the sub's own static TwiML, by GET.
+  assertEquals([app.form.VoiceFallbackUrl, app.form.VoiceFallbackMethod], ["https://static.example.test/twiml/calling-problem.xml", "GET"]);
   assertEquals(app.friendly_name, TENANT);
   // Push: both APNs credentials with Sandbox unticked, FCM with the service account; named for the tenant.
   const creds = [...w.tw.creds.values()].sort((a, b) => a.friendly_name.localeCompare(b.friendly_name));
@@ -463,6 +496,7 @@ Deno.test("a full run: every object once, inside the sub, with the sub's own cre
   const sink = [...w.tw.sinks.values()][0];
   assertEquals(JSON.parse(sink.config), { destination: "https://project.example.test/functions/v1/twilio-events?key=eventskey456", method: "POST", batch_events: false });
   assertEquals([...w.tw.subs.values()][0].types, [...A2P_EVENT_TYPES]);
+  assert([...w.tw.subs.values()][0].versions.every((v) => v === 1), "A2P events have schema version 1 only");
   assertEquals(w.tw.count("test_sink"), 1, "the new sink is sent Twilio's test event once");
   // The lock was taken and given back.
   assertEquals(row(w).provision_lock_until, null);
@@ -477,10 +511,12 @@ Deno.test("an active sub: the fast path, one read, no lock and no Twilio", async
   assertEquals(w.db.log, ["select twilio_accounts"]);
 });
 
-Deno.test("TWILIO_EVENT_TYPES replaces the list (the parent's, copied); a malformed one is refused as configuration", async () => {
+Deno.test("TWILIO_EVENT_TYPES replaces the list (the parent's, copied, versions included); a malformed one is refused as configuration", async () => {
   const w = world();
-  await ensure(w, { get: envOf({ TWILIO_EVENT_TYPES: "com.twilio.messaging.compliance.number-registration.successful, com.twilio.x.y" }) });
+  await ensure(w, { get: envOf({ TWILIO_EVENT_TYPES: "com.twilio.messaging.compliance.number-registration.successful, com.twilio.x.y@2" }) });
   assertEquals([...w.tw.subs.values()][0].types, ["com.twilio.messaging.compliance.number-registration.successful", "com.twilio.x.y"]);
+  assertEquals([...w.tw.subs.values()][0].versions, [1, 2], "type@version keeps the parent's schema version");
+  for (const bad of ["com.twilio.x@0", "com.twilio.x@v2", "com.twilio.x@", ""]) assertEquals(parseEventTypes(bad), null, bad);
   const bad = world();
   const r = await ensure(bad, { get: envOf({ TWILIO_EVENT_TYPES: "brand-registered" }), http: noHttp });
   assert(!r.ok && r.reason === "not_configured" && r.missing?.includes("TWILIO_EVENT_TYPES"), JSON.stringify(r));
@@ -499,12 +535,28 @@ Deno.test("the parent's API key without its auth token: refused, nothing written
 });
 
 Deno.test("each missing setting is named (never its value)", () => {
-  const c = provisionConfig(envOf({ PHONE_WEBHOOK_SECRET: "", PHONE_FALLBACK_URL: "http://insecure", TWILIO_EVENTS_SECRET: undefined }));
+  const c = provisionConfig(envOf({ PHONE_WEBHOOK_SECRET: "", TWILIO_SUB_VOICEMAIL_URL: "http://insecure", TWILIO_EVENTS_SECRET: undefined }));
   assert(!c.ok);
-  if (!c.ok) assertEquals(c.missing, ["PHONE_WEBHOOK_SECRET", "PHONE_FALLBACK_URL", "TWILIO_EVENTS_SECRET"]);
-  const app = provisionConfig(envOf({ TWILIO_APP_FALLBACK_URL: "https://calls-bin.example.test/x", PHONE_API_BASE: "" }));
-  assert(app.ok && app.config.fallbackUrl === "https://calls-bin.example.test/x", "the calls app's own Bin when it is set");
+  if (!c.ok) assertEquals(c.missing, ["PHONE_WEBHOOK_SECRET", "TWILIO_SUB_VOICEMAIL_URL", "TWILIO_EVENTS_SECRET"]);
+  const app = provisionConfig(envOf({ PHONE_API_BASE: "" }));
+  assert(app.ok && app.config.fallbackUrl === "https://static.example.test/twiml/calling-problem.xml", "the sub's own app fallback");
   assert(app.ok && app.config.voiceUrl.startsWith("https://phone.structurestudiosuite.com/voice/outbound?key="), "the default Worker base");
+});
+
+Deno.test("the sub's fallbacks are never a Twilio Bin (a Bin answers only the account that owns it), nor the parent's PHONE_FALLBACK_URL", () => {
+  const bin = "https://handler.twilio.com/twiml/EH" + "1".repeat(32);
+  for (const name of ["TWILIO_SUB_APP_FALLBACK_URL", "TWILIO_SUB_VOICEMAIL_URL"]) {
+    const c = provisionConfig(envOf({ [name]: bin }));
+    assert(!c.ok && c.missing.includes(name), `${name} = a Bin: ${JSON.stringify(c)}`);
+    const studio = provisionConfig(envOf({ [name]: "https://webhooks.twilio.com/v1/Accounts/AC" + "1".repeat(32) + "/Flows/FW" + "1".repeat(32) }));
+    assert(!studio.ok && studio.missing.includes(name), `${name} = a Studio flow`);
+  }
+  // Unset, the parent's Bin is never borrowed.
+  const none = provisionConfig(envOf({ TWILIO_SUB_APP_FALLBACK_URL: undefined }));
+  assert(!none.ok && none.missing.includes("TWILIO_SUB_APP_FALLBACK_URL"), JSON.stringify(none));
+  assertEquals(accountFetchableUrl("https://my-service-1234.twil.io/voicemail.xml"), "https://my-service-1234.twil.io/voicemail.xml");
+  assertEquals(accountFetchableUrl("https://HANDLER.twilio.com/twiml/EHx"), null);
+  assertEquals(accountFetchableUrl("http://static.example.test/x.xml"), null);
 });
 
 // ── Resume from every step ───────────────────────────────────────────────────────────────────
@@ -784,4 +836,236 @@ Deno.test("suspend only an active sub; reactivate only a suspended one", async (
   assert(!s.ok && s.reason === "wrong_state" && s.code === "failed", JSON.stringify(s));
   const a = await setTwilioAccountStatus(w.db, TENANT, "active", { get: ON, http: w.tw.http });
   assert(!a.ok && a.reason === "wrong_state", JSON.stringify(a));
+});
+
+// ── Review fixes ─────────────────────────────────────────────────────────────────────────────
+const MANUAL = envOf({ TWILIO_SUBACCOUNTS: "manual" });
+
+Deno.test("the switch's three modes: off is today, manual uses existing subs, on also makes them", () => {
+  for (const v of [undefined, "", "off", "ON", "Manual", " on", "true"]) {
+    const g = envOf({ TWILIO_SUBACCOUNTS: v });
+    assertEquals([subaccountsMode(g), subaccountsOn(g), provisioningOn(g)], ["off", false, false], `"${v}"`);
+  }
+  assertEquals([subaccountsMode(MANUAL), subaccountsOn(MANUAL), provisioningOn(MANUAL)], ["manual", true, false]);
+  assertEquals([subaccountsMode(ON), subaccountsOn(ON), provisioningOn(ON)], ["on", true, true]);
+});
+
+Deno.test("manual: nothing is made for a builder without an account (refused, Twilio never asked); one on the parent by decision stays there", async () => {
+  const w = world();
+  const r = await ensure(w, { get: MANUAL, http: noHttp });
+  assert(!r.ok && r.reason === "manual" && r.code === "not_made" && r.status === 409, JSON.stringify(r));
+  assert(!w.db.accounts.has(TENANT), "no row was made");
+  assertEquals(ensureRefusalSentence(r as Extract<typeof r, { ok: false }>), "Your phone account isn't set up yet. Structure Studio will set it up for you.");
+  const internal = world();
+  internal.db.settings.set(TENANT, { client_id: TENANT, internal_account: true });
+  assertEquals(await ensure(internal, { get: MANUAL, http: noHttp }), { ok: true, kind: "parent", reason: "internal" });
+  const holds = world();
+  holds.db.holdings.set(TENANT, "a live number");
+  assertEquals(await ensure(holds, { get: MANUAL, http: noHttp }), { ok: true, kind: "parent", reason: "parent_holdings" });
+});
+
+Deno.test("manual: a sub the operator made is used (the fast path); an unfinished one is not finished here; the operator's Create still runs", async () => {
+  const w = world();
+  const made = await ensure(w, { get: MANUAL, operator: true });
+  assert(made.ok && made.kind === "sub", JSON.stringify(made));
+  const r = await ensure(w, { get: MANUAL, http: noHttp });
+  assert(r.ok && r.kind === "sub" && !r.ran, JSON.stringify(r));
+  const half = world();
+  half.tw.inherit = false;
+  await ensure(half, { get: MANUAL, operator: true });
+  assertEquals(row(half).status, "failed");
+  const u = await ensure(half, { get: MANUAL, http: noHttp });
+  assert(!u.ok && u.reason === "manual" && u.code === "unfinished", JSON.stringify(u));
+});
+
+Deno.test("every write pushes the lock forward: a slow run is never taken over while it is still making progress", async () => {
+  const w = world();
+  let t = Date.parse("2026-10-09T12:00:00Z");
+  const now = () => t;
+  let second: unknown = null;
+  const real = w.tw.http;
+  w.tw.http = async (m, u, a, f) => {
+    t += 90_000; // every Twilio request takes 90 seconds: the run outlives its first lock many times over
+    if (u.startsWith("https://events.twilio.com/v1/Subscriptions") && m === "POST") {
+      second = await ensureTwilioAccount(w.db, TENANT, { get: ON, http: noHttp, now });
+    }
+    return await real(m, u, a, f);
+  };
+  const r = await ensure(w, { now });
+  assert(r.ok && r.kind === "sub", JSON.stringify(r));
+  assert(second && !(second as { ok: boolean }).ok && (second as { reason: string }).reason === "busy", `a second caller mid-run: ${JSON.stringify(second)}`);
+  assertComplete(w);
+});
+
+Deno.test("each Twilio request is given up after PROVISION_HTTP_TIMEOUT_MS (fetchHttp passes an abort signal)", async () => {
+  const realFetch = globalThis.fetch;
+  let signal: AbortSignal | null | undefined;
+  globalThis.fetch = ((_u: string, init?: RequestInit) => {
+    signal = init?.signal;
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  }) as typeof fetch;
+  try {
+    await fetchHttp("GET", "https://api.twilio.com/2010-04-01/Accounts.json", { user: "u", pass: "p" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert(signal instanceof AbortSignal, "a timeout signal is passed");
+});
+
+Deno.test("an auth token rotated in Twilio: the builder's fast path is untouched; the operator's re-check reads it again and stores it", async () => {
+  const w = world();
+  await ensure(w);
+  const sub = String(row(w).account_sid);
+  w.tw.accounts.get(sub)!.auth_token = "rotatedtoken" + "r".repeat(20);
+  assert((await ensure(w, { http: noHttp })).ok, "builders keep the fast path");
+  const created = w.tw.calls.filter((c) => c.op.startsWith("create_")).length;
+  const r = await ensure(w, { operator: true });
+  assert(r.ok && r.kind === "sub" && r.ran, JSON.stringify(r));
+  assertEquals(w.db.vault.get(`twilio_auth_token_${sub}`), "rotatedtoken" + "r".repeat(20), "Vault holds the new token");
+  assertEquals(w.tw.calls.filter((c) => c.op.startsWith("create_")).length, created, "nothing was made");
+  assertEquals([row(w).status, row(w).provision_step, row(w).last_error, row(w).provision_lock_until], ["active", "done", null, null]);
+  assertEquals((await twilioAccountView(w.db, TENANT, { get: ON, http: w.tw.http, check: true })).tokenCheck, { authToken: "ok", apiKey: "ok" });
+});
+
+Deno.test("the operator's re-check of an active sub sets the app's URLs again and makes nothing", async () => {
+  const w = world();
+  await ensure(w);
+  const before = w.tw.calls.length;
+  const r = await ensure(w, { operator: true, get: envOf({ TWILIO_SUB_APP_FALLBACK_URL: "https://static.example.test/twiml/v2.xml" }) });
+  assert(r.ok && r.kind === "sub" && r.ran, JSON.stringify(r));
+  const after = w.tw.calls.slice(before);
+  assertEquals(after.filter((c) => c.op.startsWith("create_") || c.op === "delete_key").length, 0, "nothing made or deleted");
+  assertEquals(after.filter((c) => c.op === "update_app").length, 1);
+  assertEquals([...w.tw.apps.values()][0].form.VoiceFallbackUrl, "https://static.example.test/twiml/v2.xml");
+  assertComplete(w, "re-check");
+});
+
+Deno.test("a Suspend while the operator's re-check is running: the run stops at its next write and the sub stays suspended", async () => {
+  const w = world();
+  w.db.material.fcm = { kind: "fcm", certificate: null, private_key: null, secret: null };
+  await ensure(w);
+  w.db.material.fcm.secret = '{"type":"service_account"}';
+  const real = w.tw.http;
+  let suspended: unknown = null;
+  w.tw.http = async (m, u, a, f) => {
+    const out = await real(m, u, a, f);
+    if (!suspended && u.startsWith("https://chat.twilio.com/v2/Credentials") && m === "POST") {
+      suspended = await setTwilioAccountStatus(w.db, TENANT, "suspended", { get: ON, http: real });
+    }
+    return out;
+  };
+  const r = await ensure(w, { operator: true });
+  assertEquals(suspended, { ok: true, status: "suspended", already: false });
+  assert(!r.ok && r.reason === "busy" && r.code === "lock_lost", JSON.stringify(r));
+  assertEquals([row(w).status, row(w).provision_lock_until], ["suspended", null], "the operator's Suspend stands");
+});
+
+Deno.test("the console's token check never asks a Standard key for the Accounts resource (Twilio refuses it: 20003)", async () => {
+  const w = world();
+  await ensure(w);
+  const before = w.tw.calls.length;
+  const v = await twilioAccountView(w.db, TENANT, { get: ON, http: w.tw.http, check: true });
+  assertEquals(v.tokenCheck, { authToken: "ok", apiKey: "ok" });
+  const key = String(row(w).api_key_sid);
+  const keyCalls = w.tw.calls.slice(before).filter((c) => c.auth.user === key);
+  assertEquals(keyCalls.map((c) => c.op), ["list_apps"], "the key is asked for something under the account");
+  // And a key Twilio no longer knows reads "rejected".
+  w.tw.keys.delete(key);
+  assertEquals((await twilioAccountView(w.db, TENANT, { get: ON, http: w.tw.http, check: true })).tokenCheck?.apiKey, "rejected");
+});
+
+Deno.test("the console view on a database without 292: not installed, no error", async () => {
+  const w = world();
+  w.db.missingTable = true;
+  const v = await twilioAccountView(w.db, TENANT, { get: OFF, http: noHttp, check: true });
+  assertEquals([v.installed, v.kind, v.switchMode, v.tokenCheck], [false, "none", "off", undefined]);
+});
+
+// ── delete_client's close plan (review M1, finding 6) ────────────────────────────────────────
+Deno.test("close plan: nothing to close for no row, a pin, a closed sub, or no table; the planned SID once it holds no number", async () => {
+  const none = world();
+  assertEquals(await twilioClosePlan(none.db, TENANT, { get: ON, http: noHttp }), { ok: true, row: null, closeSid: null, orphan: false });
+  none.db.missingTable = true;
+  assertEquals(await twilioClosePlan(none.db, TENANT, { get: ON, http: noHttp }), { ok: true, row: null, closeSid: null, orphan: false });
+  const pin = world();
+  pin.db.accounts.set(TENANT, { client_id: TENANT, kind: "parent", status: "active", account_sid: null });
+  const p = await twilioClosePlan(pin.db, TENANT, { get: ON, http: noHttp });
+  assert(p.ok && p.closeSid === null && p.row?.kind === "parent", JSON.stringify(p));
+  const w = world();
+  await ensure(w);
+  const sub = String(row(w).account_sid);
+  w.tw.numbers.set(sub, ["+15555550100"]);
+  const held = await twilioClosePlan(w.db, TENANT, { get: ON, http: w.tw.http });
+  assert(!held.ok && held.reason === "has_numbers", JSON.stringify(held));
+  assertEquals(w.tw.accounts.get(sub)!.status, "active", "the plan only reads");
+  w.tw.numbers.set(sub, []);
+  const plan = await twilioClosePlan(w.db, TENANT, { get: ON, http: w.tw.http });
+  assert(plan.ok && plan.closeSid === sub && !plan.orphan, JSON.stringify(plan));
+  assertEquals(w.tw.accounts.get(sub)!.status, "active", "still only read");
+  if (plan.ok) assertEquals(await closePlannedSub(w.db, TENANT, plan, { get: ON, http: w.tw.http }), { ok: true, status: "closed", already: false });
+  assertEquals([w.tw.accounts.get(sub)!.status, row(w).status], ["closed", "closed"]);
+  assertEquals(await forgetTwilioAccount(w.db, TENANT, plan.ok ? plan.row : null), { ok: true, outcome: "closed_sub" });
+});
+
+Deno.test("close plan: a sub whose create answer was lost is found by its name and closed; two are refused; no parent token is refused", async () => {
+  const w = world();
+  w.tw.lose.set("create_account", 1);
+  await ensure(w);
+  assertEquals(row(w).account_sid, null, "the row never saw the SID");
+  const orphanSid = [...w.tw.accounts.values()][0].sid;
+  const plan = await twilioClosePlan(w.db, TENANT, { get: ON, http: w.tw.http });
+  assert(plan.ok && plan.closeSid === orphanSid && plan.orphan, JSON.stringify(plan));
+  if (plan.ok) assertEquals((await closePlannedSub(w.db, TENANT, plan, { get: ON, http: w.tw.http })).ok, true);
+  assertEquals(w.tw.accounts.get(orphanSid)!.status, "closed", "the orphan is closed at Twilio");
+  assertEquals(await forgetTwilioAccount(w.db, TENANT, plan.ok ? plan.row : null), { ok: true, outcome: "never_created" });
+  // Two open accounts by that name: an operator looks first.
+  const two = world();
+  two.tw.lose.set("create_account", 1);
+  await ensure(two);
+  two.tw.accounts.set("AC" + "8".repeat(32), { sid: "AC" + "8".repeat(32), friendly_name: TENANT, status: "active", auth_token: "x".repeat(32) });
+  const dup = await twilioClosePlan(two.db, TENANT, { get: ON, http: two.tw.http });
+  assert(!dup.ok && dup.reason === "duplicate", JSON.stringify(dup));
+  const noTok = await twilioClosePlan(two.db, TENANT, { get: envOf({ TWILIO_AUTH_TOKEN: undefined }), http: noHttp });
+  assert(!noTok.ok && noTok.code === "parent_token_missing", JSON.stringify(noTok));
+});
+
+Deno.test("forget on a database without 295: a pin or a never-made sub is deleted directly; a closed sub with secrets is refused", async () => {
+  const w = world();
+  w.db.missingForget = true;
+  w.db.accounts.set(TENANT, { client_id: TENANT, kind: "parent", status: "active", account_sid: null });
+  assertEquals(await forgetTwilioAccount(w.db, TENANT, { kind: "parent", account_sid: null }), { ok: true, outcome: "parent_pin" });
+  assert(!w.db.accounts.has(TENANT));
+  w.db.accounts.set(TENANT, { client_id: TENANT, kind: "sub", status: "failed", account_sid: null });
+  assertEquals(await forgetTwilioAccount(w.db, TENANT, { kind: "sub", account_sid: null }), { ok: true, outcome: "never_created" });
+  w.db.accounts.set(TENANT, { client_id: TENANT, kind: "sub", status: "closed", account_sid: "AC" + "9".repeat(32) });
+  assertEquals(await forgetTwilioAccount(w.db, TENANT, { kind: "sub", account_sid: "AC" + "9".repeat(32) }), { ok: false, code: "PGRST202" });
+  assert(w.db.accounts.has(TENANT), "kept: only 295's definer can remove its secrets");
+});
+
+// ── One tenant, one account while the switch is off (review H1) ──────────────────────────────
+Deno.test("subAccountWhileOff: on or manual, no read; off, a sub row says 'sub', no row or no table 'no', an error 'lookup_failed'", async () => {
+  assertEquals(await subAccountWhileOff(untouchable, TENANT, ON), "no");
+  assertEquals(await subAccountWhileOff(untouchable, TENANT, MANUAL), "no");
+  const w = world();
+  assertEquals(await subAccountWhileOff(w.db, TENANT, OFF), "no");
+  await ensure(w, { get: OFF, operator: true });
+  assertEquals(await subAccountWhileOff(w.db, TENANT, OFF), "sub");
+  w.db.accounts.set(TENANT, { client_id: TENANT, kind: "parent", status: "active" });
+  assertEquals(await subAccountWhileOff(w.db, TENANT, OFF), "no");
+  w.db.missingTable = true;
+  assertEquals(await subAccountWhileOff(w.db, TENANT, OFF), "no");
+  const broken = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: { code: "57014" } }) }) }) }) };
+  assertEquals(await subAccountWhileOff(broken, TENANT, OFF), "lookup_failed");
+});
+
+Deno.test("a rotated auth token when the key has to be made again: refreshed at the auth-token step, so the key step is not refused", async () => {
+  const w = world();
+  await ensure(w);
+  const sub = String(row(w).account_sid);
+  w.tw.accounts.get(sub)!.auth_token = "rotatedtoken" + "q".repeat(20);
+  w.db.vault.delete(`twilio_api_secret_${sub}`);
+  const r = await ensure(w, { operator: true });
+  assert(r.ok && r.kind === "sub" && r.ran, JSON.stringify(r));
+  assertEquals(w.tw.count("create_key"), 2, "the key whose secret was lost is replaced");
+  assertComplete(w, "rotated + key");
 });

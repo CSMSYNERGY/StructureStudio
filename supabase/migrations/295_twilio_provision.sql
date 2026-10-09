@@ -25,6 +25,10 @@
 --     console can say "this sub has no iPhone push credential" instead of the app finding out.
 -- And phase 9's Close and delete_client need to drop a sub-account's row and its Vault secrets
 -- once Twilio has closed it, which only a definer can do (the service role cannot touch vault.*).
+-- And one tenant, one account has to hold from the other side too (review H1): 292's
+-- twilio_accounts_no_split refuses a sub-account for a tenant that holds something on the parent,
+-- but nothing refused the reverse, a number or a registration recorded on the PARENT for a tenant
+-- that already has a sub-account (an operator's purchase while TWILIO_SUBACCOUNTS was off, say).
 --
 -- ── WHAT THIS DOES ───────────────────────────────────────────────────────────────────────
 --   * twilio_accounts.push_skipped text[]: the push kinds provisioning skipped for want of
@@ -54,18 +58,35 @@
 --       anything else (a live or suspended sub) → REFUSED (55000): close it at Twilio first
 --     admin-catalog's delete_client calls it last, so a recreated slug never inherits a dead
 --     tenant's account (a closed row would read "not ready" forever; a pin would keep it off a sub).
---   * Both functions SECURITY DEFINER, search_path '', service role only.
+--   * twilio_number_follows_account / twilio_registration_follows_account (BEFORE triggers on
+--     sms_numbers and sms_registrations): for a tenant with a kind 'sub' twilio_accounts row, a
+--     live number, or a registration that has made anything at Twilio (or names an account), must
+--     name THAT sub-account in twilio_account_sid. Anything else is refused (23514), so a tenant is
+--     never split across two accounts. Tenants with no row or a parent pin (every tenant today)
+--     are not touched: the trigger answers from one primary-key read and lets the row through.
+--     Fires only when one of the columns that matter is written (client_id, twilio_account_sid,
+--     released_at; on registrations the six SID columns), never on the hot status updates.
+--   * The two functions above SECURITY DEFINER, search_path '', service role only; the two
+--     trigger functions are invoker functions with an empty search_path, executable by nobody.
 --
 -- ── WHAT THIS DOES NOT DO ────────────────────────────────────────────────────────────────
 --   * Nothing changes for any tenant: provisioning runs only when TWILIO_SUBACCOUNTS is "on" or
 --     an operator presses Create in the console, and no Vault secret is created here.
 --   * Does not change 292's functions, its guard or its pins.
+--   * Does not touch an existing row: the triggers judge rows as they are written from now on.
 --
 -- ── SAFE WITH WHAT IS LIVE ───────────────────────────────────────────────────────────────
--- ADD COLUMN with no default on twilio_accounts (read only by the switch-on code) and two new
--- functions. lock_timeout makes a hung apply give up.
+-- ADD COLUMN with no default on twilio_accounts (read only by the switch-on code), two new
+-- functions, and two BEFORE triggers that let every row through for a tenant without a sub-account
+-- (every tenant until one is made). CREATE TRIGGER takes a SHARE ROW EXCLUSIVE lock on sms_numbers
+-- and sms_registrations for the moment it runs; lock_timeout makes a hung apply give up rather
+-- than queue writers behind it.
 --
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
+--   drop trigger if exists twilio_number_follows_account on public.sms_numbers;
+--   drop trigger if exists twilio_registration_follows_account on public.sms_registrations;
+--   drop function if exists public.twilio_number_follows_account();
+--   drop function if exists public.twilio_registration_follows_account();
 --   drop function if exists public.twilio_account_forget(text);
 --   drop function if exists public.twilio_push_material();
 --   alter table public.twilio_accounts drop column if exists push_skipped;
@@ -86,6 +107,10 @@ begin
   end if;
   if to_regclass('vault.decrypted_secrets') is null or to_regclass('vault.secrets') is null then
     raise exception '295: Supabase Vault is not available (vault.secrets / decrypted_secrets)';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'sms_numbers' and column_name = 'twilio_account_sid')
+     or not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'sms_registrations' and column_name = 'twilio_account_sid') then
+    raise exception '295: sms_numbers / sms_registrations have no twilio_account_sid (migration 292 not applied?)';
   end if;
 end
 $pre$;
@@ -188,6 +213,81 @@ revoke all on function public.twilio_account_forget(text) from public, anon, aut
 grant execute on function public.twilio_push_material() to service_role;
 grant execute on function public.twilio_account_forget(text) to service_role;
 
+-- ═════════════════════════════════════════════════════════════════════════════════════════
+-- PART 4 — one tenant, one account, from the numbers' and the registration's side (review H1)
+-- ═════════════════════════════════════════════════════════════════════════════════════════
+-- 292's guard refuses a sub-account for a tenant that holds something on the parent. These refuse
+-- the reverse: a holding recorded on the parent (twilio_account_sid NULL), or in another account,
+-- for a tenant that has a sub-account row (any status: a sub still being made, or closed, too).
+-- The edge refuses first (portal-settings phone_buy_number and portal-sms buy_number read the row
+-- while the switch is off, before any money moves); this is what holds whatever the code does.
+create or replace function public.twilio_number_follows_account()
+returns trigger
+language plpgsql
+set search_path to ''
+as $fn$
+declare
+  v_kind text;
+  v_sid  text;
+begin
+  if new.released_at is not null then
+    return new;
+  end if;
+  select a.kind, a.account_sid into v_kind, v_sid from public.twilio_accounts a where a.client_id = new.client_id;
+  if v_kind is distinct from 'sub' then
+    return new;
+  end if;
+  if new.twilio_account_sid is null or new.twilio_account_sid is distinct from v_sid then
+    raise exception using errcode = '23514',
+      message = format('twilio_number_follows_account: %s lives in its own Twilio sub-account, so its number must be in it (twilio_account_sid)', new.client_id),
+      hint = 'Buy it with TWILIO_SUBACCOUNTS "manual" or "on", so it is bought inside the sub-account.';
+  end if;
+  return new;
+end;
+$fn$;
+
+create or replace function public.twilio_registration_follows_account()
+returns trigger
+language plpgsql
+set search_path to ''
+as $fn$
+declare
+  v_kind text;
+  v_sid  text;
+begin
+  -- A draft that has made nothing at Twilio and names no account is not a holding yet.
+  if new.twilio_account_sid is null
+     and coalesce(new.customer_profile_sid, new.a2p_profile_sid, new.brand_sid, new.messaging_service_sid,
+                  new.campaign_sid, new.campaign_cm_sid) is null then
+    return new;
+  end if;
+  select a.kind, a.account_sid into v_kind, v_sid from public.twilio_accounts a where a.client_id = new.client_id;
+  if v_kind is distinct from 'sub' then
+    return new;
+  end if;
+  if new.twilio_account_sid is null or new.twilio_account_sid is distinct from v_sid then
+    raise exception using errcode = '23514',
+      message = format('twilio_registration_follows_account: %s lives in its own Twilio sub-account, so its registration must be in it (twilio_account_sid)', new.client_id),
+      hint = 'Submit it with TWILIO_SUBACCOUNTS "manual" or "on", so it is made inside the sub-account.';
+  end if;
+  return new;
+end;
+$fn$;
+
+drop trigger if exists twilio_number_follows_account on public.sms_numbers;
+create trigger twilio_number_follows_account
+  before insert or update of client_id, twilio_account_sid, released_at on public.sms_numbers
+  for each row execute function public.twilio_number_follows_account();
+
+drop trigger if exists twilio_registration_follows_account on public.sms_registrations;
+create trigger twilio_registration_follows_account
+  before insert or update of client_id, twilio_account_sid, customer_profile_sid, a2p_profile_sid, brand_sid,
+    messaging_service_sid, campaign_sid, campaign_cm_sid on public.sms_registrations
+  for each row execute function public.twilio_registration_follows_account();
+
+revoke all on function public.twilio_number_follows_account() from public, anon, authenticated;
+revoke all on function public.twilio_registration_follows_account() from public, anon, authenticated;
+
 -- ── CHECKS ────────────────────────────────────────────────────────────────────────────────
 do $check$
 declare
@@ -222,6 +322,25 @@ begin
                   and conname = 'twilio_accounts_push_skipped_chk') then
     raise exception '295: twilio_accounts.push_skipped has no check on its values';
   end if;
+  if not exists (select 1 from pg_catalog.pg_trigger t
+                  where t.tgrelid = 'public.sms_numbers'::regclass and t.tgname = 'twilio_number_follows_account'
+                    and t.tgenabled = 'O' and t.tgfoid = 'public.twilio_number_follows_account()'::regprocedure)
+     or not exists (select 1 from pg_catalog.pg_trigger t
+                  where t.tgrelid = 'public.sms_registrations'::regclass and t.tgname = 'twilio_registration_follows_account'
+                    and t.tgenabled = 'O' and t.tgfoid = 'public.twilio_registration_follows_account()'::regprocedure) then
+    raise exception '295: the twilio_*_follows_account triggers are missing or disabled';
+  end if;
+  foreach v_fn in array array['public.twilio_number_follows_account()', 'public.twilio_registration_follows_account()'] loop
+    if not exists (select 1 from pg_catalog.pg_proc p where p.oid = to_regprocedure(v_fn)
+                     and not p.prosecdef and 'search_path=""' = any(coalesce(p.proconfig, '{}'::text[]))) then
+      raise exception '295: % is not an invoker function with an empty search_path', v_fn;
+    end if;
+    foreach v_role in array array['anon', 'authenticated'] loop
+      if has_function_privilege(v_role, v_fn, 'EXECUTE') then
+        raise exception '295: % may execute %', v_role, v_fn;
+      end if;
+    end loop;
+  end loop;
 
   -- ── The rehearsal: forget refuses a live sub, removes a closed one with its secrets ──
   if exists (select 1 from public.twilio_accounts where client_id = v_probe or account_sid = v_sid) then
@@ -235,6 +354,19 @@ begin
       raise exception '295: twilio_account_forget removed a live sub-account';
     exception when object_not_in_prerequisite_state then null;
     end;
+    -- A number or a registration on the PARENT for this sub tenant: refused (review H1).
+    begin
+      insert into public.sms_numbers (client_id, phone_number) values (v_probe, '+15555550129');
+      raise exception '295: a parent number was recorded for a tenant with a sub-account';
+    exception when check_violation then
+      if sqlerrm not like 'twilio_number_follows_account:%' then raise; end if;
+    end;
+    begin
+      insert into public.sms_registrations (client_id, brand_sid) values (v_probe, 'BN' || repeat('e', 32));
+      raise exception '295: a parent registration was recorded for a tenant with a sub-account';
+    exception when check_violation then
+      if sqlerrm not like 'twilio_registration_follows_account:%' then raise; end if;
+    end;
     update public.twilio_accounts set status = 'closed' where client_id = v_probe;
     v_got := public.twilio_account_forget(v_probe);
     if v_got is distinct from 'closed_sub'
@@ -245,7 +377,7 @@ begin
     if public.twilio_account_forget(v_probe) is distinct from 'none' then
       raise exception '295: twilio_account_forget of nothing did not answer none';
     end if;
-    v_out := 'a live sub refused, a closed sub removed with its secret, nothing answered none';
+    v_out := 'a live sub refused, a closed sub removed with its secret, nothing answered none, a parent holding for a sub tenant refused';
     raise exception using errcode = 'S2950', message = v_out;
   exception when sqlstate 'S2950' then
     v_out := sqlerrm;
@@ -265,10 +397,11 @@ $check$;
 notify pgrst, 'reload schema';
 
 -- ── THE RECORD ────────────────────────────────────────────────────────────────────────────
--- PASS is: functions_ready true, column_added true, material_rows 3, material_loaded = how many of
--- the three kinds Vault has complete material for (0 until Ahsan loads it; provisioning then
--- skips push and says so), rehearsal 'a live sub refused, a closed sub removed with its secret,
--- nothing answered none'.
+-- PASS is: functions_ready true, column_added true, holdings_guarded true, material_rows 3,
+-- material_loaded = how many of the three kinds Vault has complete material for (0 until Ahsan
+-- loads it; provisioning then skips push and says so), split_today 0 (no tenant with a sub-account
+-- holds anything outside it), rehearsal 'a live sub refused, a closed sub removed with its secret,
+-- nothing answered none, a parent holding for a sub tenant refused'.
 select
   '295' as migration,
   (has_function_privilege('service_role', 'public.twilio_push_material()', 'EXECUTE')
@@ -279,6 +412,16 @@ select
      and not has_function_privilege('authenticated', 'public.twilio_account_forget(text)', 'EXECUTE')) as functions_ready,
   exists (select 1 from information_schema.columns c where c.table_schema = 'public' and c.table_name = 'twilio_accounts'
             and c.column_name = 'push_skipped') as column_added,
+  (exists (select 1 from pg_catalog.pg_trigger t where t.tgrelid = 'public.sms_numbers'::regclass
+             and t.tgname = 'twilio_number_follows_account' and t.tgenabled = 'O')
+     and exists (select 1 from pg_catalog.pg_trigger t where t.tgrelid = 'public.sms_registrations'::regclass
+             and t.tgname = 'twilio_registration_follows_account' and t.tgenabled = 'O')) as holdings_guarded,
+  ((select count(*) from public.sms_numbers n join public.twilio_accounts a on a.client_id = n.client_id and a.kind = 'sub'
+     where n.released_at is null and n.twilio_account_sid is distinct from a.account_sid)
+   + (select count(*) from public.sms_registrations r join public.twilio_accounts a on a.client_id = r.client_id and a.kind = 'sub'
+     where r.twilio_account_sid is distinct from a.account_sid
+       and (r.twilio_account_sid is not null or coalesce(r.customer_profile_sid, r.a2p_profile_sid, r.brand_sid,
+            r.messaging_service_sid, r.campaign_sid, r.campaign_cm_sid) is not null)))::int as split_today,
   (select count(*) from public.twilio_push_material())::int as material_rows,
   (select count(*) from public.twilio_push_material() m
     where (m.kind <> 'fcm' and m.certificate is not null and m.private_key is not null)

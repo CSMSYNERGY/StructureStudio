@@ -33,7 +33,7 @@ Deno.test("rollout: only PHONE_SELF_SERVE=on opens it to builders; until then an
   assertEquals(phoneSelfServeOn(env("")), false);
   assertEquals(phoneSelfServeOn(env("true")), false, "only the exact word opens it");
   assertEquals(phoneSelfServeOn(env(" ON ")), true);
-  for (const sub of ["", "off", "ON", "true"]) assertEquals(phoneSelfServeOn(env("on", sub)), false, `sub-accounts "${sub}" keeps it closed`);
+  for (const sub of ["", "off", "ON", "true", "manual"]) assertEquals(phoneSelfServeOn(env("on", sub)), false, `sub-accounts "${sub}" keeps it closed`);
   assertEquals(phoneRolloutRefusal({ selfServe: false, operator: false }), PHONE_ROLLOUT_SENTENCE);
   assertEquals(phoneRolloutRefusal({ selfServe: false, operator: true }), null);
   assertEquals(phoneRolloutRefusal({ selfServe: true, operator: false }), null);

@@ -2,8 +2,9 @@
  * Which Twilio account a business's texting and calling run in, and that account's credentials
  * (Workstream 2, phases 2 and 4: one Twilio sub-account per builder, ISV architecture #1).
  *
- * THE SWITCH. Until TWILIO_SUBACCOUNTS is exactly "on" (an edge secret, and a phone-api Worker var
- * of the same name), every tenant is on the PARENT account and nothing here touches the database:
+ * THE SWITCH. Until TWILIO_SUBACCOUNTS is exactly "on" or "manual" (an edge secret, and a phone-api
+ * Worker var of the same name; subaccountsMode below says what each means), every tenant is on the
+ * PARENT account and nothing here touches the database:
  * resolveTwilioAccount answers parentCreds() from the environment, the credentials every Twilio
  * call used before this file existed. One Supabase project serves beta and production and the
  * Worker serves everyone, so "off" has to be exactly today, with no extra lookup on any path.
@@ -79,9 +80,50 @@ export class TwilioAccountError extends Error {
 
 const ACCOUNT_SID = /^AC[0-9a-f]{32}$/i;
 
-/** Exactly "on", like the Worker's other rails (CALL_RECORDING, CALL_TRANSCRIBE). */
+/**
+ * TWILIO_SUBACCOUNTS, exactly (like the Worker's other rails, CALL_RECORDING, CALL_TRANSCRIBE):
+ *   "on"      every builder's Twilio work runs in its own sub-account, and one is MADE for a builder
+ *             the first time they need it (twilioProvision.ts ensureTwilioAccount);
+ *   "manual"  every sub-account that EXISTS is used exactly as with "on", but none is made by itself:
+ *             only the operator console's Create makes one. It is the pilot (the test builder's
+ *             sub works end to end before anyone else gets one) and the ROLLBACK once real builders
+ *             are on sub-accounts: unsetting the switch then would send their numbers' webhooks,
+ *             texts and registrations to the parent, which refuses or breaks them;
+ *   anything else, unset included: "off", today, nothing looked up anywhere.
+ */
+export type SubaccountsMode = "off" | "manual" | "on";
+export function subaccountsMode(get: EnvGet): SubaccountsMode {
+  const v = get("TWILIO_SUBACCOUNTS");
+  return v === "on" ? "on" : v === "manual" ? "manual" : "off";
+}
+
+/** Are existing sub-accounts USED ("on" or "manual")? Every resolver and webhook check asks this. */
 export function subaccountsOn(get: EnvGet): boolean {
-  return get("TWILIO_SUBACCOUNTS") === "on";
+  return subaccountsMode(get) !== "off";
+}
+
+/** Are sub-accounts MADE by themselves ("on" only)? Provisioning and the sign-up gates ask this. */
+export function provisioningOn(get: EnvGet): boolean {
+  return subaccountsMode(get) === "on";
+}
+
+/**
+ * A URL a SUB-account's number or TwiML App may use as a fallback, or null: https, and not one
+ * that only answers the account that owns it. A Console TwiML Bin (handler.twilio.com) and a Studio
+ * flow's webhook (webhooks.twilio.com) are bound to their owner and refuse any other account's
+ * request (401), so the parent's can never serve a sub. (A Serverless asset must be PUBLIC for the
+ * same reason; that cannot be told from its URL, so SETUP.md 7f says it.)
+ */
+export function accountFetchableUrl(raw: unknown): string | null {
+  const s = String(raw ?? "").trim();
+  if (!/^https:\/\/[^/?#\s]+(\/\S*)?$/.test(s)) return null;
+  let host: string;
+  try {
+    host = new URL(s).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  return host === "handler.twilio.com" || host === "webhooks.twilio.com" ? null : s;
 }
 
 /**

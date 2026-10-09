@@ -14,7 +14,7 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   applyNumberVoice, areaCodeOf, buyCallingNumber, callingOnlyNumberRow, DEFAULT_PHONE_API_BASE, fallbackUrlOf, findNumberSid, numberActionForSwitch,
   numberHoldKey, numberSmsConfig, numberVoiceConfig, numberVoicemailConfig, pickedNumber, pickOrphan, smsInboundUrl, strictEncode,
-  SWITCH_WARNINGS, switchCalling, voiceEnv, type Bought, type HoldResult,
+  SWITCH_WARNINGS, subVoicemailUrlOf, switchCalling, voiceEnv, type Bought, type HoldResult,
 } from "../../supabase/functions/portal-settings/phoneNumber.ts";
 // Workstream 2 phase 2 moved phoneNumber.ts's copy of the credentials (twilioCreds) into the shared
 // resolver as parentCreds; portal-settings resolves the tenant's account from there.
@@ -61,6 +61,27 @@ Deno.test("voiceEnv: the Worker base defaults to the SPEC's address; the secret 
   assertEquals(!none.ok && none.missing, ["PHONE_WEBHOOK_SECRET", "PHONE_FALLBACK_URL"]);
   const http = voiceEnv(env({ PHONE_API_BASE: "http://phone.example.test", PHONE_WEBHOOK_SECRET: SECRET, PHONE_FALLBACK_URL: "http://x.example.test" }));
   assertEquals(!http.ok && http.missing, ["PHONE_API_BASE", "PHONE_FALLBACK_URL"]);
+});
+
+Deno.test("voiceEnv for a number in a SUB-account: its own voicemail TwiML by GET, never the parent's Bin (Workstream 2, review finding 1)", () => {
+  const bin = "https://handler.twilio.com/twiml/EH" + "0".repeat(32);
+  const base = { PHONE_WEBHOOK_SECRET: SECRET, PHONE_FALLBACK_URL: bin };
+  // The parent's number: its Bin, by POST, exactly as before.
+  const parent = voiceEnv(env(base));
+  assert(parent.ok && parent.env.fallbackUrl === bin && parent.env.fallbackMethod === undefined);
+  // A sub's: TWILIO_SUB_VOICEMAIL_URL, by GET; the parent's Bin is never borrowed.
+  const none = voiceEnv(env(base), true);
+  assertEquals(!none.ok && none.missing, ["TWILIO_SUB_VOICEMAIL_URL"]);
+  const sub = voiceEnv(env({ ...base, TWILIO_SUB_VOICEMAIL_URL: "https://static.example.test/voicemail.xml" }), true);
+  assert(sub.ok);
+  if (!sub.ok) return;
+  assertEquals([sub.env.fallbackUrl, sub.env.fallbackMethod], ["https://static.example.test/voicemail.xml", "GET"]);
+  const cfg = numberVoiceConfig(sub.env);
+  assertEquals([cfg.VoiceFallbackUrl, cfg.VoiceFallbackMethod], ["https://static.example.test/voicemail.xml", "GET"]);
+  assertEquals(numberVoicemailConfig(sub.env), { VoiceUrl: "https://static.example.test/voicemail.xml", VoiceMethod: "GET", StatusCallback: "", VoiceFallbackUrl: "" });
+  // A Bin (any account's) is refused as the sub's voicemail.
+  assertEquals(subVoicemailUrlOf(env({ TWILIO_SUB_VOICEMAIL_URL: bin })), null);
+  assertEquals(voiceEnv(env({ ...base, TWILIO_SUB_VOICEMAIL_URL: bin }), true).ok, false);
 });
 
 Deno.test("numberVoiceConfig is SETUP.md step 6, in the Worker's own URL shape", () => {
@@ -317,11 +338,12 @@ Deno.test("Connect this number for calls: only while calling is on; a calling-on
   assert(/voiceEnv\(\(k\) => Deno\.env\.get\(k\)\)/.test(connect), "reads PHONE_API_BASE / PHONE_WEBHOOK_SECRET / PHONE_FALLBACK_URL from the edge env");
   assert(/const smsUrl = !n\.messaging_service_sid \? smsInboundUrl\(\(k\) => Deno\.env\.get\(k\)\) : null;/.test(connect),
     "only a number with NO messaging service gets its own SmsUrl");
-  assert(/const config = \{ \.\.\.numberVoiceConfig\(ve\.env\), \.\.\.\(smsUrl \? numberSmsConfig\(smsUrl\) : \{\}\) \};/.test(connect));
+  // Workstream 2: the env of the number's own account (a sub's voicemail is never the parent's Bin).
+  assert(/const config = \{ \.\.\.numberVoiceConfig\(vEnv\.env\), \.\.\.\(smsUrl \? numberSmsConfig\(smsUrl\) : \{\}\) \};/.test(connect));
   assert(connect.indexOf("applyNumberVoice(") < connect.indexOf("voice_enabled: true"), "voice_enabled is written only after Twilio accepted the change");
   // The reverse (review SSB-2) writes voice_enabled = false only after Twilio accepted the voicemail settings.
   const off = slice(SRC, "const numberToVoicemail = async", "\n  };\n", "numberToVoicemail");
-  assert(/config: numberVoicemailConfig\(\{ fallbackUrl \}\)/.test(off));
+  assert(/config: numberVoicemailConfig\(\{ fallbackUrl: target, /.test(off));
   assert(/const fallbackUrl = fallbackUrlOf\(/.test(off) && !/voiceEnv\(/.test(off), "moving to voicemail needs only the fallback, not the Worker's secret");
   assert(off.indexOf("applyNumberVoice(") < off.indexOf("voice_enabled: false"));
 });

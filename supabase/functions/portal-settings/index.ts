@@ -173,7 +173,7 @@ import {
 // path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
 import {
   areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
-  numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, voiceEnv, type HoldResult, type SwitchNumber,
+  numberVoicemailConfig, pickedNumber, smsInboundUrl, subVoicemailUrlOf, switchCalling, voiceEnv, type HoldResult, type SwitchNumber,
 } from "./phoneNumber.ts";
 import { attachToTexting, TEXTING_JOIN_FAILED } from "./phoneNumber.ts";
 import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
@@ -183,7 +183,7 @@ import { trustHubHttp } from "../_shared/twilioTrustHub.ts";
 import { resolveTwilioAccount, TwilioAccountError, type TwilioAccount, type TwilioCreds } from "../_shared/twilioAccount.ts";
 // Workstream 2, phase 3: a builder's first number makes their own Twilio sub-account first (only
 // while TWILIO_SUBACCOUNTS is "on"; off, it answers "the parent" without reading anything).
-import { ensureRefusalSentence, ensureTwilioAccount } from "../_shared/twilioProvision.ts";
+import { ensureRefusalSentence, ensureTwilioAccount, SUB_WHILE_OFF_SENTENCE, subAccountWhileOff } from "../_shared/twilioProvision.ts";
 // Migration 266: a later number joins the builder's texting setup with portal-sms's own helpers.
 import { attachNumberToService, clearNumberSmsUrl, numberInService } from "../_shared/twilioTrustHub.ts";
 // Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
@@ -9462,11 +9462,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!tw.ok) return { ok: false, res: tenantTwilioRefused(tw.error) };
     const creds = tw.account;
     if (!creds) return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    // A number in the builder's own sub-account falls back to TWILIO_SUB_VOICEMAIL_URL: the parent's
+    // Bin (PHONE_FALLBACK_URL) answers only the parent (phoneNumber.ts voiceEnv).
+    const vEnv = creds.source === "sub" ? voiceEnv((k) => Deno.env.get(k), true) : ve;
+    if (!vEnv.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_env_missing",
+        message: `Connecting a number for calls needs ${vEnv.missing.join(", ")}`, severity: "info" }).catch(() => {});
+      return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes;
     const sid = sidRes.sid;
     const smsUrl = !n.messaging_service_sid ? smsInboundUrl((k) => Deno.env.get(k)) : null;
-    const config = { ...numberVoiceConfig(ve.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
+    const config = { ...numberVoiceConfig(vEnv.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
     const applied = await applyNumberVoice({ creds, numberSid: sid, config });
     if (!applied.ok) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_config_failed",
@@ -9503,9 +9511,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!tw.ok) return fail(`the tenant's Twilio account could not be resolved (${tw.error instanceof TwilioAccountError ? tw.error.kind : "error"})`);
       const creds = tw.account;
       if (!creds) return fail("Twilio credentials are not set");
+      // In a sub-account: its own voicemail TwiML (the parent's Bin answers only the parent), by GET.
+      const onSub = creds.source === "sub";
+      const target = onSub ? subVoicemailUrlOf((k) => Deno.env.get(k)) : fallbackUrl;
+      if (!target) return fail("TWILIO_SUB_VOICEMAIL_URL is not set");
       const sidRes = await numberSidOf(n, creds);
       if (!sidRes.ok) return fail("its sid could not be found");
-      const applied = await applyNumberVoice({ creds, numberSid: sidRes.sid, config: numberVoicemailConfig({ fallbackUrl }) });
+      const applied = await applyNumberVoice({
+        creds, numberSid: sidRes.sid,
+        config: numberVoicemailConfig({ fallbackUrl: target, ...(onSub ? { fallbackMethod: "GET" as const } : {}) }),
+      });
       if (!applied.ok) return fail(`Twilio answered HTTP ${applied.status}, code ${applied.code}`);
       const { error } = await admin.from("sms_numbers").update({ voice_enabled: false })
         .eq("id", n.id).eq("client_id", clientId);
@@ -10271,6 +10286,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
     }
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // ── WORKSTREAM 2 (review H1): ONE TENANT, ONE ACCOUNT, EVEN WITH THE SWITCH OFF ─────────────
+    // Off, everything runs on the parent, so for a builder an operator already gave a sub-account
+    // (the console's Create works while off) this purchase would land on the parent and split them
+    // across two accounts for good. Read ONLY while the switch is off; with it on or manual the
+    // purchase below resolves to the sub. Builders cannot reach this while off (PHONE_SELF_SERVE
+    // needs TWILIO_SUBACCOUNTS "on"), so the sentence is an operator's.
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
     // ── WORKSTREAM 2, PHASE 3: THE BUILDER'S OWN TWILIO ACCOUNT, BEFORE ANY MONEY MOVES ──────────
     // With TWILIO_SUBACCOUNTS "on", a builder who is not pinned to the parent (our internal account,
     // or one already holding something there) gets their own sub-account made here, BEFORE the
@@ -10285,6 +10309,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
       if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      // TWILIO_SUBACCOUNTS "manual": this builder's sub-account has to be made (or finished) in the
+      // operator console first, so the number does not land on the parent for good.
+      if (prov.reason === "manual") return json({ error: ensureRefusalSentence(prov), code: `twilio_manual_${prov.code}` }, 409);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
         message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
         context: { step: prov.step, code: prov.code } }).catch(() => {});
@@ -10294,10 +10321,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
     // on, the voicemail Bin when it is off).
     const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
-    const ve = voiceEnv((k) => Deno.env.get(k));
     const tw = await tenantTwilio();
     if (!tw.ok) return tenantTwilioRefused(tw.error);
     const creds = tw.account;
+    // Inside a sub-account the number's voicemail is TWILIO_SUB_VOICEMAIL_URL, not the parent's Bin.
+    const ve = voiceEnv((k) => Deno.env.get(k), creds?.source === "sub");
     if (!smsUrl || !ve.ok || !creds) {
       const missing = [!smsUrl ? "SMS_INBOUND_SECRET" : null, ...(ve.ok ? [] : ve.missing), !creds ? "Twilio credentials" : null].filter(Boolean);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_env_missing", severity: "info",

@@ -13,8 +13,10 @@
 //     Twilio whether the stored credentials are accepted;
 //   * twilio_account_suspend / _close: done with the parent's token; close is typed and REFUSED
 //     while the sub still has a number;
-//   * delete_client closes the sub FIRST (before the gateway and every wipe), refuses with nothing
-//     done while it has a number, and removes the account row last, before client_configs;
+//   * delete_client READS first (the sub's numbers, an orphan found by name, billing, the gateway's
+//     configuration), refuses with nothing done while the sub has a number; closes the sub only
+//     after the gateway step, and removes the account row right after, BEFORE the first wipe; a
+//     missing twilio_accounts table (PGRST205) is "no row"; a refused forget wipes nothing;
 //   * the money grant: provision and close need can_bill, get is a read (source checks).
 // Tenants, SIDs and secrets are made up (the repo is public).
 
@@ -33,6 +35,7 @@ const BASE_ENV: Record<string, string> = {
   SUPABASE_URL: "https://project.example.test", SUPABASE_SERVICE_ROLE_KEY: "service-role-test", ADMIN_PASSWORD,
   TWILIO_ACCOUNT_SID: PARENT, TWILIO_AUTH_TOKEN: PARENT_TOKEN, TWILIO_API_KEY: "SK" + "0".repeat(32), TWILIO_API_SECRET: "parent-api-secret",
   PHONE_API_BASE: "https://phone.example.test", PHONE_WEBHOOK_SECRET: "voicekey123", PHONE_FALLBACK_URL: "https://fallback.example.test/bin",
+  TWILIO_SUB_APP_FALLBACK_URL: "https://static.example.test/calling-problem.xml", TWILIO_SUB_VOICEMAIL_URL: "https://static.example.test/voicemail.xml",
   TWILIO_EVENTS_SECRET: "eventskey456",
 };
 
@@ -45,6 +48,8 @@ class Db {
   liveNumbers = 0;
   vault = new Map<string, string>();
   audits: Row[] = [];
+  /** twilio_accounts is not there yet (migration 292 not applied): PostgREST's PGRST205. */
+  missing = false;
 
   from(table: string) {
     // deno-lint-ignore no-this-alias
@@ -60,6 +65,7 @@ class Db {
       if (table === "admin_audit" && q.op === "insert") { db.audits.push(q.patch!); return { data: null, error: null }; }
       if (table === "admin_auth_attempts") return { data: null, error: null };
       if (table === "sms_numbers") return { data: null, count: db.liveNumbers, error: null };
+      if (table === "twilio_accounts" && db.missing) return { data: null, error: { code: "PGRST205", message: "no such table" } };
       const hit = rows().filter((r) => q.f.every((fn) => fn(r)));
       if (q.op === "select") return { data: single ? (hit[0] ? { ...hit[0] } : null) : hit, count: hit.length, error: null };
       if (q.op === "update") {
@@ -152,10 +158,16 @@ class Twilio {
         return j({ sid: this.sub.sid, auth_token: this.sub.token }, 201);
       }
       if (/\/IncomingPhoneNumbers\.json$/.test(p)) return j({ incoming_phone_numbers: this.numbers.map((n) => ({ phone_number: n })) });
-      if (/\/Applications\.json$/.test(p)) return method === "GET" ? j({ applications: [] }) : j({ sid: this.id("AP") }, 201);
+      const subToken = auth === `Basic ${btoa(`${this.sub?.sid}:${this.sub?.token}`)}`;
+      const subKey = auth === `Basic ${btoa(`${this.key?.sid}:${this.key?.secret}`)}`;
+      if (/\/Applications\.json$/.test(p)) {
+        if (method !== "GET") return j({ sid: this.id("AP") }, 201);
+        return subToken || subKey ? j({ applications: [] }) : j({ code: 20003 }, 401);
+      }
       if (/\/Accounts\/AC\w+\.json$/.test(p)) {
         if (method === "POST") { this.sub!.status = form.get("Status")!; return j({ status: this.sub!.status }); }
-        const ok = auth === `Basic ${btoa(`${this.sub?.sid}:${this.sub?.token}`)}` || auth === `Basic ${btoa(`${this.key?.sid}:${this.key?.secret}`)}` || auth.includes(btoa(`${PARENT}:`).slice(0, 10));
+        // A Standard API key cannot read the Accounts resource (Twilio's API keys page): 20003.
+        const ok = subToken || auth.includes(btoa(`${PARENT}:`).slice(0, 10));
         return ok ? j({ sid: this.sub?.sid, auth_token: this.sub?.token }) : j({ code: 20003 }, 401);
       }
     }
@@ -210,7 +222,7 @@ Deno.test("provision: makes the first test sub with the switch OFF, only for the
 
   const r = await act(db, tw, { action: "twilio_account_provision", confirmClientId: TENANT });
   assertEquals(r.status, 200, r.raw);
-  assertEquals([r.body.account.kind, r.body.account.status, r.body.account.step, r.body.account.switchOn], ["sub", "active", "done", false]);
+  assertEquals([r.body.account.kind, r.body.account.status, r.body.account.step, r.body.account.switchOn, r.body.account.switchMode], ["sub", "active", "done", false, "off"]);
   assertEquals(r.body.pushSkipped, ["apns_prod"], "material missing in Vault is skipped and said");
   assertEquals(r.body.account.accountSid, `AC…${tw.sub!.sid.slice(-4)}`);
   assert(!r.raw.includes(tw.sub!.sid) && !r.raw.includes(tw.sub!.token) && !r.raw.includes(tw.key!.secret), "no full SID or secret in the response");
@@ -254,6 +266,14 @@ Deno.test("get with check: masked, and Twilio says whether the stored credential
   assert(!r.raw.includes(tw.sub!.sid) && !r.raw.includes(tw.sub!.token));
   const none = await act(new Db(), new Twilio(), { action: "twilio_account_get" });
   assertEquals([none.status, none.body.account.kind], [200, "none"]);
+  // A database without 292: the card says so instead of failing (review L5).
+  const bare = new Db();
+  bare.missing = true;
+  const nb = await act(bare, new Twilio(), { action: "twilio_account_get" });
+  assertEquals([nb.status, nb.body.account.installed], [200, false], nb.raw);
+  const np = await act(bare, new Twilio(), { action: "twilio_account_provision", confirmClientId: TENANT });
+  assertEquals(np.status, 503, np.raw);
+  assert(/Migrations 292 and 295 aren't applied/.test(np.body.error), np.body.error);
 });
 
 Deno.test("suspend, then the same Create button reactivates; close is typed, refused while the sub has a number, then final", async () => {
@@ -298,21 +318,71 @@ Deno.test("delete_client: a sub that still has a number refuses the whole delete
   assert(!r.twilioCalls.some((c) => c.startsWith("POST ")), `the sub was changed: ${r.twilioCalls.join(", ")}`);
 });
 
-Deno.test("delete_client: the sub is closed FIRST, before the gateway and every wipe; its row goes last, before client_configs", async () => {
+Deno.test("delete_client: the sub is read first, closed after the gateway step, and its row removed BEFORE the first wipe", async () => {
   const r = await deleteClient(DELETE_HANDLER, {
     subs: [{ id: "4000000001", status: "active" }], vault: null,
     twilio: { row: { kind: "sub", status: "active", account_sid: SUB } },
   });
   assertEquals(r.status, 200, r.raw);
+  const numbersCheck = r.log.indexOf(`tw GET /2010-04-01/Accounts/${SUB}/IncomingPhoneNumbers.json`);
   const close = r.log.indexOf(`tw POST /2010-04-01/Accounts/${SUB}.json`);
   const firstGateway = r.log.findIndex((l) => l.startsWith("gw "));
-  assert(close >= 0 && close < firstGateway && close < firstWipe(r), `order:\n${r.log.join("\n")}`);
+  const lastGateway = r.log.findLastIndex((l) => l.startsWith("gw "));
+  assert(numbersCheck >= 0 && numbersCheck < firstGateway, `the numbers are checked before anything irreversible:\n${r.log.join("\n")}`);
+  assert(close > lastGateway && close < firstWipe(r), `closed after the gateway step and before every wipe:\n${r.log.join("\n")}`);
   const forget = r.log.indexOf("db rpc twilio_account_forget");
-  const configs = r.log.lastIndexOf("db delete client_configs");
-  assert(forget > firstWipe(r) && forget < configs, `the row goes last, before client_configs:\n${r.log.join("\n")}`);
+  assert(forget > close && forget < firstWipe(r), `the row goes right after the close, before the first wipe:\n${r.log.join("\n")}`);
   assertEquals(r.body.twilio, { closed: true });
   assertEquals(r.body.deleted.twilio_accounts, 1);
   assert(r.audits.some((a) => /twilio closed sid=AC…7777$/.test(a.note)), JSON.stringify(r.audits));
+});
+
+Deno.test("delete_client: the gateway declining comes BEFORE the irreversible close: the sub is still open", async () => {
+  const r = await deleteClient(DELETE_HANDLER, {
+    subs: [{ id: "4000000001", status: "active" }], vault: null,
+    gateway: () => "response=3&responsetext=Declined&response_code=300",
+    twilio: { row: { kind: "sub", status: "active", account_sid: SUB } },
+  });
+  assertEquals(r.status, 502, r.raw);
+  assert(!r.twilioCalls.some((c) => c.startsWith("POST ")), `the sub was closed: ${r.twilioCalls.join(", ")}`);
+  assertEquals(r.wipes, []);
+});
+
+Deno.test("delete_client: twilio_accounts not there yet (PGRST205) is no row: the delete goes on and Twilio is never asked", async () => {
+  const r = await deleteClient(DELETE_HANDLER, { subs: [], vault: null, twilio: { row: null, readError: "PGRST205" } });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals(r.twilioCalls, []);
+  assert(!r.log.includes("db rpc twilio_account_forget"));
+  const other = await deleteClient(DELETE_HANDLER, { subs: [], vault: null, twilio: { row: null, readError: "57014" } });
+  assertEquals(other.status, 502, other.raw);
+  assertEquals(other.wipes, [], "any other read failure refuses with nothing done");
+});
+
+Deno.test("delete_client: a forget that fails (295 not applied) wipes NOTHING and says the sub is already closed", async () => {
+  const r = await deleteClient(DELETE_HANDLER, {
+    subs: [], vault: null, twilio: { row: { kind: "sub", status: "active", account_sid: SUB }, forgetError: "PGRST202" },
+  });
+  assertEquals(r.status, 500, r.raw);
+  assertEquals(r.wipes, [], `nothing was wiped: ${r.wipes.join(", ")}`);
+  assertEquals(r.body.twilio, { closed: true, code: "PGRST202" });
+  assert(/already closed/.test(r.body.error), r.body.error);
+});
+
+Deno.test("delete_client: a sub whose create answer was lost (no SID on the row) is found by its name at Twilio and closed", async () => {
+  const ORPHAN = "AC" + "6".repeat(32);
+  const r = await deleteClient(DELETE_HANDLER, {
+    subs: [], vault: null,
+    twilio: { row: { kind: "sub", status: "failed", account_sid: null }, named: [{ sid: ORPHAN, status: "active" }] },
+  });
+  assertEquals(r.status, 200, r.raw);
+  assert(r.twilioCalls.includes("GET /2010-04-01/Accounts.json"), r.twilioCalls.join(", "));
+  assert(r.twilioCalls.includes(`POST /2010-04-01/Accounts/${ORPHAN}.json`), r.twilioCalls.join(", "));
+  assert(r.audits.some((a) => /twilio closed_orphan sid=AC…6666$/.test(a.note)), JSON.stringify(r.audits));
+  // None found: nothing to close, the row still goes.
+  const none = await deleteClient(DELETE_HANDLER, { subs: [], vault: null, twilio: { row: { kind: "sub", status: "failed", account_sid: null }, named: [] } });
+  assertEquals(none.status, 200, none.raw);
+  assert(!none.twilioCalls.some((c) => c.startsWith("POST ")));
+  assertEquals(none.body.deleted.twilio_accounts, 1);
 });
 
 Deno.test("delete_client: Twilio refusing the close refuses the delete (502), nothing else done", async () => {
@@ -323,11 +393,12 @@ Deno.test("delete_client: Twilio refusing the close refuses the delete (502), no
   assertEquals([r.wipes, r.gatewayCalls.length], [[], 0]);
 });
 
-Deno.test("delete_client: a parent pin closes nothing at Twilio; the pin goes with the tenant", async () => {
+Deno.test("delete_client: a parent pin closes nothing at Twilio; the pin goes with the tenant, before the first wipe", async () => {
   const r = await deleteClient(DELETE_HANDLER, { subs: [], vault: null, twilio: { row: { kind: "parent", status: "active", account_sid: null } } });
   assertEquals(r.status, 200, r.raw);
   assertEquals(r.twilioCalls, []);
   assert(r.log.includes("db rpc twilio_account_forget"));
+  assert(r.log.indexOf("db rpc twilio_account_forget") < firstWipe(r), r.log.join("\n"));
   assertEquals(r.body.twilio, undefined);
 });
 
