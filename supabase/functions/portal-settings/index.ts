@@ -203,12 +203,12 @@ import {
 // kinds above, and the business profile an operator makes for a builder who only calls
 // (phone_trust_profile), both in the builder's own Twilio account.
 import { createSecondaryCustomerProfile, finishSecondaryCustomerProfile, parseCnamDisplayName } from "../_shared/twilioTrustHub.ts";
-import { CNAM_COLUMNS, runTrustProfile, type RegistrationRow } from "./phoneTrust.ts";
+import { CNAM_COLUMNS, cnamNumberRefusal, runTrustProfile, type RegistrationRow } from "./phoneTrust.ts";
 // Workstream 2, phase 8: "Bring your number". The builder's request (phone_port_request) and the
 // operator's landing of a moved number (phone_adopt_number); the rules are numberRequests.ts, the
 // move itself is workers/phone-api/PORTING.md.
 import {
-  adoptNumber, parseAdoptNumber, parsePortRequest, portRequestConflict, portRequestRow, portRequestView, type PortRequestRow,
+  adoptNumber, lookupOnlyEnv, parseAdoptNumber, parsePortRequest, portRequestConflict, portRequestRow, portRequestView, type PortRequestRow,
 } from "./numberRequests.ts";
 import { parentCreds } from "../_shared/twilioAccount.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
@@ -10730,6 +10730,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (kind === "cnam" && !("cnam_trust_product_sid" in trustRow)) {
       return phoneUnavailable("Caller name registration isn't available on this server yet.");
     }
+    // CNAM is for US local numbers only (phoneTrust.ts cnamNumberRefusal): a toll-free or Canadian
+    // number is refused before anything is sent (review 2026-10-09).
+    if (kind === "cnam") {
+      const notLocal = cnamNumberRefusal(n.phone_number);
+      if (notLocal) return json({ error: notLocal, code: "cnam_us_local_only" }, 409);
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
 
@@ -10932,6 +10938,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // stored (phone_number_requests, migration 297) and IS the operator's notification: the console
   // lists every open one. No PIN, bill or account number is accepted (numberRequests.ts refuses
   // them), and nothing is sent anywhere: an operator books the move (workers/phone-api/PORTING.md).
+  // ⚠️ ONLY THIS BUILDER'S OWN ROWS ARE READ (review 2026-10-09). Refusing on another builder's
+  // number or request told any builder whether a number belonged to someone else, and let one
+  // builder block another's request; the operator console flags those instead.
   if (action === "phone_port_request") {
     const parsed = parsePortRequest(payload?.request);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -10940,9 +10949,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const [mine, asked, live] = await Promise.all([
       admin.from("phone_number_requests").select("id", { count: "exact", head: true })
         .eq("client_id", clientId).in("status", ["new", "in_progress"]),
-      // Any builder's open request for one of these numbers (the array overlap operator).
-      admin.from("phone_number_requests").select("numbers").in("status", ["new", "in_progress"]).overlaps("numbers", v.numbers).limit(20),
-      admin.from("sms_numbers").select("phone_number").in("phone_number", v.numbers).is("released_at", null).limit(20),
+      // This builder's own open requests naming one of these numbers (the array overlap operator).
+      admin.from("phone_number_requests").select("numbers").eq("client_id", clientId)
+        .in("status", ["new", "in_progress"]).overlaps("numbers", v.numbers).limit(20),
+      admin.from("sms_numbers").select("phone_number").eq("client_id", clientId)
+        .in("phone_number", v.numbers).is("released_at", null).limit(20),
     ]);
     for (const r of [mine, asked, live]) {
       if (r.error) return phoneNotReady(r.error) ? unavailable() : dbFail(req, clientId, "check your number requests", r.error);
@@ -10950,9 +10961,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const conflict = portRequestConflict(v, {
       openForTenant: Number(mine.count ?? 0),
       // deno-lint-ignore no-explicit-any
-      openNumbers: ((asked.data ?? []) as any[]).flatMap((x) => (Array.isArray(x.numbers) ? x.numbers : [])),
+      ownOpenNumbers: ((asked.data ?? []) as any[]).flatMap((x) => (Array.isArray(x.numbers) ? x.numbers : [])),
       // deno-lint-ignore no-explicit-any
-      liveNumbers: ((live.data ?? []) as any[]).map((x) => String(x.phone_number)),
+      ownLiveNumbers: ((live.data ?? []) as any[]).map((x) => String(x.phone_number)),
     });
     if (conflict) return json({ error: conflict }, 409);
     const { data: row, error } = await admin.from("phone_number_requests")
@@ -10983,10 +10994,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
     if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
     if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
-    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    // ⚠️ ADOPTING NEVER MAKES AN ACCOUNT (review 2026-10-09). A moved number can only have landed in
+    // an account that already exists, so the account is looked up the way TWILIO_SUBACCOUNTS
+    // "manual" does it (lookupOnlyEnv): an existing, finished sub-account, or the parent for a
+    // builder who lives there, and nothing is made or finished. A builder with no finished
+    // sub-account of their own while the switch is on is refused with what to do, instead of one
+    // being made as a side effect.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: lookupOnlyEnv((k) => Deno.env.get(k)) });
     if (!prov.ok) {
       if (prov.reason === "not_configured") return phoneUnavailable(ensureRefusalSentence(prov));
-      if (prov.reason === "busy" || prov.reason === "manual") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "manual") {
+        return json({
+          error: "This builder has no finished Twilio account of their own yet, so the number cannot have landed in it. Make or finish it on their Twilio account card (Admin, Account), move the number into it (PORTING.md), then adopt it.",
+          code: "no_own_account",
+        }, 409);
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
       if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
         message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
@@ -11016,6 +11039,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       },
       findInTenant: (n) => findNumberSid({ creds, e164: n }),
       findInParent: parent ? (n) => findNumberSid({ creds: parent, e164: n }) : null,
+      isOtherTenant: async (name) => {
+        const { data, error } = await admin.from("client_configs").select("client_id").eq("client_id", name).maybeSingle();
+        return error ? { ok: false as const, error } : { ok: true as const, other: !!data && name !== clientId };
+      },
+      openRequestNames: async (n) => {
+        const { data, error } = await admin.from("phone_number_requests").select("id")
+          .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [n]).limit(1);
+        // No table yet (297 not applied): no request can name it, so the parent's adoption is refused.
+        if (error) return phoneNotReady(error) ? { ok: true as const, open: false } : { ok: false as const, error };
+        return { ok: true as const, open: (data ?? []).length > 0 };
+      },
       record: async (sid) => {
         const { data, error } = await admin.from("sms_numbers")
           .insert(callingOnlyNumberRow(clientId, { sid, phoneNumber: e164 }, subAccountSid))

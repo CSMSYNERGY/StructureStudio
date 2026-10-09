@@ -4,12 +4,14 @@
 // done outside our code for now (workers/phone-api/PORTING.md): a GoHighLevel LC Phone number is a
 // HighLevel support ticket, a carrier number a Twilio Port In request made in Twilio's Console.
 //
-// ⚠️ NO SECRETS. A port needs the line's PIN or account number, a recent bill and a signed LOA. None
+// ⚠️ NO SECRETS. A port needs the line's account number (and a mobile's PIN), a recent bill and a signed LOA. None
 // of it is asked for, accepted or stored here: a request carrying any key that names one is refused
-// outright, and a run of five or more digits in a free-text box is refused (migration 297 refuses it
-// again), so a PIN or an account number typed into the wrong box is never kept. The operator types
-// the PIN into Twilio's Console, the bill is uploaded there, and Twilio emails the LOA to the
-// contact named here.
+// outright, and a free-text box is refused when it carries five or more digits in a row, even
+// spaced, dotted or dashed ("1234-5678-9012"), or any digit after a word like PIN, passcode,
+// password, acct or account ("PIN 4829"); dates and times in the timing note are allowed
+// (looksSecret). Migration 297 refuses the same again, so a PIN or an account number typed into the
+// wrong box is never kept. The operator types the PIN into Twilio's Console, the bill is uploaded
+// there, and Twilio emails the LOA to the contact named here.
 //
 // This file is the part that runs without a network or a database: parsing the request, what the
 // builder is shown, and the ORDER of an adoption. index.ts does the reads, the writes and the gates;
@@ -30,8 +32,34 @@ export const PORT_SECRET_SENTENCE =
 /** Keys a request may NEVER carry. Their presence alone refuses it (nothing is read from them). */
 const SECRET_KEYS = /pin|passcode|password|account_?number|accountnumber|acct|ssn|tax_?id|bill|loa|ssn|card/i;
 
-/** A run of five or more digits: an account number or a PIN, never a carrier, a name or a date. */
-const DIGIT_RUN = /\d{5,}/;
+/** Five or more digits joined only by spaces, dots, slashes or dashes ("1234-5678-9012",
+ *  "48 29 13 7"): an account number or a PIN, never a carrier or a name. Review 2026-10-09: a bare
+ *  `\d{5,}` let "acct 287-123-456" through. Migration 297's checks are the same pattern. */
+const DIGIT_RUN = /\d(?:[\s./-]*\d){4,}/;
+/** Any digit soon after a word that names a secret ("PIN 4829", "acct #12", "account no. 4"),
+ *  however short. */
+const SECRET_WORD = /\b(?:pin|passcode|pass\s*code|password|acct|account|ssn|security\s*code)\b(?:\s*(?:no|num|number)\b)?[^a-z0-9]{0,6}\d/i;
+
+/**
+ * The timing note with its dates and times taken out, so "after 10/20/2026, 9am-5pm" is not read as
+ * a run of digits: ISO dates, 10/20 and 10/20/2026 (also with dots or dashes), 9am, 9:30 pm, 17:00
+ * and years 1900-2099. Migration 297 strips the same before its check.
+ */
+export function withoutDatesAndTimes(s: string): string {
+  return s
+    .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
+    .replace(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/g, " ")
+    .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)/gi, " ")
+    .replace(/\b\d{1,2}:\d{2}\b/g, " ")
+    .replace(/\b(?:19|20)\d{2}\b/g, " ");
+}
+
+/** Does this free text look like it carries a PIN or an account number? `dates`: the timing note,
+ *  whose dates and times are allowed. */
+export function looksSecret(v: string, opts: { dates?: boolean } = {}): boolean {
+  if (SECRET_WORD.test(v)) return true;
+  return DIGIT_RUN.test(opts.dates ? withoutDatesAndTimes(v) : v);
+}
 
 export type PortRequest = {
   numbers: string[];
@@ -92,8 +120,8 @@ export function parsePortRequest(raw: unknown): { ok: true; value: PortRequest }
   const window = clean(r.cutoverWindow);
   if (window.length > 200) return { ok: false, error: "Keep the timing note under 200 characters." };
 
-  for (const v of [currentCarrier, contactName, window]) {
-    if (DIGIT_RUN.test(v)) return { ok: false, error: PORT_SECRET_SENTENCE };
+  if (looksSecret(currentCarrier) || looksSecret(contactName) || looksSecret(window, { dates: true })) {
+    return { ok: false, error: PORT_SECRET_SENTENCE };
   }
   return { ok: true, value: { numbers, currentCarrier, isLcPhone, contactName, contactEmail, cutoverWindow: window || null } };
 }
@@ -135,23 +163,43 @@ export function portRequestView(r: PortRequestRow) {
   };
 }
 
-/** Why a new request is refused given what is already open (any builder's), or null. A number
- *  already live on Structure Studio is not moved again; one already asked for is not asked twice. */
+/**
+ * Why a new request is refused, given THIS BUILDER'S OWN numbers and open requests, or null. A
+ * number already live on their account is not moved again; one they already asked for is not asked
+ * twice. Other builders' numbers and requests are never read here (review 2026-10-09: refusing on
+ * them told any builder whether a number was another business's, and let one builder block
+ * another's request). A number that is another builder's, or that another builder also asked for,
+ * is stored like any other and FLAGGED to the operator (admin-catalog number_requests_list, with
+ * _shared/numberRequestFlags.ts).
+ */
 export function portRequestConflict(
   v: PortRequest,
-  o: { openForTenant: number; openNumbers: string[]; liveNumbers: string[] },
+  o: { openForTenant: number; ownOpenNumbers: string[]; ownLiveNumbers: string[] },
 ): string | null {
   if (o.openForTenant >= MAX_OPEN_REQUESTS) {
     return `You already have ${o.openForTenant} requests open. Structure Studio will be in touch about those first.`;
   }
-  const live = v.numbers.find((n) => o.liveNumbers.includes(n));
-  if (live) return `${live} is already on Structure Studio.`;
-  const asked = v.numbers.find((n) => o.openNumbers.includes(n));
-  if (asked) return `${asked} has already been asked for. Structure Studio will be in touch about it.`;
+  const live = v.numbers.find((n) => o.ownLiveNumbers.includes(n));
+  if (live) return `${live} is already on your account.`;
+  const asked = v.numbers.find((n) => o.ownOpenNumbers.includes(n));
+  if (asked) return `${asked} is already in one of your open requests. Structure Studio will be in touch about it.`;
   return null;
 }
 
 // ── phone_adopt_number: land a moved number on the builder's account ─────────────────────────
+
+/**
+ * The environment as phone_adopt_number hands it to ensureTwilioAccount: TWILIO_SUBACCOUNTS "on"
+ * read as "manual", so the account is LOOKED UP, never made or finished (review 2026-10-09: a moved
+ * number can only be in an account that already exists, and an adoption must not provision a
+ * sub-account as a side effect). "off" and "manual" pass through unchanged, as does everything else.
+ */
+export function lookupOnlyEnv(get: (k: string) => string | undefined): (k: string) => string | undefined {
+  return (k) => {
+    const v = get(k);
+    return k === "TWILIO_SUBACCOUNTS" && v === "on" ? "manual" : v;
+  };
+}
 
 /** The number an operator typed → E.164 (US local and mobile), or null. */
 export function parseAdoptNumber(raw: unknown): string | null {
@@ -159,7 +207,11 @@ export function parseAdoptNumber(raw: unknown): string | null {
   return e && !TOLL_FREE.has(e.slice(2, 5)) ? e : null;
 }
 
-type Find = (e164: string) => Promise<{ ok: true; sid: string | null } | { ok: false; status: number; code: number }>;
+type Find = (e164: string) => Promise<{ ok: true; sid: string | null; friendlyName?: string | null } | { ok: false; status: number; code: number }>;
+
+/** A FriendlyName shaped like a client id (purchaseNumber names every number it buys after its
+ *  builder). Twilio's own default is the formatted number, "(816) 555-0123", which never is. */
+const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
 export type AdoptOutcome =
   | { ok: true; already: true; rowId: string }
@@ -177,7 +229,14 @@ export type AdoptOutcome =
  *      is. A number in a different account than the builder's is REFUSED, never recorded: its texts
  *      and calls would run with the wrong account's credentials, and 292/295 forbid the split.
  *      (Moving it between our accounts is a runbook step: PORTING.md.)
- *   4. Found: the calling-only row (phoneNumber.ts callingOnlyNumberRow), with the sub's SID.
+ *   4. Found, but its Twilio FriendlyName is ANOTHER builder's client id (the name purchaseNumber
+ *      gives what it buys: a number bought for them whose row was never written, or one released
+ *      here but not at Twilio): refused (review 2026-10-09).
+ *   5. Found on the PARENT (the account every builder without a sub-account shares): adopted only
+ *      for an OPEN request of this builder's that names it (review 2026-10-09: otherwise a typo
+ *      could re-point any other number on the shared account at this builder). A sub-account is
+ *      the builder's own, so any number in it is theirs.
+ *   6. The calling-only row (phoneNumber.ts callingOnlyNumberRow), with the sub's SID.
  * Nothing here changes the number at Twilio; the handler then points its calls and texts (the
  * purchase's own steps) once the row exists.
  */
@@ -189,6 +248,10 @@ export async function adoptNumber(
     findInTenant: Find;
     /** The parent's own lookup, asked only for a builder on a sub-account. */
     findInParent: Find | null;
+    /** Is this name another builder's client id? Asked only for a slug-shaped FriendlyName. */
+    isOtherTenant: (name: string) => Promise<{ ok: true; other: boolean } | { ok: false; error: unknown }>;
+    /** Does this builder have an open request naming the number? Asked only on the parent. */
+    openRequestNames: (e164: string) => Promise<{ ok: true; open: boolean } | { ok: false; error: unknown }>;
     record: (sid: string) => Promise<{ ok: true; row: { id: string; phone_number: string; twilio_sid: string | null } } | { ok: false; error: unknown }>;
   },
 ): Promise<AdoptOutcome> {
@@ -217,6 +280,27 @@ export async function adoptNumber(
     };
   }
   if (!/^PN[0-9a-f]{32}$/i.test(here.sid)) return { ok: false, kind: "twilio", status: 502, code: 0, error: "Twilio returned a number without a usable SID." };
+  const name = String(here.friendlyName ?? "").trim();
+  if (SLUG.test(name) && name !== deps.tenantId) {
+    const other = await deps.isOtherTenant(name);
+    if (!other.ok) return { ok: false, kind: "db", error: other.error };
+    if (other.other) {
+      return {
+        ok: false, kind: "refused", status: 409, code: "number_named_for_other",
+        error: `That number is named for another builder at Twilio (${name}): it was bought for them. Sort out whose it is before adopting it.`,
+      };
+    }
+  }
+  if (!o.subAccountSid) {
+    const asked = await deps.openRequestNames(o.e164);
+    if (!asked.ok) return { ok: false, kind: "db", error: asked.error };
+    if (!asked.open) {
+      return {
+        ok: false, kind: "refused", status: 409, code: "no_open_request",
+        error: "On Structure Studio's shared Twilio account a moved number is adopted only for an open request of this builder's that names it. Add it on their Bring your number card first, then adopt it.",
+      };
+    }
+  }
   const rec = await deps.record(here.sid);
   if (!rec.ok) return { ok: false, kind: "db", error: rec.error };
   return { ok: true, already: false, sid: here.sid, row: rec.row };

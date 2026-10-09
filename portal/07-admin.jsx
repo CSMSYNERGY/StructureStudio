@@ -2019,7 +2019,7 @@ function AdmNumberRequests({ onPick, onFlash }) {
   return (
     <div style={S.card} data-adm-number-requests={open.length}>
       <CardHead title={`Bring-your-number requests${open.length ? ` (${open.length} open)` : ""}`}
-        desc="Builders asking to move numbers they already have. GoHighLevel (LC Phone) numbers move by a HighLevel support ticket; any other by a Twilio Port In request made in the Twilio Console, into the builder's own Twilio account (PORTING.md). Ask for the PIN or account number by phone and type it into Twilio only." />
+        desc="Builders asking to move numbers they already have. GoHighLevel (LC Phone) numbers move by a HighLevel support ticket; any other by a Twilio Port In request made in the Twilio Console, into the builder's own Twilio account (PORTING.md). Ask for the account number (and a mobile number's PIN) by phone and type them into Twilio only." />
       {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
       {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 297 isn't applied on this database yet, so there are no requests to show.</div>}
       {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
@@ -2033,6 +2033,15 @@ function AdmNumberRequests({ onPick, onFlash }) {
               {r.cutoverWindow ? ` · when: ${r.cutoverWindow}` : ""}
             </div>
             <div style={{ color: "#475569" }}>Approves the move: {r.contactName} &lt;{r.contactEmail}&gt; · asked {phoneWhen(r.createdAt) || r.createdAt}</div>
+            {/* Review 2026-10-09: the builder is never told another business holds or asked for a
+                number; the operator is, here, before booking anything. */}
+            {r.flags && (r.flags.liveElsewhere.length > 0 || r.flags.askedElsewhere.length > 0) && (
+              <div data-adm-number-request-flag style={{ color: "#B45309", fontWeight: 700 }}>
+                {r.flags.liveElsewhere.map((f) => `${f.number} is live on ${f.clientId}. `).join("")}
+                {r.flags.askedElsewhere.map((f) => `${f.number} is also asked for by ${f.clientId}. `).join("")}
+                Check whose it is before booking the move.
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             <AdmChip tone={r.status === "new" ? "warn" : r.status === "in_progress" ? "on" : r.status === "done" ? "good" : "neutral"}>{ADM_REQ_WORDS[r.status] || r.status}</AdmChip>

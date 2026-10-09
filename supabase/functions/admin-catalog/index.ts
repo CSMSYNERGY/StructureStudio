@@ -27,6 +27,9 @@ import {
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
   summarizePhoneUsage, type PhoneBillingSettings, type TwilioDailyRow, type UsageChargeRow,
 } from "../_shared/phoneBillingAdmin.ts";
+// Workstream 2, phase 8 (review 2026-10-09): an open "Bring your number" request's overlap with
+// another builder's numbers or requests, shown to the operator instead of refused to the builder.
+import { requestFlags } from "../_shared/numberRequestFlags.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -1914,13 +1917,25 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         if (open.error) throw open.error;
         if (recent.error) throw recent.error;
         const nameOf = new Map(((names.data ?? []) as any[]).map((c) => [String(c.client_id), String(c.company_name ?? "")]));
-        const view = (r: any) => ({
+        // Review 2026-10-09: a builder's request is never refused over ANOTHER builder's number or
+        // request (that told them whose a number was), so the operator is shown it here instead:
+        // each open request's numbers that are live on another builder's account, or that another
+        // builder's open request also names. A failed read leaves the flags out, never the list.
+        const openRows = ((open.data ?? []) as any[]).map((r) => ({ ...r, numbers: Array.isArray(r.numbers) ? r.numbers.map(String) : [] }));
+        const asked = [...new Set(openRows.flatMap((r) => r.numbers))].slice(0, 500);
+        let live: Array<{ phone_number: string; client_id: string }> | null = [];
+        if (asked.length) {
+          const l = await sb.from("sms_numbers").select("phone_number, client_id").in("phone_number", asked).is("released_at", null).limit(1000);
+          live = l.error ? null : ((l.data ?? []) as any[]).map((x) => ({ phone_number: String(x.phone_number), client_id: String(x.client_id) }));
+        }
+        const view = (r: any, flagged: boolean) => ({
           id: r.id, clientId: r.client_id, companyName: nameOf.get(String(r.client_id)) || null,
           numbers: Array.isArray(r.numbers) ? r.numbers : [], currentCarrier: r.current_carrier, isLcPhone: r.is_lc_phone,
           contactName: r.contact_name, contactEmail: r.contact_email, cutoverWindow: r.cutover_window ?? null,
           status: r.status, createdAt: r.created_at, handledAt: r.handled_at ?? null,
+          ...(flagged && live ? { flags: requestFlags(r, { live, open: openRows }) } : {}),
         });
-        return json({ ok: true, installed: true, requests: [...(open.data ?? []), ...(recent.data ?? [])].map(view) });
+        return json({ ok: true, installed: true, requests: [...openRows.map((r) => view(r, true)), ...((recent.data ?? []) as any[]).map((r) => view(r, false))] });
       }
 
       case "number_request_set": {

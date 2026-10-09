@@ -7,7 +7,9 @@
 // takes.
 //
 //   A  a builder (phone edit): the card is drawn under Caller ID; Send stays off until the request is
-//      complete, and while a box holds a run of digits (a PIN or an account number), with a warning;
+//      complete, and while a box holds what looks like a PIN or an account number (a run of digits,
+//      even spaced or dashed, or any digit after "PIN" / "acct": review 2026-10-09), with a warning,
+//      while dates and times in the timing note are fine;
 //      the request goes out as exactly the six fields (no PIN, password, account number or bill key)
 //      and is accepted by the real parser; the list then shows it as "Sent to Structure Studio"; no
 //      "Adopt a moved number" and no CNAM or profile buttons for a builder; CNAM reads "Not registered";
@@ -16,7 +18,8 @@
 //      profile form sends phone_trust_profile with the details and the mobile in E.164;
 //   C  a server older than phase 8 (no portRequests): no card, no error;
 //   D  the operator console's Builders tab lists the open request with what booking the move needs,
-//      and "Take it" sends number_request_set in_progress;
+//      flags a number that is live on (or also asked for by) another builder, and "Take it" sends
+//      number_request_set in_progress;
 //   every scenario: no uncaught page error.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -151,6 +154,19 @@ try {
   await A.page.fill("[data-ss-phone-bring-window]", "PIN is 482913");
   ok("A3 a run of digits (a PIN) turns Send off and says why", await send.isDisabled()
     && /looks like an account number or a PIN/.test(await A.page.locator("[data-ss-phone-bring-nosecrets]").innerText()));
+  for (const [box, v] of [["window", "PIN 4829"], ["window", "acct 287-123-456"], ["carrier", "Verizon 1234-5678-9012"], ["name", "Pat 48 29 13"]]) {
+    await A.page.fill("[data-ss-phone-bring-window]", "");
+    await A.page.fill("[data-ss-phone-bring-carrier]", "Verizon");
+    await A.page.fill("[data-ss-phone-bring-name]", "Pat Example");
+    await A.page.fill(`[data-ss-phone-bring-${box}]`, v);
+    ok(`A3b "${v}" in the ${box} box turns Send off too (review 2026-10-09)`, await send.isDisabled()
+      && /looks like an account number or a PIN/.test(await A.page.locator("[data-ss-phone-bring-nosecrets]").innerText())
+      && parsePortRequest({ numbers: ["8165550123"], currentCarrier: "Verizon", contactName: "Pat Example", contactEmail: "pat@builder.example.test", [box === "window" ? "cutoverWindow" : box === "carrier" ? "currentCarrier" : "contactName"]: v }).ok === false);
+  }
+  await A.page.fill("[data-ss-phone-bring-carrier]", "Verizon");
+  await A.page.fill("[data-ss-phone-bring-name]", "Pat Example");
+  await A.page.fill("[data-ss-phone-bring-window]", "after 10/20/2026, 9am-5pm");
+  ok("A3c dates and times in the timing note leave Send on", !(await send.isDisabled()));
   await A.page.fill("[data-ss-phone-bring-window]", "Weekday evenings after the 20th");
   ok("A4 with it gone, Send is on", !(await send.isDisabled()));
   await tap(send);
@@ -248,7 +264,8 @@ try {
         if (body.action === "number_requests_list") {
           return json(route, { ok: true, installed: true, requests: [{ id: "00000000-0000-4000-8000-0000000000a1", clientId: "demo-builder", companyName: "Demo Builder",
             numbers: ["+18165550123"], currentCarrier: "Verizon", isLcPhone: false, contactName: "Pat Example", contactEmail: "pat@builder.example.test",
-            cutoverWindow: "after the 20th", status, createdAt: new Date().toISOString(), handledAt: null }] });
+            cutoverWindow: "after the 20th", status, createdAt: new Date().toISOString(), handledAt: null,
+            flags: { liveElsewhere: [{ number: "+18165550123", clientId: "other-builder" }], askedElsewhere: [] } }] });
         }
         if (body.action === "number_request_set") { status = body.status; return json(route, { ok: true, id: body.id, status }); }
         return json(route, { ok: true });
@@ -266,6 +283,9 @@ try {
     const t2 = await reqCard.innerText().catch(() => "");
     ok("D1 the Builders tab lists the open request: builder, number, what booking it needs, who approves", /Demo Builder/.test(t2) && /\+18165550123/.test(t2)
       && /Verizon: a Twilio Port In/.test(t2) && /Pat Example/.test(t2) && /\(1 open\)/.test(t2), t2.slice(0, 500));
+    const flag = await page.locator("[data-adm-number-request-flag]").innerText().catch(() => "");
+    ok("D1b a number live on another builder's account is flagged to the operator (review 2026-10-09)",
+      /\+18165550123 is live on other-builder/.test(flag) && /Check whose it is/.test(flag), flag);
     await tap(reqCard.getByRole("button", { name: "Take it" }));
     await page.waitForTimeout(600);
     const set = calls.filter((c) => c.action === "number_request_set").pop();

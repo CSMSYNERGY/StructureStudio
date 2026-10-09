@@ -2,9 +2,11 @@
 // whose default privileges hand every new table to the browser roles (as Supabase's do), then check
 // what it promises: phone_number_requests is service-role only (RLS on, NOT forced, no policy, no
 // table or column privilege for anon / authenticated, no foreign key); a request as the code writes
-// it is stored; what must never be stored is refused (no numbers, more than ten, a number that is
-// not +1 E.164, a run of five digits in a free-text box, a bad email or status); the apply-time
-// rehearsal leaves nothing behind; a re-apply is harmless; broken copies are refused (mutants).
+// it is stored; what must never be stored is refused (no numbers, more than ten, a NULL number, a
+// number that is not +1 E.164, five digits in a free-text box even spaced or dashed, any digit after
+// PIN / acct / account, a bad email or status), while dates and times in the timing note and a
+// carrier whose name merely contains "pin" are stored (review 2026-10-09); the apply-time rehearsal
+// leaves nothing behind; a re-apply is harmless; broken copies are refused (mutants).
 // Nothing here touches the live project.
 //
 // Run (from the repo root):
@@ -75,14 +77,30 @@ const good = () => ["some-builder", ["+18165550123"], "Verizon", false, "Pat Exa
   const r = await one(db, "select status, is_lc_phone, numbers from public.phone_number_requests");
   ok(r.status === "new" && r.is_lc_phone === false && r.numbers.join() === "+18165550123", "status starts 'new' (the operator's notification)", JSON.stringify(r));
   ok(!(await refused(db, INSERT, ["some-builder", ["+18165550123", "+18165550124"], "GoHighLevel", null, "Pat Example", "pat@builder.example.test", null])).refused, "two numbers, 'not sure', no window: stored");
+  for (const [what, mutate] of [
+    ["dates and times in the window", (g) => { g[6] = "after 10/20/2026, 9am-5pm, or 2026-10-27 at 17:00"; }],
+    ["a carrier whose name contains 'pin'", (g) => { g[2] = "Pinnacle Telecom"; }],
+    ["a year and a short count in the carrier", (g) => { g[2] = "AT&T 2025 plan, 3 lines"; }],
+  ]) {
+    const g = good(); mutate(g);
+    const x = await refused(db, INSERT, g);
+    ok(!x.refused, `stores ${what}`, x.message);
+  }
   const bad = [
     ["no numbers", (g) => { g[1] = []; }],
     ["eleven numbers", (g) => { g[1] = Array.from({ length: 11 }, (_, i) => `+1816555${String(1000 + i)}`); }],
     ["a number without +1", (g) => { g[1] = ["8165550123"]; }],
     ["a malformed number", (g) => { g[1] = ["+1816555012"]; }],
+    ["a NULL number", (g) => { g[1] = ["+18165550123", null]; }],
     ["an account number in the carrier", (g) => { g[2] = "AT&T account 12345678"; }],
+    ["a dashed account number in the carrier", (g) => { g[2] = "Verizon 1234-5678-9012"; }],
     ["a PIN in the window", (g) => { g[6] = "PIN is 88213"; }],
+    ["a four-digit PIN in the window", (g) => { g[6] = "PIN 4829"; }],
+    ["a dashed account number after acct in the window", (g) => { g[6] = "acct 287-123-456"; }],
+    ["'account no. 4' in the window", (g) => { g[6] = "account no. 4"; }],
+    ["'Acct #9' in the carrier", (g) => { g[2] = "Verizon Acct #9"; }],
     ["digits in the name", (g) => { g[4] = "Pat 55512"; }],
+    ["a spaced PIN in the name", (g) => { g[4] = "Pat 48 29 13"; }],
     ["a bad email", (g) => { g[5] = "pat at example"; }],
     ["a bad slug", (g) => { g[0] = "Some Builder"; }],
   ];
@@ -112,7 +130,10 @@ const good = () => ["some-builder", ["+18165550123"], "Verizon", false, "Pat Exa
     ["the browser roles keep the default grant", (s) => s.replace("revoke all on public.phone_number_requests from anon, authenticated;", ""), /anon holds SELECT on phone_number_requests/],
     ["RLS forced", (s) => s.replace("alter table public.phone_number_requests no force row level security;", "alter table public.phone_number_requests force row level security;"), /enabled and NOT forced/],
     ["a policy for the browser", (s) => s.replace("-- ── CHECKS", "create policy p on public.phone_number_requests for select to authenticated using (true);\n-- ── CHECKS"), /has a policy/],
-    ["digit runs allowed in the window", (s) => s.replace("cutover_window !~ '[0-9]{5,}'", "true"), /expected 8 refusals/],
+    ["the secret words allowed in the window", (s) => s.replace("and cutover_window !~* '\\m(pin|", "and 'x' !~* '\\m(pin|"), /expected 13 refusals, got 12/],
+    ["a NULL number allowed", (s) => s.replace("and array_position(numbers, null) is null", ""), /expected 13 refusals, got 12/],
+    // Slash dates "taken out" as five digits: the rehearsal's own dated timing note is then refused.
+    ["dates no longer taken out of the window", (s) => s.replace("([/.-][0-9]{2,4})?\\M', ' ', 'g')", "([/.-][0-9]{2,4})?\\M', '11111', 'g')"), /violates check constraint/],
   ]) {
     const mm = mutate(src);
     if (mm === src) { ok(false, `mutant "${label}" changed nothing (the source moved; update the test)`); continue; }

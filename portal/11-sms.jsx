@@ -1314,6 +1314,28 @@ function phoneCnamProblem(raw) {
   if (!/^[A-Za-z0-9., ]+$/.test(n)) return "Only letters, numbers, spaces, periods and commas.";
   return null;
 }
+// "Bring your number": the server's rule for a PIN or an account number in a free-text box
+// (portal-settings numberRequests.ts looksSecret, and migration 297's checks), so the card says so
+// before anything is sent. Five or more digits even when spaced, dotted or dashed, or any digit soon
+// after a word like PIN or acct; in the timing note, dates and times are taken out first.
+function phonePortLooksSecret(v, dates) {
+  let s = String(v || "");
+  if (/\b(?:pin|passcode|pass\s*code|password|acct|account|ssn|security\s*code)\b(?:\s*(?:no|num|number)\b)?[^a-z0-9]{0,6}\d/i.test(s)) return true;
+  if (dates) {
+    s = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
+      .replace(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/g, " ")
+      .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)/gi, " ")
+      .replace(/\b\d{1,2}:\d{2}\b/g, " ")
+      .replace(/\b(?:19|20)\d{2}\b/g, " ");
+  }
+  return /\d(?:[\s./-]*\d){4,}/.test(s);
+}
+// Whether a CNAM product can be sent (again): never registered, a draft, or a rejection to fix.
+// Under review or approved nothing would be sent, so the name form is not offered (review
+// 2026-10-09: it stayed open, offering "Send again", after a status check moved it on).
+function phoneCnamSendable(st) {
+  return !st || st === "draft" || st === "twilio-rejected";
+}
 
 async function phoneAction(action, body) {
   const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
@@ -2247,7 +2269,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {trustRow("shakenStir", "Verified caller ID (SHAKEN/STIR)", "Your calls are signed at the highest trust level once Twilio approves it.", "shaken_stir")}
           {trustRow("voiceIntegrity", "Spam-label protection (Voice Integrity)", "Registers the number with the carriers' spam filters.", "voice_integrity")}
           {trustRow("cnam", "Caller name (CNAM)", "Shows the business's name, up to 15 characters, on phones whose carrier looks it up. It reaches the carriers 48 to 72 hours after Twilio approves it.", "cnam")}
-          {data.canManageCallerId && cnamOpen && (
+          {data.canManageCallerId && cnamOpen && cid.cnam && cid.cnam.available && phoneCnamSendable(cid.cnam.status) && (
             <div data-ss-phone-cnam-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
               <label style={{ fontSize: 12.5, color: "#1E293B" }}>The name callers see{" "}
                 <input value={cnamName} maxLength={15} placeholder="e.g. Acme Barns" data-ss-phone-cnam-input
@@ -2259,7 +2281,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               <div>
                 <button type="button" disabled={busy || !!phoneCnamProblem(cnamName)} data-ss-phone-cnam-submit onClick={() => trustSetup("cnam")}
                   style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy || phoneCnamProblem(cnamName) ? 0.55 : 1 }}>
-                  {cid.cnam.registered ? "Send again with this name" : "Register this caller name"}
+                  {cid.cnam.registered && cid.cnam.status ? "Send again with this name" : "Register this caller name"}
                 </button>
               </div>
             </div>
@@ -2406,7 +2428,8 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   };
   const portValid = !!portForm.numbers.trim() && !!portForm.currentCarrier.trim() && portForm.contactName.trim().length >= 2
     && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(portForm.contactEmail.trim());
-  const portSecret = /\d{5,}/.test(`${portForm.currentCarrier} ${portForm.contactName} ${portForm.cutoverWindow}`);
+  const portSecret = phonePortLooksSecret(portForm.currentCarrier) || phonePortLooksSecret(portForm.contactName)
+    || phonePortLooksSecret(portForm.cutoverWindow, true);
   const bringCard = data.scope === "team" && canEdit && Array.isArray(data.portRequests) ? (
     <div style={PHONE_CARD} data-ss-phone-bring>
       <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Bring your number</h4>

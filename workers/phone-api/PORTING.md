@@ -6,9 +6,9 @@ Placeholders in angle brackets are values you hold; none of them belong in this 
 
 ## 0. The request
 
-1. The builder fills in "Bring your number" on Settings, Phone: the numbers, the company they are with now, whether it is a GoHighLevel (LC Phone) number, who can approve the move (the account holder's name and email), and when it may move. portal-settings `phone_port_request` stores it in `phone_number_requests` (migration 297). It holds no PIN, password, account number or bill: the server refuses any of them, and a run of five or more digits in a free-text box is refused too.
-2. The request shows on Admin, Builders, **Bring-your-number requests**, with what booking it needs. Press **Take it** (status "Being moved"), so the next operator knows someone has it.
-3. Call the contact named on it. Confirm the numbers, who the carrier is, and the timing. If it is a carrier number, ask for the PIN (mobile) or the account number (landline) on that call and type it straight into Twilio's Console in step 3. Never write it anywhere else.
+1. The builder fills in "Bring your number" on Settings, Phone: the numbers, the company they are with now, whether it is a GoHighLevel (LC Phone) number, who can approve the move (the account holder's name and email), and when it may move. portal-settings `phone_port_request` stores it in `phone_number_requests` (migration 297). It holds no PIN, password, account number or bill: the server refuses any of them, and a free-text box that looks like one (five or more digits, even spaced or dashed, or any digit after "PIN", "acct" or "account") is refused too.
+2. The request shows on Admin, Builders, **Bring-your-number requests**, with what booking it needs. Press **Take it** (status "Being moved"), so the next operator knows someone has it. If it says a number "is live on" or "is also asked for by" another builder, find out whose the number really is before booking anything: the builder who asked is never told.
+3. Call the contact named on it. Confirm the numbers, who the carrier is, and the timing. If it is a carrier number, ask on that call for the account number with the current carrier (always) and, for a mobile number, its port-out PIN too, and type them straight into Twilio's Console in step 3. Never write them anywhere else.
 
 ## 1. Decide where the number goes (the target account)
 
@@ -43,7 +43,7 @@ An LC Phone number already lives in HighLevel's own Twilio account, so Twilio's 
 ## 3b. Any other carrier: a Twilio Port In, made in the Console
 
 1. In Twilio's Console, Phone Numbers, Port & Host, **Port In**. Start the request so the numbers land in the TARGET account (step 1): choose that sub-account in the request (the Port In request carries an `account_sid`), or switch to the sub-account first. The parent receives the port's status emails and webhooks either way.
-2. Fill in what Twilio asks, from your call with the account holder: the service address, the PIN (mobile) or the account number (landline), and the authorised person's name and email. Type the PIN or account number here and nowhere else.
+2. Fill in what Twilio asks, from your call with the account holder: the service address, the account number with the current carrier (always required), the port-out PIN as well for a mobile number, and the authorised person's name and email. Type them here and nowhere else.
 3. Upload a recent bill from the current carrier (Twilio's Documents upload in the same request). Delete your local copy afterwards.
 4. Twilio emails the Letter of Authorization (LOA) to the authorised person. They must e-sign it within 30 days, or the request lapses.
 5. The target date is at least 7 days out, and Twilio does not guarantee it. Only US local and mobile numbers, no toll-free (up to 1,000 per request).
@@ -54,13 +54,15 @@ An LC Phone number already lives in HighLevel's own Twilio account, so Twilio's 
 
 1. Check the number is in the TARGET account (Console, that account, Phone Numbers, Active numbers). A HighLevel move or a completed port shows it there.
 2. In Structure Studio, view as the builder, Settings, Phone, **Bring your number**, **Adopt a moved number**. Enter the number and press it. (Operator only, with can_bill: portal-settings `phone_adopt_number`.)
-3. It finds the number in the builder's own account and refuses one that is anywhere else (another builder's, or our main account while the builder has their own). Then it records it the way a bought number is recorded, sets its Twilio FriendlyName to the builder's id, points its calls at My Synergy Phone (calling on) or at voicemail (calling off), its texts at Structure Studio, joins it to their texting setup if texting is on, and marks the request done.
+3. It looks the builder's account up and never makes one: a builder who should have their own sub-account but has none finished yet is refused (make or finish it on their Twilio account card first). It finds the number in the builder's own account and refuses one that is anywhere else (another builder's, or our main account while the builder has their own), and one whose Twilio name is another builder's id (bought for them). On our main account, which every builder without a sub-account shares, it adopts only a number named in an open request of THIS builder's: if they asked by phone instead, add the request from their Bring your number card in view-as first. Then it records it the way a bought number is recorded, sets its Twilio FriendlyName to the builder's id, points its calls at My Synergy Phone (calling on) or at voicemail (calling off), its texts at Structure Studio, joins it to their texting setup if texting is on, and marks the request done.
 4. Set who answers it on the Phone tab, then caller ID (SHAKEN/STIR, Voice Integrity, CNAM) on the Caller ID card. A builder who only calls needs "Add the business details" first (SETUP.md 7f step 6.5).
 5. Money: the number bills monthly at Twilio from the day it lands. Adopting takes no first-month wallet hold (it is not a purchase); from the second month the daily number-fee cron charges it like any other number, once that meter is armed (SETUP.md 7b).
 
 ## 5. If something goes wrong
 
 - **Adopt says "isn't in this builder's Twilio account yet"**: the move has not finished, or it landed elsewhere. Check the port status or the HighLevel ticket.
+- **Adopt says "only for an open request of this builder's"**: the builder is on our main account and has no open request naming the number. Add it from their Bring your number card (view-as), then adopt it.
+- **Adopt says the number "is named for another builder"**: its Twilio FriendlyName is another builder's client id (it was bought for them). Find out whose it is; never rename it just to get past this.
 - **Adopt says it "landed on Structure Studio's main Twilio account"**: it went to the parent instead of the sub. Moving a number between our own accounts is a transfer by the parent (`POST IncomingPhoneNumbers/{PN}` with the target `AccountSid`, parent's auth token): its webhooks are cleared and any texting registration must be redone. Do it on purpose, never as a guess, then adopt.
 - **A port is rejected** (wrong PIN, wrong address, name mismatch): Twilio says why in the Console. Fix it there and resubmit. Nothing here changes.
 - **Cancel a request** the builder no longer wants: Admin, Builders, Bring-your-number requests, **Cancel**. Tell them first.
