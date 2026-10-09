@@ -411,11 +411,21 @@ export async function createSecondaryCustomerProfile(opts: {
   }
   // ⚠️ The PRIMARY profile is assigned onto the secondary. This is the step that says
   // "this builder is a customer of ours" and it is what makes the ISV relationship real. In a
-  // sub-account the primary is the PARENT's, so this assignment crosses accounts (the phase 6
-  // spike proves Twilio takes it before any builder depends on it).
-  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
-    ObjectSid: opts.primaryProfileSid,
-  });
+  // sub-account the primary is the PARENT's, so this assignment crosses accounts. Twilio's ISV
+  // guide documents it (architecture #1), but it had not been tried on our account when this
+  // was written: the phase 6 spike (scripts/twilio-a2p-spike.ts) proves it on a test sub before
+  // any builder depends on it. A refusal here is a PrimaryProfileLinkError carrying the profile
+  // it stopped on, so the caller can write that profile down and FINISH it on the next press
+  // (finishSecondaryCustomerProfile) instead of making a second set of objects. Same request
+  // as always: nothing new is sent on a profile that is created in one go.
+  try {
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
+      ObjectSid: opts.primaryProfileSid,
+    });
+  } catch (e) {
+    if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, crossAccount(creds));
+    throw e;
+  }
 
   await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, {
     PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE,
@@ -423,6 +433,90 @@ export async function createSecondaryCustomerProfile(opts: {
   await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
 
   return { profileSid, endUserSid: String(business?.sid ?? ""), addressSid, repSid: String(rep?.sid ?? "") };
+}
+
+/** The marker every PrimaryProfileLinkError's message starts with. */
+export const PRIMARY_LINK_REFUSED = "primary_profile_link_refused";
+
+/**
+ * Twilio refused (or never answered) the EntityAssignment that puts the platform's PRIMARY
+ * customer profile onto a builder's SECONDARY one: the ISV link. A TrustHubError, so every
+ * existing catch still handles it; typed, so a caller can tell this one apart:
+ *   profileSid    the secondary profile that WAS made and is now waiting for the link. Record it,
+ *                 and the next press finishes it (finishSecondaryCustomerProfile) rather than
+ *                 making a second profile.
+ *   crossAccount  the secondary lives in a SUB-account (the primary is always the parent's), i.e.
+ *                 the cross-account assignment phase 6's spike proves. false = both in one account
+ *                 (today's flow, where this has never failed).
+ * Codes only travel outward (this file's header rule); `detail` keeps Twilio's body for app_errors.
+ */
+export class PrimaryProfileLinkError extends TrustHubError {
+  readonly profileSid: string;
+  readonly crossAccount: boolean;
+  constructor(cause: TrustHubError, profileSid: string, crossAccount: boolean) {
+    super({
+      message: `${PRIMARY_LINK_REFUSED}: Twilio did not link the primary customer profile to the secondary one${crossAccount ? " across accounts" : ""} (HTTP ${cause.status}, code ${cause.code}).`,
+      status: cause.status, code: cause.code, permanent: cause.permanent, detail: cause.detail,
+    });
+    this.name = "PrimaryProfileLinkError";
+    this.profileSid = profileSid;
+    this.crossAccount = crossAccount;
+  }
+}
+
+/** Do these credentials name an account other than the environment's own (the parent)? */
+function crossAccount(creds: TrustHubCreds | null | undefined): boolean {
+  if (!creds || !creds.accountSid) return false;
+  let parent = "";
+  try { parent = accountSid() ?? ""; } catch { parent = ""; }
+  return creds.accountSid !== parent;
+}
+
+/** The objects assigned onto a customer profile (its EntityAssignments' object_sid), GET only. */
+async function profileObjects(profileSid: string, http: TrustHubHttp): Promise<string[]> {
+  const r = await http("GET", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments?PageSize=50`);
+  const rows = Array.isArray(r?.results) ? r.results : [];
+  return rows.map((a: any) => String(a?.object_sid ?? "")).filter(Boolean);
+}
+
+/** Is the platform's primary profile assigned onto this secondary profile? GET only: what the
+ *  phase 6 spike prints, and what finishSecondaryCustomerProfile asks before it links. */
+export async function primaryProfileLinked(profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall): Promise<boolean> {
+  if (!SID.bundle.test(profileSid) || !SID.bundle.test(primaryProfileSid)) throw badInput("A customer profile SID is malformed.");
+  return (await profileObjects(profileSid, http)).includes(primaryProfileSid);
+}
+
+/**
+ * Finish a secondary customer profile whose creation stopped at, or before, the primary link (a
+ * PrimaryProfileLinkError, or a lost response): link the primary if it is not linked yet, then
+ * evaluate and submit the profile if it is still a draft. Every step is read first, so pressing it
+ * again on a finished profile sends nothing. A refused link is a PrimaryProfileLinkError again.
+ * `crossAccount` only labels that error (see PrimaryProfileLinkError).
+ */
+export async function finishSecondaryCustomerProfile(
+  profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall, opts: { crossAccount?: boolean } = {},
+): Promise<{ linked: boolean; submitted: boolean; status: TrustProductStatus | null }> {
+  if (!SID.bundle.test(profileSid) || !SID.bundle.test(primaryProfileSid)) throw badInput("A customer profile SID is malformed.");
+  let linked = false;
+  if (!(await profileObjects(profileSid, http)).includes(primaryProfileSid)) {
+    try {
+      await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, { ObjectSid: primaryProfileSid });
+    } catch (e) {
+      if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, opts.crossAccount === true);
+      throw e;
+    }
+    linked = true;
+  }
+  const p = await http("GET", `${TRUSTHUB}/CustomerProfiles/${profileSid}`);
+  let status = trustProductStatus(p?.status);
+  let submitted = false;
+  if (status === "draft") {
+    await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, { PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE });
+    const s = await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
+    status = trustProductStatus(s?.status) ?? "pending-review";
+    submitted = true;
+  }
+  return { linked, submitted, status };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

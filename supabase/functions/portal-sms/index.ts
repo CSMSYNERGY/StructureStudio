@@ -41,6 +41,9 @@ import {
 } from "../_shared/twilioTrustHub.ts";
 // Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
 import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
+// Workstream 2, phase 6: a sub-account's secondary profile links ACROSS accounts to the parent's
+// primary. A refusal there is typed, and the profile it stopped on is finished on the next press.
+import { finishSecondaryCustomerProfile, PrimaryProfileLinkError } from "../_shared/twilioTrustHub.ts";
 import { resolveTwilioAccount, subaccountsMode, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
 // Workstream 2, phase 3: the builder's own sub-account is made on their first submit (and checked
 // again before a number is bought), and a NEW registration waits for the switch (registrationGate.ts).
@@ -1347,6 +1350,24 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       return failed;
     }
     const err = e as TrustHubError;
+    // Workstream 2, phase 6: the builder's profile is in their own sub-account and Twilio would
+    // not link it to Structure Studio's primary profile. Its own code, so the operator sees the
+    // cross-account link failed (the one step the phase 6 spike exists to prove) rather than a
+    // generic registration failure; the profile is already written down, so the next press
+    // finishes it. Only for a sub: on the parent the old row and the old sentence, below.
+    if (err instanceof PrimaryProfileLinkError && err.crossAccount) {
+      await logEdgeError({
+        fn: "portal-sms", clientId, code: "twilio_primary_link_refused", severity: "error",
+        message: `${action}: ${err.message}`,
+        context: { action, code: err.code ?? 0, status: err.status ?? 0 },
+      }).catch(() => {});
+      const res = json({
+        error: "The carriers' registration couldn't link your business to Structure Studio's account just now. Nothing was charged, and support has been notified.",
+        code: "primary_link_refused",
+      }, 502);
+      filedAtReturnSite.add(res);
+      return res;
+    }
     // Twilio's body can echo the EIN and the representative's mobile. It goes to app_errors,
     // never to the browser.
     await logEdgeError({
@@ -1401,8 +1422,9 @@ async function advanceOne(
   // which is nobody pressing anything; that path never reaches a charging state anyway.
   userId: string | null,
   // The tenant's Twilio account (Workstream 2): every stage below runs in it. null = the
-  // environment's, what every stage did before.
-  creds: TrustHubCreds | null,
+  // environment's, what every stage did before. `source` (twilioAccount.ts) says whether it is
+  // the builder's own sub-account.
+  creds: (TrustHubCreds & { source?: "parent" | "sub" }) | null,
 ): Promise<any> {
   // ⚠️ A FAILED WRITE THROWS; IT NEVER RETURNS THE OLD ROW. This used to ignore the update's
   // error and hand back a fresh read of the unchanged row, so a refused write looked like a
@@ -1469,11 +1491,35 @@ async function advanceOne(
       // Stages 1 and 2. Twilio's ISV guide is explicit that the trust product does NOT have
       // to reach `approved` before the brand, so both are created in one pass and the first
       // real wait is at the brand itself.
-      const prof = reg.customer_profile_sid
-        ? { profileSid: reg.customer_profile_sid }
-        : await createSecondaryCustomerProfile({
+      // ── Workstream 2, phase 6: A2P INSIDE THE BUILDER'S SUB-ACCOUNT ──────────────────────
+      // The secondary profile is made in the sub with the sub's credentials, and its link to the
+      // parent's PRIMARY profile crosses accounts. If Twilio refuses that link, the profile it
+      // made is written down (customer_profile_sid) before the error goes back, and the next press
+      // FINISHES that one (finishSecondaryCustomerProfile: link, then evaluate and submit a draft;
+      // every step read first) instead of making a second. A profile made elsewhere for this
+      // builder (portal-settings' phone_trust_profile, for caller ID) is finished the same way,
+      // which on a finished profile is three reads and nothing sent. Only for a sub: on the
+      // parent every step is exactly what it was before sub-accounts.
+      const onSub = creds?.source === "sub";
+      let prof: { profileSid: string };
+      if (reg.customer_profile_sid) {
+        if (onSub) {
+          await finishSecondaryCustomerProfile(reg.customer_profile_sid, primaryProfileSid, trustHubHttp(creds), { crossAccount: true });
+        }
+        prof = { profileSid: reg.customer_profile_sid };
+      } else {
+        try {
+          prof = await createSecondaryCustomerProfile({
             intake, primaryProfileSid, friendlyName: `${clientId} — ${intake.legalBusinessName}`,
           }, creds);
+        } catch (e) {
+          if (onSub && e instanceof PrimaryProfileLinkError && /^BU[0-9a-f]{32}$/i.test(e.profileSid)) {
+            await set({ customer_profile_sid: e.profileSid });
+            await note("primary_link_refused", { code: e.code, status: e.status });
+          }
+          throw e;
+        }
+      }
       const a2p = reg.a2p_profile_sid
         ? { a2pProfileSid: reg.a2p_profile_sid }
         : await createA2pTrustProduct({
