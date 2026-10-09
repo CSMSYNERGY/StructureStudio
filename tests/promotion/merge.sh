@@ -252,6 +252,20 @@ if [ "$MODE" = new ]; then
   echo "E13 a revision expression instead of a SHA is refused"
   RCP=$(EXPECT_MAIN=$MB EXPECT_SHA='main@{now}' BETA_SHA=$BS MERGE_DATE=$MD ystep promote promote-remerge)
   [ "$RCP" != 0 ] && grep -q '^refusal=the gate reported a merge SHA that is not a commit id$' "$W/out-promote.txt" && ok "refused" || { bad "E13 rc=$RCP"; cat "$W/out-promote.txt"; }
+
+  echo "E14 'Move On Beta items to Done' sends exactly this promotion's commits, and skips while off"
+  if ! command -v jq >/dev/null 2>&1; then echo "  SKIP E14 (jq is not installed here; it runs where jq is, e.g. ubuntu-latest)"; else
+  setup e14; commit_on beta "printf '1\n' > o1.txt"; commit_on beta "printf '2\n' > o2.txt"; commit_on beta "printf '3\n' > o3.txt"; gate
+  RCP=$(EXPECT_MAIN=$MB EXPECT_SHA=$MS BETA_SHA=$BS MERGE_DATE=$MD ystep promote promote-remerge)
+  mkdir -p "$W/curlbin"; printf '%s\n' '#!/usr/bin/env bash' 'while [ $# -gt 0 ]; do [ "$1" = --data-binary ] && cp "${2#@}" "$ONBETA_SENT"; shift; done' 'echo "{\"ok\":true,\"counts\":{\"moved\":3}}"' > "$W/curlbin/curl"; chmod +x "$W/curlbin/curl"
+  cd "$W/promote"; export GITHUB_OUTPUT="$W/out-onbeta.txt" RUNNER_TEMP="$W/tmp-promote"; : > "$GITHUB_OUTPUT"
+  ONBETA_SENT="$W/onbeta-sent.json" PATH="$W/curlbin:$PATH" RELEASE_CI_SECRET=s MODE=on FUNCTION_URL=http://x MAIN_SHA=$MB BETA_SHA=$BS bash -e "$WORK/yml-step-promote-onbeta.sh" > "$W/log-onbeta.txt" 2>&1; RCO=$?
+  WANT=$(git -C "$W/origin.git" rev-list "$MB..$BS" | sort | tr '\n' ' ')
+  GOTS=$("${PYTHON:-python}" -I -c "import json,sys; print(' '.join(sorted(json.load(open(sys.argv[1]))['mergedShas'])), end=' ')" "$W/onbeta-sent.json" 2>/dev/null)
+  [ $RCO -eq 0 ] && [ "$GOTS" = "$WANT" ] && grep -q '^onbeta_result=3 moved$' "$W/out-onbeta.txt" && ok "sent the 3 promoted commits; result '3 moved'" || { bad "E14 rc=$RCO sent=[$GOTS] want=[$WANT]"; cat "$W/log-onbeta.txt"; cat "$W/out-onbeta.txt"; }
+  : > "$GITHUB_OUTPUT"; MODE=off RELEASE_CI_SECRET=s FUNCTION_URL=http://x MAIN_SHA=$MB BETA_SHA=$BS bash -e "$WORK/yml-step-promote-onbeta.sh" > /dev/null 2>&1
+  grep -q '^onbeta_result=skipped$' "$GITHUB_OUTPUT" && ok "skipped while RELEASE_NOTES_FROM_GIT is off" || bad "E14 off-path"
+  fi
   export MERGE_DATE=1700000000
 fi
 

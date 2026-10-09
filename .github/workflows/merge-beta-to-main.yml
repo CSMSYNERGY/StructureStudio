@@ -238,6 +238,7 @@ jobs:
       pushed: ${{ steps.push.outputs.pushed }}
       push_outcome: ${{ steps.push.outcome }}
       notes_result: ${{ steps.notes.outputs.notes_result }}
+      onbeta_result: ${{ steps.onbeta.outputs.onbeta_result }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -369,6 +370,58 @@ jobs:
           echo "Flipped ${COUNT} release note(s) from beta to Live."
           echo "notes_result=${COUNT} note(s) now Live" >> "$GITHUB_OUTPUT"
 
+      # Workstream 4 B3 (2026-10-09; the step c0d65b27 added to main's old single-job file, carried
+      # into this structure): Projects items that a commit's `Projects:` trailer put On Beta move to
+      # Done once that commit is in this promotion. release-ci decides per item (only an item whose
+      # newest On Beta commit is among the merged shas; anything set by hand is reported, not moved).
+      # Skips with a warning while RELEASE_NOTES_FROM_GIT is not "on" or the secret is missing, and
+      # never fails the run: the merge has already shipped. The commits are the snapshot's pinned
+      # main..beta (exactly what this promotion carries), not HEAD^1..HEAD^2, because a re-run that
+      # finds the merge already on main rebuilds nothing. The body goes to curl from a file: 5000
+      # shas would be over the 128 KB a single command-line argument may hold.
+      - name: Move On Beta items to Done
+        id: onbeta
+        if: ${{ success() }}
+        env:
+          RELEASE_CI_SECRET: ${{ secrets.RELEASE_CI_SECRET }}
+          MODE: ${{ vars.RELEASE_NOTES_FROM_GIT }}
+          FUNCTION_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/release-ci"
+          MAIN_SHA: ${{ needs.snapshot.outputs.main_sha }}
+          BETA_SHA: ${{ needs.snapshot.outputs.beta_sha }}
+        run: |
+          set -uo pipefail
+          if [ -z "${RELEASE_CI_SECRET:-}" ] || [ "${MODE:-off}" != "on" ]; then
+            echo "::warning::On Beta items were not moved (RELEASE_NOTES_FROM_GIT is '${MODE:-unset}', or RELEASE_CI_SECRET is missing)."
+            echo "onbeta_result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Capped with git's own --max-count, never a pipe into head (see the merge script's note).
+          if ! SHAS="$(git rev-list --max-count=5000 "${MAIN_SHA}..${BETA_SHA}")"; then
+            echo "::error::Could not list this promotion's commits; On Beta items were not moved."
+            echo "onbeta_result=FAILED (could not list the commits)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$SHAS" | jq -R 'select(length > 0)' | jq -s '{action: "released", mergedShas: .}' > "$RUNNER_TEMP/onbeta-body.json"
+          RESP="$(curl -sS -X POST "$FUNCTION_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-release-ci-key: ${RELEASE_CI_SECRET}" \
+            --data-binary @"$RUNNER_TEMP/onbeta-body.json")" || {
+              echo "::error::Could not reach release-ci to move On Beta items."
+              echo "onbeta_result=FAILED (network)" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          if ! printf '%s' "$RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+            MSG="$(printf '%s' "$RESP" | jq -r '.error // "unknown error"' 2>/dev/null || echo "unparseable response")"
+            echo "::error::release-ci refused the On Beta move: ${MSG}"
+            echo "onbeta_result=FAILED (${MSG})" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Counts only: item ids and titles stay out of this public log.
+          SUMMARY="$(printf '%s' "$RESP" | jq -r '[.counts // {} | to_entries[] | "\(.value) \(.key)"] | join(", ")')"
+          DRY="$(printf '%s' "$RESP" | jq -r 'if .dryRun then " (dry run: RELEASE_CI_WRITES is off)" else "" end')"
+          echo "On Beta items: ${SUMMARY:-none on beta}${DRY}"
+          echo "onbeta_result=${SUMMARY:-none on beta}${DRY}" >> "$GITHUB_OUTPUT"
+
   report:
     needs: [snapshot, gate, promote]
     if: ${{ always() }}
@@ -425,6 +478,7 @@ jobs:
           PUSHED: ${{ needs.promote.outputs.pushed }}
           PUSH_OUTCOME: ${{ needs.promote.outputs.push_outcome }}
           NOTES_RESULT: ${{ needs.promote.outputs.notes_result }}
+          ONBETA_RESULT: ${{ needs.promote.outputs.onbeta_result }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -559,6 +613,7 @@ jobs:
           Preflight gate: ${PREFLIGHT_OUTCOME:-not run}
           Pushed to main: ${PUSH_LINE}
           Release notes: ${NOTES_RESULT:-not attempted}
+          On Beta items: ${ONBETA_RESULT:-not attempted}
 
           Commits from beta:
           ${COMMITS:-n/a}"

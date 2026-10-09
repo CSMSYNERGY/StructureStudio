@@ -5,7 +5,7 @@ d = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 out = sys.argv[2]
 j = d["jobs"]
 if "gate" in j:
-    for jid, sid in (("gate", "merge"), ("promote", "remerge"), ("promote", "push")):
+    for jid, sid in (("gate", "merge"), ("promote", "remerge"), ("promote", "push"), ("promote", "onbeta")):
         s = [x for x in j[jid]["steps"] if x.get("id") == sid][0]
         open(f"{out}/yml-step-{jid}-{sid}.sh", "w", newline="\n", encoding="utf-8").write(s["run"])
     print("new")
