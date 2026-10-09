@@ -107,6 +107,30 @@ export function parseTrustProduct(raw: unknown): VoiceTrustKind | null {
 
 const BU = /^BU[0-9a-f]{32}$/i;
 
+// ── CNAM takes US standard local numbers only (review 2026-10-09) ─────────────────────────────
+// Twilio's CNAM guide: "US local long-code" numbers; not toll-free, not Canadian. Our purchases are
+// US-only (AvailablePhoneNumbers/US), but a moved number (phone_adopt_number) can be Canadian, so
+// phone_trust_setup refuses those for CNAM before anything is sent (a Trust Product Twilio would
+// only reject). Toll-free: the 8XX codes. Canada: its geographic area codes in service or
+// announced, plus 600 (non-geographic), from the NANP list (Wikipedia's, read 2026-10-09);
+// reserved-only codes are left out. A code missing here only means Twilio rejects it instead.
+const TOLL_FREE_NPA = new Set(["800", "833", "844", "855", "866", "877", "888"]);
+const CANADA_NPA = new Set([
+  "204", "226", "236", "249", "250", "257", "263", "289", "306", "343", "354", "365", "367", "368", "382",
+  "403", "416", "418", "428", "431", "437", "438", "450", "468", "474", "506", "514", "519", "548", "579",
+  "581", "584", "587", "600", "604", "613", "639", "647", "672", "683", "705", "709", "742", "753", "778",
+  "780", "782", "807", "819", "825", "867", "873", "879", "902", "905", "942",
+]);
+
+/** Why this number cannot carry a CNAM registration, or null (a US local number). */
+export function cnamNumberRefusal(e164: unknown): string | null {
+  const m = /^\+1([2-9]\d{2})[2-9]\d{6}$/.exec(String(e164 ?? "").trim());
+  if (!m) return "Caller name (CNAM) works only for US local numbers, and this one isn't.";
+  if (TOLL_FREE_NPA.has(m[1])) return "Caller name (CNAM) works only for US local numbers, not toll-free ones.";
+  if (CANADA_NPA.has(m[1])) return "Caller name (CNAM) works only for US local numbers, not Canadian ones.";
+  return null;
+}
+
 /**
  * The business profile the number is assigned to.
  *   * The builder's own Secondary Customer Profile (sms_registrations.customer_profile_sid,
@@ -429,31 +453,41 @@ export type RegistrationRow = {
 } | null;
 
 export type TrustProfileOutcome =
-  /** created: a profile was made now. finished: an existing one was linked or submitted now. */
-  | { ok: true; created: boolean; finished: boolean }
+  /** created: a profile was made now. finished: an existing one was linked or submitted now.
+   *  status: where Twilio's review of a recorded profile stands (read by `finish`). */
+  | { ok: true; created: boolean; finished: boolean; status?: TrustProductStatus | null }
   | { ok: false; kind: "refused"; status: number; error: string; problems?: string[] }
-  /** recorded: the profile Twilio made was written down anyway (a refused primary link), so the
-   *  next press finishes it rather than making another. */
+  /** recorded: the profile Twilio made was written down anyway (a sub-account's link that failed),
+   *  so the next press finishes it rather than making another. */
   | { ok: false; kind: "twilio"; status: 502; error: string; code: number; detail: string; recorded: boolean }
   | { ok: false; kind: "db"; error: unknown };
 
 export const TRUST_PROFILE_INTERNAL_SENTENCE =
   "Our own account's calls use the platform's business profile, so there is nothing to add here.";
+/** A recorded profile Twilio rejected: nothing here can change a submitted profile's details. */
+export const TRUST_PROFILE_REJECTED_SENTENCE =
+  "Twilio rejected this business's profile. Correct it in Twilio's Console (this business's own account, Trust Hub, Customer profiles) and submit it again there; caller ID and texting wait for it.";
 
 /**
  * phone_trust_profile, in the order it has to happen:
  *   1. Our internal account: refused (it uses the primary profile).
- *   2. A profile already recorded: nothing is made. In a sub-account it is FINISHED (the primary
- *      link and the submit, each read first), under the registration's lock; on the parent it is
- *      left exactly as it is.
+ *   2. A profile already recorded: nothing is made. Under the registration's lock it is FINISHED
+ *      (the primary link and the submit, each read first: a finished profile costs two reads and
+ *      sends nothing), on the parent as in a sub-account, and one Twilio rejected is reported
+ *      (TRUST_PROFILE_REJECTED_SENTENCE).
  *   3. The details, checked by the same rules texting uses (validateIntake, EIN required: CNAM and
  *      the carriers need it, and no-EIN registration is not built).
  *   4. The registration's lock (advance_lock_until, the one portal-sms's submit takes, so this and a
  *      texting submit can never both make a profile). Busy → 409.
  *   5. In a sub-account, the registration names its account BEFORE anything is made there (292's
  *      twilio_parent_holdings must never read it as the parent's; 295's trigger requires it).
- *   6. The profile, linked to the primary. A refused link is written down (step 7's column) and
- *      reported; anything else from Twilio is reported with nothing written.
+ *   6. The profile, linked to the primary. If the link fails (refused, or never answered):
+ *        in a SUB-account the profile it stopped on is written down (step 7's column) and the next
+ *        press finishes it, as portal-sms does;
+ *        on the PARENT nothing is written and the next press makes a fresh one, as before
+ *        sub-accounts. (Review 2026-10-09: written down on the parent it was never finished, and
+ *        texting there would have built a billed brand on an unlinked draft.)
+ *      Anything else from Twilio is reported with nothing written.
  *   7. customer_profile_sid, and the echo where the registration has none of its own yet.
  *   8. The lock is released, however it ended.
  */
@@ -462,7 +496,7 @@ export async function runTrustProfile(
   deps: {
     lock: TrustLock;
     create: (intake: BuilderIntake, friendlyName: string) => Promise<{ profileSid: string }>;
-    finish: (profileSid: string) => Promise<{ linked: boolean; submitted: boolean }>;
+    finish: (profileSid: string) => Promise<{ linked: boolean; submitted: boolean; status?: TrustProductStatus | null }>;
     /** An update of this tenant's sms_registrations row. */
     write: Write;
   },
@@ -470,7 +504,6 @@ export async function runTrustProfile(
   if (o.internal) return { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_INTERNAL_SENTENCE };
   const reg = o.registration ?? {};
   const recorded = String(reg.customer_profile_sid ?? "").trim();
-  if (BU.test(recorded) && !o.subAccountSid) return { ok: true, created: false, finished: false };
   if (!BU.test(recorded)) {
     const problems = validateIntake(o.intake, true);
     if (problems.length) return { ok: false, kind: "refused", status: 400, error: problems[0], problems };
@@ -485,7 +518,9 @@ export async function runTrustProfile(
   try {
     if (BU.test(recorded)) {
       const f = await deps.finish(recorded);
-      return { ok: true, created: false, finished: f.linked || f.submitted };
+      const status = f.status ?? null;
+      if (status === "twilio-rejected") return { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_REJECTED_SENTENCE };
+      return { ok: true, created: false, finished: f.linked || f.submitted, status };
     }
     if (o.subAccountSid && !reg.twilio_account_sid) {
       const w = await deps.write({ twilio_account_sid: o.subAccountSid });
@@ -496,7 +531,8 @@ export async function runTrustProfile(
     try {
       ({ profileSid } = await deps.create(intake, `${o.clientId} — ${intake.legalBusinessName}`));
     } catch (e) {
-      if (e instanceof PrimaryProfileLinkError && BU.test(e.profileSid)) {
+      // Written down in a sub-account only (step 6).
+      if (e instanceof PrimaryProfileLinkError && o.subAccountSid && BU.test(e.profileSid)) {
         const w = await deps.write({ customer_profile_sid: e.profileSid });
         return profileTwilioFail(e, w.ok);
       }
@@ -524,11 +560,21 @@ export const TRUST_PROFILE_BUSY_SENTENCE =
 
 function profileTwilioFail(e: TrustHubError, recorded: boolean): TrustProfileOutcome {
   const code = e.code ? ` (error ${e.code})` : "";
-  return {
-    ok: false, kind: "twilio", status: 502, code: e.code, detail: e.message, recorded,
-    // Codes only: Twilio's bodies echo the EIN and the representative's details.
-    error: e instanceof PrimaryProfileLinkError
-      ? `Twilio made the business profile but wouldn't link it to Structure Studio's own profile${code}. ${recorded ? "It is saved here: press it again to retry the link." : "Press it again in a minute."}`
-      : `Twilio didn't accept the business details${code}. Check them and press it again.`,
-  };
+  let error: string;
+  if (e instanceof PrimaryProfileLinkError) {
+    // Refused (Twilio said no) or unanswered (no response, a 5xx, a 429): what to do next differs.
+    const what = e.refused
+      ? `Twilio made the business profile but refused to link it to Structure Studio's own profile${code}.`
+      : "Twilio made the business profile but didn't answer while it was being linked to Structure Studio's own profile.";
+    const wait = e.refused ? "" : " in a minute";
+    error = recorded
+      ? `${what} It is saved here: press it again${wait} to retry just the link.`
+      : `${what} Nothing was saved: press it again${wait} to start over.`;
+  } else {
+    error = e.permanent
+      ? `Twilio didn't accept the business details${code}. Check them and press it again.`
+      : "Couldn't reach Twilio just now. Press it again in a minute.";
+  }
+  // Codes only: Twilio's bodies echo the EIN and the representative's details.
+  return { ok: false, kind: "twilio", status: 502, code: e.code, detail: e.message, recorded, error };
 }

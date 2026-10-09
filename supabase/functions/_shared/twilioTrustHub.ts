@@ -414,10 +414,11 @@ export async function createSecondaryCustomerProfile(opts: {
   // sub-account the primary is the PARENT's, so this assignment crosses accounts. Twilio's ISV
   // guide documents it (architecture #1), but it had not been tried on our account when this
   // was written: the phase 6 spike (scripts/twilio-a2p-spike.ts) proves it on a test sub before
-  // any builder depends on it. A refusal here is a PrimaryProfileLinkError carrying the profile
-  // it stopped on, so the caller can write that profile down and FINISH it on the next press
-  // (finishSecondaryCustomerProfile) instead of making a second set of objects. Same request
-  // as always: nothing new is sent on a profile that is created in one go.
+  // any builder depends on it. A refusal (or no answer) here is a PrimaryProfileLinkError carrying
+  // the profile it stopped on, so a caller in a SUB-account can write that profile down and FINISH
+  // it on the next press (finishSecondaryCustomerProfile) instead of making a second set of
+  // objects; `refused` says whether Twilio said no or never answered. Same request as always:
+  // nothing new is sent on a profile that is created in one go.
   try {
     await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
       ObjectSid: opts.primaryProfileSid,
@@ -435,32 +436,45 @@ export async function createSecondaryCustomerProfile(opts: {
   return { profileSid, endUserSid: String(business?.sid ?? ""), addressSid, repSid: String(rep?.sid ?? "") };
 }
 
-/** The marker every PrimaryProfileLinkError's message starts with. */
+/** The marker a PrimaryProfileLinkError's message starts with when Twilio REFUSED the link (a
+ *  permanent answer: a 4xx other than 429, or a code in PERMANENT_CODES). */
 export const PRIMARY_LINK_REFUSED = "primary_profile_link_refused";
+/** ...and when it did not answer it (no response, a 5xx or a 429): nothing was judged, so the same
+ *  link can simply be asked again. Review 2026-10-09: these used to share the "refused" marker, so
+ *  a timeout read as "Twilio will not link across accounts". */
+export const PRIMARY_LINK_UNANSWERED = "primary_profile_link_unanswered";
 
 /**
  * Twilio refused (or never answered) the EntityAssignment that puts the platform's PRIMARY
  * customer profile onto a builder's SECONDARY one: the ISV link. A TrustHubError, so every
  * existing catch still handles it; typed, so a caller can tell this one apart:
- *   profileSid    the secondary profile that WAS made and is now waiting for the link. Record it,
- *                 and the next press finishes it (finishSecondaryCustomerProfile) rather than
- *                 making a second profile.
+ *   profileSid    the secondary profile that WAS made and is now waiting for the link. In a
+ *                 sub-account, record it, and the next press finishes it
+ *                 (finishSecondaryCustomerProfile) rather than making a second profile.
  *   crossAccount  the secondary lives in a SUB-account (the primary is always the parent's), i.e.
  *                 the cross-account assignment phase 6's spike proves. false = both in one account
  *                 (today's flow, where this has never failed).
+ *   refused       Twilio answered and said no (the cause was `permanent`). false = it never
+ *                 answered (network, 5xx, 429): a retry is the whole fix, and nothing about the
+ *                 cross-account link has been learned.
  * Codes only travel outward (this file's header rule); `detail` keeps Twilio's body for app_errors.
  */
 export class PrimaryProfileLinkError extends TrustHubError {
   readonly profileSid: string;
   readonly crossAccount: boolean;
+  readonly refused: boolean;
   constructor(cause: TrustHubError, profileSid: string, crossAccount: boolean) {
+    const where = crossAccount ? " across accounts" : "";
     super({
-      message: `${PRIMARY_LINK_REFUSED}: Twilio did not link the primary customer profile to the secondary one${crossAccount ? " across accounts" : ""} (HTTP ${cause.status}, code ${cause.code}).`,
+      message: cause.permanent
+        ? `${PRIMARY_LINK_REFUSED}: Twilio refused to link the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`
+        : `${PRIMARY_LINK_UNANSWERED}: Twilio did not answer the link of the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`,
       status: cause.status, code: cause.code, permanent: cause.permanent, detail: cause.detail,
     });
     this.name = "PrimaryProfileLinkError";
     this.profileSid = profileSid;
     this.crossAccount = crossAccount;
+    this.refused = cause.permanent;
   }
 }
 

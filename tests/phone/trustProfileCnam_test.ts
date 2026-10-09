@@ -3,11 +3,13 @@
 //
 // What is pinned:
 //   * runTrustProfile (phoneTrust.ts), every branch against stubs: our internal account is refused;
-//     a recorded profile makes nothing (on the parent: nothing sent; in a sub: finished under the
-//     lock); the details are checked by texting's own rules before the lock; the registration names
-//     its sub-account BEFORE the profile is made; the profile is written where texting keeps it, with
-//     the echo only where the builder has none; a refused cross-account link is written down and
-//     reported; the lock is released however it ends; busy is a 409;
+//     a recorded profile makes nothing (it is finished under the lock, on the parent as in a sub, and
+//     one Twilio rejected is a 409 that says so); the details are checked by texting's own rules
+//     before the lock; the registration names its sub-account BEFORE the profile is made; the
+//     profile is written where texting keeps it, with the echo only where the builder has none; a
+//     failed cross-account link is written down IN A SUB only (on the parent nothing is written and
+//     the next press starts over: review 2026-10-09), and a link Twilio never answered says "in a
+//     minute", not "refused"; the lock is released however it ends; busy is a 409;
 //   * the calling-only refusal carries a code the Phone tab answers with the profile form;
 //   * runTrustSetup for CNAM records the name Twilio was sent; runTrustStatus reads CNAM only when its
 //     columns were read;
@@ -21,7 +23,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   NO_PROFILE_CODE, runTrustProfile, runTrustSetup, runTrustStatus, trustProfileFor, TRUST_PROFILE_BUSY_SENTENCE,
-  TRUST_PROFILE_INTERNAL_SENTENCE, type RegistrationRow, type TrustLock,
+  TRUST_PROFILE_INTERNAL_SENTENCE, TRUST_PROFILE_REJECTED_SENTENCE, type RegistrationRow, type TrustLock,
 } from "../../supabase/functions/portal-settings/phoneTrust.ts";
 import {
   BUSINESS_TYPES, JOB_POSITIONS, PrimaryProfileLinkError, TrustHubError, type BuilderIntake, type VoiceTrustResult, type VoiceTrustSetup,
@@ -47,7 +49,7 @@ const INTAKE: BuilderIntake = {
   repEmail: "pat@calls.example.test", repPhone: "+15555550100", repBusinessTitle: "Owner", repJobPosition: "CEO",
 };
 
-function world(o: { busy?: boolean; createFails?: unknown; writeFails?: boolean } = {}) {
+function world(o: { busy?: boolean; createFails?: unknown; writeFails?: boolean; profileStatus?: string } = {}) {
   const log: string[] = [];
   const writes: Record<string, unknown>[] = [];
   const lock: TrustLock = {
@@ -62,7 +64,10 @@ function world(o: { busy?: boolean; createFails?: unknown; writeFails?: boolean 
         log.push(`create ${friendlyName}`);
         return o.createFails ? Promise.reject(o.createFails) : Promise.resolve({ profileSid: PROFILE });
       },
-      finish: (sid: string) => { log.push(`finish ${sid.slice(0, 2)}`); return Promise.resolve({ linked: true, submitted: false }); },
+      finish: (sid: string) => {
+        log.push(`finish ${sid.slice(0, 2)}`);
+        return Promise.resolve({ linked: true, submitted: false, status: (o.profileStatus ?? "pending-review") as "pending-review" });
+      },
       write: (patch: Record<string, unknown>) => {
         log.push(`write ${Object.keys(patch).join(",")}`);
         writes.push(patch);
@@ -94,13 +99,49 @@ Deno.test("runTrustProfile: on the parent nothing names an account; the builder'
   assertEquals(w.writes, [{ customer_profile_sid: PROFILE, ein_last4: "6789", rep_email_domain: "calls.example.test" }]);
 });
 
-Deno.test("runTrustProfile: a recorded profile makes nothing; in a sub it is finished under the lock", async () => {
+Deno.test("runTrustProfile: a recorded profile makes nothing; it is finished under the lock, on the parent as in a sub", async () => {
   const parent = world();
-  assertEquals(await run(parent, { subAccountSid: null, registration: { status: "active", customer_profile_sid: PROFILE } }), { ok: true, created: false, finished: false });
-  assertEquals(parent.log, [], "on the parent: nothing claimed, nothing sent");
+  assertEquals(await run(parent, { subAccountSid: null, registration: { status: "active", customer_profile_sid: PROFILE }, intake: {} }),
+    { ok: true, created: false, finished: true, status: "pending-review" });
+  assertEquals(parent.log, ["claim", "finish BU", "release"], "on the parent too (finish reads first: a finished profile is two reads)");
   const sub = world();
-  assertEquals(await run(sub, { registration: { status: "none", customer_profile_sid: PROFILE, twilio_account_sid: SUB }, intake: {} }), { ok: true, created: false, finished: true });
+  assertEquals(await run(sub, { registration: { status: "none", customer_profile_sid: PROFILE, twilio_account_sid: SUB }, intake: {} }),
+    { ok: true, created: false, finished: true, status: "pending-review" });
   assertEquals(sub.log, ["claim", "finish BU", "release"], "and its details are not asked for again");
+});
+
+Deno.test("runTrustProfile: a recorded profile Twilio rejected is a 409 that says so, nothing made (review 2026-10-09)", async () => {
+  for (const subAccountSid of [SUB, null]) {
+    const w = world({ profileStatus: "twilio-rejected" });
+    assertEquals(await run(w, { subAccountSid, registration: { status: "none", customer_profile_sid: PROFILE }, intake: {} }),
+      { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_REJECTED_SENTENCE });
+    assertEquals(w.log, ["claim", "finish BU", "release"]);
+    assertEquals(w.writes, []);
+  }
+});
+
+Deno.test("runTrustProfile on the PARENT: a failed link writes nothing, and the next press starts over (review 2026-10-09)", async () => {
+  const refused = new PrimaryProfileLinkError(new TrustHubError({ message: "x", status: 403, code: 20403, permanent: true }), PROFILE, false);
+  const w = world({ createFails: refused });
+  const out = await run(w, { subAccountSid: null });
+  assert(!out.ok && out.kind === "twilio" && !out.recorded && out.code === 20403, JSON.stringify(out));
+  assert(/refused to link .*\(error 20403\)\. Nothing was saved: press it again to start over\./.test(out.error), out.error);
+  assertEquals(w.writes, [], "no customer_profile_sid: texting on the parent never builds on an unlinked draft");
+  assertEquals(w.log.at(-1), "release");
+  // The next press: no recorded profile, so a fresh one is made in full.
+  const again = world();
+  assertEquals(await run(again, { subAccountSid: null }), { ok: true, created: true, finished: false });
+  assert(again.log.some((l) => l.startsWith("create ")), JSON.stringify(again.log));
+});
+
+Deno.test("runTrustProfile in a SUB: a link Twilio never answered is written down and says to try again in a minute, not refused", async () => {
+  const unanswered = new PrimaryProfileLinkError(new TrustHubError({ message: "x", status: 503, code: 0, permanent: false }), PROFILE, true);
+  const w = world({ createFails: unanswered });
+  const out = await run(w);
+  assert(!out.ok && out.kind === "twilio" && out.recorded, JSON.stringify(out));
+  assert(/didn't answer .* It is saved here: press it again in a minute to retry just the link\./.test(out.error), out.error);
+  assert(!/refused/.test(out.error), out.error);
+  assertEquals(w.writes.at(-1), { customer_profile_sid: PROFILE });
 });
 
 Deno.test("runTrustProfile: refusals come before the lock; busy is a 409; Twilio failures are reported with the lock released", async () => {

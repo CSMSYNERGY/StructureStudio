@@ -15,7 +15,7 @@
 // Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/twilioTrustHubPrimaryLink.test.ts
 
 import {
-  createSecondaryCustomerProfile, finishSecondaryCustomerProfile, PRIMARY_LINK_REFUSED, PrimaryProfileLinkError,
+  createSecondaryCustomerProfile, finishSecondaryCustomerProfile, PRIMARY_LINK_REFUSED, PRIMARY_LINK_UNANSWERED, PrimaryProfileLinkError,
   primaryProfileLinked, TrustHubError, type BuilderIntake, type TrustHubCreds, type TrustHubHttp,
 } from "./twilioTrustHub.ts";
 
@@ -72,7 +72,7 @@ Deno.test("createSecondaryCustomerProfile in a sub: the primary link refused is 
     assert(caught instanceof PrimaryProfileLinkError, `a PrimaryProfileLinkError, got ${String(caught)}`);
     assert(caught instanceof TrustHubError, "and still a TrustHubError, so every existing catch handles it");
     const e = caught as PrimaryProfileLinkError;
-    assertEquals([e.profileSid, e.crossAccount, e.code, e.status, e.permanent], [SECONDARY, true, 20403, 403, true]);
+    assertEquals([e.profileSid, e.crossAccount, e.code, e.status, e.permanent, e.refused], [SECONDARY, true, 20403, 403, true, true]);
     assert(e.message.startsWith(PRIMARY_LINK_REFUSED), e.message);
     assert(!/echoes what was sent/.test(e.message), "Twilio's body never reaches the message (it echoes what was submitted)");
     assert(seen.every((s) => s.auth === basic(SUB.user, SUB.pass)), "every request on the sub's own pair");
@@ -88,7 +88,7 @@ Deno.test("createSecondaryCustomerProfile in a sub: the primary link refused is 
 });
 
 /** A stub transport over one profile's state. */
-function profileStub(o: { linked: boolean; status: string; refuseLink?: boolean }) {
+function profileStub(o: { linked: boolean; status: string; refuseLink?: boolean; linkUnanswered?: boolean }) {
   const calls: string[] = [];
   const state = { ...o };
   const http: TrustHubHttp = (method, url, form) => {
@@ -98,6 +98,8 @@ function profileStub(o: { linked: boolean; status: string; refuseLink?: boolean 
     }
     if (method === "POST" && url.endsWith("/EntityAssignments")) {
       if (state.refuseLink) return Promise.reject(new TrustHubError({ message: "refused", status: 400, code: 70002, permanent: true }));
+      // call()'s verdict on a 5xx (and on no answer at all): not permanent.
+      if (state.linkUnanswered) return Promise.reject(new TrustHubError({ message: "unanswered", status: 503, code: 0, permanent: false }));
       state.linked = true;
       return Promise.resolve({ sid: "BV" + "2".repeat(32) });
     }
@@ -138,6 +140,20 @@ Deno.test("finishSecondaryCustomerProfile: a refused link is the typed error aga
   assertEquals([(caught as PrimaryProfileLinkError).profileSid, (caught as PrimaryProfileLinkError).crossAccount, (caught as PrimaryProfileLinkError).code],
     [SECONDARY, true, 70002]);
   assertEquals(s.calls.length, 2, "the read and the refused link, then nothing");
+  assert((caught as PrimaryProfileLinkError).refused, "Twilio said no: refused");
+  assert((caught as PrimaryProfileLinkError).message.startsWith(PRIMARY_LINK_REFUSED), (caught as Error).message);
+});
+
+Deno.test("a link Twilio never answered (5xx, 429, no response) is the typed error with refused false, not a refusal (review 2026-10-09)", async () => {
+  const s = profileStub({ linked: false, status: "draft", linkUnanswered: true });
+  let caught: unknown = null;
+  try { await finishSecondaryCustomerProfile(SECONDARY, PRIMARY, s.http, { crossAccount: true }); } catch (e) { caught = e; }
+  assert(caught instanceof PrimaryProfileLinkError, String(caught));
+  const e = caught as PrimaryProfileLinkError;
+  assertEquals([e.profileSid, e.refused, e.permanent, e.status], [SECONDARY, false, false, 503]);
+  assert(e.message.startsWith(PRIMARY_LINK_UNANSWERED), e.message);
+  assert(!e.message.includes("refused"), `an unanswered link never says refused: ${e.message}`);
+  assertEquals(s.calls.length, 2, "the read and the unanswered link, then nothing");
 });
 
 Deno.test("primaryProfileLinked is one GET; malformed SIDs are refused before any request", async () => {
