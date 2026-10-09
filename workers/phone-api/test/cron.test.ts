@@ -284,8 +284,10 @@ describe("scheduled()", () => {
     await ctx.settle();
     const q = net.to(/Usage\/Records/)[0].url.searchParams;
     expect([q.get("StartDate"), q.get("EndDate")]).toEqual(["2026-10-01", "2026-10-01"]);
+    // Workstream 2, phase 7: the parent's own usage only, on migration 298's key.
+    expect(q.get("IncludeSubaccounts")).toBe("false");
     const up = net.writes("twilio_usage_daily", "POST")[0];
-    expect(up.url.searchParams.get("on_conflict")).toBe("day,category");
+    expect(up.url.searchParams.get("on_conflict")).toBe("day,account_sid,category");
     expect(up.json).toEqual([
       { day: "2026-10-01", category: "calls-outbound", count: 12, usage: 31, price_micros: 434000, fetched_at: "2026-10-02T09:00:00.000Z" },
       { day: "2026-10-01", category: "sms-messages-carrierfees", count: 40, usage: 40, price_micros: 180000, fetched_at: "2026-10-02T09:00:00.000Z" },

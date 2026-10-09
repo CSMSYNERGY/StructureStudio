@@ -492,6 +492,8 @@ export const USAGE_CATEGORIES = new Set([
 ]);
 
 export interface TwilioUsageRecord {
+  /** The UTC day the record is for (its start_date; the day asked for when Twilio leaves it out). */
+  day: string;
   category: string;
   count: number | null;
   usage: number | null;
@@ -501,18 +503,25 @@ export interface TwilioUsageRecord {
 }
 
 /**
- * One UTC day's Usage Records (Daily.json, StartDate = EndDate = day), the categories above
- * only. Every category comes back on one or two pages, so this follows next_page_uri a few
- * times at most.
+ * One account's Daily Usage Records (Daily.json), the categories above only, for `day` (or from
+ * `opts.from` to `day`, one record per category per day). Every category comes back on one or two
+ * pages, so this follows next_page_uri a few times at most.
+ *
+ * Workstream 2, phase 7: `includeSubaccounts: false` sends IncludeSubaccounts=false. Twilio's
+ * default (true) folds every sub-account's usage into the PARENT's records, so with sub-accounts
+ * the parent's snapshot would count each builder twice once their own rows are stored too. Asked
+ * for the parent (and for each sub, where it changes nothing), so each row is one account's own.
  */
-export async function listUsageDaily(env: Env, day: string): Promise<TwilioUsageRecord[]> {
+export async function listUsageDaily(env: Env, day: string, opts: { from?: string; includeSubaccounts?: boolean } = {}): Promise<TwilioUsageRecord[]> {
   const out: TwilioUsageRecord[] = [];
-  let path: string | null = `/Usage/Records/Daily.json?${new URLSearchParams({ StartDate: day, EndDate: day, PageSize: "1000" })}`;
+  const q: Record<string, string> = { StartDate: opts.from ?? day, EndDate: day, PageSize: "1000" };
+  if (opts.includeSubaccounts === false) q.IncludeSubaccounts = "false";
+  let path: string | null = `/Usage/Records/Daily.json?${new URLSearchParams(q)}`;
   for (let page = 0; path && page < 5; page++) {
     const res: Response = await call(env, "list usage", path);
     if (!res.ok) throw new TwilioError("list usage", res.status, await codeOf(res));
     const body = (await res.json()) as {
-      usage_records?: { category?: string; count?: string | number | null; usage?: string | number | null; price?: string | null; price_unit?: string | null }[];
+      usage_records?: { category?: string; start_date?: string | null; count?: string | number | null; usage?: string | number | null; price?: string | null; price_unit?: string | null }[];
       next_page_uri?: string | null;
     };
     for (const r of body.usage_records ?? []) {
@@ -520,7 +529,10 @@ export async function listUsageDaily(env: Env, day: string): Promise<TwilioUsage
       if (!USAGE_CATEGORIES.has(category) && !/conference/i.test(category)) continue;
       const count = Number(r.count);
       const usage = Number(r.usage);
+      // One day asked for: that day, exactly as before. A window: each record's own day.
+      const start = String(r.start_date ?? "").slice(0, 10);
       out.push({
+        day: opts.from && opts.from !== day && /^\d{4}-\d{2}-\d{2}$/.test(start) ? start : day,
         category,
         count: r.count === null || r.count === undefined || !Number.isFinite(count) ? null : count,
         usage: r.usage === null || r.usage === undefined || !Number.isFinite(usage) ? null : usage,
