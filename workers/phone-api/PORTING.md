@@ -14,7 +14,7 @@ Placeholders in angle brackets are values you hold; none of them belong in this 
 
 One builder, one Twilio account (SETUP.md 7f; migrations 292 and 295 enforce it):
 
-- **Our own business (`structure-studio`)**: the parent account. Target Account SID = the parent's.
+- **Our own internal account**: the parent account. Target Account SID = the parent's.
 - **Any other builder**: their own sub-account. Open Admin, the builder, Account, **Twilio account**. If it says "None yet", press Create (it needs can_bill, and `TWILIO_SUBACCOUNTS` must be `manual` or `on` before the number is used). Note the masked SID there and copy the full SID from Twilio's Console (Account, Subaccounts). That is the target Account SID.
 - A builder who already has a number or a texting registration on our main account stays there (the card says why). Target = the parent.
 
