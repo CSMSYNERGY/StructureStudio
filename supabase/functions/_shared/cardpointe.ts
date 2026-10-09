@@ -16,7 +16,27 @@
 //    portal-billing, portal-settings and every payment function to redeploy in lockstep on
 //    any change to either gateway (_shared bundles PER function). The agreement between
 //    the two is pinned by a test case in cardpointe.test.ts, not by this comment.
-//    Importers: _shared/invoicePayment.ts, customer-pay/index.ts, portal-payments/index.ts
+//    Importers: _shared/invoicePayment.ts, customer-pay/index.ts, portal-payments/index.ts,
+//    admin-catalog/index.ts (set_payments / verify_payments, since workstream 1 phase 3)
+//    It imports _shared/paymentSettings.ts (types), so a change there redeploys all of the above.
+//
+// ── TWO SYSTEMS, CHOSEN PER CALL (workstream 1 phase 3, migration 296) ─────────────────────
+// Every operation takes the MERCHANT it acts for, {merchid, env}, and the env picks the base URL,
+// the API credentials and the tokenizer:
+//
+//   env 'uat'   CARDPOINTE_BASE_URL / _API_USER / _API_PASS / _TOKENIZER_BASE        the secrets this
+//               deployment has always had: Fiserv's test system, where the certification runs
+//   env 'prod'  CARDPOINTE_PROD_BASE_URL / _PROD_API_USER / _PROD_API_PASS / _PROD_TOKENIZER_BASE
+//
+// A set with any of its four missing is NOT CONFIGURED, and a call for it throws GATEWAY_CONFIG
+// before anything is sent: a live builder whose production secrets are not set is refused, never
+// sent to the test system, and the reverse. Read per call, not at load, so a secret set or removed
+// takes effect on the next request and a test can drive both systems through one module.
+//
+// ⚠️ NO DEFAULT MERCHANT. The MID comes only from the tenant's own row (paymentSettings.ts
+//    cpMerchant) or from the attempt a charge was taken on (invoicePayment.ts merchantOfRecord).
+//    CARDPOINTE_MERCHID, the deployment-wide fallback that once took a MID-less builder's customers'
+//    cards into the platform's own account, is no longer read by anything.
 //
 // ── WHY THIS NEEDS MORE FAILURE CLASSES THAN nmi.ts ────────────────────────────────
 // nmi.ts splits two ways (decline = known-not-charged, transport = unknown). A JSON/HTTP
@@ -59,19 +79,53 @@
 //    transaction. Written from the documentation alone this would have been a silent
 //    wrong-field bug.
 
-const RAW_BASE = Deno.env.get("CARDPOINTE_BASE_URL") || "";
-export const CP_BASE = RAW_BASE.replace(/\/+$/, "");
-const API_USER = Deno.env.get("CARDPOINTE_API_USER") || "";
-const API_PASS = Deno.env.get("CARDPOINTE_API_PASS") || "";
-export const CP_DEFAULT_MERCHID = Deno.env.get("CARDPOINTE_MERCHID") || "";
-export const CP_TOKENIZER_BASE = Deno.env.get("CARDPOINTE_TOKENIZER_BASE") || "";
+import type { CpEnv, CpMerchant } from "./paymentSettings.ts";
+export type { CpEnv, CpMerchant };
 
-/** Whether this deployment can move money at all. All-or-nothing, the nmiConfigured rule:
- *  a tokenizer base without API credentials mints tokens nobody can charge, and credentials
- *  without a tokenizer base cannot collect an instrument in the first place. */
-export const cardpointeConfigured = Boolean(
-  CP_BASE && API_USER && API_PASS && CP_DEFAULT_MERCHID && CP_TOKENIZER_BASE,
-);
+/** The secret-name prefix of each system. UAT keeps the names the deployment has always had. */
+const CP_SECRET_PREFIX: Record<CpEnv, string> = { uat: "CARDPOINTE_", prod: "CARDPOINTE_PROD_" };
+
+type CpConfig = { base: string; user: string; pass: string; tokenizerBase: string };
+
+/** One system's settings, read now. An env that is neither 'uat' nor 'prod' reads as all-blank,
+ *  which is "not configured": nothing is ever sent for a system this module does not know. */
+function cpConfig(env: unknown): CpConfig {
+  const prefix = env === "uat" || env === "prod" ? CP_SECRET_PREFIX[env] : null;
+  const get = (k: string) => (prefix ? Deno.env.get(prefix + k) || "" : "");
+  return {
+    base: get("BASE_URL").replace(/\/+$/, ""),
+    user: get("API_USER"),
+    pass: get("API_PASS"),
+    tokenizerBase: get("TOKENIZER_BASE"),
+  };
+}
+
+function configComplete(c: CpConfig): boolean {
+  return Boolean(c.base && c.user && c.pass && c.tokenizerBase);
+}
+
+/**
+ * Whether this deployment can move money on one system. All-or-nothing per system, the
+ * nmiConfigured rule: a tokenizer base without API credentials mints tokens nobody can charge, and
+ * credentials without a tokenizer base cannot collect an instrument in the first place.
+ *
+ * The MID is NOT part of it. CARDPOINTE_MERCHID used to be (it was the default merchant), so a
+ * deployment without it read as unconfigured; every merchant now names its own.
+ */
+export function cardpointeConfigured(env: CpEnv): boolean {
+  return configComplete(cpConfig(env));
+}
+
+/** How a person names a system, for refusals and the operator console. */
+export function cpEnvLabel(env: CpEnv): string {
+  return env === "prod" ? "live" : "test (UAT)";
+}
+
+/** The secrets one system needs, by name, for an operator's refusal. Never their values. */
+export function cpEnvSecretNames(env: CpEnv): string[] {
+  const p = CP_SECRET_PREFIX[env];
+  return ["BASE_URL", "API_USER", "API_PASS", "TOKENIZER_BASE"].map((k) => p + k);
+}
 
 const GATEWAY_UNKNOWN = "GATEWAY_UNKNOWN:";
 const GATEWAY_THROTTLED = "GATEWAY_THROTTLED:";
@@ -211,26 +265,32 @@ export type CpPartial = {
 
 export type CpAuthResult = CpApproved | CpPartial;
 
-function authHeader(): string {
-  return "Basic " + btoa(`${API_USER}:${API_PASS}`);
-}
-
-/** One request. Classifies transport and HTTP; does NOT look at respstat — that is the
- *  caller's job, because only the caller knows what it asked for. */
+/** One request, on the system and with the credentials of `merchant.env`. Classifies transport and
+ *  HTTP; does NOT look at respstat — that is the caller's job, because only the caller knows what
+ *  it asked for. A system that is not configured, or a merchant with no MID, throws GATEWAY_CONFIG
+ *  with nothing sent. */
 async function cpPost(
+  merchant: CpMerchant,
   method: "PUT" | "POST" | "GET",
   path: string,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  if (!cardpointeConfigured) {
-    throw new Error(`${GATEWAY_CONFIG} CardPointe is not configured for this deployment`);
+  const env = merchant?.env;
+  const cfg = cpConfig(env);
+  if (!configComplete(cfg)) {
+    throw new Error(
+      `${GATEWAY_CONFIG} CardPointe ${env === "uat" || env === "prod" ? cpEnvLabel(env) : `"${String(env)}"`} is not configured for this deployment`,
+    );
+  }
+  if (!String(merchant.merchid ?? "").trim()) {
+    throw new Error(`${GATEWAY_CONFIG} no merchant id`);
   }
   let res: Response;
   let text: string;
   try {
-    res = await fetch(`${CP_BASE}${path}`, {
+    res = await fetch(`${cfg.base}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", "Authorization": authHeader() },
+      headers: { "Content-Type": "application/json", "Authorization": "Basic " + btoa(`${cfg.user}:${cfg.pass}`) },
       body: body === undefined ? undefined : JSON.stringify(body),
       // A redirect off the payment host is not something to follow.
       redirect: "error",
@@ -290,7 +350,8 @@ function requireRespstat(j: Record<string, unknown>): string {
 }
 
 export type CpAuthRequest = {
-  merchid: string;
+  /** The account the sale is taken on, and the system it lives on. Its MID is the body's `merchid`. */
+  merchant: CpMerchant;
   amountCents: number;
   /** A CardSecure token from the iFrame tokenizer, OR raw encrypted track data from the
    *  VP3350 reader. The gateway takes either in `account`, which is exactly why the reader
@@ -366,7 +427,7 @@ export function cpBillingFields(raw: unknown): CpBilling {
  *  (cpAuthFieldNames) are the names actually sent and cannot drift from them. */
 function cpAuthBody(req: CpAuthRequest): Record<string, unknown> {
   const body: Record<string, unknown> = {
-    merchid: req.merchid,
+    merchid: req.merchant.merchid,
     account: req.account,
     amount: cpAmount(req.amountCents),
     currency: "USD",
@@ -432,7 +493,7 @@ export function cpDeclineVerification(e: unknown): CpVerification | null {
  * Throws on decline, unknown, throttled and config. Returns on approved and PARTIAL.
  */
 export async function cpAuth(req: CpAuthRequest): Promise<CpAuthResult> {
-  const j = await cpPost("PUT", "/auth", cpAuthBody(req));
+  const j = await cpPost(req.merchant, "PUT", "/auth", cpAuthBody(req));
   const stat = requireRespstat(j);
 
   if (stat === "C") {
@@ -528,21 +589,26 @@ function readLast4(j: Record<string, unknown>): string | null {
 }
 
 /** Release an authorization that has not settled. Cheap, and always tried before a refund. */
-export async function cpVoid(merchid: string, retref: string): Promise<boolean> {
-  const j = await cpPost("PUT", "/void", { merchid, retref });
+export async function cpVoid(merchant: CpMerchant, retref: string): Promise<boolean> {
+  const j = await cpPost(merchant, "PUT", "/void", { merchid: merchant.merchid, retref });
   return requireRespstat(j) === "A";
 }
 
 /** Return money on a SETTLED transaction. A refund is a new event, never a mutation of the
  *  original — the original settled and the books have to show both. */
 export async function cpRefund(
-  merchid: string,
+  merchant: CpMerchant,
   retref: string,
   amountCents: number,
 ): Promise<{ ok: boolean; retref: string | null; raw: Record<string, unknown> }> {
-  const j = await cpPost("PUT", "/refund", { merchid, retref, amount: cpAmount(amountCents) });
+  const j = await cpPost(merchant, "PUT", "/refund", { merchid: merchant.merchid, retref, amount: cpAmount(amountCents) });
   const ok = requireRespstat(j) === "A";
   return { ok, retref: typeof j.retref === "string" ? j.retref : null, raw: j };
+}
+
+/** The inquireByOrderid path, built in one place for the recovery call and the Verify button. */
+function inquirePath(merchant: CpMerchant, orderid: string): string {
+  return `/inquireByOrderid/${encodeURIComponent(orderid)}/${encodeURIComponent(merchant.merchid)}`;
 }
 
 /**
@@ -551,26 +617,59 @@ export async function cpRefund(
  * Returns null when the gateway has no record, which means nothing was charged.
  */
 export async function cpInquireByOrderId(
-  merchid: string,
+  merchant: CpMerchant,
   orderid: string,
 ): Promise<Record<string, unknown> | null> {
-  const j = await cpPost("GET", `/inquireByOrderid/${encodeURIComponent(orderid)}/${encodeURIComponent(merchid)}`);
+  const j = await cpPost(merchant, "GET", inquirePath(merchant, orderid));
   // The gateway answers with an empty-ish object or a "not found" respstat when there is
   // no such order. Absence of a retref is the honest test.
   const retref = typeof j.retref === "string" ? j.retref.trim() : "";
   return retref ? j : null;
 }
 
+export type CpVerifyResult =
+  | { reachable: true; orderid: string; answer: Record<string, unknown> }
+  | { reachable: false; orderid: string; kind: "config" | "throttled" | "unknown"; message: string };
+
+/**
+ * The operator's Verify button (admin-catalog verify_payments): ONE inquireByOrderid, the same
+ * request cpInquireByOrderId makes, for an order id nobody ever used. It moves no money and creates
+ * nothing at the gateway. What it proves is that this deployment's credentials for the merchant's
+ * system are accepted for that MID:
+ *
+ *   reachable    the gateway answered with a body (most likely "not found"). `answer` is its
+ *                whitelisted summary, so the operator reads the gateway's own words.
+ *   config       not configured here, or the gateway refused us (401/403/4xx): wrong credentials or
+ *                a MID those credentials do not cover
+ *   throttled    the per-MID rate limiter; try again shortly
+ *   unknown      no usable answer (network, 5xx, an unparseable body)
+ *
+ * Never throws.
+ */
+export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyResult> {
+  const orderid = "ssverify_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  try {
+    const j = await cpPost(merchant, "GET", inquirePath(merchant, orderid));
+    // The MID is the operator's own input; the answer does not need to carry it back.
+    const { merchid: _mid, ...answer } = cpSummary(j);
+    return { reachable: true, orderid, answer };
+  } catch (e) {
+    const message = String((e as Error)?.message ?? "").replace(/^GATEWAY_[A-Z]+:\s*/, "").slice(0, 200);
+    const kind = isGatewayConfig(e) ? "config" : isGatewayThrottled(e) ? "throttled" : "unknown";
+    return { reachable: false, orderid, kind, message };
+  }
+}
+
 /** Settlement status for a date (YYYYMMDD). ONE call returns the whole batch — always
  *  preferred over a per-payment inquire loop, which would 429 itself into uselessness and
  *  starve real customer charges of the shared per-MID quota. */
-export async function cpSettleStat(merchid: string, date: string): Promise<unknown> {
-  return await cpPost("GET", `/settlestat?merchid=${encodeURIComponent(merchid)}&date=${encodeURIComponent(date)}`);
+export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<unknown> {
+  return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }
 
 /** Funding detail — the final word on whether an ACH debit actually funded. */
-export async function cpFunding(merchid: string, date: string): Promise<unknown> {
-  return await cpPost("GET", `/funding?merchid=${encodeURIComponent(merchid)}&date=${encodeURIComponent(date)}`);
+export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {
+  return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }
 
 /**
@@ -580,14 +679,14 @@ export async function cpFunding(merchid: string, date: string): Promise<unknown>
  * "unknown" rather than throwing.
  */
 export async function cpSurchargeProbe(
-  merchid: string,
+  merchant: CpMerchant,
   token: string,
   postal?: string,
 ): Promise<{ applies: boolean | null; percent: number | null }> {
   try {
-    const qs = new URLSearchParams({ merchid, account: token });
+    const qs = new URLSearchParams({ merchid: merchant.merchid, account: token });
     if (postal) qs.set("postal", postal);
-    const j = await cpPost("GET", `/surcharge?${qs.toString()}`);
+    const j = await cpPost(merchant, "GET", `/surcharge?${qs.toString()}`);
     const raw = String(j.surchargeapplied ?? j.surcharge ?? "").toLowerCase();
     const pctRaw = j.surchargepercent ?? j.percent;
     const pct = pctRaw == null ? null : Number(pctRaw);
@@ -610,6 +709,12 @@ export async function cpSurchargeProbe(
  * ⚠️ This repo is PUBLIC. No CardPointe host may appear in a browser-served file, and
  * preflight enforces that. Composing here also means the isv-uat/production switch is a
  * secret change rather than a code edit, and there is exactly one place to get it wrong.
+ *
+ * PER MERCHANT since workstream 1 phase 3: the tokenizer is the one on the merchant's own system,
+ * because a token minted by the test tokenizer cannot be charged on live, and the reverse. A
+ * system that is not configured answers "" rather than a relative "?enhancedresponse=…" URL,
+ * which an iframe would resolve against the page and load the portal into itself; every caller
+ * refuses before it gets here anyway.
  *
  * The parameter set is chosen for a phone, because most shed shoppers open my-quotes.html
  * from a text message:
@@ -639,7 +744,9 @@ export async function cpSurchargeProbe(
  * is still served so a page cached from before keeps working; it can go once nothing that
  * old can still be open.
  */
-export function cpTokenizerUrl(rail: "card" | "ach"): string {
+export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach"): string {
+  const base = cpConfig(merchant?.env).tokenizerBase;
+  if (!base) return "";
   // ⚠️ THREE THINGS HERE ARE FIXES FOR DEFECTS SEEN ON A REAL PHONE (2026-09-02), not
   // decoration. The first version of this looked fine in the markup and wrong on screen.
   //
@@ -712,7 +819,7 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
       "cvvlabel=" + encodeURIComponent("Security code"),
       "placeholder=" + encodeURIComponent("Card number"),
     ];
-  return `${CP_TOKENIZER_BASE}?${params.join("&")}`;
+  return `${base}?${params.join("&")}`;
 }
 
 /**
@@ -735,10 +842,11 @@ export function cpTokenizerHeight(rail: "card" | "ach"): number {
   return rail === "ach" ? 130 : 265;
 }
 
-/** The origin the browser must check every postMessage against. */
-export function cpTokenizerOrigin(): string {
+/** The origin the browser must check every postMessage against, and where the pages tokenize a bank
+ *  account themselves: the tokenizer of the merchant's own system. "" when it is not configured. */
+export function cpTokenizerOrigin(merchant: CpMerchant): string {
   try {
-    return new URL(CP_TOKENIZER_BASE).origin;
+    return new URL(cpConfig(merchant?.env).tokenizerBase).origin;
   } catch {
     return "";
   }
