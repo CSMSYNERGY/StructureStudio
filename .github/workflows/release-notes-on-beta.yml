@@ -1,0 +1,202 @@
+# .github/workflows/release-notes-on-beta.yml
+#
+# On every push to beta: hand the pushed commits to the release-ci edge function, which copies each
+# commit's person-written `Release-note:` trailer into What's New as status 'beta' (and, when
+# switched on, moves the commit's `Projects:` items to On Beta). Also warns about commits that
+# change what builders see but carry no trailer (scripts/release-note-nudge.mjs). The words are
+# always a person's: nothing here or in release-ci writes, summarises or rewrites a note. The rule
+# and the trailer format are in CLAUDE.md ("What's New changelog") and _shared/releaseTrailer.ts.
+#
+# ⚠️ TWIN-COMMITTED: keep this file byte-identical on main AND beta. The weekly promotion pushes
+# with GITHUB_TOKEN, which GitHub refuses for any push that touches .github/workflows/, and the
+# promotion gate refuses early when the two branches' workflow files differ. So a change here is
+# committed to beta and, the same day, the identical file to main.
+#
+# DARK BY DEFAULT (one Supabase project serves beta and production):
+#   * Repository VARIABLE RELEASE_NOTES_FROM_GIT: unset or `off` -> the job does nothing and passes.
+#     `dry-run` -> release-ci is asked for a dry run (decides and reports, writes nothing).
+#     `on` -> release-ci is asked to write, which it still refuses unless the Supabase secret
+#     RELEASE_CI_WRITES=1 is also set (item moves need RELEASE_CI_MOVE_ITEMS=1 on top).
+#   * Repository SECRET RELEASE_CI_SECRET (the same value as the Supabase secret): missing -> a
+#     warning and a pass; nothing is called.
+#   * A release-ci error (unreachable, 401, 4xx/5xx) fails the run, so a broken leg is seen.
+#
+# PUBLIC LOGS: this repository is public, so its Actions logs and summaries are public too. The
+# summary shows short shas, result words, fixed reasons and Projects id prefixes only: never a note's
+# title, a commit subject, or a builder's name. release-ci never returns any of those, and the nudge
+# prints shas and paths only in --github mode. Both holds (held_commercial, held_names_builder) are
+# shown as one "held", reason left out, in the table, the counts and the log line: which hold
+# applied would tell any reader that a word in that commit's public trailer is a customer's name.
+#
+# NO `concurrency:` GROUP, ON PURPOSE. GitHub keeps ONE pending run per group and cancels the older
+# pending one when another arrives, and each run sends only its own before..sha. So with a group,
+# three pushes inside one run's lifetime (beta has had pushes seven seconds apart) would cancel the
+# middle run and its commits' notes would never be sent, with nothing failing. Runs may overlap
+# instead, which release-ci tolerates per commit: a note is unique on source_commit (a second
+# delivery answers `exists`) and a Projects move is keyed on (item, commit). What overlap can
+# disorder is which of two commits naming the SAME item is recorded last, and `released` reads that
+# as the item's newest commit; it takes two pushes naming one item seconds apart AND a promotion
+# cut between them.
+
+name: Release notes from beta pushes
+
+on:
+  push:
+    branches: [beta]
+
+permissions:
+  contents: read
+
+jobs:
+  release-notes:
+    # A deleted branch has no commits to read.
+    if: ${{ github.event.deleted != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FN_URL: "https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/release-ci"
+    steps:
+      - name: Mode
+        id: mode
+        env:
+          MODE: ${{ vars.RELEASE_NOTES_FROM_GIT }}
+        run: |
+          case "${MODE:-}" in
+            on|dry-run)
+              echo "mode=${MODE}" >> "$GITHUB_OUTPUT" ;;
+            ""|off)
+              echo "RELEASE_NOTES_FROM_GIT is unset or off: nothing to do."
+              echo "mode=off" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::RELEASE_NOTES_FROM_GIT must be off, dry-run or on. Treating it as off."
+              echo "mode=off" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Check out beta with history
+        if: ${{ steps.mode.outputs.mode != 'off' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List the pushed commits
+        if: ${{ steps.mode.outputs.mode != 'off' }}
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # all-zero "before" = a new branch; otherwise it must be a commit we have AND an ancestor
+          # of this push (a force-push rewinds past it). Anything else: the last 20 commits, said so.
+          case "${BEFORE:-}" in
+            "" | *[!0]*) usable=yes ;;
+            *) usable=no ;;
+          esac
+          if [ "$usable" = yes ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+             && git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
+            RANGE="${BEFORE}..${AFTER}"
+            COUNT="$(git rev-list --count "$RANGE")"
+            # Cap with git's own -200, NEVER "| head": under pipefail head closes the pipe, git log
+            # takes SIGPIPE and the step dies (the merge workflow's 2026-08-03 lesson). --reverse
+            # is applied after the cap, so this is the NEWEST 200, oldest first.
+            git log --reverse -200 --format='%x1e%H%n%B' "$RANGE" > "$RUNNER_TEMP/log.txt"
+            echo "$RANGE" > "$RUNNER_TEMP/nudge-args.txt"
+            DESC="\`${BEFORE:0:7}..${AFTER:0:7}\` (${COUNT} commit(s))"
+            if [ "$COUNT" -gt 200 ]; then DESC="${DESC}, capped at the newest 200"; fi
+          else
+            git log --reverse -20 --format='%x1e%H%n%B' "$AFTER" > "$RUNNER_TEMP/log.txt"
+            echo "--last 20 $AFTER" > "$RUNNER_TEMP/nudge-args.txt"
+            DESC="the last 20 commits up to \`${AFTER:0:7}\` (FALLBACK: the push's starting point was missing or not an ancestor, as after a new branch or a force-push)"
+          fi
+          printf '%s\n' "$DESC" > "$RUNNER_TEMP/range-desc.txt"
+          echo "Range: $DESC"
+
+      - name: Nudge about user-facing commits with no Release-note trailer
+        if: ${{ steps.mode.outputs.mode != 'off' }}
+        continue-on-error: true
+        run: |
+          # shellcheck disable=SC2046  # the saved arguments are split on purpose
+          node scripts/release-note-nudge.mjs --github $(cat "$RUNNER_TEMP/nudge-args.txt")
+
+      - name: Send them to release-ci
+        if: ${{ steps.mode.outputs.mode != 'off' }}
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          RELEASE_CI_SECRET: ${{ secrets.RELEASE_CI_SECRET }}
+        run: |
+          set -euo pipefail
+          DESC="$(cat "$RUNNER_TEMP/range-desc.txt")"
+          if [ -z "${RELEASE_CI_SECRET:-}" ]; then
+            echo "::warning::RELEASE_CI_SECRET is not set - release notes were not sent to release-ci."
+            {
+              echo "## Release notes from this push"
+              echo ""
+              echo "Skipped: the RELEASE_CI_SECRET repository secret is not set. Range: ${DESC}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          DRY=false
+          if [ "$MODE" = "dry-run" ]; then DRY=true; fi
+          # The body, built by jq (never by string pasting): one {sha, message} per commit, oldest
+          # first, messages capped at 20000 characters, anything that is not a full sha dropped.
+          jq -Rs --argjson dry "$DRY" '
+            split("\u001e") | map(select(length > 0))
+            | map(split("\n") as $l | {sha: $l[0], message: (($l[1:] | join("\n"))[0:20000])})
+            | map(select(.sha | test("^[0-9a-f]{40}$")))
+            | {action: "on_beta", dryRun: $dry, commits: .}
+          ' "$RUNNER_TEMP/log.txt" > "$RUNNER_TEMP/body.json"
+
+          HTTP="$(curl -sS --max-time 120 -o "$RUNNER_TEMP/resp.json" -w '%{http_code}' -X POST "$FN_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-release-ci-key: ${RELEASE_CI_SECRET}" \
+            --data-binary "@$RUNNER_TEMP/body.json")" || {
+              echo "::error::Could not reach release-ci."
+              exit 1
+            }
+          if [ "$HTTP" != "200" ] || ! jq -e '.ok == true' "$RUNNER_TEMP/resp.json" >/dev/null 2>&1; then
+            MSG="$(jq -r '(.error // "no error text") | tostring | .[0:300]' "$RUNNER_TEMP/resp.json" 2>/dev/null || echo "unreadable response")"
+            echo "::error::release-ci answered HTTP ${HTTP}: ${MSG}"
+            {
+              echo "## Release notes from this push"
+              echo ""
+              echo "FAILED: release-ci answered HTTP ${HTTP}. Range: ${DESC}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # The summary: short shas, result words, fixed reasons and id prefixes. release-ci returns
+          # no titles, subjects or names, and nothing here adds any. Both holds print as "held" with
+          # no reason (see PUBLIC LOGS at the top); `held` below folds their counts the same way.
+          HELD='def held: if type == "string" and startswith("held_") then "held" else . end;
+                def counts: (. // {}) | to_entries | map(.key |= held) | group_by(.key)
+                            | map({key: .[0].key, value: (map(.value) | add)}) | from_entries;'
+          {
+            echo "## Release notes from this push"
+            echo ""
+            echo "Mode \`${MODE}\` · range ${DESC}"
+            jq -r '
+              if .dryRun then "**Dry run: nothing was written.** Each result says what would happen."
+              else "Notes were written (RELEASE_CI_WRITES is on)." end,
+              if .moves then "" else "Item moves are off (RELEASE_CI_MOVE_ITEMS): Projects refs are reported, not moved." end
+            ' "$RUNNER_TEMP/resp.json"
+            echo ""
+            echo "| Commit | Note | Projects refs |"
+            echo "|---|---|---|"
+            jq -r "$HELD"'
+              def clean: tostring | gsub("[|<>`\r\n]"; " ");
+              .commits[]
+              | (.result | held) as $res
+              | "| `\(.sha | clean)` | \($res | clean)"
+                + (if .why and $res != "held" then " (\(.why | clean))" else "" end)
+                + (if .newSection then ", new section chip: check its spelling" else "" end)
+                + (if .badRefs then ", \(.badRefs) unusable ref(s)" else "" end)
+                + " | \(((.refs // []) | map("`\(.ref[0:8] | clean)` \(.result | clean)") | join(", ")) as $r | if $r == "" then "-" else $r end) |"
+            ' "$RUNNER_TEMP/resp.json"
+            echo ""
+            jq -r "$HELD"'"Counts: " + (.counts | counts | to_entries | map("\(.key) \(.value)") | join(", "))' "$RUNNER_TEMP/resp.json"
+            if jq -e '.counts // {} | keys | any(startswith("held_"))' "$RUNNER_TEMP/resp.json" >/dev/null; then
+              echo ""
+              echo "**Held** notes mention pricing or name a builder: they are not published. Read the commit's trailer; a person publishes it by hand, or not at all."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -c "$HELD"'{dryRun, writes, moves, counts: (.counts | counts)}' "$RUNNER_TEMP/resp.json"
