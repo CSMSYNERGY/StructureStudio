@@ -20,7 +20,7 @@ const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
 const MIG_PATH = process.env.MIG_FILE || path.join(WT, "supabase/migrations/292_twilio_accounts.sql");
-const MIG_TEXT = () => fs.readFileSync(MIG_PATH, "utf8");
+const MIG_TEXT = () => fs.readFileSync(MIG_PATH, "utf8").replace(/\r/g, "");
 
 const SUB_SID = "AC" + "1".repeat(32);
 const SUB2_SID = "AC" + "2".repeat(32);
