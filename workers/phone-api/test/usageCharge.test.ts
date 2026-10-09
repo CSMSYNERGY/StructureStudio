@@ -1346,9 +1346,11 @@ describe("twilioRest additions", () => {
       next_page_uri: null,
     }));
     expect(await listUsageDaily(ON, "2026-10-01")).toEqual([
-      { category: "calls-inbound", count: 3, usage: 7, priceMicros: 60000, priceUnit: "usd" },
-      { category: "calls-globalconference", count: 1, usage: 4, priceMicros: null, priceUnit: "usd" },
+      { day: "2026-10-01", category: "calls-inbound", count: 3, usage: 7, priceMicros: 60000, priceUnit: "usd" },
+      { day: "2026-10-01", category: "calls-globalconference", count: 1, usage: 4, priceMicros: null, priceUnit: "usd" },
     ]);
+    // No opts: Twilio's own default (IncludeSubaccounts unset), exactly the request it always was.
+    expect(net.to(/StartDate/)[0].url.searchParams.has("IncludeSubaccounts")).toBe(false);
   });
 });
 

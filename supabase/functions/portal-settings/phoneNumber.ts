@@ -217,14 +217,18 @@ export async function applyNumberVoice(opts: {
 }
 
 /** A number's PN… sid by its E.164, for a row recorded without one (a number bought by hand
- *  in the console, like the pilot's). null = this account has no such number. */
+ *  in the console, like the pilot's). null = this account has no such number. `friendlyName` is
+ *  its Twilio name (purchaseNumber's is the client id; phone_adopt_number reads it). */
 export async function findNumberSid(opts: { creds: TwilioCreds; e164: string; fetchImpl?: Fetch }):
-  Promise<{ ok: true; sid: string | null } | TwilioFail> {
+  Promise<{ ok: true; sid: string | null; friendlyName: string | null } | TwilioFail> {
   const r = await twilio(opts.creds, "GET", `/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(opts.e164)}&PageSize=5`, null, opts.fetchImpl ?? fetch);
   if (!r.ok) return r;
   const list = Array.isArray(r.body.incoming_phone_numbers) ? r.body.incoming_phone_numbers as Record<string, unknown>[] : [];
   const hit = list.find((n) => String(n.phone_number ?? "") === opts.e164);
-  return { ok: true, sid: hit ? String(hit.sid ?? "") || null : null };
+  return {
+    ok: true, sid: hit ? String(hit.sid ?? "") || null : null,
+    friendlyName: hit && hit.friendly_name != null ? String(hit.friendly_name) : null,
+  };
 }
 
 /** The US number a builder picked from the search results, or null. Search only ever offers

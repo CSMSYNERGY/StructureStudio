@@ -140,13 +140,13 @@ Deno.test("applyNumberVoice: a malformed sid never reaches Twilio; a Twilio refu
   assertEquals(down, { ok: false, status: 0, code: 0 });
 });
 
-Deno.test("findNumberSid finds a hand-bought number's sid by its E.164", async () => {
+Deno.test("findNumberSid finds a hand-bought number's sid by its E.164, and its Twilio name", async () => {
   const seen: Seen[] = [];
-  const f = stubFetch(() => ({ body: { incoming_phone_numbers: [{ sid: PN, phone_number: "+15555550100" }] } }), seen);
-  assertEquals(await findNumberSid({ creds: CREDS, e164: "+15555550100", fetchImpl: f }), { ok: true, sid: PN });
+  const f = stubFetch(() => ({ body: { incoming_phone_numbers: [{ sid: PN, phone_number: "+15555550100", friendly_name: "(555) 555-0100" }] } }), seen);
+  assertEquals(await findNumberSid({ creds: CREDS, e164: "+15555550100", fetchImpl: f }), { ok: true, sid: PN, friendlyName: "(555) 555-0100" });
   assert(seen[0].url.endsWith("/IncomingPhoneNumbers.json?PhoneNumber=%2B15555550100&PageSize=5") && seen[0].method === "GET");
   const none = stubFetch(() => ({ body: { incoming_phone_numbers: [] } }), []);
-  assertEquals(await findNumberSid({ creds: CREDS, e164: "+15555550101", fetchImpl: none }), { ok: true, sid: null });
+  assertEquals(await findNumberSid({ creds: CREDS, e164: "+15555550101", fetchImpl: none }), { ok: true, sid: null, friendlyName: null });
 });
 
 // ── the calling-only purchase ──────────────────────────────────────────────────────────────

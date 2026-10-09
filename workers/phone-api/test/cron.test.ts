@@ -284,8 +284,11 @@ describe("scheduled()", () => {
     await ctx.settle();
     const q = net.to(/Usage\/Records/)[0].url.searchParams;
     expect([q.get("StartDate"), q.get("EndDate")]).toEqual(["2026-10-01", "2026-10-01"]);
+    // Workstream 2, phase 7: with the switch off the request is exactly the one it always was
+    // (Twilio's default, sub-accounts folded in: review 2026-10-09), now on migration 299's key.
+    expect(q.has("IncludeSubaccounts")).toBe(false);
     const up = net.writes("twilio_usage_daily", "POST")[0];
-    expect(up.url.searchParams.get("on_conflict")).toBe("day,category");
+    expect(up.url.searchParams.get("on_conflict")).toBe("day,account_sid,category");
     expect(up.json).toEqual([
       { day: "2026-10-01", category: "calls-outbound", count: 12, usage: 31, price_micros: 434000, fetched_at: "2026-10-02T09:00:00.000Z" },
       { day: "2026-10-01", category: "sms-messages-carrierfees", count: 40, usage: 40, price_micros: 180000, fetched_at: "2026-10-02T09:00:00.000Z" },
@@ -634,6 +637,9 @@ describe("monthly number fee (sms_number_monthly, daily cron, months 2 and on)",
     const daily = index.slice(index.indexOf("if (dailyDue) {"), index.indexOf("if (tick && callTranscribeOn(env))"));
     expect(daily).toContain('await job("number_fee", () => chargeMonthlyNumberFees(env, adminClient(env), at));');
     expect(daily.indexOf('job("number_fee"')).toBeGreaterThan(daily.indexOf('job("line_fee"'));
+    // Twilio's daily totals run LAST (review 2026-10-09): with sub-accounts they may use many
+    // subrequests, and the billing jobs must never be the ones starved of them.
+    expect(daily.indexOf('job("twilio_usage"')).toBeGreaterThan(daily.indexOf('job("number_fee"'));
 
     const { net, debits } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-20T10:00:00Z" }] });
     net.rest("GET", "phone_voicemails", () => []);

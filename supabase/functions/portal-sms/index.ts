@@ -41,6 +41,9 @@ import {
 } from "../_shared/twilioTrustHub.ts";
 // Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
 import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
+// Workstream 2, phase 6: a sub-account's secondary profile links ACROSS accounts to the parent's
+// primary. A refusal there is typed, and the profile it stopped on is finished on the next press.
+import { fetchCustomerProfile, finishSecondaryCustomerProfile, PrimaryProfileLinkError } from "../_shared/twilioTrustHub.ts";
 import { resolveTwilioAccount, subaccountsMode, subaccountsOn, TwilioAccountError, type TwilioAccount } from "../_shared/twilioAccount.ts";
 // Workstream 2, phase 3: the builder's own sub-account is made on their first submit (and checked
 // again before a number is bought), and a NEW registration waits for the switch (registrationGate.ts).
@@ -92,6 +95,19 @@ class RegistrationWriteError extends Error {
     this.name = "RegistrationWriteError";
   }
 }
+
+/** Workstream 2, phase 6 (review 2026-10-09): the business profile this registration would reuse
+ *  was REJECTED by Twilio's review. Thrown at the ready stage BEFORE the A2P trust product and the
+ *  paid brand, so nothing is held, bought or charged on a profile the carriers cannot accept. The
+ *  handler answers 409 with the sentence below and files one app_errors row (support must act). */
+class ProfileRejectedError extends Error {
+  constructor() {
+    super("the business profile this registration reuses was rejected by Twilio");
+    this.name = "ProfileRejectedError";
+  }
+}
+const PROFILE_REJECTED_SENTENCE =
+  "Twilio rejected this business's profile, the business details your texting registration is built on. Nothing was charged. Structure Studio has been notified and will correct it with you.";
 
 // 502s whose app_errors row advanceOne already wrote (sms_registration_update_failed), so
 // withErrorLog's `alreadyFiled` skips its generic '502' copy of the same failure. A WeakSet, so
@@ -1346,7 +1362,44 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       filedAtReturnSite.add(failed);
       return failed;
     }
+    // Workstream 2, phase 6: the profile this registration would reuse was rejected (advanceOne's
+    // ready stage, before anything billed). A refusal the builder cannot fix alone: one row for
+    // support, then the sentence.
+    if (e instanceof ProfileRejectedError) {
+      await logEdgeError({
+        fn: "portal-sms", clientId, code: "sms_registration_profile_rejected", severity: "error",
+        message: `${action}: ${e.message}`, context: { action },
+      }).catch(() => {});
+      const res = json({ error: PROFILE_REJECTED_SENTENCE, code: "profile_rejected" }, 409);
+      filedAtReturnSite.add(res);
+      return res;
+    }
     const err = e as TrustHubError;
+    // Workstream 2, phase 6: the builder's profile is in their own sub-account and its link to
+    // Structure Studio's primary profile failed. Its own code, so the operator sees the
+    // cross-account link failed (the one step the phase 6 spike exists to prove) rather than a
+    // generic registration failure; the profile is already written down, so the next press
+    // finishes it. REFUSED (Twilio said no) and UNANSWERED (no response, a 5xx or a 429; review
+    // 2026-10-09) are told apart: only a refusal says anything about the cross-account link.
+    // Only for a sub: on the parent the old row and the old sentence, below.
+    if (err instanceof PrimaryProfileLinkError && err.crossAccount) {
+      await logEdgeError({
+        fn: "portal-sms", clientId, code: err.refused ? "twilio_primary_link_refused" : "twilio_primary_link_unanswered", severity: "error",
+        message: `${action}: ${err.message}`,
+        context: { action, code: err.code ?? 0, status: err.status ?? 0 },
+      }).catch(() => {});
+      const res = err.refused
+        ? json({
+          error: "The carriers' registration couldn't link your business to Structure Studio's account. Nothing was charged, and support has been notified.",
+          code: "primary_link_refused",
+        }, 502)
+        : json({
+          error: "The carriers' registration didn't answer while your business was being linked to Structure Studio's account. Nothing was charged. Submit again in a minute: it carries on where it stopped.",
+          code: "primary_link_unanswered",
+        }, 503);
+      filedAtReturnSite.add(res);
+      return res;
+    }
     // Twilio's body can echo the EIN and the representative's mobile. It goes to app_errors,
     // never to the browser.
     await logEdgeError({
@@ -1401,8 +1454,9 @@ async function advanceOne(
   // which is nobody pressing anything; that path never reaches a charging state anyway.
   userId: string | null,
   // The tenant's Twilio account (Workstream 2): every stage below runs in it. null = the
-  // environment's, what every stage did before.
-  creds: TrustHubCreds | null,
+  // environment's, what every stage did before. `source` (twilioAccount.ts) says whether it is
+  // the builder's own sub-account.
+  creds: (TrustHubCreds & { source?: "parent" | "sub" }) | null,
 ): Promise<any> {
   // ⚠️ A FAILED WRITE THROWS; IT NEVER RETURNS THE OLD ROW. This used to ignore the update's
   // error and hand back a fresh read of the unchanged row, so a refused write looked like a
@@ -1469,11 +1523,49 @@ async function advanceOne(
       // Stages 1 and 2. Twilio's ISV guide is explicit that the trust product does NOT have
       // to reach `approved` before the brand, so both are created in one pass and the first
       // real wait is at the brand itself.
-      const prof = reg.customer_profile_sid
-        ? { profileSid: reg.customer_profile_sid }
-        : await createSecondaryCustomerProfile({
+      // ── Workstream 2, phase 6: A2P INSIDE THE BUILDER'S SUB-ACCOUNT ──────────────────────
+      // The secondary profile is made in the sub with the sub's credentials, and its link to the
+      // parent's PRIMARY profile crosses accounts. If Twilio refuses that link, the profile it
+      // made is written down (customer_profile_sid) before the error goes back, and the next press
+      // FINISHES that one (finishSecondaryCustomerProfile: link, then evaluate and submit a draft;
+      // every step read first) instead of making a second. A profile made elsewhere for this
+      // builder (portal-settings' phone_trust_profile, for caller ID) is finished the same way,
+      // which on a finished profile is two reads and nothing sent. Only for a sub: on the
+      // parent every step is exactly what it was before sub-accounts.
+      //
+      // ⚠️ A REUSED PROFILE IS READ BEFORE ANYTHING IS BUILT ON IT (review 2026-10-09). One that
+      // Twilio REJECTED is refused here (ProfileRejectedError, 409), before the A2P trust product
+      // and long before the paid brand: no hold, no charge. In a sub, finish's own read is the
+      // check. On the parent the one GET runs only for a profile texting did NOT make itself (no
+      // A2P trust product beside it: phone_trust_profile's, for a builder who only called before);
+      // a profile texting made carries its A2P product, and that resubmit path is untouched.
+      const onSub = creds?.source === "sub";
+      let prof: { profileSid: string };
+      if (reg.customer_profile_sid) {
+        let reviewed: string | null = null;
+        if (onSub) {
+          reviewed = (await finishSecondaryCustomerProfile(reg.customer_profile_sid, primaryProfileSid, trustHubHttp(creds), { crossAccount: true })).status;
+        } else if (!reg.a2p_profile_sid) {
+          reviewed = (await fetchCustomerProfile(reg.customer_profile_sid, trustHubHttp(creds))).status;
+        }
+        if (reviewed === "twilio-rejected") {
+          await note("profile_rejected", {});
+          throw new ProfileRejectedError();
+        }
+        prof = { profileSid: reg.customer_profile_sid };
+      } else {
+        try {
+          prof = await createSecondaryCustomerProfile({
             intake, primaryProfileSid, friendlyName: `${clientId} — ${intake.legalBusinessName}`,
           }, creds);
+        } catch (e) {
+          if (onSub && e instanceof PrimaryProfileLinkError && /^BU[0-9a-f]{32}$/i.test(e.profileSid)) {
+            await set({ customer_profile_sid: e.profileSid });
+            await note(e.refused ? "primary_link_refused" : "primary_link_unanswered", { code: e.code, status: e.status });
+          }
+          throw e;
+        }
+      }
       const a2p = reg.a2p_profile_sid
         ? { a2pProfileSid: reg.a2p_profile_sid }
         : await createA2pTrustProduct({

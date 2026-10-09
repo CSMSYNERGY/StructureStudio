@@ -199,6 +199,18 @@ import {
   callerIdView, chooseTrustProfile, parseTrustProduct, runTrustSetup, runTrustStatus, TRUST_COLS, TRUST_COLUMNS, TRUST_LOCK_MS,
   TRUST_OPERATOR_SENTENCE, trustOperatorAllowed, type TrustRow,
 } from "./phoneTrust.ts";
+// Workstream 2, phase 6: CNAM (the business's name on the called party's screen) beside the two
+// kinds above, and the business profile an operator makes for a builder who only calls
+// (phone_trust_profile), both in the builder's own Twilio account.
+import { createSecondaryCustomerProfile, finishSecondaryCustomerProfile, parseCnamDisplayName } from "../_shared/twilioTrustHub.ts";
+import { CNAM_COLUMNS, cnamNumberRefusal, runTrustProfile, type RegistrationRow } from "./phoneTrust.ts";
+// Workstream 2, phase 8: "Bring your number". The builder's request (phone_port_request) and the
+// operator's landing of a moved number (phone_adopt_number); the rules are numberRequests.ts, the
+// move itself is workers/phone-api/PORTING.md.
+import {
+  adoptNumber, lookupOnlyEnv, parseAdoptNumber, parsePortRequest, portRequestConflict, portRequestRow, portRequestView, type PortRequestRow,
+} from "./numberRequests.ts";
+import { parentCreds } from "../_shared/twilioAccount.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 // CSM Synergy's own GoHighLevel contacts into its CRM (migration 282): the GoHighLevel read and the
 // walk. This function is the module's only importer.
@@ -641,6 +653,17 @@ const GATES: GateTable = {
   // a READ-level line is where resolveTenant waves a read-only operator through.
   phone_trust_setup: { area: "phone", level: "edit" },
   phone_trust_status: { area: "phone", level: "edit" },
+  // Workstream 2, phase 6: the business profile caller ID is built on, made by an OPERATOR from the
+  // business's details for a builder who only calls (phoneTrust.ts runTrustProfile). The same floor
+  // and the same operator gate as the two above; it submits the builder's legal identity to Twilio.
+  // (CNAM is phone_trust_setup / phone_trust_status with product "cnam": no line of its own.)
+  phone_trust_profile: { area: "phone", level: "edit" },
+  // Workstream 2, phase 8: "Bring your number". The REQUEST is the builder's (phone:edit, the people
+  // who set the phone up): it spends nothing and stores no PIN, bill or account number
+  // (numberRequests.ts). ADOPTING a number that has arrived is an operator's (the caller-ID gate,
+  // plus canBill in view-as: the number bills monthly from then on); phone:edit is its floor only.
+  phone_port_request: { area: "phone", level: "edit" },
+  phone_adopt_number: { area: "phone", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -9532,14 +9555,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     (await callerMayManageCallerId()) ? null : phoneRefused(TRUST_OPERATOR_SENTENCE, 403);
   // The number's caller-ID columns (migration 255), in their OWN select so a server without 255
   // answers `callerId.available: false` rather than failing the number read everything else uses.
-  const trustRowOf = async (numberId: string) =>
-    await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("id", numberId).eq("client_id", clientId).maybeSingle();
+  // Workstream 2, phase 6: CNAM's columns (migration 297) ride along; before 297 the row is read
+  // again without them, and CNAM alone is "not available" (the row then has no cnam_* key).
+  const trustRowOf = async (numberId: string) => {
+    const read = (cols: string) => admin.from("sms_numbers").select(cols).eq("id", numberId).eq("client_id", clientId).maybeSingle();
+    const res = await read(`${TRUST_COLUMNS}, ${CNAM_COLUMNS}`);
+    return res.error && phoneNotReady(res.error) ? await read(TRUST_COLUMNS) : res;
+  };
 
   // Phase 6: may this caller BUY a number? phone:'edit' got them through the gate; spending money
   // every month is settings_billing:'edit' everywhere else (portal-sms buy_number), and an
   // operator needs canBill. Asked by the purchase and reported by phone_settings_get so the
   // screen offers the button only to people it will work for.
   const mayBuyPhoneNumber = () => canEdit("phone") && canEdit("settings_billing") && (!operator || operator.canBill);
+
+  // Workstream 2, phase 6: the texting registration's profile and echo, which phone_trust_profile
+  // reads and writes. No SID leaves: `exists` and the echo the operator's form starts from.
+  const REG_PROFILE_COLUMNS = "status, customer_profile_sid, twilio_account_sid, legal_business_name, ein_last4, rep_email_domain, website_url";
+  const registrationRow = async (): Promise<{ row: RegistrationRow; error: unknown }> => {
+    const { data, error } = await admin.from("sms_registrations").select(REG_PROFILE_COLUMNS).eq("client_id", clientId).maybeSingle();
+    return { row: (data ?? null) as RegistrationRow, error };
+  };
+  // Workstream 2, phase 8: this business's "Bring your number" requests (migration 298), newest
+  // first, or null when the table is not there yet or the read fails (the card is then not drawn).
+  const portRequestsOf = async () => {
+    const { data, error } = await admin.from("phone_number_requests")
+      .select("id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at")
+      .eq("client_id", clientId).order("created_at", { ascending: false }).limit(10);
+    return error ? null : ((data ?? []) as PortRequestRow[]).map(portRequestView);
+  };
+  const businessProfileView = async () => {
+    const r = await registrationRow();
+    if (r.error) return null;
+    const row = r.row ?? {};
+    return {
+      exists: /^BU[0-9a-f]{32}$/i.test(String(row.customer_profile_sid ?? "")),
+      legalBusinessName: row.legal_business_name ?? "",
+      websiteUrl: row.website_url ?? "",
+      einLast4: row.ein_last4 ?? "",
+    };
+  };
 
   // A 5xx whose app_errors row the branch already wrote, so withErrorLog does not file it twice.
   const filedHere = (res: Response) => { filedAtReturnSite.add(res); return res; };
@@ -9774,7 +9829,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const trustBy = new Map<string, any>();
     let trustAvailable = false;
     if (rows.length) {
-      const tr = await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("client_id", clientId).in("id", rows.map((r) => r.id)).limit(50);
+      const readTrust = (cols: string) => admin.from("sms_numbers").select(cols).eq("client_id", clientId).in("id", rows.map((r) => r.id)).limit(50);
+      let tr = await readTrust(`${TRUST_COLUMNS}, ${CNAM_COLUMNS}`);
+      if (tr.error && phoneNotReady(tr.error)) tr = await readTrust(TRUST_COLUMNS);
       trustAvailable = !tr.error;
       // deno-lint-ignore no-explicit-any
       for (const t of (tr.error ? [] : (tr.data ?? [])) as any[]) trustBy.set(String(t.id), t);
@@ -9832,6 +9889,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
       callerId,
       canManageCallerId: canEdit("phone") && await callerMayManageCallerId(),
+      // Workstream 2, phase 6: whether this business has the profile caller ID is built on, and
+      // what the operator's form starts from (phone_trust_profile). Read for an operator only, so a
+      // builder's screen asks nothing new.
+      businessProfile: canEdit("phone") && rows.length && await callerMayManageCallerId() ? await businessProfileView() : null,
+      // Workstream 2, phase 8: this business's "Bring your number" requests, newest first (null = not
+      // available on this database yet: the card is not drawn), and whether this caller may land a
+      // moved number (phone_adopt_number's own check).
+      portRequests: canEdit("phone") ? await portRequestsOf() : null,
+      canAdoptNumber: canEdit("phone") && (!operator || operator.canBill) && await callerMayManageCallerId(),
       // Call recording (migration 263): the settings, and whether THIS caller may change them
       // (the business owner with phone edit: phone_recording_save's rule).
       recording,
@@ -10663,12 +10729,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const refused = await phoneOperatorGate();
     if (refused) return refused;
     const kind = parseTrustProduct(payload?.product);
-    if (!kind) return json({ error: "Choose SHAKEN/STIR or Voice Integrity." }, 400);
+    if (!kind) return json({ error: "Choose SHAKEN/STIR, Voice Integrity or the caller name (CNAM)." }, 400);
     let info: VoiceIntegrityInfo | null = null;
     if (kind === "voice_integrity" && payload?.voiceIntegrity != null) {
       const parsed = parseVoiceIntegrityInfo(payload.voiceIntegrity);
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       info = parsed.info;
+    }
+    // Workstream 2, phase 6: CNAM's display name (at most 15 characters), checked before Twilio.
+    let cnamName: string | null = null;
+    if (kind === "cnam" && payload?.cnam?.displayName != null) {
+      const parsed = parseCnamDisplayName(payload.cnam.displayName);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      cnamName = parsed.name;
     }
     const tw = await tenantTwilio();
     if (!tw.ok) return tenantTwilioRefused(tw.error);
@@ -10690,6 +10763,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
     }
     const trustRow = (tr.data ?? {}) as TrustRow;
+    // CNAM is recorded in migration 297's columns: before 297, nothing is sent for it.
+    if (kind === "cnam" && !("cnam_trust_product_sid" in trustRow)) {
+      return phoneUnavailable("Caller name registration isn't available on this server yet.");
+    }
+    // CNAM is for US local numbers only (phoneTrust.ts cnamNumberRefusal): a toll-free or Canadian
+    // number is refused before anything is sent (review 2026-10-09).
+    if (kind === "cnam") {
+      const notLocal = cnamNumberRefusal(n.phone_number);
+      if (notLocal) return json({ error: notLocal, code: "cnam_us_local_only" }, 409);
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
 
@@ -10711,7 +10794,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       numberSid: sidRes.sid,
     }, { numberOnProfile: (p, num) => numberOnProfile(p, num, trustHubHttp(creds)) });
     if (!prof.ok) {
-      if (prof.kind === "refused") return json({ error: prof.error }, prof.status);
+      // `code` no_business_profile: the Phone tab offers an operator the business-profile form.
+      if (prof.kind === "refused") return json({ error: prof.error, ...(prof.code ? { code: prof.code } : {}) }, prof.status);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
         message: `${kind}: ${prof.detail}`, context: { number_id: n.id, twilio_code: prof.code, profile: "primary_check" } }).catch(() => {});
       return filedHere(json({ error: prof.error, code: prof.code || null }, prof.status));
@@ -10724,7 +10808,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const lockUntil = new Date(Date.now() + TRUST_LOCK_MS).toISOString();
     const out = await runTrustSetup({
       kind, clientId, numberSid: sidRes.sid, profileSid: prof.profileSid,
-      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info,
+      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info, cnamName,
     }, {
       lock: {
         claim: async () => {
@@ -10760,7 +10844,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       `product=${kind} status=${r0.status ?? "unknown"} created=${r0.created} submitted=${r0.submitted} answers_updated=${r0.endUserUpdated} profile=${prof.which}`).catch(() => {});
     return json({
       ok: true, product: kind, status: r0.status, submitted: r0.submitted, created: r0.created, answersUpdated: r0.endUserUpdated, profile: prof.which,
-      callerId: callerIdView({ ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString() }),
+      callerId: callerIdView({
+        ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString(),
+        ...(kind === "cnam" && cnamName && (r0.endUserCreated || r0.endUserUpdated) ? { cnam_display_name: cnamName } : {}),
+      }),
     });
   }
 
@@ -10798,6 +10885,270 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return filedHere(json({ error: out.error, code: out.code || null }, out.status));
     }
     return json({ ok: true, callerId: out.view, errorCodes: out.errorCodes });
+  }
+
+  // ── Workstream 2, phase 6: the business profile for a builder who only calls ─────────────────
+  // Caller ID (all three kinds) is built on the builder's own Secondary Customer Profile, which only
+  // texting's first submit used to make. An operator makes it here from the business's details
+  // (phoneTrust.ts runTrustProfile: the order, the lock, the write), in the builder's own Twilio
+  // account and linked to the parent's primary profile, and it is written where texting keeps it
+  // (sms_registrations.customer_profile_sid) so texting reuses it later. Twilio reviews it before
+  // caller ID can be registered (usually a few days).
+  // ⚠️ OPERATOR-ONLY (phoneOperatorGate), like the two above. Spends nothing.
+  // ⚠️ ONE TENANT, ONE ACCOUNT: only for a builder whose account is decided by a live number (caller
+  // ID is per number anyway), and never on the parent for a builder with a sub-account while
+  // TWILIO_SUBACCOUNTS is off (it would land there and split them).
+  if (action === "phone_trust_profile") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    const primary = String(Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "").trim();
+    if (!trustHubConfigured() || !/^BU[0-9a-f]{32}$/i.test(primary)) {
+      return phoneUnavailable("Adding a business profile isn't available on this server yet.");
+    }
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    if (!creds) return phoneUnavailable("Adding a business profile isn't available on this server yet.");
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    if (!(numRes.data ?? []).length) {
+      return json({ error: "Get a number for this business first: caller ID is registered for a number, and the number decides which Twilio account the profile goes in." }, 409);
+    }
+    let internal = false;
+    try { internal = await isInternalTenant(admin, clientId); } catch (e) {
+      return dbFail(req, clientId, "check this account", { message: (e as Error)?.message ?? "unknown" });
+    }
+    // The registration row the profile is written on (portal-sms's load(): made when missing).
+    let reg = await registrationRow();
+    if (reg.error) return dbFail(req, clientId, "load your texting registration", reg.error);
+    if (!reg.row) {
+      const { error } = await admin.from("sms_registrations").insert({ client_id: clientId, status: "none" });
+      if (error && String((error as { code?: string }).code ?? "") !== "23505") return dbFail(req, clientId, "start your texting registration", error);
+      reg = await registrationRow();
+      if (reg.error || !reg.row) return dbFail(req, clientId, "load your texting registration", reg.error ?? { message: "no row" });
+    }
+    const onSub = creds.source === "sub";
+    const lockUntil = new Date(Date.now() + 5 * 60_000).toISOString();
+    const regWrite = async (patch: Record<string, unknown>) => {
+      const { error } = await admin.from("sms_registrations").update({ ...patch, updated_at: new Date().toISOString() }).eq("client_id", clientId);
+      return error ? { ok: false as const, error } : { ok: true as const };
+    };
+    const out = await runTrustProfile({
+      clientId, intake: (payload?.intake ?? {}) as Parameters<typeof runTrustProfile>[0]["intake"], internal, registration: reg.row,
+      subAccountSid: onSub ? creds.accountSid : null,
+    }, {
+      // portal-sms advance's own lock, so this and a texting submit never both make a profile.
+      lock: {
+        claim: async () => {
+          const { data, error } = await admin.from("sms_registrations").update({ advance_lock_until: lockUntil })
+            .eq("client_id", clientId)
+            .or(`advance_lock_until.is.null,advance_lock_until.lt.${new Date().toISOString()}`)
+            .select("client_id");
+          if (error) return { ok: false as const, busy: false as const, error };
+          return (data ?? []).length ? { ok: true as const } : { ok: false as const, busy: true as const };
+        },
+        release: async () => {
+          await admin.from("sms_registrations").update({ advance_lock_until: null })
+            .eq("client_id", clientId).eq("advance_lock_until", lockUntil);
+        },
+      },
+      create: (intake, friendlyName) => createSecondaryCustomerProfile({ intake, primaryProfileSid: primary, friendlyName }, creds),
+      finish: (profileSid) => finishSecondaryCustomerProfile(profileSid, primary, trustHubHttp(creds), { crossAccount: onSub }),
+      write: regWrite,
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error, ...(out.problems ? { problems: out.problems } : {}) }, out.status);
+      if (out.kind === "db") return dbFail(req, clientId, "record the business profile", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_profile_failed", severity: "error",
+        message: out.detail, context: { twilio_code: out.code, recorded: out.recorded, sub: onSub } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    audit("phone_trust_profile", 1, `created=${out.created} finished=${out.finished} sub=${onSub}`).catch(() => {});
+    return json({ ok: true, created: out.created, finished: out.finished, businessProfile: await businessProfileView() });
+  }
+
+  // ── Workstream 2, phase 8: "Bring your number" ───────────────────────────────────────────────
+  // The builder asks to move numbers they already have into Structure Studio. The request is
+  // stored (phone_number_requests, migration 298) and IS the operator's notification: the console
+  // lists every open one. No PIN, bill or account number is accepted (numberRequests.ts refuses
+  // them), and nothing is sent anywhere: an operator books the move (workers/phone-api/PORTING.md).
+  // ⚠️ ONLY THIS BUILDER'S OWN ROWS ARE READ (review 2026-10-09). Refusing on another builder's
+  // number or request told any builder whether a number belonged to someone else, and let one
+  // builder block another's request; the operator console flags those instead.
+  if (action === "phone_port_request") {
+    const parsed = parsePortRequest(payload?.request);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const v = parsed.value;
+    const unavailable = () => phoneUnavailable("Asking to bring a number isn't available on this server yet.");
+    const [mine, asked, live] = await Promise.all([
+      admin.from("phone_number_requests").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).in("status", ["new", "in_progress"]),
+      // This builder's own open requests naming one of these numbers (the array overlap operator).
+      admin.from("phone_number_requests").select("numbers").eq("client_id", clientId)
+        .in("status", ["new", "in_progress"]).overlaps("numbers", v.numbers).limit(20),
+      admin.from("sms_numbers").select("phone_number").eq("client_id", clientId)
+        .in("phone_number", v.numbers).is("released_at", null).limit(20),
+    ]);
+    for (const r of [mine, asked, live]) {
+      if (r.error) return phoneNotReady(r.error) ? unavailable() : dbFail(req, clientId, "check your number requests", r.error);
+    }
+    const conflict = portRequestConflict(v, {
+      openForTenant: Number(mine.count ?? 0),
+      // deno-lint-ignore no-explicit-any
+      ownOpenNumbers: ((asked.data ?? []) as any[]).flatMap((x) => (Array.isArray(x.numbers) ? x.numbers : [])),
+      // deno-lint-ignore no-explicit-any
+      ownLiveNumbers: ((live.data ?? []) as any[]).map((x) => String(x.phone_number)),
+    });
+    if (conflict) return json({ error: conflict }, 409);
+    const { data: row, error } = await admin.from("phone_number_requests")
+      .insert(portRequestRow(clientId, isUuid(String(userId ?? "")) ? String(userId) : null, v))
+      .select("id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at").single();
+    if (error || !row) return phoneNotReady(error) ? unavailable() : dbFail(req, clientId, "save your number request", error ?? { message: "no row" });
+    audit("phone_port_request", 1, `numbers=${v.numbers.length} lc_phone=${v.isLcPhone ?? "unsure"}`).catch(() => {});
+    return json({ ok: true, request: portRequestView(row as PortRequestRow) });
+  }
+
+  // An OPERATOR lands a moved number on this builder once it has arrived in THEIR Twilio account
+  // (their sub-account, or the parent for a builder who lives there): numberRequests.ts adoptNumber
+  // finds it there (refusing one in any other account), records it the way a calling-only purchase
+  // is recorded, and then, exactly as phone_buy_number does after a purchase, the number's calls go
+  // to My Synergy Phone (calling on) or voicemail (off), its texts to sms-inbound or into the
+  // business's texting setup, and its FriendlyName becomes the client id (the purchase's
+  // reconciliation key). Open requests naming it are marked done. Nothing is bought, no wallet
+  // hold is taken: the number's monthly fee from its second month is the daily cron's, as for any
+  // number (its first month here is not charged).
+  if (action === "phone_adopt_number") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    if (operator && !operator.canBill) return json({ error: "This operator account cannot change billing." }, 403);
+    const e164 = parseAdoptNumber(payload?.phoneNumber);
+    if (!e164) return json({ error: "Enter the moved number, like (816) 555-0123 (a US local or mobile number)." }, 400);
+    if (!trustHubConfigured()) return phoneUnavailable("Adding a moved number isn't available on this server yet.");
+    // One tenant, one account, even with the switch off (phone_buy_number's own rule).
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    // ⚠️ ADOPTING NEVER MAKES AN ACCOUNT (review 2026-10-09). A moved number can only have landed in
+    // an account that already exists, so the account is looked up the way TWILIO_SUBACCOUNTS
+    // "manual" does it (lookupOnlyEnv): an existing, finished sub-account, or the parent for a
+    // builder who lives there, and nothing is made or finished. A builder with no finished
+    // sub-account of their own while the switch is on is refused with what to do, instead of one
+    // being made as a side effect.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: lookupOnlyEnv((k) => Deno.env.get(k)) });
+    if (!prov.ok) {
+      if (prov.reason === "not_configured") return phoneUnavailable(ensureRefusalSentence(prov));
+      if (prov.reason === "manual") {
+        return json({
+          error: "This builder has no finished Twilio account of their own yet, so the number cannot have landed in it. Make or finish it on their Twilio account card (Admin, Account), move the number into it (PORTING.md), then adopt it.",
+          code: "no_own_account",
+        }, 409);
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+        message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+        context: { step: prov.step, code: prov.code } }).catch(() => {});
+      return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+    }
+    const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    const ve = voiceEnv((k) => Deno.env.get(k), creds?.source === "sub");
+    if (!smsUrl || !ve.ok || !creds) return phoneUnavailable("Adding a moved number isn't available on this server yet.");
+    const live = await phoneNumberRows();
+    if (live.error) return dbFail(req, clientId, "check your numbers", live.error);
+    const liveRows = live.data ?? [];
+    if (!liveRows.some((r) => r.phone_number === e164)) {
+      if (!live.perNumber && liveRows.length >= 1) return json({ error: "This account already has a number, and this server keeps one per account." }, 409);
+      if (liveRows.length >= MAX_NUMBERS) return json({ error: `This account has ${MAX_NUMBERS} numbers, the most one account can have.` }, 409);
+    }
+    const subAccountSid = creds.source === "sub" ? creds.accountSid : null;
+    const parent = creds.source === "sub" ? parentCreds((k) => Deno.env.get(k)) : null;
+    const out = await adoptNumber({ e164, subAccountSid }, {
+      tenantId: clientId,
+      liveRow: async (n) => {
+        const { data, error } = await admin.from("sms_numbers").select("id, client_id").eq("phone_number", n).is("released_at", null).maybeSingle();
+        return error ? { ok: false as const, error } : { ok: true as const, row: (data ?? null) as { id: string; client_id: string } | null };
+      },
+      findInTenant: (n) => findNumberSid({ creds, e164: n }),
+      findInParent: parent ? (n) => findNumberSid({ creds: parent, e164: n }) : null,
+      isOtherTenant: async (name) => {
+        const { data, error } = await admin.from("client_configs").select("client_id").eq("client_id", name).maybeSingle();
+        return error ? { ok: false as const, error } : { ok: true as const, other: !!data && name !== clientId };
+      },
+      openRequestNames: async (n) => {
+        const { data, error } = await admin.from("phone_number_requests").select("id")
+          .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [n]).limit(1);
+        // No table yet (298 not applied): no request can name it, so the parent's adoption is refused.
+        if (error) return phoneNotReady(error) ? { ok: true as const, open: false } : { ok: false as const, error };
+        return { ok: true as const, open: (data ?? []).length > 0 };
+      },
+      record: async (sid) => {
+        const { data, error } = await admin.from("sms_numbers")
+          .insert(callingOnlyNumberRow(clientId, { sid, phoneNumber: e164 }, subAccountSid))
+          .select("id, phone_number, twilio_sid").single();
+        return error || !data ? { ok: false as const, error: error ?? { message: "no row returned" } } : { ok: true as const, row: data };
+      },
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error, ...(out.code ? { code: out.code } : {}) }, out.status);
+      if (out.kind === "db") return dbFail(req, clientId, "record the moved number", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_adopt_number_failed", severity: "error",
+        message: `Looking the moved number up at Twilio failed (code ${out.code})`, context: { twilio_code: out.code } }).catch(() => {});
+      return filedHere(json({ error: out.error }, out.status));
+    }
+    const doneRequests = async () => {
+      await admin.from("phone_number_requests")
+        .update({ status: "done", handled_at: new Date().toISOString(), handled_by: isUuid(String(userId ?? "")) ? userId : null, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [e164])
+        .then(() => {}, () => {});
+    };
+    if (out.already) {
+      await doneRequests();
+      return json({ ok: true, already: true, number: { id: out.rowId, e164 } });
+    }
+    const { row, sid } = out;
+    audit("phone_adopt_number", 1, `number=${row.id} sub=${!!subAccountSid}`).catch(() => {});
+    await doneRequests();
+    // The purchase's reconciliation key (purchaseNumber's FriendlyName = client_id), so a later
+    // lookup by name finds it. A failure here changes nothing else, so it is only logged.
+    const named = await applyNumberVoice({ creds, numberSid: sid, config: { FriendlyName: clientId } });
+    if (!named.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_adopt_number_name_failed", severity: "info",
+        message: `The moved number's FriendlyName was not set (HTTP ${named.status}, code ${named.code})`, context: { number_id: row.id } }).catch(() => {});
+    }
+    // Texting, then calls and texts' webhooks: phone_buy_number's own tail.
+    const serviceSid = await textingServiceSid();
+    let joined = false;
+    if (serviceSid) {
+      const att = await attachToTexting({ serviceSid, numberSid: sid }, textingDeps(String(row.id), creds));
+      joined = att.ok;
+      if (!att.ok) {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
+          message: `A moved number did not join the texting setup (stopped at ${att.step})`,
+          context: { number_id: row.id, step: att.step, twilio_code: (att.error as { code?: number } | null)?.code ?? null } }).catch(() => {});
+      }
+    }
+    const { data: cs } = await admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle();
+    const number = { id: String(row.id), e164, callingOnly: !joined };
+    if ((cs as { phone_status?: string } | null)?.phone_status === "on") {
+      const done = await connectNumberForCalls({ ...row, messaging_service_sid: joined ? serviceSid : null });
+      return json({ ok: true, number: { ...number, voiceReady: done.ok }, ...(done.ok ? {} : { warning: "It's on the account, but connecting it for calls didn't finish. Press \"Connect this number for calls\" to try again." }) });
+    }
+    const applied = await applyNumberVoice({
+      creds, numberSid: sid, config: { ...numberVoicemailConfig(ve.env), ...(joined ? {} : numberSmsConfig(smsUrl)) },
+    });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_webhooks_failed", severity: "error",
+        message: `A moved number's voicemail and text settings did not apply (HTTP ${applied.status}, code ${applied.code})`,
+        context: { number_id: row.id } }).catch(() => {});
+      return json({ ok: true, number: { ...number, voiceReady: false }, warning: "It's on the account, but its voicemail and texts aren't set up yet. Turn calling on and press \"Connect this number for calls\" to finish." });
+    }
+    return json({ ok: true, number: { ...number, voiceReady: false } });
   }
 
   // ── The Calls report ────────────────────────────────────────────────────────────────────

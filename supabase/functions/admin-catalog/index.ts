@@ -32,6 +32,9 @@ import {
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
   summarizePhoneUsage, type PhoneBillingSettings, type TwilioDailyRow, type UsageChargeRow,
 } from "../_shared/phoneBillingAdmin.ts";
+// Workstream 2, phase 8 (review 2026-10-09): an open "Bring your number" request's overlap with
+// another builder's numbers or requests, shown to the operator instead of refused to the builder.
+import { requestFlags } from "../_shared/numberRequestFlags.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -139,6 +142,30 @@ function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: str
     case "twilio_failed": return `Twilio did not accept it (${r.code}). Nothing was recorded here; try again.`;
     default: return `It was not recorded (${r.code}). Look at the account in Twilio before you try again.`;
   }
+}
+
+// ── Workstream 2, phase 6: each live number's caller-ID registrations, for the console card ──────
+// Statuses only (Twilio's TrustProduct enum, as last read by portal-settings phone_trust_status),
+// the CNAM name callers see, and the number's last four digits: no SID. CNAM's columns are
+// migration 297's; before it, 255's are read alone and `cnam` is null. Any other failure is null
+// (the card says "unknown"): it never fails the account view.
+async function callerIdSummary(sb: any, clientId: string): Promise<Array<Record<string, unknown>> | null> {
+  const read = (cols: string) => sb.from("sms_numbers").select(cols).eq("client_id", clientId).is("released_at", null)
+    .order("purchased_at", { ascending: true }).limit(20);
+  let res = await read("phone_number, shaken_status, voice_integrity_status, cnam_status, cnam_display_name");
+  let cnam = true;
+  if (res.error && relationMissing(res.error)) {
+    cnam = false;
+    res = await read("phone_number, shaken_status, voice_integrity_status");
+  }
+  if (res.error) return null;
+  return (res.data ?? []).map((n: any) => ({
+    number: `…${String(n.phone_number ?? "").slice(-4)}`,
+    shaken: n.shaken_status ?? null,
+    voiceIntegrity: n.voice_integrity_status ?? null,
+    cnam: cnam ? (n.cnam_status ?? null) : undefined,
+    cnamName: cnam ? (n.cnam_display_name ?? null) : undefined,
+  }));
 }
 
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
@@ -339,10 +366,15 @@ async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string):
   // server cap of 500 with `offset += PAGE` would silently skip rows 500–999 of every page.
   let offset = 0;
   while (offset < 20_000) {
+    // Workstream 2, phase 7: one row per day, ACCOUNT and category, so (day, category) is no longer
+    // unique and offset paging over it could repeat or skip rows past a page (review 2026-10-09).
+    // account_sid completes the order: (day, category, account_sid) is 299's key, the parent's NULL
+    // first.
     const { data, error } = await sb.from("twilio_usage_daily")
       .select("day, category, count, usage, price_micros")
       .gte("day", firstDay).lt("day", nextFirstDay)
       .order("day", { ascending: true }).order("category", { ascending: true })
+      .order("account_sid", { ascending: true, nullsFirst: true })
       .range(offset, offset + PAGE - 1);
     if (error) throw phoneBillingDbError(error);
     const batch = (data ?? []) as TwilioDailyRow[];
@@ -417,6 +449,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     "get_billing_overview", "get_payments", "avalara_tax_codes_status",
     // Masked SIDs and what exists; `check` asks Twilio two GETs and changes nothing.
     "twilio_account_get",
+    // Workstream 2, phase 8: the open "Bring your number" requests (a builder's numbers and who may
+    // approve the move; no PIN, bill or account number exists to show).
+    "number_requests_list",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -1997,7 +2032,80 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "twilio_account_get": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
-        return json({ ok: true, account });
+        // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
+        // CNAM), registered from the builder's Phone tab in view-as. Phase 8: how many "Bring your
+        // number" requests of theirs are open (null = migration 298 not applied, or the read failed).
+        // Both are extras on the card: a read that fails (or throws) is null, never a failed view.
+        const openNumberRequests = await (async () => {
+          try {
+            const r = await sb.from("phone_number_requests").select("id", { count: "exact", head: true })
+              .eq("client_id", clientId).in("status", ["new", "in_progress"]);
+            return r?.error ? null : Number(r?.count ?? 0);
+          } catch { return null; }
+        })();
+        const callerId = await (async () => { try { return await callerIdSummary(sb, clientId); } catch { return null; } })();
+        return json({ ok: true, account: { ...account, callerId, openNumberRequests } });
+      }
+
+      // ── Workstream 2, phase 8: "Bring your number" requests (migration 298) ─────────────────────
+      // A builder's request IS the operator's notification: status 'new' until someone takes it. The
+      // console lists every open one (and the last month's finished ones) across builders, newest
+      // first, and moves it on. The move itself is workers/phone-api/PORTING.md; landing the number
+      // is portal-settings phone_adopt_number, which marks the request done by itself.
+      case "number_requests_list": {
+        const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+        const cols = "id, client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at";
+        const [open, recent, names] = await Promise.all([
+          sb.from("phone_number_requests").select(cols).in("status", ["new", "in_progress"]).order("created_at", { ascending: false }).limit(100),
+          sb.from("phone_number_requests").select(cols).in("status", ["done", "cancelled"]).gte("updated_at", since).order("updated_at", { ascending: false }).limit(50),
+          sb.from("client_configs").select("client_id, company_name"),
+        ]);
+        if (open.error && relationMissing(open.error)) return json({ ok: true, installed: false, requests: [] });
+        if (open.error) throw open.error;
+        if (recent.error) throw recent.error;
+        const nameOf = new Map(((names.data ?? []) as any[]).map((c) => [String(c.client_id), String(c.company_name ?? "")]));
+        // Review 2026-10-09: a builder's request is never refused over ANOTHER builder's number or
+        // request (that told them whose a number was), so the operator is shown it here instead:
+        // each open request's numbers that are live on another builder's account, or that another
+        // builder's open request also names. A failed read leaves the flags out, never the list.
+        const openRows = ((open.data ?? []) as any[]).map((r) => ({ ...r, numbers: Array.isArray(r.numbers) ? r.numbers.map(String) : [] }));
+        const asked = [...new Set(openRows.flatMap((r) => r.numbers))].slice(0, 500);
+        let live: Array<{ phone_number: string; client_id: string }> | null = [];
+        if (asked.length) {
+          const l = await sb.from("sms_numbers").select("phone_number, client_id").in("phone_number", asked).is("released_at", null).limit(1000);
+          live = l.error ? null : ((l.data ?? []) as any[]).map((x) => ({ phone_number: String(x.phone_number), client_id: String(x.client_id) }));
+        }
+        const view = (r: any, flagged: boolean) => ({
+          id: r.id, clientId: r.client_id, companyName: nameOf.get(String(r.client_id)) || null,
+          numbers: Array.isArray(r.numbers) ? r.numbers : [], currentCarrier: r.current_carrier, isLcPhone: r.is_lc_phone,
+          contactName: r.contact_name, contactEmail: r.contact_email, cutoverWindow: r.cutover_window ?? null,
+          status: r.status, createdAt: r.created_at, handledAt: r.handled_at ?? null,
+          ...(flagged && live ? { flags: requestFlags(r, { live, open: openRows }) } : {}),
+        });
+        return json({ ok: true, installed: true, requests: [...openRows.map((r) => view(r, true)), ...((recent.data ?? []) as any[]).map((r) => view(r, false))] });
+      }
+
+      case "number_request_set": {
+        const id = reqStr(p.id, "id");
+        if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("invalid request id");
+        const status = String(p.status ?? "");
+        if (!["new", "in_progress", "done", "cancelled"].includes(status)) throw new Error("status must be new, in_progress, done or cancelled");
+        const now = new Date().toISOString();
+        const { data, error } = await sb.from("phone_number_requests")
+          .update({ status, updated_at: now, handled_at: status === "new" ? null : now, handled_by: identity.via === "operator" ? identity.userId : null })
+          .eq("id", id).select("id, client_id, status").maybeSingle();
+        if (error && relationMissing(error)) return json({ error: "Migration 298 isn't applied on this database yet." }, 503);
+        if (error) throw error;
+        if (!data) return json({ error: "No such request." }, 404);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "number_request_set", target_client_id: data.client_id,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} status=${status}`,
+          });
+        } catch (_e) { /* best-effort */ }
+        return json({ ok: true, id: data.id, status: data.status });
       }
 
       case "twilio_account_provision": {
@@ -2314,6 +2422,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
         //   to prevent.
         await wipe("qbo_item_map");
+        //   Workstream 2, phase 8: the builder's "Bring your number" requests (migration 298). Asks
+        //   nobody needs once the builder is gone, naming who could approve a move; a recreated slug
+        //   must not inherit them. A database without 298 has none to wipe.
+        {
+          const { error, count } = await sb.from("phone_number_requests").delete({ count: "exact" }).eq("client_id", clientId);
+          if (error && !relationMissing(error)) throw new Error(`phone_number_requests: ${error.message}`);
+          if (!error) deleted.phone_number_requests = count ?? 0;
+        }
         try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
 
         // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.

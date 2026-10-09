@@ -1300,6 +1300,42 @@ const PHONE_VI_USE_CASES = [
   "Customer Support", "Phone System", "Appointment Scheduling", "Order Notifications",
   "Delivery Notifications", "Lead Management", "Click to Call", "Outbound Dialer",
 ];
+// Workstream 2, phase 6: the business profile an operator adds for a builder who only calls
+// (phone_trust_profile). Twilio's own lists (_shared/twilioTrustHub.ts BUSINESS_TYPES and
+// JOB_POSITIONS, which the server checks against; tests/phone/trustProfileCnam_test.ts pins them).
+const PHONE_BP_TYPES = ["Limited Liability Corporation", "Corporation", "Partnership", "Co-operative", "Non-profit Corporation"];
+const PHONE_BP_ROLES = ["CEO", "Director", "GM", "VP", "CFO", "General Counsel", "Other"];
+// CNAM's display name (Twilio's rules; the server's parseCnamDisplayName is the authority).
+function phoneCnamProblem(raw) {
+  const n = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!n) return "Enter the name callers should see.";
+  if (n.length > 15) return `That is ${n.length} characters; the carriers keep at most 15.`;
+  if (!/^[A-Za-z]/.test(n)) return "Start it with a letter.";
+  if (!/^[A-Za-z0-9., ]+$/.test(n)) return "Only letters, numbers, spaces, periods and commas.";
+  return null;
+}
+// "Bring your number": the server's rule for a PIN or an account number in a free-text box
+// (portal-settings numberRequests.ts looksSecret, and migration 298's checks), so the card says so
+// before anything is sent. Five or more digits even when spaced, dotted or dashed, or any digit soon
+// after a word like PIN or acct; in the timing note, dates and times are taken out first.
+function phonePortLooksSecret(v, dates) {
+  let s = String(v || "");
+  if (/\b(?:pin|passcode|pass\s*code|password|acct|account|ssn|security\s*code)\b(?:\s*(?:no|num|number)\b)?[^a-z0-9]{0,6}\d/i.test(s)) return true;
+  if (dates) {
+    s = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
+      .replace(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/g, " ")
+      .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)/gi, " ")
+      .replace(/\b\d{1,2}:\d{2}\b/g, " ")
+      .replace(/\b(?:19|20)\d{2}\b/g, " ");
+  }
+  return /\d(?:[\s./-]*\d){4,}/.test(s);
+}
+// Whether a CNAM product can be sent (again): never registered, a draft, or a rejection to fix.
+// Under review or approved nothing would be sent, so the name form is not offered (review
+// 2026-10-09: it stayed open, offering "Send again", after a status check moved it on).
+function phoneCnamSendable(st) {
+  return !st || st === "draft" || st === "twilio-rejected";
+}
 
 async function phoneAction(action, body) {
   const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
@@ -1581,6 +1617,23 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
   const [viOpen, setViOpen] = useState(false);
   const [viForm, setViForm] = useState({ useCase: "Customer Support", employeeCount: "", averageDailyCalls: "", notes: "" });
+  // Workstream 2, phase 6: CNAM's name (opened by its button) and the business-profile form an
+  // operator fills for a builder who only calls (phone_trust_profile).
+  const [cnamOpen, setCnamOpen] = useState(false);
+  const [cnamName, setCnamName] = useState("");
+  const [bpOpen, setBpOpen] = useState(false);
+  // Workstream 2, phase 8: "Bring your number" (the builder's request) and, for an operator, landing
+  // a moved number that has arrived (phone_adopt_number).
+  const [portOpen, setPortOpen] = useState(false);
+  const [portForm, setPortForm] = useState({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+  const [portNote, setPortNote] = useState(null);      // { ok } | { err }
+  const [adoptNum, setAdoptNum] = useState("");
+  const [adoptNote, setAdoptNote] = useState(null);    // { ok } | { err }
+  const [bpForm, setBpForm] = useState({
+    legalBusinessName: "", ein: "", businessType: "Limited Liability Corporation", businessIndustry: "CONSTRUCTION",
+    websiteUrl: "", street: "", city: "", region: "", postalCode: "", isoCountry: "US",
+    repFirstName: "", repLastName: "", repEmail: "", repPhone: "", repBusinessTitle: "Owner", repJobPosition: "CEO",
+  });
   // Call recording (migration 263): its own small form, saved on its own (phone_recording_save),
   // and what the last save said.
   const [recForm, setRecForm] = useState(null);
@@ -2109,14 +2162,40 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // Per number (migration 266): the open one's registrations, and each press names it.
   const cid = (sel && sel.callerId) || null;
   const trustSetup = async (product) => {
-    const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)" : "verified caller ID (SHAKEN/STIR)";
+    const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)"
+      : product === "cnam" ? `the caller name "${cnamName.replace(/\s+/g, " ").trim()}" (CNAM)` : "verified caller ID (SHAKEN/STIR)";
     if (!window.confirm(`Register ${phoneDisplay(sel.e164)} for ${what}? This sends the business details on its Twilio business profile for Twilio's review.`)) return;
     setBusy(true); setTrustNote(null);
     try {
-      const d = await phoneAction("phone_trust_setup", { product, numberId: sel.id, ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}) });
+      const d = await phoneAction("phone_trust_setup", {
+        product, numberId: sel.id,
+        ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}),
+        ...(product === "cnam" ? { cnam: { displayName: cnamName } } : {}),
+      });
       if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
       if (product === "voice_integrity") setViOpen(false);
-      setTrustNote({ ok: d.submitted ? "Submitted. Twilio usually reviews it within one to two business days." : "It's already with Twilio, so nothing was sent again." });
+      if (product === "cnam") setCnamOpen(false);
+      setTrustNote({ ok: d.submitted
+        ? (product === "cnam" ? "Submitted. Once Twilio approves it, the name reaches the carriers within 48 to 72 hours." : "Submitted. Twilio usually reviews it within one to two business days.")
+        : "It's already with Twilio, so nothing was sent again." });
+    } catch (e) {
+      // A builder with no business profile at Twilio yet (one who only calls): open its form.
+      if (/business's details at Twilio/.test(String(e.message || "")) && data.businessProfile && !data.businessProfile.exists) setBpOpen(true);
+      setTrustNote({ err: e.message });
+    }
+    finally { setBusy(false); }
+  };
+  // Workstream 2, phase 6: the business profile for a builder who only calls (operator only).
+  const addBusinessProfile = async () => {
+    if (!window.confirm(`Send these business details to Twilio for review? They become ${viewingLabel || "this business"}'s business profile, which caller ID (and later texting) is registered on.`)) return;
+    setBusy(true); setTrustNote(null);
+    try {
+      const d = await phoneAction("phone_trust_profile", { intake: { ...bpForm, repPhone: smsE164(bpForm.repPhone) } });
+      setData((x) => ({ ...x, businessProfile: d.businessProfile || { ...(x.businessProfile || {}), exists: true } }));
+      setBpOpen(false);
+      setTrustNote({ ok: d.created
+        ? "Sent to Twilio for review. Caller ID can be registered once Twilio approves the business, usually within a few days."
+        : "The business already has a profile at Twilio, so nothing new was made." });
     } catch (e) { setTrustNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -2125,12 +2204,20 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     try {
       const d = await phoneAction("phone_trust_status", { numberId: sel.id });
       if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
-      const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || [])];
+      const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || []), ...((d.errorCodes && d.errorCodes.cnam) || [])];
       setTrustNote({ ok: codes.length ? `Checked. Twilio's rejection codes: ${codes.join(", ")}.` : "Checked with Twilio just now." });
     } catch (e) { setTrustNote({ err: e.message }); }
     finally { setBusy(false); }
   };
   const trustRow = (key, label, blurb, product) => {
+    // CNAM before migration 297 (or from a server older than it): said, with nothing to press.
+    if (key === "cnam" && !(cid && cid.cnam && cid.cnam.available)) {
+      return (
+        <div data-ss-phone-trust="cnam" style={{ padding: "8px 0", borderTop: "1px solid #F1F5F9", fontSize: 12, color: "#64748B" }}>
+          {label}: not available on this account yet.
+        </div>
+      );
+    }
     const st = cid && cid[key] ? cid[key].status : null;
     const registered = !!(cid && cid[key] && cid[key].registered);
     // Offered while there is something to send: never registered, a draft, or a rejection to
@@ -2149,9 +2236,16 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         }}>
           {PHONE_TRUST_WORDS[st] || (registered ? "Status unknown" : "Not registered")}
         </span>
+        {key === "cnam" && cid.cnam.displayName && (
+          <span data-ss-phone-cnam-name style={{ fontSize: 12, fontWeight: 700, color: "#1E293B" }}>&ldquo;{cid.cnam.displayName}&rdquo;</span>
+        )}
         {data.canManageCallerId && canSend && (
           <button type="button" disabled={busy} data-ss-phone-trust-register={product}
-            onClick={() => (product === "voice_integrity" ? setViOpen((v) => !v) : trustSetup(product))}
+            onClick={() => {
+              if (product === "voice_integrity") setViOpen((v) => !v);
+              else if (product === "cnam") { setCnamName((n) => n || cid.cnam.displayName || ""); setCnamOpen((v) => !v); }
+              else trustSetup(product);
+            }}
             style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy ? 0.55 : 1 }}>
             {st === "twilio-rejected" ? "Submit again" : st === "draft" ? "Submit" : "Register"}
           </button>
@@ -2174,6 +2268,74 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         <>
           {trustRow("shakenStir", "Verified caller ID (SHAKEN/STIR)", "Your calls are signed at the highest trust level once Twilio approves it.", "shaken_stir")}
           {trustRow("voiceIntegrity", "Spam-label protection (Voice Integrity)", "Registers the number with the carriers' spam filters.", "voice_integrity")}
+          {trustRow("cnam", "Caller name (CNAM)", "Shows the business's name, up to 15 characters, on phones whose carrier looks it up. It reaches the carriers 48 to 72 hours after Twilio approves it.", "cnam")}
+          {data.canManageCallerId && cnamOpen && cid.cnam && cid.cnam.available && phoneCnamSendable(cid.cnam.status) && (
+            <div data-ss-phone-cnam-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>The name callers see{" "}
+                <input value={cnamName} maxLength={15} placeholder="e.g. Acme Barns" data-ss-phone-cnam-input
+                  onChange={(e) => setCnamName(e.target.value)} style={{ ...S.input, width: 200 }} />
+              </label>
+              <div style={{ fontSize: 12, color: phoneCnamProblem(cnamName) ? "#B45309" : "#64748B" }}>
+                {phoneCnamProblem(cnamName) || "Up to 15 letters, numbers, spaces, periods or commas. It has to be this business's own name, not a town."}
+              </div>
+              <div>
+                <button type="button" disabled={busy || !!phoneCnamProblem(cnamName)} data-ss-phone-cnam-submit onClick={() => trustSetup("cnam")}
+                  style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy || phoneCnamProblem(cnamName) ? 0.55 : 1 }}>
+                  {cid.cnam.registered && cid.cnam.status ? "Send again with this name" : "Register this caller name"}
+                </button>
+              </div>
+            </div>
+          )}
+          {/* Workstream 2, phase 6: no business profile at Twilio yet (a builder who only calls).
+              An operator adds one from the business's details; the server keeps only an echo. */}
+          {data.canManageCallerId && data.businessProfile && !data.businessProfile.exists && (
+            <div data-ss-phone-business-profile style={{ padding: "10px 0", borderTop: "1px solid #F1F5F9" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12.5, color: "#475569", flex: "1 1 240px" }}>
+                  Caller ID needs this business&rsquo;s details at Twilio first (its business profile). Texting adds them when it is
+                  submitted; for a business that only calls, add them here.
+                </span>
+                <button type="button" disabled={busy} data-ss-phone-business-profile-open
+                  onClick={() => { setBpOpen((v) => !v); setBpForm((f) => (f.legalBusinessName ? f : { ...f, legalBusinessName: data.businessProfile.legalBusinessName || "", websiteUrl: data.businessProfile.websiteUrl || "" })); }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5 }}>
+                  {bpOpen ? "Close" : "Add the business details"}
+                </button>
+              </div>
+              {bpOpen && (
+                <div data-ss-phone-business-profile-form style={{ marginTop: 10, padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0 12px" }}>
+                    {[["legalBusinessName", "Legal business name (as on the IRS letter)"], ["ein", "EIN (12-3456789)"], ["websiteUrl", "Website (https://)"],
+                      ["street", "Street address"], ["city", "City"], ["region", "State (2 letters)"], ["postalCode", "ZIP"],
+                      ["repFirstName", "Contact first name"], ["repLastName", "Contact last name"], ["repEmail", "Contact work email"],
+                      ["repPhone", "Contact mobile"], ["repBusinessTitle", "Contact job title"]].map(([k, l]) => (
+                      <SmsField key={k} label={l}>
+                        <input style={SMS_INPUT} value={bpForm[k]} data-ss-phone-bp={k}
+                          onChange={(e) => setBpForm((f) => ({ ...f, [k]: k === "region" ? e.target.value.toUpperCase().slice(0, 2) : k === "repPhone" ? formatPhone(e.target.value) : e.target.value }))} />
+                      </SmsField>
+                    ))}
+                    <SmsField label="Business type">
+                      <select style={SMS_INPUT} value={bpForm.businessType} onChange={(e) => setBpForm((f) => ({ ...f, businessType: e.target.value }))}>
+                        {PHONE_BP_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </SmsField>
+                    <SmsField label="Contact role">
+                      <select style={SMS_INPUT} value={bpForm.repJobPosition} onChange={(e) => setBpForm((f) => ({ ...f, repJobPosition: e.target.value }))}>
+                        {PHONE_BP_ROLES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </SmsField>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#64748B", margin: "4px 0 8px" }}>
+                    Sent to Twilio for review in this business&rsquo;s own Twilio account. Structure Studio keeps only the name, the EIN&rsquo;s last four digits,
+                    the email&rsquo;s domain and the website.
+                  </div>
+                  <button type="button" disabled={busy} data-ss-phone-business-profile-submit onClick={addBusinessProfile}
+                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy ? 0.55 : 1 }}>
+                    Send to Twilio for review
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {data.canManageCallerId && viOpen && (
             <div data-ss-phone-vi-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
               <div style={{ fontSize: 12.5, color: "#475569" }}>
@@ -2212,7 +2374,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
                 ? (cid.checkedAt ? `Last checked with Twilio ${phoneWhen(cid.checkedAt) || "recently"}.` : "Not checked with Twilio yet.")
                 : "Structure Studio registers your number. Ask us if you'd like it done."}
             </span>
-            {data.canManageCallerId && (cid.shakenStir.registered || cid.voiceIntegrity.registered) && (
+            {data.canManageCallerId && (cid.shakenStir.registered || cid.voiceIntegrity.registered || !!(cid.cnam && cid.cnam.registered)) && (
               <button type="button" disabled={busy} onClick={trustCheck} data-ss-phone-trust-check
                 style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5 }}>
                 Check status
@@ -2223,6 +2385,143 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       )}
       {trustNote && trustNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{trustNote.ok}</div>}
       {trustNote && trustNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{trustNote.err}</div>}
+    </div>
+  ) : null;
+
+  // ── Workstream 2, phase 8: "Bring your number" ─────────────────────────────────────────────
+  // For anyone who can change the phone setup (phone edit): ask Structure Studio to move numbers
+  // the business already has (phone_port_request). Only the numbers, the company they are with now,
+  // whether it is GoHighLevel, who can approve the move and when: no PIN, password, account number
+  // or bill is asked for or kept (the server refuses them too). `portRequests` null = the server or
+  // database doesn't have requests yet, and the card is not drawn. An operator also gets "Adopt a
+  // moved number" here, once the move has finished at Twilio (phone_adopt_number).
+  const PORT_WORDS = { new: "Sent to Structure Studio", in_progress: "Being moved", done: "Moved", cancelled: "Cancelled" };
+  const sendPortRequest = async () => {
+    setBusy(true); setPortNote(null);
+    try {
+      const d = await phoneAction("phone_port_request", { request: {
+        numbers: portForm.numbers.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean),
+        currentCarrier: portForm.currentCarrier,
+        isLcPhone: portForm.isLcPhone === "yes" ? true : portForm.isLcPhone === "no" ? false : null,
+        contactName: portForm.contactName, contactEmail: portForm.contactEmail, cutoverWindow: portForm.cutoverWindow,
+      } });
+      setData((x) => ({ ...x, portRequests: [d.request, ...(x.portRequests || [])] }));
+      setPortOpen(false);
+      setPortForm({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+      setPortNote({ ok: d.request && d.request.isLcPhone
+        ? `Sent. Structure Studio will contact ${d.request.contactName} to book it. A GoHighLevel number usually moves within one or two business days.`
+        : `Sent. Structure Studio will contact ${(d.request && d.request.contactName) || "you"} to book it. A number from another phone company takes at least a week, and the account holder signs the transfer by email.` });
+    } catch (e) { setPortNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const adoptMoved = async () => {
+    if (!window.confirm(`Add ${adoptNum.trim()} to ${viewingLabel || "this business"}? It has to be in their own Twilio account already (the move has finished). It then takes calls here, and it bills monthly from now on.`)) return;
+    setBusy(true); setAdoptNote(null);
+    try {
+      const d = await phoneAction("phone_adopt_number", { phoneNumber: adoptNum });
+      setAdoptNum("");
+      await load();
+      if (d.number && d.number.id) setSelId(d.number.id);
+      setAdoptNote(d.warning ? { err: d.warning } : { ok: d.already ? "That number is already on this account." : "Added. It is on this account now." });
+    } catch (e) { setAdoptNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const portValid = !!portForm.numbers.trim() && !!portForm.currentCarrier.trim() && portForm.contactName.trim().length >= 2
+    && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(portForm.contactEmail.trim());
+  const portSecret = phonePortLooksSecret(portForm.currentCarrier) || phonePortLooksSecret(portForm.contactName)
+    || phonePortLooksSecret(portForm.cutoverWindow, true);
+  const bringCard = data.scope === "team" && canEdit && Array.isArray(data.portRequests) ? (
+    <div style={PHONE_CARD} data-ss-phone-bring>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Bring your number</h4>
+      <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        Already have a business number? Structure Studio can move it here, so customers keep calling and texting the number they know.
+        A GoHighLevel number usually moves within one or two business days; a number from another phone company takes at least a week.
+      </p>
+      {data.portRequests.length > 0 && (
+        <div data-ss-phone-bring-list style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {data.portRequests.map((r) => (
+            <div key={r.id} data-ss-phone-bring-request={r.status} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12.5 }}>
+              <span style={{ fontWeight: 800, color: "#1E293B" }}>{(r.numbers || []).map(phoneDisplay).join(", ")}</span>
+              <span style={{ color: "#64748B" }}>{r.isLcPhone ? "GoHighLevel" : r.currentCarrier}</span>
+              <span style={{ fontWeight: 800, borderRadius: 999, padding: "2px 9px", background: r.status === "done" ? "#ECFDF5" : "#F1F5F9", color: r.status === "done" ? "#047857" : "#475569" }}>
+                {PORT_WORDS[r.status] || r.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!portOpen && (
+        <button type="button" disabled={busy} data-ss-phone-bring-open onClick={() => { setPortOpen(true); setPortNote(null); }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+          Bring a number you already have
+        </button>
+      )}
+      {portOpen && (
+        <div data-ss-phone-bring-form style={{ padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0 12px" }}>
+            <SmsField label="The number (or numbers, separated by commas)">
+              <input style={SMS_INPUT} value={portForm.numbers} placeholder="(816) 555-0123" data-ss-phone-bring-numbers
+                onChange={(e) => setPortForm((f) => ({ ...f, numbers: e.target.value }))} />
+            </SmsField>
+            <SmsField label="The phone company it is with now">
+              <input style={SMS_INPUT} value={portForm.currentCarrier} placeholder="e.g. Verizon, or GoHighLevel" maxLength={80} data-ss-phone-bring-carrier
+                onChange={(e) => setPortForm((f) => ({ ...f, currentCarrier: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Is it a GoHighLevel (LC Phone) number?">
+              <select style={SMS_INPUT} value={portForm.isLcPhone} data-ss-phone-bring-lc onChange={(e) => setPortForm((f) => ({ ...f, isLcPhone: e.target.value }))}>
+                <option value="">Not sure</option>
+                <option value="yes">Yes, it's in GoHighLevel</option>
+                <option value="no">No, another phone company</option>
+              </select>
+            </SmsField>
+            <SmsField label="Who can approve the move (the account holder)">
+              <input style={SMS_INPUT} value={portForm.contactName} maxLength={120} data-ss-phone-bring-name
+                onChange={(e) => setPortForm((f) => ({ ...f, contactName: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Their email">
+              <input style={SMS_INPUT} value={portForm.contactEmail} maxLength={254} data-ss-phone-bring-email
+                onChange={(e) => setPortForm((f) => ({ ...f, contactEmail: e.target.value }))} />
+            </SmsField>
+            <SmsField label="When it can move (optional)">
+              <input style={SMS_INPUT} value={portForm.cutoverWindow} maxLength={200} placeholder="e.g. weekday evenings after the 20th" data-ss-phone-bring-window
+                onChange={(e) => setPortForm((f) => ({ ...f, cutoverWindow: e.target.value }))} />
+            </SmsField>
+          </div>
+          <div data-ss-phone-bring-nosecrets style={{ fontSize: 12, color: portSecret ? "#B45309" : "#64748B", margin: "2px 0 8px", lineHeight: 1.5 }}>
+            {portSecret
+              ? "That looks like an account number or a PIN. Leave those out: Structure Studio asks for them by phone when the move is booked, and never stores them."
+              : "Don't include a PIN, password, account number or bill. Structure Studio asks for what the move needs by phone, and the account holder signs the transfer by email."}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" disabled={busy || !portValid || portSecret} data-ss-phone-bring-send onClick={sendPortRequest}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy || !portValid || portSecret ? 0.55 : 1 }}>
+              Send to Structure Studio
+            </button>
+            <button type="button" disabled={busy} onClick={() => setPortOpen(false)}
+              style={{ background: "none", border: "none", padding: 0, color: "#64748B", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {portNote && portNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{portNote.ok}</div>}
+      {portNote && portNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{portNote.err}</div>}
+      {data.canAdoptNumber && (
+        <div data-ss-phone-adopt style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 6 }}>
+            Structure Studio only: once a move has finished and the number is in this business&rsquo;s own Twilio account, add it here.
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input value={adoptNum} placeholder="(816) 555-0123" data-ss-phone-adopt-number onChange={(e) => setAdoptNum(e.target.value)} style={{ ...S.input, width: 190 }} />
+            <button type="button" disabled={busy || adoptNum.replace(/\D/g, "").length < 10} data-ss-phone-adopt-send onClick={adoptMoved}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", opacity: busy || adoptNum.replace(/\D/g, "").length < 10 ? 0.55 : 1 }}>
+              Adopt a moved number
+            </button>
+          </div>
+          {adoptNote && adoptNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{adoptNote.ok}</div>}
+          {adoptNote && adoptNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{adoptNote.err}</div>}
+        </div>
+      )}
     </div>
   ) : null;
 
@@ -2477,6 +2776,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {numberCard}
       {thisNumberCard}
       {callerIdCard}
+      {bringCard}
 
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>

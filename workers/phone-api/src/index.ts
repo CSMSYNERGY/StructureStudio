@@ -305,11 +305,14 @@ export default {
         // Each business's own retention; runs whatever CALL_RECORDING says, so recordings made
         // while it was on still expire after it is switched off.
         await job("recording_retention", () => recordingRetention(env, at));
-        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
         // Each number's own fee from its second month on (the purchase took the first). Its only
         // rail is the sms_number_monthly meter, the switch month 1 is charged on.
         await job("number_fee", () => chargeMonthlyNumberFees(env, adminClient(env), at));
+        // Twilio's daily totals LAST (review 2026-10-09): with sub-accounts it asks each one (up to
+        // USAGE_SUBS_PER_RUN), so it may use many of this invocation's subrequests; the billing jobs
+        // above must never be the ones starved of them. It changes nothing they read.
+        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
       }
       if (tick && callTranscribeOn(env)) {
         await job("transcribe", () => runTranscriptions(env, adminClient(env), at));
