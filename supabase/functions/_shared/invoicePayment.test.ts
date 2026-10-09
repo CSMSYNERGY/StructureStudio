@@ -17,14 +17,17 @@
 // The gateway is driven through a stubbed globalThis.fetch rather than a mocked cpAuth, so
 // these exercise the REAL classification in cardpointe.ts end to end.
 //
-// Dependency-free (no jsr:/npm: imports) so the suite runs with no registry access. Env is
-// set before the dynamic import because cardpointe.ts reads its configuration at load.
+// Dependency-free (no jsr:/npm: imports) so the suite runs with no registry access. cardpointe.ts
+// reads its configuration per call (since workstream 1 phase 3); the UAT set is configured here and
+// the production set is set and cleared by the tests that need it. CARDPOINTE_MERCHID is set to a
+// MID no merchant here uses, so any call that ever fell back to it would be visible.
 
 Deno.env.set("CARDPOINTE_BASE_URL", "https://isv-uat.example.invalid/cardconnect/rest");
 Deno.env.set("CARDPOINTE_API_USER", "u");
 Deno.env.set("CARDPOINTE_API_PASS", "p");
-Deno.env.set("CARDPOINTE_MERCHID", "100200300400");
+Deno.env.set("CARDPOINTE_MERCHID", "100200300999");
 Deno.env.set("CARDPOINTE_TOKENIZER_BASE", "https://isv-uat.example.invalid/itoke/ajax-tokenizer.html");
+for (const k of ["BASE_URL", "API_USER", "API_PASS", "TOKENIZER_BASE"]) Deno.env.delete(`CARDPOINTE_PROD_${k}`);
 
 const ip = await import("./invoicePayment.ts");
 
@@ -209,6 +212,14 @@ function makeAdmin(answer: (table: string, op: string, payload: any, inIds?: unk
   };
 }
 
+/** The production set, for the tests that drive a live merchant. Made-up hosts and logins. */
+const PROD_ENV: Record<string, string> = {
+  CARDPOINTE_PROD_BASE_URL: "https://live.example.invalid/cardconnect/rest",
+  CARDPOINTE_PROD_API_USER: "pu",
+  CARDPOINTE_PROD_API_PASS: "pp",
+  CARDPOINTE_PROD_TOKENIZER_BASE: "https://live.example.invalid/itoke/ajax-tokenizer.html",
+};
+
 const realFetch = globalThis.fetch;
 let fetchCount = 0;
 const fetchLog: string[] = [];
@@ -227,7 +238,7 @@ function restore() {
 
 const OPTS = {
   clientId: "t1",
-  merchid: "100200300400",
+  merchant: { merchid: "100200300400", env: "uat" as const },
   orderId: "o1",
   shortCode: "SS-ABC",
   amountCents: 100000,
@@ -797,22 +808,93 @@ Deno.test("a database WITHOUT 291's columns still takes the payment, and still c
   // a close that fails leaves a CHARGED attempt open until the stale sweep blocks the order.
   const log: Call[] = [];
   recordingGateway(APPROVED, []);
+  // A database without 291 has no 296 either: both sets of keys are refused.
   const missing = { data: null, error: { code: "PGRST204", message: "Could not find the 'sent_fields' column of 'payment_attempts' in the schema cache" } };
   const has291 = (p: unknown) => ["sent_fields", "ecomind", "avsresp", "cvvresp"].some((k) => k in ((p ?? {}) as Record<string, unknown>));
+  const has296 = (p: unknown) => "cp_env" in ((p ?? {}) as Record<string, unknown>);
   const admin = makeAdmin((table, op, p) => {
-    if (table === "payment_attempts" && (op === "insert" || op === "update") && has291(p)) return missing;
+    if (table === "payment_attempts" && (op === "insert" || op === "update") && (has291(p) || has296(p))) return missing;
     return defaultAnswer()(table, op, p);
   }, log);
   const r = await ip.chargeInvoicePayment(admin, { ...OPTS, postal: "12345" });
   restore();
   check("succeeded", r.ok, r.ok ? "" : r.error);
   const inserts = log.filter((c) => c.table === "payment_attempts" && c.op === "insert");
-  check("insert tried twice: with the columns, then without", inserts.length === 2 && has291(inserts[0].payload) && !has291(inserts[1].payload),
+  check("insert tried three times: everything, then without cp_env (296), then without the 291 keys too",
+    inserts.length === 3 && has291(inserts[0].payload) && has296(inserts[0].payload)
+      && has291(inserts[1].payload) && !has296(inserts[1].payload) && !has291(inserts[2].payload) && !has296(inserts[2].payload),
     JSON.stringify(inserts.map((c) => Object.keys(c.payload as object))));
   const close = lastAttemptUpdate(log);
   check("the attempt is still closed_ok, written without the 291 keys", close?.state === "closed_ok" && !has291(close) && close?.payment_id === "p1",
     JSON.stringify(close));
   check("respcode (a 174 column) survives the retry", close?.respcode === "00", JSON.stringify(close));
+});
+
+Deno.test("a database with 291 but WITHOUT 296 drops only cp_env, and keeps every 291 field", async () => {
+  // Live between this deploy and 296's apply. Dropping all the late keys at once would lose the
+  // field list and the AVS/CVV answer of every sale in that window.
+  const log: Call[] = [];
+  recordingGateway(APPROVED, []);
+  const missing = { data: null, error: { code: "PGRST204", message: "Could not find the 'cp_env' column of 'payment_attempts' in the schema cache" } };
+  const admin = makeAdmin((table, op, p) => {
+    if (table === "payment_attempts" && (op === "insert" || op === "update") && "cp_env" in ((p ?? {}) as Record<string, unknown>)) return missing;
+    return defaultAnswer()(table, op, p);
+  }, log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, postal: "12345" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const inserts = log.filter((c) => c.table === "payment_attempts" && c.op === "insert");
+  const second = (inserts[1]?.payload ?? {}) as Record<string, unknown>;
+  check("two inserts, the second without cp_env and WITH sent_fields and ecomind",
+    inserts.length === 2 && !("cp_env" in second) && Array.isArray(second.sent_fields) && second.ecomind === "E",
+    JSON.stringify(inserts.map((c) => Object.keys(c.payload as object))));
+  const close = lastAttemptUpdate(log);
+  check("the close keeps the AVS/CVV answer", close?.state === "closed_ok" && close?.avsresp === "Y" && close?.cvvresp === "M", JSON.stringify(close));
+});
+
+Deno.test("the attempt records the system the sale went to (cp_env), and the sale goes to THAT system", async () => {
+  const log: Call[] = [];
+  const urls: string[] = [];
+  stubGateway((url) => {
+    urls.push(url);
+    return new Response(JSON.stringify(APPROVED), { status: 200 });
+  });
+  const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log), OPTS);
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  check("uat attempt", attemptInsert(log)?.cp_env === "uat" && attemptInsert(log)?.merchid === "100200300400", JSON.stringify(attemptInsert(log)));
+  check("on the UAT base", urls.length === 1 && urls[0].startsWith("https://isv-uat.example.invalid/cardconnect/rest/auth"), urls.join(","));
+
+  // A live merchant with the production secrets set: the production base, and cp_env 'prod'.
+  for (const [k, v] of Object.entries(PROD_ENV)) Deno.env.set(k, v);
+  try {
+    const log2: Call[] = [];
+    urls.length = 0;
+    stubGateway((url) => {
+      urls.push(url);
+      return new Response(JSON.stringify(APPROVED), { status: 200 });
+    });
+    const r2 = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log2), { ...OPTS, merchant: { merchid: "100200300500", env: "prod" } });
+    restore();
+    check("live succeeded", r2.ok, r2.ok ? "" : r2.error);
+    check("prod attempt", attemptInsert(log2)?.cp_env === "prod" && attemptInsert(log2)?.merchid === "100200300500", JSON.stringify(attemptInsert(log2)));
+    check("on the PRODUCTION base", urls.length === 1 && urls[0].startsWith("https://live.example.invalid/cardconnect/rest/auth"), urls.join(","));
+  } finally {
+    for (const k of Object.keys(PROD_ENV)) Deno.env.delete(k);
+  }
+});
+
+Deno.test("a LIVE merchant with the production secrets unset: closed as a configuration refusal, nothing sent, never the test system", async () => {
+  const log: Call[] = [];
+  stubGateway(() => new Response(JSON.stringify(APPROVED), { status: 200 }));
+  const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log), { ...OPTS, merchant: { merchid: "100200300500", env: "prod" } });
+  restore();
+  check("refused 503, not a decline", !r.ok && r.status === 503 && !r.blocking, JSON.stringify(r));
+  check("ZERO gateway calls (the UAT base is never tried)", fetchCount === 0, String(fetchCount));
+  const close = lastAttemptUpdate(log);
+  check("the attempt is closed as a configuration refusal (so the decline throttle skips it)",
+    close?.state === "closed_declined" && /^gateway configuration:/.test(String(close?.detail)), JSON.stringify(close));
+  check("and filed as a fault", log.some((c) => c.table === "app_errors" && (c.payload as Record<string, unknown>)?.code === "payment_gateway_config"));
 });
 
 Deno.test("any OTHER insert error still refuses before the card is touched (no retry)", async () => {
@@ -891,6 +973,70 @@ Deno.test("merchantOfRecord maps each attempt to the MID it was taken on, and le
   check("an attempt with no row is absent", !m.has("45"));
   check("ONE read, of the distinct numeric ids only", log.length === 1 && JSON.stringify(asked) === JSON.stringify(["41", "42", "43", "44", "45"]),
     JSON.stringify(asked));
+});
+
+Deno.test("merchantOfRecord carries the SYSTEM: cp_env null is uat (pre-296), 'prod' is prod, anything else is no merchant", async () => {
+  const admin = makeAdmin((table, op) => {
+    if (table === "payment_attempts" && op === "select") {
+      return { data: [
+        { id: 41, merchid: "100200300400", cp_env: null },
+        { id: 42, merchid: "100200300500", cp_env: "prod" },
+        { id: 43, merchid: "100200300600", cp_env: "uat" },
+        { id: 44, merchid: "100200300700", cp_env: "live" },
+        { id: 45, merchid: "100200300800" },
+      ] };
+    }
+    return { data: null, error: null };
+  }, []);
+  const m = await ip.merchantOfRecord(admin, "t1", [41, 42, 43, 44, 45]);
+  check("null is uat", JSON.stringify(m.get("41")) === JSON.stringify({ merchid: "100200300400", env: "uat" }), JSON.stringify([...m]));
+  check("prod", JSON.stringify(m.get("42")) === JSON.stringify({ merchid: "100200300500", env: "prod" }), JSON.stringify([...m]));
+  check("uat", m.get("43")?.env === "uat", JSON.stringify([...m]));
+  check("an unknown system is NOT a merchant (refused, never guessed)", !m.has("44"), JSON.stringify([...m]));
+  check("an absent column is uat", m.get("45")?.env === "uat", JSON.stringify([...m]));
+});
+
+Deno.test("merchantOfRecord on a database WITHOUT 296 asks again without cp_env, and reads every attempt as uat", async () => {
+  let reads = 0;
+  const admin = makeAdmin((table, op) => {
+    if (table === "payment_attempts" && op === "select") {
+      reads++;
+      return reads === 1
+        ? { data: null, error: { code: "42703", message: "column payment_attempts.cp_env does not exist" } }
+        : { data: [{ id: 41, merchid: "100200300400" }] };
+    }
+    return { data: null, error: null };
+  }, []);
+  const m = await ip.merchantOfRecord(admin, "t1", [41]);
+  check("two reads", reads === 2, String(reads));
+  check("uat", JSON.stringify(m.get("41")) === JSON.stringify({ merchid: "100200300400", env: "uat" }), JSON.stringify([...m]));
+});
+
+Deno.test("recovery of a LIVE attempt inquires on the production system; with its secrets unset it asks nothing", async () => {
+  const prodAtt = { ...UNKNOWN_ATT, merchid: "100200300500" };
+  // deno-lint-ignore no-explicit-any
+  const answerProd = (table: string, op: string, p: any, inIds?: unknown[]) =>
+    table === "payment_attempts" && op === "select" && inIds
+      ? { data: [{ id: prodAtt.id, merchid: prodAtt.merchid, cp_env: "prod" }] }
+      : attemptAnswer(prodAtt)(table, op, p, inIds);
+  // Unset: nothing is sent anywhere, and the block stays.
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const r0 = await ip.resolveUnknownAttempt(makeAdmin(answerProd, []), "t1", 42);
+  restore();
+  check("unset: not resolved", !r0.resolved && r0.reason === "inquire_failed", JSON.stringify(r0));
+  check("unset: ZERO gateway calls", fetchCount === 0, String(fetchCount));
+  // Set: the production base, on the attempt's MID.
+  for (const [k, v] of Object.entries(PROD_ENV)) Deno.env.set(k, v);
+  try {
+    stubGateway(() => new Response(CHARGED, { status: 200 }));
+    const r = await ip.resolveUnknownAttempt(makeAdmin(answerProd, []), "t1", 42);
+    const urls = [...fetchLog];
+    restore();
+    check("resolved", r.resolved, JSON.stringify(r));
+    check("on production", urls.length === 1 && urls[0] === "https://live.example.invalid/cardconnect/rest/inquireByOrderid/ssp_lost/100200300500", urls.join(","));
+  } finally {
+    for (const k of Object.keys(PROD_ENV)) Deno.env.delete(k);
+  }
 });
 
 Deno.test("merchantOfRecord with no usable id reads nothing; a failed read THROWS, never an empty answer", async () => {

@@ -22,6 +22,11 @@ import {
   closePlannedSub, ensureTwilioAccount, forgetTwilioAccount, maskSid, relationMissing, setTwilioAccountStatus,
   twilioAccountView, twilioClosePlan, type EnsureResult, type StatusChange,
 } from "../_shared/twilioProvision.ts";
+// Card payments (workstream 1 phase 3): set_payments refuses a system this deployment has no
+// credentials for, and verify_payments asks the gateway one harmless question. cardpointe.ts is the
+// one CardPointe client and paymentSettings.ts reads the tenant's account; see their importer ledgers.
+import { cardpointeConfigured, cpEnvSecretNames, cpVerifyMerchant } from "../_shared/cardpointe.ts";
+import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
@@ -271,6 +276,9 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 // their only reader outside the phone-api worker.
 const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
 
+/** verify_payments: at most one gateway check per builder in this many seconds (see the action). */
+const VERIFY_COOLDOWN_S = 10;
+
 async function readPhoneBilling(sb: any): Promise<{ settings: PhoneBillingSettings; meters: any[] }> {
   const [st, mt] = await Promise.all([
     sb.from("phone_billing_settings").select(PHONE_SETTINGS_COLUMNS).eq("id", true).maybeSingle(),
@@ -430,6 +438,12 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // The ADMIN_PASSWORD break-glass path is untouched (it carries no operator row at all).
     if (String(action ?? "") === "set_payments" && !identity.canBill) {
       return json({ error: "This operator account cannot change payment routing." }, 403);
+    }
+    // verify_payments moves no money, but it calls a builder's merchant account at the gateway with
+    // our credentials, so it sits on the same money grant as set_payments (and, being absent from
+    // READ_ONLY_ACTIONS, needs can_write too: phone_usage_report's precedent for a money-adjacent read).
+    if (String(action ?? "") === "verify_payments" && !identity.canBill) {
+      return json({ error: "This operator account cannot check payment routing." }, 403);
     }
     // Phone & text billing (usage billing Part 1 step 6): all four on the money grant, the two
     // READS included. phone_billing_get and phone_usage_report serve OUR COST of every call and
@@ -1517,6 +1531,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           .select("billing_exempt").eq("client_id", clientId).maybeSingle();
         const wasExempt = Boolean(priorCs?.billing_exempt);
 
+        // ⛔ MAKING A BUILDER BILLABLE WHILE THEY TAKE CARDS IN TEST MODE (workstream 1 phase 3). Only a
+        // non-billable account may take payments on Fiserv's test system (UAT), which moves no real
+        // money: set_payments refuses switching a billable builder on there, and this is the other
+        // door into the same state. Refused before anything is written, so the discount and dates
+        // sent with it are not saved either. Only the CHANGE is refused: the card sends billingExempt
+        // on every save, and an account that is already billable is not being made so here. The money
+        // gates refuse the charge itself too (paymentSettings.ts testModeNeedsExempt).
+        if (wasExempt && p.billingExempt === false) {
+          const { row: pay, error: payErr } = await readPaymentSettings(sb, clientId, []);
+          if (payErr) throw payErr;
+          if (pay?.payments_online_enabled === true && testModeNeedsExempt({ ...pay, billing_exempt: false })) {
+            throw new Error(
+              "This builder takes card payments in test mode (UAT), which moves no real money, so the account has to stay non-billable. " +
+              "Move them to Live, or switch their card payments off, under Card payments first. Nothing was changed.");
+          }
+        }
+
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
         if (p.discountPercent !== undefined) {
@@ -1580,16 +1611,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Per-tenant on purpose, rather than folded into list_clients: a MID identifies
         // somebody else's bank account, and there is no reason for every operator page-load
         // to carry one for every builder when the console shows one tenant at a time.
+        //
+        // Since workstream 1 phase 3 it also answers WHICH SYSTEM the builder is on (env: 'uat' =
+        // Fiserv's test system, 'prod' = live; migration 296), whether they are non-billable (only
+        // a non-billable account may take payments in test mode), and which systems this
+        // deployment has credentials for. `envColumn: false` means 296 is not applied yet: every
+        // builder is on UAT and the console must not offer the switch.
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
-        const { data, error } = await sb.from("client_settings")
-          .select("payments_online_enabled, cardpointe_merchid")
-          .eq("client_id", clientId).maybeSingle();
+        const { row, error, envColumn } = await readPaymentSettings(sb, clientId, ["billing_exempt"]);
         if (error) throw error;
         return json({
           ok: true,
           clientId,
-          paymentsEnabled: data?.payments_online_enabled === true,
-          merchid: data?.cardpointe_merchid ?? null,
+          paymentsEnabled: row?.payments_online_enabled === true,
+          merchid: row?.cardpointe_merchid ?? null,
+          env: cpEnvOf(row?.cardpointe_env),
+          envColumn,
+          billingExempt: row?.billing_exempt === true,
+          configured: { uat: cardpointeConfigured("uat"), prod: cardpointeConfigured("prod") },
         });
       }
       case "set_payments": {
@@ -1623,8 +1662,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             // SHAPE: digits only, 12–16 of them. A CardPointe MID is a 12-digit number
             // (the gateway fixtures in _shared/cardpointe.test.ts are 12), and Fiserv has
             // issued longer numeric ids on some front-ends — 16 leaves that headroom without
-            // ever accepting free text. NOTHING IS STRIPPED: "1002-0030-0400" and
-            // "1002 0030 0400" are refused, not silently repunctuated, because a value the
+            // ever accepting free text. NOTHING IS STRIPPED: an id typed with dashes or spaces
+            // between its digit groups is refused, not silently repunctuated, because a value the
             // operator never typed is exactly the class of change that must not happen
             // quietly to the field that decides where money goes.
             throw new Error(
@@ -1637,28 +1676,67 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           patch.cardpointe_merchid = merchid;
         }
 
-        const { data: current, error: curErr } = await sb.from("client_settings")
-          .select("payments_online_enabled, cardpointe_merchid")
-          .eq("client_id", clientId).maybeSingle();
-        if (curErr) throw curErr;
-        const effectiveMerchid = merchid !== undefined ? merchid : (current?.cardpointe_merchid ?? null);
+        // The SYSTEM (migration 296): undefined = leave it alone (an older console sends none),
+        // 'uat' = Fiserv's test system, 'prod' = live. Anything else is refused, never mapped.
+        let env: "uat" | "prod" | undefined;
+        if (p.env !== undefined) {
+          if (p.env !== "uat" && p.env !== "prod") {
+            throw new Error(`env must be "uat" (test) or "prod" (live), not ${JSON.stringify(p.env).slice(0, 40)}.`);
+          }
+          env = p.env;
+          patch.cardpointe_env = env;
+        }
 
-        // ⛔ ENABLED WITH NO MID IS THE DANGEROUS STATE, NOT MERELY AN INCOMPLETE ONE.
-        // Both readers resolve `settings.cardpointe_merchid || CP_DEFAULT_MERCHID` — so a
-        // blank id does NOT refuse, it falls through to the deployment-wide CARDPOINTE_MERCHID
-        // and takes this builder's customers' money into OUR merchant account. Refusing at
-        // this door is the only place that pairing is checked.
-        if (p.paymentsEnabled === true && !effectiveMerchid) {
-          throw new Error(
-            "Add this builder's own CardPointe merchant id before switching payments on. " +
-            "Enabled with no MID is not a half-finished setting: portal-payments and customer-pay " +
-            "both fall back to the deployment-wide merchant id, so their customers' card payments " +
-            "would land in the wrong account rather than being refused.");
+        const { row: current, error: curErr, envColumn } = await readPaymentSettings(sb, clientId, ["billing_exempt"]);
+        if (curErr) throw curErr;
+        if (env !== undefined && !envColumn) {
+          throw new Error("The test/live setting needs migration 296 applied first. Nothing was changed.");
+        }
+        const effectiveMerchid = merchid !== undefined ? merchid : (current?.cardpointe_merchid ?? null);
+        const currentEnv = cpEnvOf(current?.cardpointe_env);
+        const effectiveEnv = env ?? currentEnv;
+        if (!effectiveEnv) {
+          // Unreachable through the column's CHECK; refused rather than guessed if it ever is.
+          throw new Error("This builder's stored test/live setting isn't one this console knows. Pick Test or Live and save again.");
+        }
+
+        if (p.paymentsEnabled === true) {
+          // ⛔ ENABLED WITH NO MID. Until workstream 1 phase 3 a blank id fell through to the
+          // deployment-wide CARDPOINTE_MERCHID and took this builder's customers' money into OUR
+          // merchant account. That fallback is gone, so a blank id now refuses every card payment
+          // instead; switching on with none is still refused here, because it is never what anyone
+          // meant.
+          if (!effectiveMerchid) {
+            throw new Error(
+              "Add this builder's own CardPointe merchant id before switching payments on. " +
+              "With none, their customers can't pay by card at all.");
+          }
+          // ⛔ TEST MODE TAKES NO REAL MONEY. A builder's customer who "pays" on Fiserv's test
+          // system has paid nothing, while the order reads paid. So only a non-billable account
+          // (our own, and the certification tenant) may take payments in test mode. set_billing
+          // refuses the other way in (making such a builder billable), and the money gates refuse
+          // the charge itself (paymentSettings.ts testModeNeedsExempt).
+          if (testModeNeedsExempt({ cardpointe_env: effectiveEnv, billing_exempt: current?.billing_exempt })) {
+            throw new Error(
+              "Test mode (UAT) moves no real money, so only a non-billable account may take payments in it. " +
+              "Switch this builder to Live, or mark the account non-billable on the Billing card first. Nothing was changed.");
+          }
+          // ⛔ A SYSTEM THIS DEPLOYMENT CANNOT REACH. Every card payment would be refused.
+          if (!cardpointeConfigured(effectiveEnv)) {
+            throw new Error(
+              `${effectiveEnv === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment yet: ` +
+              `set the ${cpEnvSecretNames(effectiveEnv).join(", ")} secrets first. Nothing was changed.`);
+          }
         }
         patch.payments_online_enabled = p.paymentsEnabled === true;
 
         const { error: upErr } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
-        if (upErr) throw upErr;
+        if (upErr) {
+          if (isMissingColumn(upErr) && "cardpointe_env" in patch) {
+            throw new Error("The test/live setting needs migration 296 applied first. Nothing was changed.");
+          }
+          throw upErr;
+        }
 
         // A DEDICATED audit row, on top of the generic operator one at the top of this
         // function. That row records only that `set_payments` ran; when money has landed
@@ -1673,19 +1751,88 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             actor_user_id: identity.via === "operator" ? identity.userId : null,
             note: `via=${identity.via}`
               + ` enabled ${current?.payments_online_enabled === true} -> ${patch.payments_online_enabled === true}`
-              + ` merchid ${current?.cardpointe_merchid || "(none)"} -> ${effectiveMerchid || "(none)"}`,
+              + ` merchid ${current?.cardpointe_merchid || "(none)"} -> ${effectiveMerchid || "(none)"}`
+              + ` env ${currentEnv ?? "(unknown)"} -> ${effectiveEnv}`,
           });
         } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
 
+        const sys = effectiveEnv === "prod" ? "LIVE" : "TEST (UAT)";
         return json({
           ok: true,
           clientId,
           paymentsEnabled: patch.payments_online_enabled === true,
           merchid: effectiveMerchid,
+          env: effectiveEnv,
           note: patch.payments_online_enabled === true
-            ? `Card payments are ON for ${clientId}. Charges route to merchant id ${effectiveMerchid} — their Fiserv account, their chargeback liability.`
+            ? `Card payments are ON for ${clientId}, on ${sys}. Charges route to merchant id ${effectiveMerchid} — their Fiserv account, their chargeback liability.`
             : `Card payments are OFF for ${clientId}. Their pay surface disappears; nothing already taken is affected.`,
         });
+      }
+      case "verify_payments": {
+        // The Verify button: is this builder's account reachable with this deployment's credentials
+        // for its system? ONE inquireByOrderid for an order id nobody ever used (cardpointe.ts
+        // cpVerifyMerchant): no money moves and nothing is created at the gateway. It asks whether
+        // the switch is on only to report it, so an account can be checked BEFORE it is switched on.
+        // `expected` is true only for the gateway's known "not found" answer (respcode 29); any other
+        // answer is reachable but not a pass, and the console shows it in amber with the gateway's words.
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const { row, error } = await readPaymentSettings(sb, clientId, []);
+        if (error) throw error;
+        const merchant = cpMerchant(row);
+        const base = {
+          ok: true,
+          clientId,
+          paymentsEnabled: row?.payments_online_enabled === true,
+          env: merchant?.env ?? cpEnvOf(row?.cardpointe_env),
+          midLast4: midLast4(row?.cardpointe_merchid),
+        };
+        let out: Record<string, unknown>;
+        if (!merchant) {
+          out = { ...base, reachable: false, configError: "No merchant id is set for this builder." };
+        } else if (!cardpointeConfigured(merchant.env)) {
+          out = {
+            ...base, reachable: false,
+            configError: `${merchant.env === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment: ` +
+              `the ${cpEnvSecretNames(merchant.env).join(", ")} secrets are missing.`,
+          };
+        } else {
+          // ONE CHECK PER BUILDER EVERY VERIFY_COOLDOWN_S SECONDS. Each check spends one of the requests a
+          // minute the gateway allows a MID, and real customer charges on that MID share them. Only a
+          // check that went out is counted (the verify_payments audit row, written below after the
+          // call); a refused click writes nothing, so a stuck clicker cannot keep the window shut.
+          // If the audit read fails, the check goes ahead: this guard protects a quota, not money.
+          const since = new Date(Date.now() - VERIFY_COOLDOWN_S * 1000).toISOString();
+          const recent = await sb.from("admin_audit").select("created_at")
+            .eq("action", "verify_payments").eq("target_client_id", clientId).gte("created_at", since).limit(1);
+          if (!recent.error && Array.isArray(recent.data) && recent.data.length) {
+            return json({
+              error: `This builder's account was checked a few seconds ago. Wait ${VERIFY_COOLDOWN_S} seconds and try again.`,
+              retryAfterSeconds: VERIFY_COOLDOWN_S,
+            }, 429);
+          }
+          const v = await cpVerifyMerchant(merchant);
+          out = v.reachable
+            ? { ...base, reachable: true, expected: v.expected, gateway: v.answer }
+            : v.kind === "config"
+            ? { ...base, reachable: false, configError: `The gateway refused our request: ${v.message}` }
+            : v.kind === "throttled"
+            ? { ...base, reachable: false, error: "The gateway is busy for this merchant id. Try again in a minute." }
+            : { ...base, reachable: false, error: `The gateway did not answer: ${v.message}` };
+        }
+        // Who checked which account, and what came back. Last four only: the full id is on the
+        // set_payments row that put it there.
+        try {
+          await sb.from("admin_audit").insert({
+            action: "verify_payments",
+            target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} env=${base.env ?? "(unknown)"} mid=…${base.midLast4 ?? "(none)"}`
+              + ` reachable=${out.reachable === true}${out.configError ? " config_error" : out.error ? " no_answer" : ""}`
+              + `${out.reachable === true && out.expected !== true ? " unexpected_answer" : ""}`,
+          });
+        } catch (_e) { /* best-effort */ }
+        return json(out);
       }
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));

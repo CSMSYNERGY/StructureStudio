@@ -209,6 +209,9 @@ import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 // Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
 import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
+// Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
+// account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
+import { cpEnvOf, cpMerchant, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -349,6 +352,11 @@ const GATES: GateTable = {
   // The serial counter is shared by Inventory and Orders but is configured from a Settings
   // card; branding is where that card lives, and it is an owner/admin-shaped decision.
   save_serial_start: { area: "settings_branding", level: "edit" },
+  // Settings → Company → Payments (workstream 1 phase 4): a READ-ONLY summary of the card account
+  // CSM sets up in Admin (admin-catalog set_payments). The Company area, as the tab's own
+  // SETTINGS_TAB_AREA entry says, so no new area: _shared/access.ts and its SQL twin
+  // area_level_for() are untouched. There is no write beside it; changes are requested, not made.
+  payments_status: { area: "settings_branding", level: "view" },
 
   // ── CRM ──────────────────────────────────────────────────────────────────
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
@@ -7296,6 +7304,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
 
   if (action === "tax_codes_get") return await taxCodesResponse();
+
+  // ── Payments (Settings → Company → Payments, workstream 1 phase 4) ──────────────────────────
+  // What a builder may know about the card account CSM set up for them, and nothing they could act
+  // on: on or off, test or live, the merchant id's LAST FOUR (never the whole id, which names their
+  // bank account to anyone who can read Settings), and whether their own processor login is on
+  // file. The account is managed by the Structure Studio team in Admin (admin-catalog set_payments);
+  // this action has no write beside it.
+  //
+  //   enabled            switched on AND a merchant id the charge path would use (cpMerchant): a
+  //                      switch that is on with no id takes no cards, so it does not read as on
+  //   env                "live" or "test" — words for a builder, never the system's own names
+  //   credentialsOnFile  false until per-merchant logins exist (the plan's migration C, waiting on
+  //                      Fiserv); today every merchant runs on the platform's own login
+  //
+  // A database without migration 296 reads as test, which is what every account was before it
+  // (readPaymentSettings). A builder with no settings row reads off, with nothing else.
+  if (action === "payments_status") {
+    const { row, error } = await readPaymentSettings(admin, clientId);
+    if (error) return dbFail(req, clientId, "load your payment settings", error);
+    const merchant = cpMerchant(row);
+    return json({
+      ok: true,
+      enabled: row?.payments_online_enabled === true && merchant !== null,
+      env: cpEnvOf(row?.cardpointe_env) === "prod" ? "live" : "test",
+      midLast4: midLast4(row?.cardpointe_merchid),
+      credentialsOnFile: false,
+      brand: "Structure Studio Payments",
+    });
+  }
 
   // The picker's type-ahead, over the stored catalog. Active codes only; the codes Avalara marks
   // not applicable to North America are left out unless `includeAll`. An empty box lists the

@@ -38,7 +38,8 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb } from "./supabase_stub.ts";
 
-// cardpointe.ts reads its configuration once, at load: set it before the handler is imported.
+// The UAT system's configuration (cardpointe.ts reads it per call since phase 3; set here once, for
+// the whole file). Every attempt below has no cp_env, which is UAT.
 const GATEWAY = "https://gateway.example.invalid/cardconnect/rest";
 Deno.env.set("CARDPOINTE_BASE_URL", GATEWAY);
 Deno.env.set("CARDPOINTE_API_USER", "u");
@@ -134,7 +135,7 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "invoice_sends":
       return { data: null, error: null };
     case "client_settings":
-      return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, business_name: "Acme Sheds" } : world.settings, error: null };
+      return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, billing_exempt: true, business_name: "Acme Sheds" } : world.settings, error: null };
     case "payment_attempts": {
       if (verb) {
         trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });
@@ -306,8 +307,8 @@ Deno.test("a tenant switched OFF is still refused everything that TAKES money", 
     { action: "charge", orderId: "o-1", payToken: "9413948780281111", confirmChargeCents: 100000 },
     { action: "charge_adhoc", amountCents: 5000, confirmChargeCents: 5000, payToken: "9413948780281111" },
   ];
-  // Switched off, and no settings row at all. (A tenant switched ON with a blank MID still falls
-  // back to the deployment default for a NEW charge until phase 3 removes that default.)
+  // Switched off, and no settings row at all. (A tenant switched ON with a blank MID is refused the
+  // same way since phase 3 removed the deployment default: paymentsEnvWiring_test, case 3.)
   for (const settings of [OFF, null]) {
     for (const body of bodies) {
       const r = await call(body, { settings, payments: [CARD], attempts: ATTEMPTS });

@@ -784,6 +784,10 @@ const SETTINGS_TAB_AREA = {
   // mapping the server refuses to read, and a new area would mean a row in _shared/access.ts
   // and its SQL twin area_level_for() for a screen that grants nothing new.
   tax: "settings_crm",
+  // Company → Payments (workstream 1 phase 4): a READ-ONLY summary of the card account the
+  // Structure Studio team sets up (portal-settings payments_status, gated settings_branding:view).
+  // The Company area, so no new area and no row in _shared/access.ts or its SQL twin.
+  payments: "settings_branding",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
   // Texting registers the BUSINESS's legal identity with the carriers and spends real money,
@@ -1512,6 +1516,10 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // 2026-10-09 it is also where the company sales tax rate is set, and the codes are optional
     // (the "Use tax codes" switch, migration 290).
     ["tax", "Tax", "Your sales tax rate, and optional tax codes for each building, option and service"],
+    // PAYMENTS (workstream 1 phase 4): read-only. The card account is set up and managed by the
+    // Structure Studio team, so this tab shows its status and how to ask for a change, and saves
+    // nothing. Last, so every tab above keeps its place. Its area is SETTINGS_TAB_AREA.payments.
+    ["payments", "Payments", "Taking card and bank payments, set up and managed for you by the Structure Studio team"],
   ].filter(([id]) => {
     if (isAdmin || !access) return true;
     const area = SETTINGS_TAB_AREA[id];

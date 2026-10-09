@@ -13,14 +13,18 @@
 // documentation: the respproc/cardproc field-name split, and the field-order shuffling.
 //
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a machine
-// with no registry access — the same rule the other _shared tests follow. Env is set BEFORE
-// the dynamic import because the module reads its configuration at load.
+// with no registry access — the same rule the other _shared tests follow. The module reads its
+// configuration PER CALL since workstream 1 phase 3, so the UAT set is configured here and the
+// production set is set and cleared by the tests that drive it. CARDPOINTE_MERCHID (the old
+// deployment default) is deliberately left UNSET: nothing may need it any more.
 
 Deno.env.set("CARDPOINTE_BASE_URL", "https://isv-uat.example.invalid/cardconnect/rest");
 Deno.env.set("CARDPOINTE_API_USER", "u");
 Deno.env.set("CARDPOINTE_API_PASS", "p");
-Deno.env.set("CARDPOINTE_MERCHID", "100200300400");
+Deno.env.delete("CARDPOINTE_MERCHID");
 Deno.env.set("CARDPOINTE_TOKENIZER_BASE", "https://isv-uat.example.invalid/itoke/ajax-tokenizer.html");
+const PROD_KEYS = ["BASE_URL", "API_USER", "API_PASS", "TOKENIZER_BASE"].map((k) => `CARDPOINTE_PROD_${k}`);
+for (const k of PROD_KEYS) Deno.env.delete(k);
 
 const cp = await import("./cardpointe.ts");
 
@@ -41,7 +45,10 @@ function restore() {
   globalThis.fetch = realFetch;
 }
 
-const REQ = { merchid: "100200300400", amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
+/** Made-up merchants, one on each system. */
+const UAT_M = { merchid: "100200300400", env: "uat" as const };
+const PROD_M = { merchid: "100200300500", env: "prod" as const };
+const REQ = { merchant: UAT_M, amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
 
 /** Run cpAuth and hand back the thrown error, or null when it returned. */
 async function authError(): Promise<Error | null> {
@@ -245,7 +252,7 @@ Deno.test("cpSummary is a whitelist rebuild — secrets cannot leak into a log b
 });
 
 Deno.test("the tokenizer URL carries the mobile-critical parameters", () => {
-  const card = cp.cpTokenizerUrl("card");
+  const card = cp.cpTokenizerUrl(UAT_M, "card");
   for (const p of ["enhancedresponse=true", "tokenizewheninactive=true", "inactivityto=2000", "usecvv=true", "useexpiry=true", "unique=true"]) {
     check(`card has ${p}`, card.includes(p), card);
   }
@@ -254,19 +261,19 @@ Deno.test("the tokenizer URL carries the mobile-critical parameters", () => {
   // already 16px for that reason; a smaller field inside the iframe would jump the layout.
   check("16px font is in the css param", decodeURIComponent(card).includes("font-size:16px"), card);
 
-  const ach = cp.cpTokenizerUrl("ach");
+  const ach = cp.cpTokenizerUrl(UAT_M, "ach");
   // Routing and account are typed into ONE field as "routing/account", and a numeric
   // keypad has no slash.
   check("ach is full-keyboard", ach.includes("fullmobilekeyboard=true"), ach);
   check("ach has no cvv", !ach.includes("usecvv=true"), ach);
 
-  check("origin", cp.cpTokenizerOrigin() === "https://isv-uat.example.invalid", cp.cpTokenizerOrigin());
+  check("origin", cp.cpTokenizerOrigin(UAT_M) === "https://isv-uat.example.invalid", cp.cpTokenizerOrigin(UAT_M));
 });
 
 Deno.test("the tokenizer css resets CardPointe's body margin and sets a REAL font", () => {
   // Both are fixes for defects seen on a real phone (2026-09-02), and both are invisible
   // in the markup — the only way they regress is silently.
-  const css = decodeURIComponent(cp.cpTokenizerUrl("card"));
+  const css = decodeURIComponent(cp.cpTokenizerUrl(UAT_M, "card"));
   // Without this the inputs at width:100% overflow the frame's right edge, because
   // width:100% is measured against a body wider than the frame.
   check("body margin reset", /body\{[^}]*margin:0/.test(css), css.slice(0, 200));
@@ -356,10 +363,222 @@ Deno.test("cpAuth sends the gateway MMYY when the tokenizer said YYYYM", async (
   check("expiry reached /auth as MMYY", body.expiry === "0932", JSON.stringify(body.expiry));
 });
 
-Deno.test("cardpointeConfigured is all-or-nothing", () => {
-  // The nmiConfigured rule: a tokenizer base without credentials mints tokens nobody can
-  // charge, and credentials without a tokenizer base cannot collect an instrument at all.
-  check("configured with all five", cp.cardpointeConfigured === true);
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Two systems, chosen per call (workstream 1 phase 3, migration 296).
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+const PROD_ENV: Record<string, string> = {
+  CARDPOINTE_PROD_BASE_URL: "https://live.example.invalid/cardconnect/rest/",
+  CARDPOINTE_PROD_API_USER: "pu",
+  CARDPOINTE_PROD_API_PASS: "pp",
+  CARDPOINTE_PROD_TOKENIZER_BASE: "https://live.example.invalid/itoke/ajax-tokenizer.html",
+};
+/** Run `fn` with the production set configured (or `only` some of it), then clear it again. */
+async function withProd<T>(fn: () => Promise<T> | T, only: string[] = Object.keys(PROD_ENV)): Promise<T> {
+  for (const k of only) Deno.env.set(k, PROD_ENV[k]);
+  try {
+    return await fn();
+  } finally {
+    for (const k of PROD_KEYS) Deno.env.delete(k);
+  }
+}
+/** Every request the stub saw: url, method, Authorization, body. */
+type Seen = { url: string; method: string; auth: string | null; body: Record<string, unknown> | null };
+function recordAll(answer: Record<string, unknown> | number, seen: Seen[]) {
+  globalThis.fetch = ((u: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    seen.push({ url: String(u), method: String(init?.method ?? "GET"), auth: headers.get("Authorization"), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return Promise.resolve(typeof answer === "number" ? new Response("", { status: answer }) : new Response(JSON.stringify(answer), { status: 200 }));
+  }) as typeof fetch;
+}
+const basic = (u: string, p: string) => "Basic " + btoa(`${u}:${p}`);
+
+Deno.test("cardpointeConfigured is all-or-nothing PER SYSTEM, and the MID is no longer part of it", async () => {
+  // The nmiConfigured rule, per system: a tokenizer base without credentials mints tokens nobody
+  // can charge, and credentials without a tokenizer base cannot collect an instrument at all.
+  // CARDPOINTE_MERCHID is unset in this file: it was the default merchant, and nothing needs it now.
+  check("UAT configured with its four, no MID", cp.cardpointeConfigured("uat") === true);
+  check("production unset", cp.cardpointeConfigured("prod") === false);
+  await withProd(() => check("production with all four", cp.cardpointeConfigured("prod") === true));
+  for (const missing of Object.keys(PROD_ENV)) {
+    await withProd(() => check(`production without ${missing}`, cp.cardpointeConfigured("prod") === false),
+      Object.keys(PROD_ENV).filter((k) => k !== missing));
+  }
+  // The UAT set is all-or-nothing too, and setting production does not complete it.
+  const saved = Deno.env.get("CARDPOINTE_API_PASS")!;
+  Deno.env.delete("CARDPOINTE_API_PASS");
+  try {
+    await withProd(() => check("UAT without its password is unconfigured, production set or not", cp.cardpointeConfigured("uat") === false));
+  } finally {
+    Deno.env.set("CARDPOINTE_API_PASS", saved);
+  }
+  check("an unknown system is never configured", cp.cardpointeConfigured("live" as never) === false);
+});
+
+Deno.test("per-call credentials: each merchant's system gets its own base URL and login, on every operation", async () => {
+  await withProd(async () => {
+    const ok = { respstat: "A", respcode: "00", retref: "r1", amount: "6.00", token: "9413948780281111" };
+    for (const [m, base, auth] of [
+      [UAT_M, "https://isv-uat.example.invalid/cardconnect/rest", basic("u", "p")],
+      [PROD_M, "https://live.example.invalid/cardconnect/rest", basic("pu", "pp")],
+    ] as const) {
+      const seen: Seen[] = [];
+      recordAll(ok, seen);
+      try {
+        await cp.cpAuth({ ...REQ, merchant: m });
+        await cp.cpVoid(m, "r1");
+        await cp.cpRefund(m, "r1", 600);
+        await cp.cpInquireByOrderId(m, "ssp_x");
+        await cp.cpSettleStat(m, "20261009");
+        await cp.cpFunding(m, "20261009");
+        await cp.cpSurchargeProbe(m, "9413948780281111");
+      } finally {
+        restore();
+      }
+      check(`${m.env}: seven calls`, seen.length === 7, String(seen.length));
+      for (const s of seen) {
+        check(`${m.env}: ${s.url} on its own base`, s.url.startsWith(base + "/"), s.url);
+        check(`${m.env}: ${s.url} with its own login`, s.auth === auth, String(s.auth));
+        // The MID in every request is the merchant's own, in the body or the path.
+        const carries = s.body ? s.body.merchid === m.merchid : s.url.includes(m.merchid);
+        check(`${m.env}: ${s.url} names the merchant's MID`, carries, JSON.stringify(s));
+      }
+    }
+  });
+});
+
+Deno.test("a LIVE merchant with the production secrets unset is refused with a config error, and NOTHING is sent", async () => {
+  const seen: Seen[] = [];
+  recordAll({ respstat: "A", retref: "r1", amount: "6.00" }, seen);
+  const errs: unknown[] = [];
+  try {
+    for (
+      const call of [
+        () => cp.cpAuth({ ...REQ, merchant: PROD_M }),
+        () => cp.cpVoid(PROD_M, "r1"),
+        () => cp.cpRefund(PROD_M, "r1", 600),
+        () => cp.cpInquireByOrderId(PROD_M, "ssp_x"),
+        () => cp.cpSettleStat(PROD_M, "20261009"),
+        () => cp.cpFunding(PROD_M, "20261009"),
+      ]
+    ) {
+      try {
+        await call();
+        errs.push(null);
+      } catch (e) {
+        errs.push(e);
+      }
+    }
+    // The probe never throws: it answers "unknown", still without a request.
+    const probe = await cp.cpSurchargeProbe(PROD_M, "9413948780281111");
+    check("probe answers unknown", probe.applies === null && probe.percent === null, JSON.stringify(probe));
+  } finally {
+    restore();
+  }
+  check("every operation threw a CONFIG error", errs.every((e) => cp.isGatewayConfig(e)), errs.map((e) => String((e as Error)?.message)).join(" | "));
+  check("the error names the live system", /live is not configured/.test(String((errs[0] as Error)?.message)), String((errs[0] as Error)?.message));
+  check("not one request (never the test system instead)", seen.length === 0, JSON.stringify(seen.map((s) => s.url)));
+  check("no tokenizer for it either", cp.cpTokenizerUrl(PROD_M, "card") === "" && cp.cpTokenizerOrigin(PROD_M) === "");
+});
+
+Deno.test("NO DEFAULT MERCHANT: a blank MID is refused even with CARDPOINTE_MERCHID set, and an unknown system goes nowhere", async () => {
+  const seen: Seen[] = [];
+  recordAll({ respstat: "A", retref: "r1", amount: "6.00" }, seen);
+  Deno.env.set("CARDPOINTE_MERCHID", "100200300999");
+  const errs: unknown[] = [];
+  try {
+    for (const m of [{ merchid: "", env: "uat" as const }, { merchid: "   ", env: "uat" as const }, { merchid: "100200300400", env: "live" as never }]) {
+      try {
+        await cp.cpVoid(m, "r1");
+        errs.push(null);
+      } catch (e) {
+        errs.push(e);
+      }
+    }
+  } finally {
+    Deno.env.delete("CARDPOINTE_MERCHID");
+    restore();
+  }
+  check("all three refused as CONFIG", errs.length === 3 && errs.every((e) => cp.isGatewayConfig(e)), errs.map((e) => String((e as Error)?.message)).join(" | "));
+  check("nothing sent, so the old default was never used", seen.length === 0, JSON.stringify(seen));
+});
+
+Deno.test("the tokenizer is the one on the merchant's own system", async () => {
+  await withProd(() => {
+    check("UAT tokenizer", cp.cpTokenizerUrl(UAT_M, "card").startsWith("https://isv-uat.example.invalid/itoke/ajax-tokenizer.html?"), cp.cpTokenizerUrl(UAT_M, "card"));
+    check("live tokenizer", cp.cpTokenizerUrl(PROD_M, "card").startsWith("https://live.example.invalid/itoke/ajax-tokenizer.html?"), cp.cpTokenizerUrl(PROD_M, "card"));
+    check("live origin", cp.cpTokenizerOrigin(PROD_M) === "https://live.example.invalid", cp.cpTokenizerOrigin(PROD_M));
+    check("same parameters on both", cp.cpTokenizerUrl(PROD_M, "card").split("?")[1] === cp.cpTokenizerUrl(UAT_M, "card").split("?")[1]);
+  });
+});
+
+Deno.test("cpVerifyMerchant: one inquireByOrderid for an unused order id; reachable, config, throttled and unknown", async () => {
+  // Reachable: the gateway answered. The answer is whitelisted, and the MID is not echoed back.
+  let seen: Seen[] = [];
+  recordAll({ respstat: "C", respcode: "29", resptext: "Txn not found", merchid: UAT_M.merchid, token: "9413948780281111" }, seen);
+  const ok = await cp.cpVerifyMerchant(UAT_M);
+  restore();
+  check("reachable", ok.reachable === true, JSON.stringify(ok));
+  check("…and the expected answer (29, Txn not found)", ok.reachable === true && ok.expected === true, JSON.stringify(ok));
+  check("one GET", seen.length === 1 && seen[0].method === "GET", JSON.stringify(seen));
+  check("an unused order id, on the merchant's MID", /\/inquireByOrderid\/ssverify_[0-9a-f]{16}\/100200300400$/.test(seen[0].url), seen[0].url);
+  if (ok.reachable) {
+    check("the gateway's own words", ok.answer.resptext === "Txn not found" && ok.answer.respcode === "29", JSON.stringify(ok.answer));
+    check("no MID and no token in the answer", !("merchid" in ok.answer) && !("token" in ok.answer), JSON.stringify(ok.answer));
+  }
+  // Answered, but NOT the answer a check expects: green would claim more than a 200 proves. A 200 can
+  // carry an error about the MID itself, an order (a retref) that should not exist, or a shape this
+  // module does not know. Each is reachable, never expected, and the gateway's words are kept.
+  for (
+    const [label, body] of [
+      ["another refusal in a 200", { respstat: "C", respcode: "8", resptext: "Invalid merchant" }],
+      ["a 29 that carries a retref", { respstat: "C", respcode: "29", resptext: "Txn not found", retref: "123456789012" }],
+      ["no respcode at all", { respstat: "C", resptext: "Txn not found" }],
+      ["an array", [{ respcode: "29" }]],
+      ["a bare null", null],
+    ] as [string, unknown][]
+  ) {
+    recordAll(body as Record<string, unknown>, []);
+    const odd = await cp.cpVerifyMerchant(UAT_M);
+    restore();
+    check(`${label}: reachable, not expected`, odd.reachable === true && odd.expected === false, JSON.stringify(odd));
+  }
+  recordAll({ respstat: "C", respcode: 29, resptext: "Txn not found" }, []);
+  const numeric = await cp.cpVerifyMerchant(UAT_M);
+  restore();
+  check("a numeric 29 is the expected answer too", numeric.reachable === true && numeric.expected === true, JSON.stringify(numeric));
+  // Refused: our credentials or this MID.
+  seen = [];
+  recordAll(401, seen);
+  const denied = await cp.cpVerifyMerchant(UAT_M);
+  restore();
+  check("401 is config", !denied.reachable && denied.kind === "config", JSON.stringify(denied));
+  // No usable answer.
+  recordAll(502, []);
+  const dark = await cp.cpVerifyMerchant(UAT_M);
+  restore();
+  check("502 is unknown", !dark.reachable && dark.kind === "unknown", JSON.stringify(dark));
+  // A system with no credentials: config, and nothing sent.
+  seen = [];
+  recordAll({ respstat: "A" }, seen);
+  const unset = await cp.cpVerifyMerchant(PROD_M);
+  restore();
+  check("unset live is config", !unset.reachable && unset.kind === "config" && seen.length === 0, JSON.stringify({ unset, seen }));
+});
+
+Deno.test("source: the deployment-default merchant is gone, and the importer ledger names admin-catalog", async () => {
+  const src = (await Deno.readTextFile(new URL("./cardpointe.ts", import.meta.url))).replace(/\r\n/g, "\n");
+  const code = src.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join("\n");
+  check("CARDPOINTE_MERCHID is never read", !/CARDPOINTE_MERCHID/.test(code));
+  check("CP_DEFAULT_MERCHID is gone", !/CP_DEFAULT_MERCHID/.test(code));
+  check("no module-level env read (config is per call)", !/^(export )?const [A-Z_]+ = Deno\.env\.get/m.test(code));
+  check("the Importers: line names admin-catalog", /Importers:[^\n]*\n\/\/\s+admin-catalog\/index\.ts/.test(src), src.slice(0, 1500));
+  for (const fn of ["customer-pay", "portal-payments", "admin-catalog"]) {
+    // Comments may tell the history; code may not read the old default.
+    const f = (await Deno.readTextFile(new URL(`../${fn}/index.ts`, import.meta.url))).replace(/\r\n/g, "\n")
+      .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*\*)/.test(l)).join("\n");
+    check(`${fn} does not read the old default`, !/CP_DEFAULT_MERCHID|CARDPOINTE_MERCHID/.test(f));
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────
@@ -464,7 +683,7 @@ Deno.test("cpAuthFieldNames is exactly the keys /auth is sent, sorted, and never
   check("sorted", JSON.stringify(names) === JSON.stringify([...names].sort()));
   check("carries the billing names", ["address", "name", "postal"].every((k) => names.includes(k)), String(names));
   const joined = names.join(",");
-  for (const v of [REQ.account, REQ.merchid, "Pat Example", "12 Main St", "12345", "1232"]) {
+  for (const v of [REQ.account, REQ.merchant.merchid, "Pat Example", "12 Main St", "12345", "1232"]) {
     check(`no value (${v}) in the list`, !joined.includes(v), joined);
   }
   // A swipe's list says ecomind was NOT sent; a malformed ZIP is not listed because it is not sent.

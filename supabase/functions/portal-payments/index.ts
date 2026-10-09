@@ -39,8 +39,8 @@ import {
 } from "../_shared/invoicePayment.ts";
 import {
   cardpointeConfigured,
-  CP_DEFAULT_MERCHID,
   cpBillingFields,
+  cpEnvLabel,
   cpRefund,
   cpSettleStat,
   cpSurchargeProbe,
@@ -49,6 +49,7 @@ import {
   cpTokenizerUrl,
   cpVoid,
 } from "../_shared/cardpointe.ts";
+import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import { fundingStateFromSetlstat, returnedPaymentPatch } from "../_shared/achState.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 
@@ -241,26 +242,65 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, audit, operator, canEdit } = r.ctx;
 
-  if (!cardpointeConfigured) {
+  // Neither system configured: this deployment takes no cards at all, so every action is refused
+  // the way it always was. One system configured is enough to go on: which one a tenant needs is
+  // decided per merchant below.
+  if (!cardpointeConfigured("uat") && !cardpointeConfigured("prod")) {
     return refusal({ error: "Card payments aren't configured on this deployment yet." });
   }
 
+  /** A merchant whose system this deployment has no credentials for: refused with nothing sent,
+   *  and filed as a FAULT (the refusal itself files as info), because it means an operator switched
+   *  a tenant to a system whose secrets are missing, or they were removed. set_payments refuses to
+   *  create that state; this is the second line. */
+  const systemMissing = async (merchant: CpMerchant, error: string) => {
+    await logEdgeError({
+      fn: "portal-payments",
+      req,
+      clientId,
+      code: "payments_env_not_configured",
+      message: `${clientId}: ${action} refused: the tenant's ${cpEnvLabel(merchant.env)} CardPointe system has no credentials on this deployment. Nothing was sent.`,
+      context: { action, env: merchant.env },
+    });
+    return refusal({ error, reason: "env_not_configured" });
+  };
+
   // ⚠️ THE SWITCH GUARDS TAKING MONEY, AND ONLY THAT (2026-10). `payments_online_enabled` and the
-  // tenant's CURRENT merchant id are for a new charge. Void, refund and reconcile act on money
+  // tenant's CURRENT merchant are for a new charge. Void, refund and reconcile act on money
   // already taken, on the account it was taken on (merchantOfRecord), so a tenant switched off, or
   // moved to a new MID, can still give a customer their money back and still see a bank payment
   // clear or come back. All seven actions used to sit behind this refusal and use this MID.
+  //
+  // The merchant is the tenant's OWN MID and system (paymentSettings.ts cpMerchant). There is no
+  // deployment default any more: a tenant switched on with no MID is refused like one switched off.
   const TAKES_MONEY = new Set(["pay_options", "surcharge_probe", "charge", "charge_adhoc"]);
-  let currentMerchid = "";
+  let currentMerchant: CpMerchant = { merchid: "", env: "uat" };
   if (TAKES_MONEY.has(action)) {
-    const { data: settings, error: sErr } = await admin.from("client_settings")
-      .select("payments_online_enabled, cardpointe_merchid, business_name")
-      .eq("client_id", clientId).maybeSingle();
+    const { row: settings, error: sErr } = await readPaymentSettings(admin, clientId, ["business_name", "billing_exempt"]);
     if (sErr) return dbFail(req, clientId, "read your payment settings", sErr);
-    currentMerchid = String(settings?.cardpointe_merchid || CP_DEFAULT_MERCHID || "").trim();
-    if (settings?.payments_online_enabled !== true || !currentMerchid) {
+    const merchant = cpMerchant(settings);
+    if (settings?.payments_online_enabled !== true || !merchant) {
       return refusal({ error: "Taking cards isn't switched on for this account yet." });
     }
+    // ⛔ TEST MODE ON A BILLABLE ACCOUNT. The test system moves no real money, so a card "taken" there
+    // pays nothing while the order reads paid. set_payments and set_billing both refuse to create this
+    // state; this catches it however it arose (a row changed by hand). Refused with nothing sent, and
+    // filed as a fault: it is ours to fix, by moving the builder to live or switching them off.
+    if (testModeNeedsExempt(settings)) {
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "payments_test_mode_billable",
+        message: `${clientId}: ${action} refused: the tenant takes cards on the test system (UAT) but is billable. Nothing was sent.`,
+        context: { action, env: merchant.env },
+      });
+      return refusal({ error: "Taking cards isn't available for this account right now. Nothing was charged, and we've been told.", reason: "test_mode_billable" });
+    }
+    if (!cardpointeConfigured(merchant.env)) {
+      return await systemMissing(merchant, "Taking cards isn't available for this account right now. Nothing was charged, and we've been told.");
+    }
+    currentMerchant = merchant;
   }
 
   // ── pay_options ───────────────────────────────────────────────────────────────────
@@ -362,16 +402,18 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       depositCents: money.depositCents,
       minCents: MIN_PAYMENT_CENTS,
       maxCents: MAX_PAYMENT_CENTS,
+      // The tokenizer of the tenant's OWN system (test or live): a token minted on one cannot be
+      // charged on the other.
       tokenizer: {
         // Also where the modal tokenizes a bank account itself (the Routing and Checking
         // boxes, 2026-10): the numbers go from the browser to CardSecure, never through here.
-        origin: cpTokenizerOrigin(),
-        cardUrl: cpTokenizerUrl("card"),
+        origin: cpTokenizerOrigin(currentMerchant),
+        cardUrl: cpTokenizerUrl(currentMerchant, "card"),
         // Unused by the current modal; kept for a portal tab still running the old build.
-        achUrl: cpTokenizerUrl("ach"),
+        achUrl: cpTokenizerUrl(currentMerchant, "ach"),
         // swipeonly is a SEPARATE url: the reader is a USB keyboard, and letting it share
         // the keyed-entry frame would mean a swipe could also be typed by hand.
-        swipeUrl: cpTokenizerUrl("card") + "&swipeonly=true",
+        swipeUrl: cpTokenizerUrl(currentMerchant, "card") + "&swipeonly=true",
         cardHeight: cpTokenizerHeight("card"),
         achHeight: cpTokenizerHeight("ach"),
       },
@@ -384,7 +426,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (!t || t.length > 256) return json({ ok: true, applies: null, percent: null });
     // The billing ZIP from the modal, when it holds a real one: a fee can turn on where the card
     // is billed. A malformed ZIP is left off rather than sent.
-    const probe = await cpSurchargeProbe(currentMerchid, t, cpBillingFields(payload).postal);
+    const probe = await cpSurchargeProbe(currentMerchant, t, cpBillingFields(payload).postal);
     return json({ ok: true, applies: probe.applies, percent: probe.percent });
   }
 
@@ -459,7 +501,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const result = await chargeInvoicePayment(admin, {
       clientId,
-      merchid: currentMerchid,
+      merchant: currentMerchant,
       orderId,
       shortCode: money.shortCode,
       amountCents: decision.askCents,
@@ -533,7 +575,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const result = await chargeInvoicePayment(admin, {
       clientId,
-      merchid: currentMerchid,
+      merchant: currentMerchant,
       orderId: String(order.id),
       shortCode: null,
       amountCents: cents,
@@ -606,11 +648,16 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         error: "We can't tell which merchant account took this payment, so it can't be cancelled or refunded from here. Nothing has changed, and we've been told.",
       }, 409);
     }
+    // The SYSTEM the charge was taken on (test or live) must have credentials here. Without them the
+    // gateway call would only throw a configuration error and read as "couldn't reach the network".
+    if (!cardpointeConfigured(merchant.env)) {
+      return await systemMissing(merchant, "That payment can't be cancelled or refunded from here right now. Nothing has changed, and we've been told.");
+    }
 
     if (action === "void_payment") {
       let ok = false;
       try {
-        ok = await cpVoid(merchant.merchid, String(p.gateway_txn_id));
+        ok = await cpVoid(merchant, String(p.gateway_txn_id));
       } catch (e) {
         return json({
           error: "We couldn't reach the card network to cancel that payment. Nothing has changed — try again shortly.",
@@ -640,7 +687,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     }
     let out;
     try {
-      out = await cpRefund(merchant.merchid, String(p.gateway_txn_id), refundCents);
+      out = await cpRefund(merchant, String(p.gateway_txn_id), refundCents);
     } catch (e) {
       return json({
         error: "We couldn't reach the card network to refund that payment. Nothing has changed — try again shortly.",
@@ -729,11 +776,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const nowIso = new Date().toISOString();
     const updated: unknown[] = [];
-    // Keyed `${merchid}|${retref}`: a batch answers for ITS merchant, and a retref is only looked
-    // up in the batch of the account the payment was taken on.
+    // Keyed `${env}|${merchid}|${retref}`: a batch answers for ITS merchant on ITS system (test or
+    // live), and a retref is only looked up in the batch of the account the payment was taken on.
     const byRetref = new Map<string, string>();
-    // Keyed `${merchid}|${day}`: settlestat is one call per MERCHANT and day (the 40 TPM quota is
-    // per MID), and MAX_SETTLESTAT_DAYS caps how many of those calls one sweep makes.
+    // Keyed `${env}|${merchid}|${day}`: settlestat is one call per MERCHANT and day (the 40 TPM quota
+    // is per MID), and MAX_SETTLESTAT_DAYS caps how many of those calls one sweep makes.
     const fetchedDays = new Set<string>();
     const skippedDays = new Set<string>();
     const dayOf = (v: unknown) => String(v ?? "").slice(0, 10).replace(/-/g, "");
@@ -776,22 +823,24 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     }
 
     /** Spend (merchant, day)-sized pieces of the budget, in the order given, never twice on the
-     *  same pair, and never past MAX_SETTLESTAT_DAYS. A row with no merchant asks nothing. */
+     *  same pair, and never past MAX_SETTLESTAT_DAYS. A row with no merchant asks nothing, and nor
+     *  does one on a system this deployment has no credentials for: it stays as it is, and spends
+     *  none of the budget on a call that could only be refused. */
     const loadDays = async (rows: Record<string, unknown>[]) => {
       for (const row of rows) {
         const m = merchantOf(row);
         const d = dayOf(row.received_at);
-        if (!m || !d) continue;
-        const key = `${m.merchid}|${d}`;
+        if (!m || !d || !cardpointeConfigured(m.env)) continue;
+        const key = `${m.env}|${m.merchid}|${d}`;
         if (fetchedDays.has(key) || skippedDays.has(key)) continue;
         if (fetchedDays.size >= MAX_SETTLESTAT_DAYS) { skippedDays.add(key); continue; }
         fetchedDays.add(key);
         try {
-          const batch = await cpSettleStat(m.merchid, d) as Record<string, unknown>;
+          const batch = await cpSettleStat(m, d) as Record<string, unknown>;
           const rs = (batch?.txns ?? batch?.transactions ?? []) as Record<string, unknown>[];
           for (const t of Array.isArray(rs) ? rs : []) {
             const rr = String(t.retref ?? "");
-            if (rr) byRetref.set(`${m.merchid}|${rr}`, String(t.setlstat ?? t.status ?? ""));
+            if (rr) byRetref.set(`${m.env}|${m.merchid}|${rr}`, String(t.setlstat ?? t.status ?? ""));
           }
         } catch { /* one bad day must not stop the rest */ }
       }
@@ -799,7 +848,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     /** The settlement status the payment's OWN merchant reported for it, if a batch said. */
     const statusOf = (row: Record<string, unknown>) => {
       const m = merchantOf(row);
-      return m ? byRetref.get(`${m.merchid}|${String(row.gateway_txn_id ?? "")}`) : undefined;
+      return m ? byRetref.get(`${m.env}|${m.merchid}|${String(row.gateway_txn_id ?? "")}`) : undefined;
     };
 
     const noteReturned = (paymentId: unknown, orderRef: unknown, retref: string) => {
@@ -869,7 +918,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       ok: true,
       resolved,
       updated,
-      daysChecked: [...new Set([...fetchedDays].map((k) => k.split("|")[1]))],
+      daysChecked: [...new Set([...fetchedDays].map((k) => k.split("|")[2]))],
       daysSkipped: skippedDays.size,
     });
   }

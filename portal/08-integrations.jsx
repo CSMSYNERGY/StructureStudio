@@ -4371,6 +4371,113 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
   </>);
 }
 
+// ─── Structure Studio Payments (Settings → Company → Payments, workstream 1 phase 4) ───
+// A builder's READ-ONLY view of the card account the Structure Studio team sets up for them in
+// Admin (admin-catalog set_payments). Ahsan's decision of 2026-10-08: the team enters the merchant
+// details and the builder's side is locked. So this card saves nothing and offers no field to type
+// into; it says what is set and how to ask for a change. The brand is Carolyn's, "Structure Studio
+// Payments", never the platform company's name.
+//
+// What it shows comes from portal-settings payments_status: on or off, test or live (only once a
+// merchant id is set or payments are on), and the last four digits of the merchant id (never the
+// whole id). A portal-settings older than this page
+// answers 403 "Unrecognised action": the card then says only who manages the account, with no
+// status at all, rather than a refusal or a guess (the taxCodesUnavailable rule, reused).
+//
+// How to ask for a change: the Feedback button's "Request a Feature", which lands on the team's
+// board and shows under Support → My Requests. An operator in view-as has no Feedback button, and
+// needs none: the change is theirs to make in Admin.
+const PAYMENTS_BRAND = "Structure Studio Payments";
+// The answer carries the fields this card shows. Anything else (an older function's shape, a
+// refusal) shows no status.
+const ssHasPaymentsStatus = (d) => !!d && !d.err && typeof d.enabled === "boolean" && (d.env === "live" || d.env === "test");
+
+function PaymentsCard() {
+  const [data, setData] = useState(null);   // payments_status answer | { err, unavailable } | null while loading
+  const loadSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++loadSeq.current;
+    (async () => {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "payments_status" } });
+      if (seq !== loadSeq.current) return;
+      if (error || !d || d.error) {
+        setData({ err: (d && d.error) || (error && error.message) || "Couldn't load your payment details.", unavailable: taxCodesUnavailable(error) });
+        return;
+      }
+      setData(d);
+    })();
+    return () => { loadSeq.current++; };
+  }, []);
+
+  const d = ssHasPaymentsStatus(data) ? data : null;
+  const row = (label, value, attr) => (
+    <div {...{ [attr]: "" }} style={{ display: "flex", gap: 12, alignItems: "baseline", padding: "9px 0", borderTop: "1px solid #F1F5F9" }}>
+      <span style={{ ...S.lbl, marginBottom: 0, minWidth: 130 }}>{label}</span>
+      <span style={{ fontSize: 13.5, color: "#1E293B", fontWeight: 600 }}>{value}</span>
+    </div>
+  );
+  const pill = (text, bg, fg) => (
+    <span style={{ background: bg, color: fg, borderRadius: 12, fontSize: 11.5, fontWeight: 800, padding: "3px 10px", letterSpacing: 0.3 }}>{text}</span>
+  );
+
+  return (
+    <div data-payments-card="" style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>{(d && d.brand) || PAYMENTS_BRAND}</div>
+        <span data-payments-locked="" title="Set up and managed by the Structure Studio team"
+          style={{ background: "#F1F5F9", color: "#475569", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 10px" }}>
+          🔒 Managed for you
+        </span>
+      </div>
+      <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.55, margin: "0 0 12px" }}>
+        Your payment account is set up and managed by the Structure Studio team. It's locked here, so nothing on this
+        page can change it, and there's nothing for you to fill in.
+      </p>
+
+      {data === null && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your payment details…</div>}
+
+      {data && data.err && (data.unavailable
+        ? <div data-payments-soon="" style={{ fontSize: 13, color: "#64748B" }}>The details of your account will show here soon.</div>
+        : <div style={{ ...S.err, marginBottom: 0 }}>{data.err}</div>)}
+
+      {data && !data.err && !d && (
+        <div data-payments-soon="" style={{ fontSize: 13, color: "#64748B" }}>The details of your account will show here soon.</div>
+      )}
+
+      {d && (
+        <div data-payments-status="">
+          {row("Card payments",
+            d.enabled ? pill("ON", "#DCFCE7", "#15803D") : pill("OFF", "#FEF3C7", "#92400E"),
+            "data-payments-onoff")}
+          {/* Test or live only once there is an account to be on one: with payments off and no merchant
+              id, every builder reads "test" by default, and a TEST row would describe an account that
+              doesn't exist. */}
+          {(d.enabled || d.midLast4) && row("Mode",
+            d.env === "live"
+              ? <span>{pill("LIVE", "#DBEAFE", "#1D4ED8")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>Real payments go to your bank account.</span></span>
+              : <span>{pill("TEST", "#F3E8FF", "#7E22CE")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>No real money moves. This is how an account is checked before it goes live.</span></span>,
+            "data-payments-mode")}
+          {row("Merchant ID",
+            d.midLast4 ? <span>ending in <code style={{ fontSize: 13 }}>{d.midLast4}</code></span> : <span style={{ color: "#92400E" }}>Not set up yet</span>,
+            "data-payments-mid")}
+          {!d.enabled && (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 8 }}>
+              While payments are off, your customers can't pay online and your team can't take a card in Orders.
+              Payments you've already taken aren't affected.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div data-payments-request="" style={{ marginTop: 14, padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12.5, color: "#334155", lineHeight: 1.55 }}>
+        <b>Need a change?</b> To switch payments on or off, move from test to live, or use a different merchant
+        account, send us a request with the <b>Feedback</b> button (choose <b>Request a Feature</b>), or ask your
+        Structure Studio contact. You can follow it under <b>Support → My Requests</b>.
+      </div>
+    </div>
+  );
+}
+
 // ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
 // Carolyn 2026-09-11: "I want to create some top navigation inside company. The first tab is
 // business details, next branding, then we want team, then Locations and move the locations
@@ -4521,6 +4628,10 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
           company rate block's "switch to StructureStudio paperwork" link opens CRM Connection
           (also settings_crm) without leaving the page. */}
       {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} onOpenConnection={() => onSub("connection")} />}
+      {/* Read-only (workstream 1 phase 4): the card account is managed by the Structure Studio team,
+          so the tab only shows it. The tab rides settings_branding (SETTINGS_TAB_AREA.payments),
+          the same gate as payments_status, so whoever sees it may read it. */}
+      {sub === "payments" && <PaymentsCard />}
     </div>
   );
 }

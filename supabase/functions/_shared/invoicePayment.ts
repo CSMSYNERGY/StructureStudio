@@ -15,6 +15,7 @@
 //    money on a DIFFERENT processor for a DIFFERENT merchant of record. If you change the
 //    double-charge posture in one, change all three.
 //    Importers: customer-pay/index.ts, portal-payments/index.ts
+//    It imports _shared/cardpointe.ts and _shared/paymentSettings.ts: a change to either redeploys both.
 //
 // THE ORDERING RULE, which is the whole point of this file: the charge attempt exists in OUR
 // records BEFORE the card is touched, and the balance is credited only AFTER the sale is
@@ -39,6 +40,7 @@ import {
   isGatewayUnknown,
   throttledRetryAfter,
 } from "./cardpointe.ts";
+import { cpEnvOf, type CpMerchant, isMissingColumn } from "./paymentSettings.ts";
 import { amountOwed } from "./estimateLines.ts";
 import { agreedBaseline } from "./changeOrderDiff.ts";
 import { addressFrom } from "./contactAddress.ts";
@@ -249,7 +251,8 @@ export async function readOrderMoney(
 
 export type ChargeOpts = {
   clientId: string;
-  merchid: string;
+  /** The tenant's own account and its system (paymentSettings.ts cpMerchant). Never a default. */
+  merchant: CpMerchant;
   orderId: string;
   shortCode: string | null;
   amountCents: number;
@@ -309,16 +312,37 @@ export function billingFromRequest(body: any, contact: any): CpBilling {
 // it closed_unknown and blocked the order. On that error the write is tried once more without
 // the 291 keys (emailSend.ts and sms-inbound do the same for their own migrations). A failed
 // statement wrote nothing, so the retried insert is still the guard.
+//
+// Migration 296's `cp_env` joins the same rule, NEWEST FIRST: a missing column drops cp_env alone
+// and tries again, and only if that still fails are the 291 keys dropped too. So a database with
+// 291 and without 296 (live, between this deploy and that apply) keeps every 291 field, and the
+// attempt reads as UAT (cp_env null), which is what it is: production secrets cannot be used for
+// a tenant until 296 gives the tenant a column to say so.
 // ─────────────────────────────────────────────────────────────────────────────────────
 
 const M291_KEYS = ["sent_fields", "ecomind", "avsresp", "cvvresp"];
-const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+const M296_KEYS = ["cp_env"];
+/** The keys a missing-column error drops, in order: the newest migration's first. */
+const LATE_KEY_SETS = [M296_KEYS, M291_KEYS];
+const LATE_KEYS = LATE_KEY_SETS.flat();
 
-function isMissingColumn(err: unknown): boolean {
-  return MISSING_COLUMN.has(String((err as { code?: unknown } | null)?.code ?? ""));
+function without(row: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([k]) => !keys.includes(k)));
 }
-function without291(row: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(row).filter(([k]) => !M291_KEYS.includes(k)));
+
+/** Run a write; while it fails on a missing column, drop the next set of late keys and run it
+ *  again. Stops at the first answer that is not a missing column, or when nothing is left to drop. */
+// deno-lint-ignore no-explicit-any
+async function writeTolerant(write: (row: Record<string, unknown>) => Promise<any>, row: Record<string, unknown>) {
+  let cur = row;
+  let r = await write(cur);
+  for (const keys of LATE_KEY_SETS) {
+    if (!(r?.error && isMissingColumn(r.error))) break;
+    if (!Object.keys(cur).some((k) => keys.includes(k))) continue;
+    cur = without(cur, keys);
+    r = await write(cur);
+  }
+  return r;
 }
 
 /** The verification codes as attempt columns, each only when the gateway gave one, so a close
@@ -414,7 +438,7 @@ export async function chargeInvoicePayment(
   // The request is built BEFORE the attempt row, so the row can say which fields the sale
   // carries. A swipe sends no ecomind at all; a keyed card sends "E" unless told otherwise.
   const authReq: CpAuthRequest = {
-    merchid: opts.merchid,
+    merchant: opts.merchant,
     amountCents,
     account: opts.account,
     expiry: opts.expiry,
@@ -431,20 +455,20 @@ export async function chargeInvoicePayment(
     short_code: opts.shortCode ?? null,
     amount_cents: amountCents,
     rail,
-    merchid: opts.merchid,
+    merchid: opts.merchant.merchid,
     orderid: orderRef,
     actor_kind: opts.actorKind,
     actor_ref: opts.actorRef ?? null,
     // Migration 291: field NAMES only, never a value, and the ecomind actually sent (null = none).
     sent_fields: cpAuthFieldNames(authReq),
     ecomind: authReq.ecomind ?? null,
+    // Migration 296: the system the sale goes to. Void, refund, settlestat and the recovery inquire
+    // read it back (merchantOfRecord), so they ask the system that holds the transaction.
+    cp_env: opts.merchant.env,
   };
   const insertAttempt = (row: Record<string, unknown>) =>
     admin.from("payment_attempts").insert(row).select("id").maybeSingle();
-  let { data: attempt, error: attErr } = await insertAttempt(attemptRow);
-  if (attErr && isMissingColumn(attErr)) {
-    ({ data: attempt, error: attErr } = await insertAttempt(without291(attemptRow)));
-  }
+  const { data: attempt, error: attErr } = await writeTolerant(insertAttempt, attemptRow);
   if (attErr || !attempt) {
     return {
       ok: false,
@@ -456,13 +480,14 @@ export async function chargeInvoicePayment(
 
   // Writing to the ledger after the insert must never become a second failure — it swallows
   // its own errors, exactly as walletTopup's does. A database without 291's columns gets the
-  // same write without them (see M291_KEYS).
+  // same write without them (see LATE_KEY_SETS).
   const updateAttempt = async (patch: Record<string, unknown>) => {
     try {
-      const r = await admin.from("payment_attempts").update(patch).eq("id", attempt.id);
-      if (r?.error && isMissingColumn(r.error) && Object.keys(patch).some((k) => M291_KEYS.includes(k))) {
-        await admin.from("payment_attempts").update(without291(patch)).eq("id", attempt.id);
+      if (!Object.keys(patch).some((k) => LATE_KEYS.includes(k))) {
+        await admin.from("payment_attempts").update(patch).eq("id", attempt.id);
+        return;
       }
+      await writeTolerant((p) => admin.from("payment_attempts").update(p).eq("id", attempt.id), patch);
     } catch { /* see above */ }
   };
   const closeAttempt = (
@@ -494,7 +519,7 @@ export async function chargeInvoicePayment(
       await logFault(
         "payment_charge_unknown",
         `${clientId}: ${amountCents} cent ${rail} charge on order ${orderId} is UNVERIFIABLE. ` +
-          `Resolve with /inquireByOrderid orderid=${orderRef} merchid=${opts.merchid} before allowing another attempt. ${msg}`,
+          `Resolve with /inquireByOrderid orderid=${orderRef} merchid=${opts.merchant.merchid} (${opts.merchant.env}) before allowing another attempt. ${msg}`,
       );
       return {
         ok: false,
@@ -554,7 +579,7 @@ export async function chargeInvoicePayment(
     });
     let voided = false;
     try {
-      voided = await cpVoid(opts.merchid, auth.retref);
+      voided = await cpVoid(opts.merchant, auth.retref);
     } catch {
       voided = false;
     }
@@ -710,23 +735,28 @@ export async function chargeInvoicePayment(
 // The merchant a charge was taken on.
 // ─────────────────────────────────────────────────────────────────────────────────────
 
-/** The merchant account one charge was taken on. The environment joins the MID here when
- *  test and live accounts are told apart (workstream 1 phase 3). */
-export type MerchantOfRecord = { merchid: string };
+/** The merchant account one charge was taken on, and the system (test or live) it lives on. */
+export type MerchantOfRecord = CpMerchant;
 
 /**
- * The MID each charge was TAKEN ON, keyed by String(attempt id), read off the attempt rows
- * (payment_attempts.merchid, written before the card was touched).
+ * The MID and system each charge was TAKEN ON, keyed by String(attempt id), read off the attempt
+ * rows (payment_attempts.merchid and, since migration 296, cp_env, both written before the card was
+ * touched).
  *
  * Void, refund, settlestat and the recovery inquire must ask the account that HOLDS the
  * transaction. Until 2026-10 they asked the tenant's CURRENT one (client_settings, or the
  * deployment default when that was blank), so a builder whose MID changed after a sale could no
  * longer void, refund or reconcile it: the gateway was asked about a retref on an account that
- * never saw it.
+ * never saw it. The same holds for the SYSTEM: a sale taken in test mode is asked about on the test
+ * system after the builder goes live, and the reverse.
  *
- * An id with no row, or a row with a blank MID, is simply ABSENT from the map. The caller refuses
- * and logs; nothing here or there falls back to the current MID. Throws on a read error, so "the
- * database did not answer" can never be mistaken for "no such attempt".
+ * cp_env NULL is UAT (paymentSettings.ts cpEnvOf): every attempt written before 296 went to the
+ * CARDPOINTE_* secrets, which are the UAT set. A database without 296 is read the same way.
+ *
+ * An id with no row, a row with a blank MID, or a cp_env that is neither 'uat' nor 'prod' is simply
+ * ABSENT from the map. The caller refuses and logs; nothing here or there falls back to the current
+ * MID or guesses a system. Throws on a read error, so "the database did not answer" can never be
+ * mistaken for "no such attempt".
  */
 export async function merchantOfRecord(
   admin: Admin,
@@ -738,12 +768,15 @@ export async function merchantOfRecord(
   // cast it would fail the whole read.
   const ids = [...new Set(attemptIds.map((v) => (v == null ? "" : String(v).trim())).filter((v) => /^\d{1,19}$/.test(v)))];
   if (!ids.length) return out;
-  const { data, error } = await admin.from("payment_attempts")
-    .select("id, merchid").eq("client_id", clientId).in("id", ids);
+  const read = (cols: string) => admin.from("payment_attempts").select(cols).eq("client_id", clientId).in("id", ids);
+  let { data, error } = await read("id, merchid, cp_env");
+  // Deployed ahead of migration 296: the column is not there, and every attempt is UAT.
+  if (error && isMissingColumn(error)) ({ data, error } = await read("id, merchid"));
   if (error) throw new Error(`merchantOfRecord: ${String(error.message ?? error.code ?? "read failed")}`);
   for (const row of Array.isArray(data) ? data : []) {
     const merchid = typeof row?.merchid === "string" ? row.merchid.trim() : "";
-    if (row?.id != null && merchid) out.set(String(row.id), { merchid });
+    const env = cpEnvOf(row?.cp_env);
+    if (row?.id != null && merchid && env) out.set(String(row.id), { merchid, env });
   }
   return out;
 }
@@ -796,7 +829,7 @@ export async function resolveUnknownAttempt(
 
   let found: Record<string, unknown> | null;
   try {
-    found = await cpInquireByOrderId(merchant.merchid, att.orderid);
+    found = await cpInquireByOrderId(merchant, att.orderid);
   } catch (e) {
     return { resolved: false, reason: isGatewayUnknown(e) ? "gateway_unreachable" : "inquire_failed" };
   }

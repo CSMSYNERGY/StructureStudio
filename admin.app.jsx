@@ -264,9 +264,15 @@ function AdminApp() {
   // merchant id. Read on demand (get_payments), never carried in the clients list — a MID
   // names somebody else's bank account, so it loads only for the builder being looked at.
   const [payOpen, setPayOpen] = useState(false);
-  const [payLoaded, setPayLoaded] = useState(null);   // null=unread · {paymentsEnabled,merchid} · {error}
+  const [payLoaded, setPayLoaded] = useState(null);   // null=unread · get_payments' answer · {error}
   const [payEnabled, setPayEnabled] = useState(false);
   const [payMerchid, setPayMerchid] = useState("");
+  // Which Fiserv system (migration 296): "uat" = test, "prod" = live. Only sent when the database
+  // has the column (get_payments' envColumn), so a console in front of an unmigrated database
+  // still saves exactly what it saved before.
+  const [payEnv, setPayEnv] = useState("uat");
+  // The Verify button's last answer for the builder on screen: null · {busy} · verify_payments' answer · {error}
+  const [payVerify, setPayVerify] = useState(null);
   // Deliberate friction: switching payments ON requires ticking this first. The field is not
   // a preference — it decides whose account a customer's card payment lands in.
   const [payConfirm, setPayConfirm] = useState(false);
@@ -371,6 +377,7 @@ function AdminApp() {
     // per-tenant, so leaving one builder's merchant id on screen under another builder's
     // name is the one mistake this card must never make.
     setPayOpen(false); setPayLoaded(null); setPayEnabled(false); setPayMerchid(""); setPayConfirm(false);
+    setPayEnv("uat"); setPayVerify(null);
     // Seed the billing editor from the list row so it opens showing what is actually set.
     const row = (freshClients || clients).find((c) => c.client_id === cid);
     setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
@@ -456,15 +463,28 @@ function AdminApp() {
   // somebody opens this card, and one builder's merchant id should not sit in the page's
   // memory because an operator clicked through the builder list.
   const loadPayments = async (cid) => {
-    setPayLoaded(null);
+    setPayLoaded(null); setPayVerify(null);
     try {
       const r = await api("get_payments", pwd, { clientId: cid });
       if (selRef.current !== cid) return;   // another builder is on screen now — see selRef
       setPayLoaded(r);
       setPayEnabled(Boolean(r.paymentsEnabled));
       setPayMerchid(String(r.merchid || ""));
+      setPayEnv(r.env === "prod" ? "prod" : "uat");
       setPayConfirm(false);
     } catch (e) { if (selRef.current === cid) setPayLoaded({ error: e.message }); }
+  };
+  // Verify: one harmless question to the gateway, on this builder's MID and system, with this
+  // deployment's credentials (admin-catalog verify_payments). It checks what is SAVED, not what is
+  // typed in the boxes, so the answer is about the account their customers would really pay into.
+  const verifyPayments = async () => {
+    const cid = sel;
+    if (!cid) return;
+    setPayVerify({ busy: true });
+    try {
+      const r = await api("verify_payments", pwd, { clientId: cid });
+      if (selRef.current === cid) setPayVerify(r);
+    } catch (e) { if (selRef.current === cid) setPayVerify({ error: e.message }); }
   };
   const togglePayments = () => {
     const next = !payOpen;
@@ -486,11 +506,19 @@ function AdminApp() {
     if (payEnabled && !payConfirm) {
       flash({ err: "Tick the confirmation first. This decides whose bank account customer card payments land in." }); return;
     }
+    const envKnown = Boolean(payLoaded && payLoaded.envColumn);
+    if (payEnabled && envKnown && payEnv === "uat" && !payLoaded.billingExempt) {
+      flash({ err: "Test mode moves no real money, so only a non-billable account may take payments in it. Pick Live, or mark the account non-billable on the Billing card first." }); return;
+    }
+    if (payEnabled && payLoaded && payLoaded.configured && payLoaded.configured[envKnown ? payEnv : "uat"] === false) {
+      flash({ err: `${(envKnown ? payEnv : "uat") === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment yet, so payments can't be switched on for it.` }); return;
+    }
     setBusy(true); setMsg(null);
     try {
-      const r = await api("set_payments", pwd, { clientId: sel, paymentsEnabled: payEnabled, merchid: mid });
-      setPayLoaded({ paymentsEnabled: r.paymentsEnabled, merchid: r.merchid });
-      setPayMerchid(String(r.merchid || "")); setPayConfirm(false);
+      const r = await api("set_payments", pwd, { clientId: sel, paymentsEnabled: payEnabled, merchid: mid, ...(envKnown ? { env: payEnv } : {}) });
+      setPayLoaded((cur) => ({ ...(cur || {}), paymentsEnabled: r.paymentsEnabled, merchid: r.merchid, env: r.env ?? (cur && cur.env) }));
+      setPayMerchid(String(r.merchid || "")); setPayConfirm(false); setPayVerify(null);
+      if (r.env === "prod" || r.env === "uat") setPayEnv(r.env);
       flash({ ok: r.note || "Saved." });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
@@ -884,6 +912,11 @@ function AdminApp() {
                     Nothing here charges anybody. It is the switch the customer pay page, the card
                     modal and the swipe reader all check before they will take a payment.
                   </div>
+                  <div style={{ marginTop: 6 }}>
+                    <b>Live</b> sends their customers' payments to their real Fiserv account. <b>Test (UAT)</b> is
+                    Fiserv's test system: no real money moves, so only a non-billable account may take payments
+                    on it. Payments already taken are always cancelled and refunded on the system they were taken on.
+                  </div>
                 </div>
 
                 {/* What is actually set right now, stated before anything is editable. */}
@@ -897,6 +930,20 @@ function AdminApp() {
                   {payLoaded.merchid
                     ? <code style={{ fontSize: 12.5 }}>{payLoaded.merchid}</code>
                     : <span style={{ color: "#B45309" }}>none set</span>}
+                  {" · "}
+                  <b>System:</b>{" "}
+                  {payLoaded.env === "prod"
+                    ? <span style={{ color: "#1D4ED8", fontWeight: 700 }}>LIVE</span>
+                    : <span style={{ color: "#7E22CE", fontWeight: 700 }}>TEST (UAT)</span>}
+                  {payLoaded.billingExempt ? <span style={{ color: "#64748B" }}> · non-billable account</span> : null}
+                  {/* The state set_payments and set_billing refuse to create, reached some other way
+                      (a row changed by hand): every card payment is refused until it is fixed. */}
+                  {payLoaded.paymentsEnabled && payLoaded.env !== "prod" && !payLoaded.billingExempt && (
+                    <div style={{ marginTop: 6, color: "#991B1B" }}>
+                      <b>Their customers can't pay right now:</b> test mode (UAT) is only for a non-billable account, so
+                      every card payment is refused. Switch them to Live, or switch payments off.
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -907,13 +954,64 @@ function AdminApp() {
                       placeholder="12–16 digits" title="Paste it from their Fiserv/CardConnect boarding paperwork — do not retype it"
                       style={{ ...S.input, width: 200, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }} />
                   </label>
+                  {/* Test or live (migration 296). Hidden until the database has the column: an
+                      unmigrated database keeps every builder on test, and set_payments would refuse
+                      the field. Test is only for a non-billable account; the server refuses it otherwise. */}
+                  {payLoaded.envColumn && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                      <b>System</b>
+                      <select value={payEnv} onChange={(e) => { setPayEnv(e.target.value === "prod" ? "prod" : "uat"); setPayConfirm(false); }}
+                        style={{ ...S.input, width: "auto" }}>
+                        <option value="prod">Live{payLoaded.configured && payLoaded.configured.prod === false ? " (not set up on this deployment)" : ""}</option>
+                        <option value="uat">Test (UAT){payLoaded.billingExempt ? "" : " (non-billable accounts only)"}</option>
+                      </select>
+                    </label>
+                  )}
                   <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
                     <input type="checkbox" checked={payEnabled} onChange={(e) => { setPayEnabled(e.target.checked); setPayConfirm(false); }} />
                     <b>Take card payments for this builder</b>
                   </label>
                   <button onClick={savePayments} disabled={busy || (payEnabled && !payConfirm)}
                     style={S.btn(busy || (payEnabled && !payConfirm) ? "#9CA3AF" : "#B45309", "#FFF")}>Save payment settings</button>
+                  <button onClick={verifyPayments} disabled={busy || (payVerify && payVerify.busy) || !payLoaded.merchid}
+                    title={payLoaded.merchid ? "Ask the gateway one harmless question on the SAVED merchant id and system. No money moves." : "Save a merchant id first"}
+                    style={S.btn(busy || (payVerify && payVerify.busy) || !payLoaded.merchid ? "#E5E7EB" : "#FFF", "#92400E")}>
+                    {payVerify && payVerify.busy ? "Verifying…" : "Verify"}
+                  </button>
                 </div>
+                {/* Verify's answer. GREEN only for the gateway's known "not found" answer to a
+                    never-used order id (expected: respcode 29). Any other answer is AMBER: our login
+                    worked, but a 200 can carry an error about the MID itself. RED when nothing
+                    usable came back. The gateway's own words always follow, and even green does not
+                    prove this is the right builder's account, so it says so. */}
+                {payVerify && !payVerify.busy && (() => {
+                  const tone = payVerify.reachable && payVerify.expected ? "ok" : payVerify.reachable ? "warn" : "bad";
+                  const C = { ok: ["#F0FDF4", "#BBF7D0", "#166534"], warn: ["#FFFBEB", "#FDE68A", "#92400E"], bad: ["#FEF2F2", "#FECACA", "#991B1B"] }[tone];
+                  const sys = payVerify.env === "prod" ? "live" : "test";
+                  const said = payVerify.gateway && (payVerify.gateway.resptext || payVerify.gateway.respcode)
+                    ? <span> It said: “{String(payVerify.gateway.resptext || "")}”{payVerify.gateway.respcode ? ` (${payVerify.gateway.respcode})` : ""}.</span>
+                    : <span> It gave no message.</span>;
+                  return (
+                    <div data-pay-verify={tone} style={{ fontSize: 12.5, marginTop: 10, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
+                      background: C[0], border: `1px solid ${C[1]}`, color: C[2] }}>
+                      {payVerify.error && !("reachable" in payVerify)
+                        ? <span><b>Couldn't verify:</b> {payVerify.error}</span>
+                        : tone === "ok"
+                        ? <span>
+                            <b>Reachable.</b> The {sys} gateway accepted our login and answered for the merchant id ending {payVerify.midLast4 || "?"} with
+                            the reply a check expects (no such order).{said} This does not prove the id is the right builder's, so
+                            check it against their boarding paperwork.
+                          </span>
+                        : tone === "warn"
+                        ? <span>
+                            <b>Answered, but not as expected.</b> The {sys} gateway accepted our login, but its reply for the
+                            merchant id ending {payVerify.midLast4 || "?"} is not the “Txn not found” (29) a check should get.{said} Read
+                            it before relying on this account.
+                          </span>
+                        : <span><b>Not reachable.</b> {payVerify.configError || payVerify.error || "No answer."}</span>}
+                    </div>
+                  );
+                })()}
                 <div style={{ fontSize: 11.5, color: "#78350F", marginTop: 6 }}>
                   Digits only — no spaces, dashes or letters. A mistyped id is not rejected by anyone
                   downstream; it just sends the money somewhere else. Clearing the box removes the id.

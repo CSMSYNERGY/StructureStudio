@@ -38,12 +38,13 @@ import {
 } from "../_shared/invoicePayment.ts";
 import {
   cardpointeConfigured,
-  CP_DEFAULT_MERCHID,
+  cpEnvLabel,
   cpSurchargeProbe,
   cpTokenizerHeight,
   cpTokenizerOrigin,
   cpTokenizerUrl,
 } from "../_shared/cardpointe.ts";
+import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -113,7 +114,8 @@ type Ctx = {
   clientId: string;
   shortCode: string;
   orderId: string;
-  merchid: string;
+  /** The builder's own MID and system (test or live). Never a deployment default. */
+  merchant: CpMerchant;
   design: Record<string, unknown>;
 };
 
@@ -125,16 +127,18 @@ type Ctx = {
  */
 // deno-lint-ignore no-explicit-any
 async function gate(req: Request, admin: any, identity: any, body: any): Promise<Ctx | Response> {
-  if (!cardpointeConfigured) {
+  // Neither system configured: this deployment takes no cards at all. Which system THIS builder
+  // needs is checked once their settings are read, below.
+  if (!cardpointeConfigured("uat") && !cardpointeConfigured("prod")) {
     return refusal({ error: "Online payments aren't switched on yet." });
   }
 
   const code = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
   if (!/^[A-Za-z0-9_-]{4,32}$/.test(code)) return json({ error: "Invalid quote reference." }, 400);
 
-  const { data: settings, error: sErr } = await admin.from("client_settings")
-    .select("invoice_in_ghl, payments_online_enabled, cardpointe_merchid, business_name")
-    .eq("client_id", identity.clientId).maybeSingle();
+  // payments_online_enabled, cardpointe_merchid and cardpointe_env (migration 296; a database
+  // without it reads as UAT, which is what every charge before it was).
+  const { row: settings, error: sErr } = await readPaymentSettings(admin, identity.clientId, ["invoice_in_ghl", "business_name", "billing_exempt"]);
   if (sErr) return dbFail(req, identity.clientId, "check your builder's settings", sErr);
 
   if (!settings || settings.invoice_in_ghl !== false) {
@@ -146,9 +150,38 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   if (settings.payments_online_enabled !== true) {
     return refusal({ error: "Your builder hasn't switched on online payments yet." }, 503);
   }
-  const merchid = String(settings.cardpointe_merchid || CP_DEFAULT_MERCHID || "").trim();
-  if (!merchid) {
+  // The builder's OWN merchant id and system. No MID is "not set up", never the deployment's
+  // default (which took a MID-less builder's customers' cards into the platform's account).
+  const merchant = cpMerchant(settings);
+  if (!merchant) {
     return refusal({ error: "Your builder hasn't finished setting up payments yet." }, 503);
+  }
+  // ⛔ The test system on a billable builder: the shopper would "pay" with no real money moving while
+  // the order reads paid. set_payments and set_billing refuse to create this; this catches a row
+  // changed by hand. Nothing is sent, and it is filed as a fault for us.
+  if (testModeNeedsExempt(settings)) {
+    await logEdgeError({
+      fn: "customer-pay",
+      req,
+      clientId: identity.clientId,
+      code: "payments_test_mode_billable",
+      message: `${identity.clientId}: customer-pay refused: the builder takes cards on the test system (UAT) but is billable. Nothing was sent.`,
+      context: { env: merchant.env },
+    });
+    return refusal({ error: "Online payments aren't available right now. Nothing was charged. Please try again later, or call your builder." }, 503);
+  }
+  // The builder's system (test or live) has no credentials on this deployment: nothing is sent,
+  // and it is filed as a fault for us (set_payments refuses to create this state).
+  if (!cardpointeConfigured(merchant.env)) {
+    await logEdgeError({
+      fn: "customer-pay",
+      req,
+      clientId: identity.clientId,
+      code: "payments_env_not_configured",
+      message: `${identity.clientId}: customer-pay refused: the builder's ${cpEnvLabel(merchant.env)} CardPointe system has no credentials on this deployment. Nothing was sent.`,
+      context: { env: merchant.env },
+    });
+    return refusal({ error: "Online payments aren't available right now. Nothing was charged. Please try again later, or call your builder." }, 503);
   }
 
   const { data: d, error: dErr } = await admin.from("designs")
@@ -210,7 +243,7 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
     clientId: identity.clientId,
     shortCode: code,
     orderId: String(order.id),
-    merchid,
+    merchant,
     design: d as Record<string, unknown>,
   };
 }
@@ -267,11 +300,11 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
         // The origin is also where the page tokenizes a bank account itself: since the
         // Routing and Checking boxes (2026-10) the numbers go from the browser straight to
         // CardSecure on this origin, never through here.
-        origin: cpTokenizerOrigin(),
-        cardUrl: cpTokenizerUrl("card"),
+        origin: cpTokenizerOrigin(ctx.merchant),
+        cardUrl: cpTokenizerUrl(ctx.merchant, "card"),
         // No current page loads achUrl/achHeight. They stay so a page cached from before
         // the two boxes still renders the old single-field iframe and can still pay.
-        achUrl: cpTokenizerUrl("ach"),
+        achUrl: cpTokenizerUrl(ctx.merchant, "ach"),
         // Served, not hardcoded in the page: at 132px the CVV sat below the fold of a
         // non-scrolling frame and the form was quietly uncompletable.
         cardHeight: cpTokenizerHeight("card"),
@@ -296,7 +329,7 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     // The billing ZIP, typed or (billing:"delivery") the delivery address's. Whether a fee may be
     // charged can turn on where the card is billed, so the probe asks with it when there is one.
     const postal = billingFromRequest(body, ctx.design.contact).postal;
-    const probe = await cpSurchargeProbe(ctx.merchid, probeToken, postal);
+    const probe = await cpSurchargeProbe(ctx.merchant, probeToken, postal);
     const feeCents = probe.applies && probe.percent && decision.ok
       ? Math.round(decision.askCents * (probe.percent / 100))
       : null;
@@ -383,7 +416,7 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
   const billing = billingFromRequest(body, ctx.design.contact);
   const result = await chargeInvoicePayment(admin, {
     clientId: ctx.clientId,
-    merchid: ctx.merchid,
+    merchant: ctx.merchant,
     orderId: ctx.orderId,
     shortCode: ctx.shortCode,
     amountCents: decision.askCents,
