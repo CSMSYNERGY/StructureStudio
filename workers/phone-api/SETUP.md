@@ -243,6 +243,45 @@ None of this is a migration or SQL. The markup, the wait, the pilot list, `armed
 - The fee on a text sent is T-Mobile's ($0.0045). Verizon's is $0.005 and AT&T's $0.0035.
 - With a 1-hour wait, an item Twilio prices later than that keeps its estimate, because the ledger wins.
 
+## 7f. One Twilio sub-account per builder (Workstream 2; off until you turn it on)
+
+Every builder but our own texts and calls from a Twilio sub-account of their own, billed to ours. The switch is `TWILIO_SUBACCOUNTS`, an edge secret AND a var of this Worker (one file, many rails: see 7e), with three values (DEVIATIONS 76 to 78):
+- **unset (off):** today. Nothing is looked up anywhere. The operator console can still make a TEST sub, but nothing uses it.
+- **`manual`:** every sub-account that exists is used (its numbers, texts, calls, `/token`, webhooks), but none is made by itself. Only the console's Create makes one. A builder without one is refused rather than put on our main account for good. This is the pilot and the rollback.
+- **`on`:** as `manual`, and a builder's sub-account is made by itself the first time they buy a number on the Phone tab or first submit their texting registration (`_shared/twilioProvision.ts`).
+
+1. **Before deploying (reads only).**
+   - `npx supabase secrets list`: `PHONE_SELF_SERVE` must be unset. It now opens only when `TWILIO_SUBACCOUNTS` is `on` too, so if it is set today, builder self-serve would quietly close.
+   - Saved texting drafts. A draft's first submit is refused until the switch is on, because it would put the builder on our main account for good:
+     `select status, count(*) from public.sms_registrations where status in ('intake', 'aup_pending', 'ready') and coalesce(customer_profile_sid, a2p_profile_sid, brand_sid, messaging_service_sid, campaign_sid) is null group by 1;`
+     For each builder it finds, either pin them to our main account (if they should stay there) or tell them it waits.
+2. **Migrations 292 and 295** applied (renumbered at apply), each with its RECORD row read back. 295 must read `holdings_guarded` true and `split_today` 0. From then on the database itself refuses a number or a registration on our main account for a builder that has a sub-account.
+3. **Deploy order:** the migrations, then admin-catalog and the rest of the deploy list, then this Worker, and only then push the portal bundle to beta. Until admin-catalog is deployed, the console card only says the server doesn't have the tools yet.
+4. **Edge secrets.**
+   - `TWILIO_AUTH_TOKEN`: the parent's auth token, required. A parent API key can neither create a sub-account nor reach one, so with only a key, Create names the secret to set.
+   - `TWILIO_SUB_APP_FALLBACK_URL` and `TWILIO_SUB_VOICEMAIL_URL`, both required: static TwiML that ANY account may fetch, fetched with GET. ⚠️ **Never a TwiML Bin.** A Console Bin answers only the account that owns it (Twilio's TwiML Bin migration page: "you'll have to replicate it to each account"). The parent's Bins (`PHONE_FALLBACK_URL`, the calls app's fallback from 2.3) would answer every sub with 401: no voicemail for a sub's numbers when calling is off or the Worker is down. A `handler.twilio.com` or `webhooks.twilio.com` URL is refused. One way to host them: in the parent's Twilio console, Functions and Assets, a new Service with three Assets whose visibility is **Public** (Protected checks the request's signature, the same problem as a Bin). Deploy it and copy their `https://<service>.twil.io/...` URLs. Any static https host that doesn't depend on this Worker works too.
+     - `voicemail.xml` (`TWILIO_SUB_VOICEMAIL_URL`): the same greeting as the parent's voicemail Bin, then `<Record action="<the hangup.xml URL>" method="GET" .../>`. The recording sweep files those messages per account.
+     - `hangup.xml`: `<Response><Hangup/></Response>`.
+     - `calling-problem.xml` (`TWILIO_SUB_APP_FALLBACK_URL`): `<Response><Say>Calling is having a problem. Please try again or use your cell.</Say><Hangup/></Response>`.
+   - Optional: `PHONE_API_BASE`, and `TWILIO_EVENT_TYPES` (comma-separated `type` or `type@version`, to copy the parent subscription's list exactly from the phase 0 inventory; without it, the A2P brand, campaign and number-registration types twilio-events acts on, at version 1).
+   - Already set: `TWILIO_ACCOUNT_SID`, `PHONE_WEBHOOK_SECRET`, `TWILIO_EVENTS_SECRET`.
+5. **Push material, into Vault by hand** (the SQL editor, never a file), under exactly these names. A missing one is skipped and shown on the console card. That sub's phones then sign in without incoming-call push until it is loaded and "Add the missing push credentials" is pressed.
+   - `twilio_push_apns_dev_certificate`, `twilio_push_apns_dev_private_key`: the development bundle id's VoIP Services certificate and key, PEM.
+   - `twilio_push_apns_prod_certificate`, `twilio_push_apns_prod_private_key`: the store bundle id's, PEM.
+   - `twilio_push_fcm_secret`: the Firebase service account JSON the parent's FCM credential was made from.
+   - `select vault.create_secret('<the PEM or JSON>', '<name>', 'Twilio push material (migration 295)');` Both APNs credentials are made with Sandbox unticked (item 75's one APNs environment). The VoIP certificate expires 2027-11-05: renew the two apns secrets then, and each sub's own credential.
+6. **The test builder, in this order.**
+   1. Admin, the test builder, Account, "Twilio account", Create (needs can_bill). While the switch is not `on`, it asks you to type the builder's id. Then Check token: both should read accepted. A builder on our main account (our own, or one already holding a number or registration there) is never offered Create.
+   2. Set `TWILIO_SUBACCOUNTS=manual` on the edge (`npx supabase secrets set TWILIO_SUBACCOUNTS=manual`) and in this Worker's `wrangler.jsonc`, then deploy. Nothing changes for any builder without a sub-account. **Everything below needs `manual` or `on`:** with the switch off, buying a number for a builder that has a sub-account is refused (it would land on our main account and split them), and their `/token` and calls still run on the parent.
+   3. Buy a number for the test builder. It lands in the sub, and `sms_numbers.twilio_account_sid` is set. Then mint `/token` for a test user (the issuer is the sub's key, the app the sub's), place a call, and point the number's voice URL at a dead address: the caller still reaches the sub's voicemail TwiML, and within 15 minutes the sweep files the message.
+   4. The phase 6 spike (A2P inside the test sub).
+7. **Switch on:** `TWILIO_SUBACCOUNTS=on` on the edge and in the Worker. From then on, a builder's first number or first texting submit makes their sub-account. New registrations are refused while the switch is not `on` (portal-sms registrationGate.ts), and the Phone tab's `PHONE_SELF_SERVE` opens only with it on.
+8. **Rollback.**
+   - Before any real builder is on a sub-account: unset it.
+   - After that, set it to `manual`. **Never unset it.** Off, this Worker refuses every webhook from a sub's numbers (`wrong_account`), texts go out with our main account's credentials and fail, and registrations in a sub-account wait. `manual` stops new sub-accounts and keeps every existing one working.
+   - Never close a sub that still has numbers: Close refuses, because closing releases them for good. Deleting a builder checks everything first, closes their sub only after the payment-gateway step, and refuses with nothing done while it has a number.
+   - A closed sub-account keeps its builder off calls and texts while its row is on record. To let them start again: `select public.twilio_account_forget('<client id>');` in the SQL editor (it removes only a closed, never-made or pinned row).
+
 ## 8. Prove it (plan section 20, phase 1b)
 
 - A test page calls your cell, and your cell calls the test page. Timing marks appear in `phone_call_events`.

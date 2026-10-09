@@ -178,10 +178,17 @@ import {
 // path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
 import {
   areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
-  numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, twilioCreds, voiceEnv, type HoldResult, type SwitchNumber,
+  numberVoicemailConfig, pickedNumber, smsInboundUrl, subVoicemailUrlOf, switchCalling, voiceEnv, type HoldResult, type SwitchNumber,
 } from "./phoneNumber.ts";
 import { attachToTexting, TEXTING_JOIN_FAILED } from "./phoneNumber.ts";
 import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
+// Workstream 2: every Twilio call below runs as the TENANT'S account, resolved once per request
+// (tenantTwilio). trustHubHttp binds the shared helpers' transport to it.
+import { trustHubHttp } from "../_shared/twilioTrustHub.ts";
+import { resolveTwilioAccount, TwilioAccountError, type TwilioAccount, type TwilioCreds } from "../_shared/twilioAccount.ts";
+// Workstream 2, phase 3: a builder's first number makes their own Twilio sub-account first (only
+// while TWILIO_SUBACCOUNTS is "on"; off, it answers "the parent" without reading anything).
+import { ensureRefusalSentence, ensureTwilioAccount, SUB_WHILE_OFF_SENTENCE, subAccountWhileOff } from "../_shared/twilioProvision.ts";
 // Migration 266: a later number joins the builder's texting setup with portal-sms's own helpers.
 import { attachNumberToService, clearNumberSmsUrl, numberInService } from "../_shared/twilioTrustHub.ts";
 // Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
@@ -9410,6 +9417,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return why ? phoneRefused(why, 403) : null;
   };
 
+  // ── WHICH TWILIO ACCOUNT (Workstream 2) ───────────────────────────────────────────────────
+  // Every Twilio call on this tenant's numbers runs as the tenant's account, resolved AT MOST ONCE
+  // per request and only when a branch asks. While TWILIO_SUBACCOUNTS is not "on" it is the parent
+  // from the environment with no lookup: the same credentials twilioCreds read here before phase 2
+  // (account null = not configured, the old `!creds`). With it on, a tenant with an active
+  // sub-account runs in it; one whose sub is not active yet, or whose lookup fails, gets
+  // tenantTwilioRefused and nothing is sent to Twilio for it.
+  type TenantTwilio = { ok: true; account: TwilioAccount | null } | { ok: false; error: unknown };
+  let tenantTwilioMemo: Promise<TenantTwilio> | null = null;
+  const tenantTwilio = (): Promise<TenantTwilio> =>
+    (tenantTwilioMemo ??= resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k))
+      .then((account): TenantTwilio => ({ ok: true, account }), (error): TenantTwilio => ({ ok: false, error })));
+  const tenantTwilioRefused = (e: unknown): Response => {
+    if (e instanceof TwilioAccountError && e.kind === "not_ready") {
+      return phoneUnavailable("Your phone account is still being set up. Try again in a few minutes.");
+    }
+    logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_account_lookup_failed", severity: "error",
+      message: `The tenant's Twilio account could not be resolved: ${(e as Error)?.message ?? "unknown"}` }).catch(() => {});
+    return filedHere(json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502));
+  };
+
   // The tenant's numbers: EVERY live sms_numbers row, OLDEST first (migration 266, per-person
   // numbers; plan D6's one number per builder is lifted to MAX_NUMBERS). The first is the number
   // every screen before 266 called "your number", and a request that names no number (an older
@@ -9445,10 +9473,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
   // attachToTexting's Twilio and database steps for one number: portal-sms's own helpers, and the
   // row's messaging_service_sid written last (an update that matched nothing is not a success).
-  const textingDeps = (numberId: string) => ({
-    inService: (svc: string, sid: string) => numberInService(svc, sid),
-    attach: (svc: string, sid: string) => attachNumberToService(svc, sid),
-    clearSmsUrl: (sid: string) => clearNumberSmsUrl(sid),
+  const textingDeps = (numberId: string, creds: TwilioCreds) => ({
+    inService: (svc: string, sid: string) => numberInService(svc, sid, trustHubHttp(creds)),
+    attach: (svc: string, sid: string) => attachNumberToService(svc, sid, trustHubHttp(creds)),
+    clearSmsUrl: (sid: string) => clearNumberSmsUrl(sid, trustHubHttp(creds), creds.accountSid),
     record: async (patch: { messaging_service_sid: string; twilio_sid: string }) => {
       const { data, error } = await admin.from("sms_numbers").update(patch)
         .eq("id", numberId).eq("client_id", clientId).is("released_at", null).select("id");
@@ -9483,7 +9511,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   // The number's PN… sid: the row's own, or found by its E.164 for a number recorded without one
   // (a number bought by hand in the console, like the pilot's).
-  const numberSidOf = async (n: PhoneNum, creds: NonNullable<ReturnType<typeof twilioCreds>>):
+  const numberSidOf = async (n: PhoneNum, creds: TwilioCreds):
     Promise<{ ok: true; sid: string } | { ok: false; res: Response }> => {
     if (n.twilio_sid) return { ok: true, sid: n.twilio_sid };
     const found = await findNumberSid({ creds, e164: n.phone_number });
@@ -9509,13 +9537,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         message: `Connecting a number for calls needs ${ve.missing.join(", ")}`, severity: "info" }).catch(() => {});
       return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return { ok: false, res: tenantTwilioRefused(tw.error) };
+    const creds = tw.account;
     if (!creds) return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    // A number in the builder's own sub-account falls back to TWILIO_SUB_VOICEMAIL_URL: the parent's
+    // Bin (PHONE_FALLBACK_URL) answers only the parent (phoneNumber.ts voiceEnv).
+    const vEnv = creds.source === "sub" ? voiceEnv((k) => Deno.env.get(k), true) : ve;
+    if (!vEnv.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_env_missing",
+        message: `Connecting a number for calls needs ${vEnv.missing.join(", ")}`, severity: "info" }).catch(() => {});
+      return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes;
     const sid = sidRes.sid;
     const smsUrl = !n.messaging_service_sid ? smsInboundUrl((k) => Deno.env.get(k)) : null;
-    const config = { ...numberVoiceConfig(ve.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
+    const config = { ...numberVoiceConfig(vEnv.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
     const applied = await applyNumberVoice({ creds, numberSid: sid, config });
     if (!applied.ok) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_config_failed",
@@ -9548,11 +9586,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // (the pilot's) must still be movable off the Worker.
       const fallbackUrl = fallbackUrlOf((k) => Deno.env.get(k));
       if (!fallbackUrl) return fail("PHONE_FALLBACK_URL is not set");
-      const creds = twilioCreds((k) => Deno.env.get(k));
+      const tw = await tenantTwilio();
+      if (!tw.ok) return fail(`the tenant's Twilio account could not be resolved (${tw.error instanceof TwilioAccountError ? tw.error.kind : "error"})`);
+      const creds = tw.account;
       if (!creds) return fail("Twilio credentials are not set");
+      // In a sub-account: its own voicemail TwiML (the parent's Bin answers only the parent), by GET.
+      const onSub = creds.source === "sub";
+      const target = onSub ? subVoicemailUrlOf((k) => Deno.env.get(k)) : fallbackUrl;
+      if (!target) return fail("TWILIO_SUB_VOICEMAIL_URL is not set");
       const sidRes = await numberSidOf(n, creds);
       if (!sidRes.ok) return fail("its sid could not be found");
-      const applied = await applyNumberVoice({ creds, numberSid: sidRes.sid, config: numberVoicemailConfig({ fallbackUrl }) });
+      const applied = await applyNumberVoice({
+        creds, numberSid: sidRes.sid,
+        config: numberVoicemailConfig({ fallbackUrl: target, ...(onSub ? { fallbackMethod: "GET" as const } : {}) }),
+      });
       if (!applied.ok) return fail(`Twilio answered HTTP ${applied.status}, code ${applied.code}`);
       const { error } = await admin.from("sms_numbers").update({ voice_enabled: false })
         .eq("id", n.id).eq("client_id", clientId);
@@ -10272,7 +10319,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const refused = await phoneRolloutGate();
     if (refused) return refused;
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
-    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 })
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 }, tw.account)
       .catch((e: unknown) => ({ failed: e }));
     if (!Array.isArray(results)) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_search_failed",
@@ -10316,12 +10365,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
     }
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // ── WORKSTREAM 2 (review H1): ONE TENANT, ONE ACCOUNT, EVEN WITH THE SWITCH OFF ─────────────
+    // Off, everything runs on the parent, so for a builder an operator already gave a sub-account
+    // (the console's Create works while off) this purchase would land on the parent and split them
+    // across two accounts for good. Read ONLY while the switch is off; with it on or manual the
+    // purchase below resolves to the sub. Builders cannot reach this while off (PHONE_SELF_SERVE
+    // needs TWILIO_SUBACCOUNTS "on"), so the sentence is an operator's.
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    // ── WORKSTREAM 2, PHASE 3: THE BUILDER'S OWN TWILIO ACCOUNT, BEFORE ANY MONEY MOVES ──────────
+    // With TWILIO_SUBACCOUNTS "on", a builder who is not pinned to the parent (our internal account,
+    // or one already holding something there) gets their own sub-account made here, BEFORE the
+    // wallet hold and the purchase, so the number is bought inside it with its own credentials
+    // (tenantTwilio below then resolves to it). Off, this returns "the parent" without a read: today.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (!prov.ok) {
+      if (prov.reason === "not_configured") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_not_configured", severity: "info",
+          message: `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}` }).catch(() => {});
+        return phoneUnavailable(ensureRefusalSentence(prov));
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      // TWILIO_SUBACCOUNTS "manual": this builder's sub-account has to be made (or finished) in the
+      // operator console first, so the number does not land on the parent for good.
+      if (prov.reason === "manual") return json({ error: ensureRefusalSentence(prov), code: `twilio_manual_${prov.code}` }, 409);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+        message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+        context: { step: prov.step, code: prov.code } }).catch(() => {});
+      return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+    }
     // Everything the new number needs, BEFORE any money moves: somewhere for its texts to go
     // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
     // on, the voicemail Bin when it is off).
     const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
-    const ve = voiceEnv((k) => Deno.env.get(k));
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    // Inside a sub-account the number's voicemail is TWILIO_SUB_VOICEMAIL_URL, not the parent's Bin.
+    const ve = voiceEnv((k) => Deno.env.get(k), creds?.source === "sub");
     if (!smsUrl || !ve.ok || !creds) {
       const missing = [!smsUrl ? "SMS_INBOUND_SECRET" : null, ...(ve.ok ? [] : ve.missing), !creds ? "Twilio credentials" : null].filter(Boolean);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_env_missing", severity: "info",
@@ -10354,8 +10437,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
     const phoneOn = (cs as { phone_status?: string } | null)?.phone_status === "on";
 
+    // The row records which account the number lives in (migration 292): the sub's SID, or nothing
+    // for the parent (exactly the row this wrote before sub-accounts).
+    const subAccountSid = creds.source === "sub" ? creds.accountSid : null;
     const out = await buyCallingNumber({ clientId, wanted, recorded: liveRows.map((r) => String(r.phone_number)) }, {
-      findPurchasedNumbers, purchaseNumber, releaseNumber,
+      // In the tenant's own account (its sub-account once TWILIO_SUBACCOUNTS is on).
+      findPurchasedNumbers: (id) => findPurchasedNumbers(id, creds),
+      purchaseNumber: (o) => purchaseNumber(o, creds),
+      releaseNumber: (sid) => releaseNumber(sid, creds),
       hold: takeNumberHold,
       capture: async (holdId, b) => {
         const { error } = await admin.rpc("wallet_capture", {
@@ -10375,7 +10464,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       },
       record: async (b) => {
         const { data, error } = await admin.from("sms_numbers")
-          .insert(callingOnlyNumberRow(clientId, b))
+          .insert(callingOnlyNumberRow(clientId, b, subAccountSid))
           .select("id, phone_number, twilio_sid").single();
         return error || !data ? { ok: false, error: error ?? { message: "no row returned" } } : { ok: true, row: data };
       },
@@ -10420,7 +10509,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     let joined = false;
     let textingWarning: string | null = null;
     if (serviceSid) {
-      const att = await attachToTexting({ serviceSid, numberSid: bought.sid }, textingDeps(String(row.id)));
+      const att = await attachToTexting({ serviceSid, numberSid: bought.sid }, textingDeps(String(row.id), creds));
       joined = att.ok;
       if (!att.ok) {
         textingWarning = TEXTING_JOIN_FAILED;
@@ -10493,11 +10582,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!serviceSid) {
       return json({ error: "Texting isn't on for this account yet. Finish the Text Messaging tab first; your main number is used for texting when the carriers approve it." }, 409);
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
     if (!creds) return phoneUnavailable("Texting setup isn't available on this server yet.");
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
-    const att = await attachToTexting({ serviceSid, numberSid: sidRes.sid }, textingDeps(String(n.id)));
+    const att = await attachToTexting({ serviceSid, numberSid: sidRes.sid }, textingDeps(String(n.id), creds));
     if (!att.ok) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
         message: `A number did not join the texting setup (stopped at ${att.step}): ${(att.error as { message?: string } | null)?.message ?? "unknown"}`,
@@ -10542,7 +10633,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       info = parsed.info;
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
     if (!trustHubConfigured() || !creds) return phoneUnavailable("Caller ID registration isn't available on this server yet.");
 
     const numRes = await phoneNumberRows();
@@ -10579,7 +10672,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       internal,
       primaryProfileSid,
       numberSid: sidRes.sid,
-    }, { numberOnProfile: (p, num) => numberOnProfile(p, num) });
+    }, { numberOnProfile: (p, num) => numberOnProfile(p, num, trustHubHttp(creds)) });
     if (!prof.ok) {
       if (prof.kind === "refused") return json({ error: prof.error }, prof.status);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
@@ -10610,8 +10703,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .eq("id", n.id).eq("client_id", clientId).eq("caller_id_lock_until", lockUntil);
         },
       },
-      fetchProfile: (sid) => fetchCustomerProfile(sid),
-      setup: (s) => setupVoiceTrust(s),
+      fetchProfile: (sid) => fetchCustomerProfile(sid, trustHubHttp(creds)),
+      setup: (s) => setupVoiceTrust(s, trustHubHttp(creds)),
       write: trustWrite(n.id),
     });
     if (!out.ok) {
@@ -10637,7 +10730,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "phone_trust_status") {
     const refused = await phoneOperatorGate();
     if (refused) return refused;
-    if (!trustHubConfigured() || !twilioCreds((k) => Deno.env.get(k))) {
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    if (!trustHubConfigured() || !creds) {
       return phoneUnavailable("Caller ID registration isn't available on this server yet.");
     }
     const numRes = await phoneNumberRows();
@@ -10655,7 +10751,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
     }
     const out = await runTrustStatus((tr.data ?? {}) as TrustRow, {
-      fetchTrustProduct: (sid) => fetchTrustProduct(sid),
+      fetchTrustProduct: (sid) => fetchTrustProduct(sid, trustHubHttp(creds)),
       write: trustWrite(n.id),
     });
     if (!out.ok) {

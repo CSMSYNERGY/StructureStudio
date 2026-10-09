@@ -2376,6 +2376,147 @@ function AdminClientPanes({ sub, clientId, clientRow, master, masterErr, feature
   );
 }
 
+// ── The builder's own Twilio account (Workstream 2, phase 9) ────────────────────────────────
+// Every builder but our own texts and calls from a Twilio sub-account of theirs, billed to ours
+// (Carolyn 2026-10-08). It is made by itself, once TWILIO_SUBACCOUNTS is on, when they get their
+// first number or first submit their texting registration (admin-catalog -> _shared/
+// twilioProvision.ts). This card shows where it stands and lets an operator make one by hand (the
+// first TEST account, while the switch is still off), re-check one, suspend it, or close it. SIDs are
+// masked by the server; nothing secret ever reaches this page. Create and Close are on the money
+// grant (can_bill). Close is typed, because Twilio releases every number in a closed account for
+// good; so is Create whenever the switch is not "on" (review M4: there it is the only way a
+// sub-account is made, and a closed one can never be undone).
+function AdmTwilioAccount({ clientId, label, onFlash }) {
+  const [acct, setAcct] = useState(null);
+  const [err, setErr] = useState(null);
+  // The server has no such action yet (admin-catalog deployed before this card): said quietly.
+  const [notDeployed, setNotDeployed] = useState(false);
+  const [busy, setBusy] = useState(null);
+
+  const load = useCallback(async (check) => {
+    setErr(null);
+    try {
+      const r = await adminApi("twilio_account_get", check ? { clientId, check: true } : { clientId });
+      setAcct((r && r.account) || null);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setNotDeployed(true); return; }
+      setErr(e.message || "Couldn't load this builder's phone account.");
+    }
+  }, [clientId]);
+  useEffect(() => { setAcct(null); setNotDeployed(false); load(false); }, [load]);
+
+  const run = async (kind, action, body, okMsg) => {
+    setBusy(kind);
+    try {
+      const r = await adminApi(action, Object.assign({ clientId }, body));
+      if (r && r.account) setAcct(r.account);
+      onFlash({ ok: okMsg(r || {}) });
+    } catch (e) {
+      onFlash({ err: e.message });
+      await load(false);
+    }
+    setBusy(null);
+  };
+
+  const sub = acct && acct.kind === "sub";
+  const status = sub ? acct.status : null;
+  const mode = (acct && acct.switchMode) || (acct && acct.switchOn ? "on" : "off");
+  const installed = !acct || acct.installed !== false;
+  const canCreate = installed && acct && (acct.kind === "none" ? !acct.parentReason
+    : sub && (status === "provisioning" || status === "failed" || status === "suspended" || status === "active"));
+  const createLabel = status === "suspended" ? "Reactivate"
+    : status === "active" ? ((acct.pushSkipped || []).length ? "Add the missing push credentials" : "Re-check set-up")
+    : status === "provisioning" || status === "failed" ? "Finish setting it up" : "Create Twilio account";
+
+  const create = () => {
+    let confirmId = clientId;
+    if (status === "suspended") {
+      if (!window.confirm(`Reactivate ${label}'s Twilio account? Their calls and texts start working again.`)) return;
+    } else if (status === "active") {
+      if (!window.confirm(`${createLabel} for ${label}? Every piece of their Twilio account is checked again and anything missing is filled in `
+        + "(push credentials loaded since, an auth token rotated in Twilio, the calling app's URLs). Nothing is made twice.")) return;
+    } else {
+      const what = "This makes a Twilio sub-account billed to ours, with its own key, calling app, push credentials and event stream. "
+        + "Pressing it again after a failure carries on from where it stopped; nothing is made twice.";
+      if (mode !== "on") {
+        // Typed, like Close: with the switch not "on" this is the only way a sub-account is made.
+        const typed = window.prompt(`${createLabel} for ${label}?\n\n`
+          + (mode === "manual" ? "TWILIO_SUBACCOUNTS is \"manual\": this builder's calls and texts move into it as soon as it is made.\n\n"
+            : "TWILIO_SUBACCOUNTS is off, so this is a TEST account: make one only for a test builder. It is used only once the switch is \"manual\" or \"on\".\n\n")
+          + `${what}\n\nType ${clientId} to make it.`);
+        if (typed == null) return;
+        if (typed.trim() !== clientId) { onFlash({ err: "That isn't this builder's id, so nothing was made." }); return; }
+        confirmId = typed.trim();
+      } else if (!window.confirm(`${createLabel} for ${label}?\n\n${what}`)) return;
+    }
+    run("create", "twilio_account_provision", { confirmClientId: confirmId }, (r) => (r.reactivated
+      ? `${label}'s Twilio account is active again.`
+      : `${label} has its own Twilio account.${(r.pushSkipped || []).length ? ` No push credential yet for: ${r.pushSkipped.join(", ")} (load it in Vault, then press again).` : ""}`));
+  };
+  const suspend = () => {
+    if (!window.confirm(`Suspend ${label}'s Twilio account? Their calls and texts stop until you reactivate it. Their numbers are kept.`)) return;
+    run("suspend", "twilio_account_suspend", {}, () => `${label}'s Twilio account is suspended.`);
+  };
+  const close = () => {
+    const typed = window.prompt(`CLOSE ${label}'s Twilio account for good? A closed Twilio account can't be reopened, and every number in it is released. Release their numbers first (it refuses while any are left).
+
+Type ${clientId} to close it.`);
+    if (typed == null) return;
+    if (typed.trim() !== clientId) { onFlash({ err: "That isn't this builder's id, so nothing was closed." }); return; }
+    run("close", "twilio_account_close", { confirmClientId: typed.trim() }, () => `${label}'s Twilio account is closed.`);
+  };
+  const check = async () => { setBusy("check"); await load(true); setBusy(null); };
+
+  const tone = status === "active" ? "good" : status === "suspended" || status === "failed" ? "warn" : status === "closed" ? "danger" : "neutral";
+  const row = (k, v) => (
+    <div style={ADM_ROW}>
+      <div style={{ width: 170, fontSize: 12, fontWeight: 700, color: "#64748B", flexShrink: 0 }}>{k}</div>
+      <div style={{ fontSize: 12.5, color: "#1E293B", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>{v}</div>
+    </div>
+  );
+  const have = (on, name) => <AdmChip key={name} tone={on ? "good" : "neutral"}>{name}{on ? "" : ": none"}</AdmChip>;
+  const checkChip = (v) => <AdmChip tone={v === "ok" ? "good" : v === "missing" ? "neutral" : "danger"}>{v === "ok" ? "accepted" : v}</AdmChip>;
+  const btn = (kind, text, onClick, bg, fg) => (
+    <button type="button" onClick={onClick} disabled={!!busy}
+      style={{ ...S.btn(bg, fg), padding: "8px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1, cursor: busy ? "default" : "pointer" }}>
+      {busy === kind ? "Working…" : text}
+    </button>
+  );
+
+  return (
+    <div style={S.card} data-adm-twilio-account>
+      <CardHead title="Twilio account"
+        desc="Where this builder's texting and calling live. Every builder but our own gets a Twilio sub-account of their own, billed to ours: it is made by itself when they get their first number or submit their texting registration, once sub-accounts are switched on." />
+      {err && <div style={S.err}>{err}</div>}
+      {notDeployed && <div style={{ fontSize: 12.5, color: "#64748B" }}>This server doesn't have the Twilio account tools yet (admin-catalog is older than this page).</div>}
+      {!acct && !err && !notDeployed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {acct && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migrations 292 and 295 aren't applied on this database yet, so there is nothing to show.</div>}
+      {acct && installed && (
+        <div>
+          {row("Switch", <AdmChip tone={mode === "on" ? "on" : mode === "manual" ? "warn" : "neutral"}
+            title={mode === "manual" ? "Existing sub-accounts are used; new ones are made only here" : undefined}>{`TWILIO_SUBACCOUNTS ${mode}`}</AdmChip>)}
+          {row("Account", acct.kind === "sub"
+            ? <><AdmChip tone={tone}>{status}</AdmChip><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.accountSid || "not made yet"}</span></>
+            : <span>{acct.kind === "parent" ? "Stays on our main account (pinned)." : acct.parentReason ? `Stays on our main account: it has ${acct.parentReason}.` : "None yet: on our main account until one is made."}</span>)}
+          {sub && row("Set-up step", <><span>{acct.step === "done" ? "finished" : acct.step || "not started"}</span>{acct.lastError && <AdmChip tone="warn" title="The step and Twilio's code where it last stopped">{acct.lastError}</AdmChip>}{acct.lockedUntil && <AdmChip tone="on">being set up now</AdmChip>}</>)}
+          {sub && row("Key and calling app", <><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.apiKeySid || "no key"}</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.twimlAppSid || "no app"}</span></>)}
+          {sub && row("Push credentials", <>{have(acct.push && acct.push.apns_dev, "iPhone dev")}{have(acct.push && acct.push.apns_prod, "iPhone")}{have(acct.push && acct.push.fcm, "Android")}</>)}
+          {sub && row("Event Streams", <>{have(acct.sink, "sink")}{have(acct.subscription, "subscription")}</>)}
+          {row("Live numbers", <span>{acct.liveNumbers == null ? "unknown" : acct.liveNumbers}</span>)}
+          {acct.tokenCheck && row("Token check", <><span>auth token</span>{checkChip(acct.tokenCheck.authToken)}<span>API key</span>{checkChip(acct.tokenCheck.apiKey)}</>)}
+          {status === "closed" && row("Closed", <span>Closed for good. This builder stays off calls and texts while the closed account is on record: deleting the builder removes it, or run <code>select public.twilio_account_forget('{clientId}');</code> (SETUP.md 7f).</span>)}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+            {canCreate && btn("create", createLabel, create, ACCENT, "#FFF")}
+            {sub && acct.accountSid && status !== "closed" && btn("check", "Check token", check, "#F1F5F9", "#334155")}
+            {sub && status === "active" && btn("suspend", "Suspend", suspend, "#FEF3C7", "#92400E")}
+            {sub && acct.accountSid && status !== "closed" && btn("close", "Close…", close, "#FEF2F2", "#DC2626")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadClients, onDeleted }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("owner");
@@ -2646,6 +2787,9 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
           </div>
         </div>
       )}
+
+      {/* Workstream 2, phase 9: the builder's own Twilio sub-account (AdmTwilioAccount above). */}
+      <AdmTwilioAccount clientId={clientId} label={label} onFlash={onFlash} />
 
       {/* The only tinted card in the shell, which is what makes the tint mean something.
           Last card on the tab, below a scroll — unreachable by accident, and impossible to

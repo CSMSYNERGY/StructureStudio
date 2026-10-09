@@ -121,6 +121,7 @@ import {
   type TwilioLegCost,
 } from "../twilioRest";
 import { requestAutoTopup } from "../wallet";
+import { envForClient, subaccountsOnFor } from "../twilioAccount";
 
 /** Outside requests per run, Supabase and Twilio together. */
 export const REQUEST_CAP = 300;
@@ -498,6 +499,9 @@ interface Run {
   ledger: Map<number, LedgerLine>;
   /** Tenants a line was posted for this run (the auto top-up check). */
   charged: Set<string>;
+  /** Businesses whose Twilio account this run has resolved (Workstream 2): each one's first
+   *  lookup is counted against the budget like any other request (review L4). */
+  accountsResolved: Set<string>;
 }
 
 /** A posted usage debit, as the queue row must record it. */
@@ -541,7 +545,7 @@ export async function runUsageCharges(env: Env, admin: Admin, now = new Date(), 
   };
   const run: Run = {
     env, admin, now, metersOn, settings: DEFAULT_SETTINGS, budget,
-    exempt: new Map(), armed: new Map(), ledger: new Map(), charged: new Set(),
+    exempt: new Map(), armed: new Map(), ledger: new Map(), charged: new Set(), accountsResolved: new Set(),
   };
   let failure: string | null = null;
   try {
@@ -614,13 +618,26 @@ async function processBatch(run: Run, rows: ChargeRow[], counts: UsageRunCounts)
       return true;
     }
     try {
+      // Twilio is asked in the account the row's business lives in (Workstream 2, phase 5), so a
+      // sub-account's call, text and recording are priced from the sub's own records. Off: `run`
+      // itself, nothing looked up. A sub that cannot be resolved is retried like any Twilio error.
+      // The first lookup per business is a request (twilio_account_creds), counted like one; the
+      // isolate's cache answers the rest.
+      let r = run;
+      if (subaccountsOnFor(run.env)) {
+        if (!run.accountsResolved.has(row.client_id)) {
+          run.budget.spend();
+          run.accountsResolved.add(row.client_id);
+        }
+        r = { ...run, env: await envForClient(run.env, run.admin, row.client_id) };
+      }
       const state = row.source === "call"
-        ? await chargeCall(run, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
+        ? await chargeCall(r, row, calls.get(row.source_id) ?? null, events.get(row.source_id) ?? [])
         : row.source === "sms"
-          ? await chargeSms(run, row, msgs.get(row.source_id) ?? null)
+          ? await chargeSms(r, row, msgs.get(row.source_id) ?? null)
           : row.source === "recording"
-            ? await chargeRecording(run, row, recs.get(row.source_id) ?? null)
-            : await chargeTranscription(run, row, recs.get(row.source_id) ?? null);
+            ? await chargeRecording(r, row, recs.get(row.source_id) ?? null)
+            : await chargeTranscription(r, row, recs.get(row.source_id) ?? null);
       counts[state]++;
     } catch (e) {
       if (e instanceof BudgetSpent) {
@@ -1339,6 +1356,9 @@ export type UsageSnapshotSummary =
  * refreshes the day). What the account was really billed, to check the per-item costs and the
  * carrier-fee estimate against. Runs with cost capture, like the shadow rows.
  */
+// ⚠️ THE PARENT'S ONLY, until Workstream 2's phase 7: Usage Records include sub-accounts by
+// default, and the per-account key and loop are that phase's (twilio_usage_daily keeps its
+// (day, category) primary key until then).
 export async function snapshotTwilioUsage(env: Env, admin: Admin, now = new Date()): Promise<UsageSnapshotSummary> {
   if (env.PHONE_USAGE_METERS !== "on" && env.PHONE_USAGE_COST_CAPTURE === "off") return { ran: false, reason: "switched_off" };
   if (!twilioConfigured(env)) return { ran: false, reason: "not_configured" };

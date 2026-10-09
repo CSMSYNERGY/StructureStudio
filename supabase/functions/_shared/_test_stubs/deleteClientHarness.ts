@@ -16,7 +16,7 @@
 // Tenants, ids and keys are made up (the repo is public).
 
 // deno-lint-ignore-file no-explicit-any
-import { stubDb, stubStorage } from "./supabase_stub.ts";
+import { stubDb, stubRpc, stubStorage } from "./supabase_stub.ts";
 
 export const GATEWAY_URL = "https://gateway.test";
 export const SECURITY_KEY = "sk_test_not_a_real_key";
@@ -70,6 +70,21 @@ export interface World {
   failWipe?: string;
   /** The gateway's answer to one call: a body string, an HTTP status, or a throw (no answer). */
   gateway?: (params: Record<string, string>) => string | number;
+  /** Workstream 2, phase 9: the tenant's twilio_accounts row and what Twilio holds for it. Absent:
+   *  no row (every test before phase 9), and Twilio is never called. */
+  twilio?: {
+    row: { kind: string; status: string; account_sid: string | null } | null;
+    /** Numbers Twilio lists in the sub (IncomingPhoneNumbers). */
+    numbers?: string[];
+    /** Twilio's HTTP status for the close; 200 by default. */
+    closeStatus?: number;
+    /** The twilio_accounts read fails with this code (PGRST205: the table is not there yet). */
+    readError?: string;
+    /** The accounts Twilio lists under the tenant's FriendlyName (a create whose answer was lost). */
+    named?: { sid: string; status: string }[];
+    /** twilio_account_forget fails with this code (PGRST202: migration 295 not applied). */
+    forgetError?: string;
+  };
 }
 
 export interface Run {
@@ -83,10 +98,12 @@ export interface Run {
   audits: any[];
   updates: { table: string; payload: any; filters: [string, string, unknown][] }[];
   faultRows: any[];
+  /** Twilio requests, in order: "<METHOD> <path>" (also in `log` as "tw ..."). */
+  twilioCalls: string[];
 }
 
 export async function deleteClient(handler: (req: Request) => Promise<Response>, world: World): Promise<Run> {
-  const run: Run = { status: 0, body: null, raw: "", log: [], gatewayCalls: [], wipes: [], audits: [], updates: [], faultRows: [] };
+  const run: Run = { status: 0, body: null, raw: "", log: [], gatewayCalls: [], wipes: [], audits: [], updates: [], faultRows: [], twilioCalls: [] };
 
   const from = (table: string) => {
     const call: any = { table, op: "select", filters: [] as [string, string, unknown][], opts: undefined, payload: undefined };
@@ -110,6 +127,10 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       }
       if (call.op === "update") {
         run.updates.push({ table, payload: call.payload, filters: call.filters });
+        if (table === "twilio_accounts" && world.twilio?.row && eqv("client_id") === TENANT) {
+          world.twilio.row = { ...world.twilio.row, ...call.payload };
+          return { data: [{ client_id: TENANT }], error: null, count: 1 };
+        }
         if (table === "billing_subscriptions" && eqv("client_id") === TENANT) {
           // A new array: callers share fixture arrays across tests, so the rows are never mutated.
           world.subs = world.subs.map((s) => (s.id === eqv("id") ? { ...s, status: call.payload?.status ?? s.status } : s));
@@ -128,6 +149,9 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
           return { data: eqv("client_id") === TENANT ? world.subs : [], error: null };
         case "billing_customers":
           return { data: eqv("client_id") === TENANT && world.vault ? { vault_id: world.vault } : null, error: null };
+        case "twilio_accounts":
+          if (world.twilio?.readError) return { data: null, error: { code: world.twilio.readError, message: "twilio_accounts read failed" } };
+          return { data: eqv("client_id") === TENANT && world.twilio?.row ? { ...world.twilio.row } : null, error: null };
         default:
           return { data: table === "client_users" ? [] : null, error: null };
       }
@@ -152,6 +176,21 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
   const realFetch = globalThis.fetch;
   globalThis.fetch = ((input: Request | URL | string, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (world.twilio && url.startsWith("https://api.twilio.com/")) {
+      const u = new URL(url);
+      const line = `${init?.method ?? "GET"} ${u.pathname}`;
+      run.twilioCalls.push(line);
+      run.log.push(`tw ${line}`);
+      if (/\/IncomingPhoneNumbers\.json$/.test(u.pathname)) {
+        return Promise.resolve(new Response(JSON.stringify({ incoming_phone_numbers: (world.twilio.numbers ?? []).map((n) => ({ phone_number: n })) }), { status: 200 }));
+      }
+      if (/\/Accounts\.json$/.test(u.pathname) && (init?.method ?? "GET") === "GET") {
+        const named = (world.twilio.named ?? []).map((a) => ({ sid: a.sid, status: a.status, friendly_name: u.searchParams.get("FriendlyName") }));
+        return Promise.resolve(new Response(JSON.stringify({ accounts: named }), { status: 200 }));
+      }
+      const status = world.twilio.closeStatus ?? 200;
+      return Promise.resolve(new Response(JSON.stringify(status === 200 ? { status: "closed" } : { code: 20005 }), { status }));
+    }
     if (url !== `${GATEWAY_URL}/api/transact.php`) {
       return Promise.reject(new Error(`deleteClientHarness: unexpected fetch to ${url}`));
     }
@@ -169,10 +208,23 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
     return Promise.resolve(typeof out === "number" ? new Response("", { status: out }) : new Response(out, { status: 200 }));
   }) as typeof fetch;
 
-  const env = { SUPABASE_URL: "http://supabase.test", SUPABASE_SERVICE_ROLE_KEY: "service-role-test", ADMIN_PASSWORD };
+  const env: Record<string, string> = { SUPABASE_URL: "http://supabase.test", SUPABASE_SERVICE_ROLE_KEY: "service-role-test", ADMIN_PASSWORD };
+  // The parent's SID and auth token: closing a sub-account is done with them (Workstream 2).
+  if (world.twilio) Object.assign(env, { TWILIO_ACCOUNT_SID: "AC" + "0".repeat(32), TWILIO_AUTH_TOKEN: "parent-auth-token-test" });
   const prior = Object.fromEntries(Object.keys(env).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
   stubDb.from = from;
+  // 295's twilio_account_forget, the delete's last Twilio step (only ever called with a row).
+  stubRpc.rpc = (fn: string, args?: any) => {
+    run.log.push(`db rpc ${fn}`);
+    if (fn === "twilio_account_forget" && args?.p_client_id === TENANT) {
+      if (world.twilio?.forgetError) return Promise.resolve({ data: null, error: { code: world.twilio.forgetError, message: "forget failed" } });
+      const r = world.twilio?.row;
+      world.twilio = world.twilio ? { ...world.twilio, row: null } : world.twilio;
+      return Promise.resolve({ data: !r ? "none" : r.kind === "parent" ? "parent_pin" : r.account_sid ? "closed_sub" : "never_created", error: null });
+    }
+    return Promise.reject(new Error(`deleteClientHarness: unexpected rpc ${fn}`));
+  };
   stubStorage.from = (bucket: string) => ({
     list: () => { run.log.push(`storage list ${bucket}`); return Promise.resolve({ data: [], error: null }); },
     remove: () => Promise.resolve({ data: [], error: null }),
@@ -189,6 +241,7 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
   } finally {
     globalThis.fetch = realFetch;
     stubDb.from = null;
+    stubRpc.rpc = null;
     stubStorage.from = null;
     for (const [k, v] of Object.entries(prior)) {
       if (v === undefined) Deno.env.delete(k);

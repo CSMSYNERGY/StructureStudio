@@ -19,6 +19,11 @@
 //
 // THE LIST IS READ TO THE END (up to LIST_MAX). It used to stop at the newest 200; once calls are
 // recorded, those 200 can all be call recordings, hiding a real voicemail behind them.
+//
+// EVERY ACCOUNT (Workstream 2, phase 5). A sub-account's recordings are listed only by the sub
+// itself, so with TWILIO_SUBACCOUNTS on the sweep runs once for the parent and once for each active
+// sub-account (twilioAccount.ts cronAccounts), each with that account's credentials, and a sub's
+// run files only recordings on its own business's numbers. Off: the parent alone, exactly as before.
 
 import type { Env } from "../env";
 import { adminClient, must, routeForNumber, type Admin } from "../db";
@@ -26,6 +31,7 @@ import { phoneDigits } from "../identity";
 import { logFault } from "../log";
 import { fetchCall, listRecordings, twilioConfigured, type TwilioRecording } from "../twilioRest";
 import { fileVoicemail, MIN_VOICEMAIL_SECONDS } from "../routes/voice";
+import { cronAccounts } from "../twilioAccount";
 
 const MAX_PER_RUN = 50;
 /**
@@ -36,7 +42,9 @@ export const LIST_MAX = 2000;
 /** The one recording source that is a voicemail: the <Record> verb (Twilio's Recording.source). */
 export const VOICEMAIL_SOURCE = "RecordVerb";
 
-async function callIdForRecording(env: Env, admin: Admin, rec: TwilioRecording, known: Map<string, string>): Promise<string | null> {
+async function callIdForRecording(
+  env: Env, admin: Admin, rec: TwilioRecording, known: Map<string, string>, onlyClient: string | null,
+): Promise<string | null> {
   const existing = known.get(rec.call_sid);
   if (existing) return existing;
 
@@ -44,6 +52,8 @@ async function callIdForRecording(env: Env, admin: Admin, rec: TwilioRecording, 
   if (!tc || tc.direction !== "inbound") return null;
   const info = await routeForNumber(admin, tc.to);
   if (!info) return null; // not a number this product answers
+  // A sub-account's recording is only ever its own business's (one tenant, one account).
+  if (onlyClient && info.client_id !== onlyClient) return null;
 
   let contactId: string | null = null;
   const digits = phoneDigits(tc.from);
@@ -70,6 +80,26 @@ async function callIdForRecording(env: Env, admin: Admin, rec: TwilioRecording, 
 export async function recordingSweep(env: Env, now = new Date()): Promise<{ checked: number; filed: number }> {
   if (!twilioConfigured(env)) return { checked: 0, filed: 0 };
   const admin = adminClient(env);
+  const out = { checked: 0, filed: 0 };
+  // The parent first; a sub's failure is logged and the others go on. A failure of the parent's is
+  // the job's failure, as it always was, but only after every sub has had its turn.
+  let parentError: unknown = null;
+  for (const a of await cronAccounts(env, admin, { now: now.getTime() })) {
+    try {
+      const r = await sweepAccount(a.env, admin, now, a.clientId);
+      out.checked += r.checked;
+      out.filed += r.filed;
+    } catch (e) {
+      if (!a.clientId) { parentError = e; continue; }
+      await logFault({ code: "recording_sweep_failed", clientId: a.clientId, message: `The voicemail sweep failed for a sub-account: ${(e as Error).message}` });
+    }
+  }
+  if (parentError) throw parentError;
+  return out;
+}
+
+/** One account's sweep. `onlyClient`: a sub-account's business (null for the parent). */
+async function sweepAccount(env: Env, admin: Admin, now: Date, onlyClient: string | null): Promise<{ checked: number; filed: number }> {
   // Twilio filters by DAY, so yesterday is included to cover a run just after midnight UTC.
   const since = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
   const listed = await listRecordings(env, since, LIST_MAX);
@@ -118,7 +148,7 @@ export async function recordingSweep(env: Env, now = new Date()): Promise<{ chec
   let count = 0;
   for (const rec of missing) {
     try {
-      const callId = await callIdForRecording(env, admin, rec, known);
+      const callId = await callIdForRecording(env, admin, rec, known, onlyClient);
       if (callId && await fileVoicemail(admin, callId, rec.sid, Number(rec.duration))) count++;
     } catch (e) {
       await logFault({ code: "recording_sweep_item_failed", message: (e as Error).message, context: { recording: rec.sid } });

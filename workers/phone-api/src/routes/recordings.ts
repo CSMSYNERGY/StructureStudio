@@ -16,6 +16,7 @@ import { CALL_COLUMNS, must, type CallRow } from "../db";
 import { ApiError, ok, UUID_RE } from "../http";
 import { recordingMedia } from "../twilioRest";
 import { mayViewCall, resolveCall } from "./calls";
+import { callerTwilioEnv } from "../twilioAccount";
 
 interface RecordingRead {
   id: string;
@@ -28,6 +29,8 @@ interface RecordingRead {
 
 export async function recordingAudio(env: Env, _ec: Ctx, req: Request, id: string): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const notFound = () => new ApiError("not_found", "That recording wasn't found.");
   if (!UUID_RE.test(id)) throw notFound();
   const rec = must(

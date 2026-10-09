@@ -15,6 +15,7 @@ import { dropRecording, GREETING_PURPOSE, GREETING_RING_SECONDS, GREETING_SID_RE
 import { createCall, recordingMedia, type TwilioError } from "../twilioRest";
 import { hook } from "../urls";
 import { SETTINGS_COLUMNS, settingsOut, type SettingsRow } from "./me";
+import { callerTwilioEnv } from "../twilioAccount";
 
 // ── POST /settings/me/greeting/record ───────────────────────────────────────────────
 
@@ -39,6 +40,8 @@ const WAIT_TEXT = "Your phone is already ringing for your greeting. Try again in
  */
 export async function recordGreeting(env: Env, ec: Ctx, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   if (!c.ctx.number) throw new ApiError("no_number");
   const now = Date.now();
   const last = lastRing.get(c.userId) ?? 0;
@@ -82,6 +85,8 @@ async function myRow(c: Awaited<ReturnType<typeof requireCaller>>): Promise<Sett
  */
 export async function myGreetingAudio(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const sid = (await myRow(c))?.greeting_recording_sid ?? null;
   if (!sid || !GREETING_SID_RE.test(sid)) throw new ApiError("not_found", "You haven't recorded a greeting.");
   let media: Response;
@@ -116,6 +121,8 @@ export async function myGreetingAudio(env: Env, req: Request): Promise<Response>
  */
 export async function clearGreeting(env: Env, ec: Ctx, req: Request): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const row = await myRow(c);
   const sid = row?.greeting_recording_sid ?? null;
   if (!sid) return ok({ settings: settingsOut(row) });

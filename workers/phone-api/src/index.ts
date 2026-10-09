@@ -20,6 +20,7 @@ import {
 } from "./http";
 import { logFault } from "./log";
 import { verifyTwilioRequest } from "./twilioSignature";
+import { webhookAccountLookup, webhookEnv } from "./twilioAccount";
 import { afterDial, applyStatus, inbound, outbound, screen, transcription, voicemail } from "./routes/voice";
 import { conferenceEvent } from "./conference";
 import { greetingAudio, voiceGreeting } from "./greeting";
@@ -64,18 +65,26 @@ const VOICE_PATHS = new Set([
   "/voice/greeting",
 ]);
 
-async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
+async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  const check = await verifyTwilioRequest(env, req);
+  // Workstream 2, phase 4: the account lookup is handed over but only used while
+  // TWILIO_SUBACCOUNTS is "on" (twilioSignature.ts); off, this is the parent check it always was.
+  const check = await verifyTwilioRequest(envIn, req, { accountBySid: webhookAccountLookup(envIn, () => adminClient(envIn)) });
   if (!check.ok) {
-    const misconfigured = check.reason === "no_webhook_secret";
+    // A missing secret, an account lookup that failed, or (sub-accounts on) a missing parent token
+    // is OUR fault: an error. A bad key or signature is someone else's request being correctly
+    // refused: info, and throttled.
+    const misconfigured = check.reason === "no_webhook_secret" || check.reason === "account_lookup_failed"
+      || check.reason === "parent_token_missing";
     ec.waitUntil(logFault({
       code: `twilio_${check.reason}`,
-      // A missing secret is OUR fault and stops every call: an error. A bad key or signature is
-      // someone else's request being correctly refused: info, and throttled.
       severity: misconfigured ? "error" : "info",
-      message: misconfigured
+      message: check.reason === "no_webhook_secret"
         ? "Refusing every Twilio request: PHONE_WEBHOOK_SECRET is not set."
+        : check.reason === "account_lookup_failed"
+        ? `Refused a Twilio webhook on ${path}: the account its AccountSid names could not be looked up.`
+        : check.reason === "parent_token_missing"
+        ? `Refused the parent account's Twilio webhook on ${path}: TWILIO_SUBACCOUNTS is on (or manual) but TWILIO_AUTH_TOKEN is not set, and with sub-accounts every webhook must be signed.`
         : `Refused a Twilio webhook (${check.reason}) on ${path}.`,
       req,
       throttleMs: misconfigured ? 5 * 60_000 : 60_000,
@@ -90,6 +99,12 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
       message: "TWILIO_AUTH_TOKEN is not set: Twilio webhooks are accepted on the ?key= secret alone, without checking X-Twilio-Signature.",
     }));
   }
+  // The account the webhook came from rides on the handler's Env while the switch is on, so a handler
+  // that resolves a tenant can refuse one in another account (twilioAccount.ts tenantMatchesWebhook),
+  // and a SUB's webhook runs every Twilio REST call of its handler in that sub, with the SID and auth
+  // token its signature was just checked with (phase 5; no lookup). The parent's runs as the parent.
+  // Off: `check.account` is absent and this is the same env object.
+  const env = webhookEnv(envIn, check.account);
   const p = check.params;
   const url = new URL(req.url);
   switch (path) {

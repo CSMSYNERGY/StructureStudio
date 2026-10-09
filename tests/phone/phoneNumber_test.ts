@@ -14,8 +14,11 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   applyNumberVoice, areaCodeOf, buyCallingNumber, callingOnlyNumberRow, DEFAULT_PHONE_API_BASE, fallbackUrlOf, findNumberSid, numberActionForSwitch,
   numberHoldKey, numberSmsConfig, numberVoiceConfig, numberVoicemailConfig, pickedNumber, pickOrphan, smsInboundUrl, strictEncode,
-  SWITCH_WARNINGS, switchCalling, twilioCreds, voiceEnv, type Bought, type HoldResult,
+  SWITCH_WARNINGS, subVoicemailUrlOf, switchCalling, voiceEnv, type Bought, type HoldResult,
 } from "../../supabase/functions/portal-settings/phoneNumber.ts";
+// Workstream 2 phase 2 moved phoneNumber.ts's copy of the credentials (twilioCreds) into the shared
+// resolver as parentCreds; portal-settings resolves the tenant's account from there.
+import { parentCreds } from "../../supabase/functions/_shared/twilioAccount.ts";
 
 const SRC = (await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
 const WORKER_URLS = (await Deno.readTextFile(new URL("../../workers/phone-api/src/urls.ts", import.meta.url))).replace(/\r\n/g, "\n");
@@ -60,6 +63,27 @@ Deno.test("voiceEnv: the Worker base defaults to the SPEC's address; the secret 
   assertEquals(!http.ok && http.missing, ["PHONE_API_BASE", "PHONE_FALLBACK_URL"]);
 });
 
+Deno.test("voiceEnv for a number in a SUB-account: its own voicemail TwiML by GET, never the parent's Bin (Workstream 2, review finding 1)", () => {
+  const bin = "https://handler.twilio.com/twiml/EH" + "0".repeat(32);
+  const base = { PHONE_WEBHOOK_SECRET: SECRET, PHONE_FALLBACK_URL: bin };
+  // The parent's number: its Bin, by POST, exactly as before.
+  const parent = voiceEnv(env(base));
+  assert(parent.ok && parent.env.fallbackUrl === bin && parent.env.fallbackMethod === undefined);
+  // A sub's: TWILIO_SUB_VOICEMAIL_URL, by GET; the parent's Bin is never borrowed.
+  const none = voiceEnv(env(base), true);
+  assertEquals(!none.ok && none.missing, ["TWILIO_SUB_VOICEMAIL_URL"]);
+  const sub = voiceEnv(env({ ...base, TWILIO_SUB_VOICEMAIL_URL: "https://static.example.test/voicemail.xml" }), true);
+  assert(sub.ok);
+  if (!sub.ok) return;
+  assertEquals([sub.env.fallbackUrl, sub.env.fallbackMethod], ["https://static.example.test/voicemail.xml", "GET"]);
+  const cfg = numberVoiceConfig(sub.env);
+  assertEquals([cfg.VoiceFallbackUrl, cfg.VoiceFallbackMethod], ["https://static.example.test/voicemail.xml", "GET"]);
+  assertEquals(numberVoicemailConfig(sub.env), { VoiceUrl: "https://static.example.test/voicemail.xml", VoiceMethod: "GET", StatusCallback: "", VoiceFallbackUrl: "" });
+  // A Bin (any account's) is refused as the sub's voicemail.
+  assertEquals(subVoicemailUrlOf(env({ TWILIO_SUB_VOICEMAIL_URL: bin })), null);
+  assertEquals(voiceEnv(env({ ...base, TWILIO_SUB_VOICEMAIL_URL: bin }), true).ok, false);
+});
+
 Deno.test("numberVoiceConfig is SETUP.md step 6, in the Worker's own URL shape", () => {
   const ve = voiceEnv(env({ PHONE_API_BASE: "https://phone-api.example.test", PHONE_WEBHOOK_SECRET: SECRET, PHONE_FALLBACK_URL: "https://handler.example.test/bin" }));
   assert(ve.ok);
@@ -81,11 +105,11 @@ Deno.test("numberVoiceConfig is SETUP.md step 6, in the Worker's own URL shape",
   assertEquals(odd.VoiceUrl, "https://p.example.test/voice/inbound?key=k%27y");
 });
 
-Deno.test("twilioCreds prefers an API key pair, like twilioTrustHub's basicAuthPair", () => {
-  assertEquals(twilioCreds(env({})), null);
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1" })), null);
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t" })), { accountSid: "AC1", user: "AC1", pass: "t" });
-  assertEquals(twilioCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t", TWILIO_API_KEY: "SK1", TWILIO_API_SECRET: "s" })), { accountSid: "AC1", user: "SK1", pass: "s" });
+Deno.test("parentCreds prefers an API key pair, like twilioTrustHub's basicAuthPair", () => {
+  assertEquals(parentCreds(env({})), null);
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1" })), null);
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t" })), { accountSid: "AC1", user: "AC1", pass: "t" });
+  assertEquals(parentCreds(env({ TWILIO_ACCOUNT_SID: "AC1", TWILIO_AUTH_TOKEN: "t", TWILIO_API_KEY: "SK1", TWILIO_API_SECRET: "s" })), { accountSid: "AC1", user: "SK1", pass: "s" });
 });
 
 // ── the two Twilio calls, against a stub ───────────────────────────────────────────────────
@@ -251,6 +275,11 @@ Deno.test("the calling-only row: not registered for texting (165's word), no mes
     messaging_service_sid: null, registration_status: "pending_registration",
   });
   assertEquals(callingOnlyNumberRow("demo-tenant", { sid: "", phoneNumber: "+15555550104" }).twilio_sid, null);
+  // Workstream 2: bought inside the tenant's own sub-account, the row says which (migration 292);
+  // on the parent it carries no such key at all (the row it always was).
+  assertEquals(callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }, null), callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }));
+  const SUB = "AC" + "5".repeat(32);
+  assertEquals((callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }, SUB) as Record<string, unknown>).twilio_account_sid, SUB);
 });
 
 Deno.test("only a US number from the search, and a three-digit area code, get through", () => {
@@ -277,8 +306,12 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
   assert(/buyCallingNumber\(\{ clientId, wanted, recorded: liveRows\.map\(\(r\) => String\(r\.phone_number\)\) \}, \{/.test(buy),
     "the purchase is buyCallingNumber (tested above), told which numbers are already the tenant's");
   assert(/p_kind: "sms_number_monthly"/.test(SRC) && /hold: takeNumberHold/.test(buy), "the first month is held on portal-sms's meter");
-  assert(/findPurchasedNumbers, purchaseNumber, releaseNumber,/.test(buy), "a number bought but not recorded can be given back");
-  assert(/\.insert\(callingOnlyNumberRow\(clientId, b\)\)/.test(buy));
+  // In the tenant's own Twilio account (Workstream 2: tenantTwilio, the parent while TWILIO_SUBACCOUNTS is off).
+  assert(/findPurchasedNumbers: \(id\) => findPurchasedNumbers\(id, creds\),\s*purchaseNumber: \(o\) => purchaseNumber\(o, creds\),\s*releaseNumber: \(sid\) => releaseNumber\(sid, creds\),/.test(buy),
+    "a number bought but not recorded can be given back, in the account it was bought in");
+  assert(buy.indexOf("await tenantTwilio()") > 0 && buy.indexOf("await tenantTwilio()") < buy.indexOf("buyCallingNumber("), "the account is resolved before anything is bought");
+  assert(/\.insert\(callingOnlyNumberRow\(clientId, b, subAccountSid\)\)/.test(buy));
+  assert(/const subAccountSid = creds\.source === "sub" \? creds\.accountSid : null;/.test(buy), "the sub's SID only, never the parent's");
   assert(!/messagingServiceSid/.test(buy), "the purchase itself never passes a messaging service (joining texting is attachToTexting, after the row is recorded)");
   assert(!/client_settings"\)\s*\.update/.test(buy), "a calling-only number must not become client_settings.sms_number");
   // Up to MAX_NUMBERS live numbers (migration 266), checked before anything is bought; the env a number needs, before money moves.
@@ -294,7 +327,8 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
     "calling on: connect it as the calling-only number it is, or as the texting number it just became");
   // Migration 266: texting joins AFTER the row is recorded, and only while the builder's texting is on.
   assert(buy.indexOf("const serviceSid = await textingServiceSid();") > buy.indexOf("buyCallingNumber("));
-  assert(/attachToTexting\(\{ serviceSid, numberSid: bought\.sid \}, textingDeps\(String\(row\.id\)\)\)/.test(buy));
+  // The join runs in the tenant's own Twilio account (Workstream 2), the one the number was bought in.
+  assert(/attachToTexting\(\{ serviceSid, numberSid: bought\.sid \}, textingDeps\(String\(row\.id\), creds\)\)/.test(buy));
 });
 
 Deno.test("Connect this number for calls: only while calling is on; a calling-only number gets its SMS webhook in the same update", () => {
@@ -304,11 +338,12 @@ Deno.test("Connect this number for calls: only while calling is on; a calling-on
   assert(/voiceEnv\(\(k\) => Deno\.env\.get\(k\)\)/.test(connect), "reads PHONE_API_BASE / PHONE_WEBHOOK_SECRET / PHONE_FALLBACK_URL from the edge env");
   assert(/const smsUrl = !n\.messaging_service_sid \? smsInboundUrl\(\(k\) => Deno\.env\.get\(k\)\) : null;/.test(connect),
     "only a number with NO messaging service gets its own SmsUrl");
-  assert(/const config = \{ \.\.\.numberVoiceConfig\(ve\.env\), \.\.\.\(smsUrl \? numberSmsConfig\(smsUrl\) : \{\}\) \};/.test(connect));
+  // Workstream 2: the env of the number's own account (a sub's voicemail is never the parent's Bin).
+  assert(/const config = \{ \.\.\.numberVoiceConfig\(vEnv\.env\), \.\.\.\(smsUrl \? numberSmsConfig\(smsUrl\) : \{\}\) \};/.test(connect));
   assert(connect.indexOf("applyNumberVoice(") < connect.indexOf("voice_enabled: true"), "voice_enabled is written only after Twilio accepted the change");
   // The reverse (review SSB-2) writes voice_enabled = false only after Twilio accepted the voicemail settings.
   const off = slice(SRC, "const numberToVoicemail = async", "\n  };\n", "numberToVoicemail");
-  assert(/config: numberVoicemailConfig\(\{ fallbackUrl \}\)/.test(off));
+  assert(/config: numberVoicemailConfig\(\{ fallbackUrl: target, /.test(off));
   assert(/const fallbackUrl = fallbackUrlOf\(/.test(off) && !/voiceEnv\(/.test(off), "moving to voicemail needs only the fallback, not the Worker's secret");
   assert(off.indexOf("applyNumberVoice(") < off.indexOf("voice_enabled: false"));
 });
