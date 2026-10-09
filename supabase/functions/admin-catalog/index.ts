@@ -1880,9 +1880,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
         // CNAM), registered from the builder's Phone tab in view-as. Phase 8: how many "Bring your
         // number" requests of theirs are open (null = migration 297 not applied, or the read failed).
-        const reqs = await sb.from("phone_number_requests").select("id", { count: "exact", head: true })
-          .eq("client_id", clientId).in("status", ["new", "in_progress"]);
-        return json({ ok: true, account: { ...account, callerId: await callerIdSummary(sb, clientId), openNumberRequests: reqs.error ? null : Number(reqs.count ?? 0) } });
+        // Both are extras on the card: a read that fails (or throws) is null, never a failed view.
+        const openNumberRequests = await (async () => {
+          try {
+            const r = await sb.from("phone_number_requests").select("id", { count: "exact", head: true })
+              .eq("client_id", clientId).in("status", ["new", "in_progress"]);
+            return r?.error ? null : Number(r?.count ?? 0);
+          } catch { return null; }
+        })();
+        const callerId = await (async () => { try { return await callerIdSummary(sb, clientId); } catch { return null; } })();
+        return json({ ok: true, account: { ...account, callerId, openNumberRequests } });
       }
 
       // ── Workstream 2, phase 8: "Bring your number" requests (migration 297) ─────────────────────
