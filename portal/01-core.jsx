@@ -550,11 +550,10 @@ const TAB_META = {
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
-  // Hand-moved deal boards (migration 301, Carolyn 2026-10-09), labelled "Leads" by her choice.
-  // NOT "Pipeline", which is the designs board above and is derived from estimate status; this
-  // one a person drags. The id stays `pipelines`: `leads` is already SS_TAB_ALIASES' old name for
-  // Contacts, and bookmarked /portal/leads links must keep landing there.
-  pipelines: ["Leads", "Leads and deals you move through your own pipeline stages"],
+  // The Leads tab's address for one day on beta (migration 301). Since 302 its board is the
+  // Pipeline page's board, and this route only redirects there (12-shell PipelinesLegacyRedirect).
+  // Kept routable so a saved /portal/pipelines link still arrives.
+  pipelines: ["Pipeline", "Redirecting to the Pipeline board"],
   orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],

@@ -19,6 +19,17 @@ function DesignsLegacySub({ sub, navigate }) {
   return null;
 }
 
+// The Leads tab's old address (/portal/pipelines[/<id>], migration 301) → the Pipeline page's board.
+// The pipeline it named is remembered the way SalesPipelines remembers a pick (SS_PIPE_LAST), so
+// the board opens on it. `replace`, like DesignsLegacySub, so Back never lands on the alias.
+function PipelinesLegacyRedirect({ sub, clientId, navigate }) {
+  useEffect(() => {
+    if (sub && clientId) { try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, sub); } catch (_e) { /* private mode */ } }
+    navigate("designs", "pipeline", true);
+  }, [sub, clientId]);
+  return null;
+}
+
 // ── Nav rail glyphs ───────────────────────────────────────────────────────────
 // MODULE SCOPE, not a Dashboard local. These are ~22 static SVG trees with nothing
 // from the component in them, and building them inside the body rebuilt every one of
@@ -44,8 +55,6 @@ const ICONS = {
   contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
   // Two speech bubbles: a back-and-forth. Not Settings → SMS's single bubble, which is one channel.
   conversations: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>,
-  // Three columns of cards: a board someone moves things across (migration 301).
-  pipelines: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="10" y="4" width="5" height="5" rx="1"/><rect x="17" y="4" width="5" height="5" rx="1"/><rect x="17" y="12" width="5" height="5" rx="1"/></svg>,
   orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
   pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
   "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
@@ -2807,10 +2816,6 @@ function Dashboard({ session }) {
               Contacts, which stays in the rail to sell it, one locked item there is enough. A
               typed /portal/conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
-          {/* Hand-moved deal boards (migration 301, Carolyn 2026-10-09: her reps' manufacturer
-              prospects), labelled "Leads" (her choice). Only with the CRM, like Conversations; a typed
-              URL without it gets the CRM card below. Not "Pipeline": that is the designs board. */}
-          {crmUnlocked && navItem("pipelines", "Leads")}
           {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -3460,32 +3465,10 @@ function Dashboard({ session }) {
                 />
               )
             )}
-            {/* SALES PIPELINES — /portal/pipelines[/<pipeline id>] (migration 301). The sub is the
-                pipeline, so Back walks between boards. A card opens the CONTACT record, and that
-                record's Back returns here (recordCtx.from). Behind the built-in CRM. */}
-            {!gateLocked && activeTab === "pipelines" && (
-              crmUnlocked ? (
-                <SalesPipelines key={"t-" + effClientId} clientId={effClientId} viewing={!!viewing}
-                  urlPipelineId={sub || null}
-                  onPickPipeline={(id) => navigate("pipelines", id, true)}
-                  onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId, false, {
-                    from: { page: "pipelines", pageSub: sub || null },
-                  })} />
-              ) : (
-                <ComingSoon
-                  title="Leads"
-                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="10" y="4" width="5" height="5" rx="1"/><rect x="17" y="4" width="5" height="5" rx="1"/><rect x="17" y="12" width="5" height="5" rx="1"/></svg>}
-                  blurb="Your own sales stages, with every lead as a card you drag from one to the next. Add leads by hand, see who owns each one, and know what needs a follow-up. Part of the built-in CRM."
-                  bullets={[
-                    "As many pipelines as you need, with your own stage names",
-                    "Drag a lead to its next stage; mark it won or lost",
-                    "Every lead is also a contact, with its whole history",
-                  ]}
-                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
-                  available
-                />
-              )
-            )}
+            {/* /portal/pipelines[/<pipeline id>] was the Leads tab (migration 301, one day on beta).
+                Its board IS the Pipeline page's board since 302 (Carolyn 2026-10-09: "move the Leads
+                pipeline into the pipeline page"), so old links land there, on the pipeline named. */}
+            {activeTab === "pipelines" && <PipelinesLegacyRedirect sub={sub} clientId={effClientId} navigate={navigate} />}
             {/* Deliberately NOT behind `!gateLocked`, like Admin and Projects below: since view-as
                 mirrors the viewed tenant's billing lock (2026-09-15), the switcher is how an
                 operator LEAVES a locked account. Behind the gate it would trap them there. */}

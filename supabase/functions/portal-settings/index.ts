@@ -9400,7 +9400,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   /** The tenant's live pipelines with their live stages, seeding the starter "Sales" once. */
   const readPipelines = async (): Promise<{ pipelines: any[] } | { dbError: unknown }> => {
     const read = () => admin.from("crm_pipelines")
-      .select("id, name, position, lost_reasons, seed_kind")
+      .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
     let { data: pipes, error } = await read();
     if (error) return { dbError: error };
@@ -9414,7 +9414,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const ids = (pipes ?? []).map((p: any) => p.id);
     const { data: stages, error: sErr } = ids.length
-      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
+      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position, design_status")
           .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
           .order("position", { ascending: true })
       : { data: [], error: null };
@@ -9422,13 +9422,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return {
       pipelines: (pipes ?? []).map((p: any) => ({
         id: p.id, name: p.name, position: p.position, lostReasons: p.lost_reasons ?? [], seedKind: p.seed_kind ?? null,
+        feedsDesigns: p.feeds_designs === true,
         stages: (stages ?? []).filter((s: any) => s.pipeline_id === p.id)
-          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position })),
+          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position, designStatus: s.design_status ?? null })),
       })),
     };
   };
 
-  const DEAL_COLS = "id, pipeline_id, stage_id, contact_id, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at";
+  const DEAL_COLS = "id, pipeline_id, stage_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at";
 
   /**
    * Deals → the same deals with their contact attached, narrowed to what this caller may see.
@@ -9436,7 +9437,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    * does not move deals — 301's header), so a tombstone never hides a deal.
    */
   const withContacts = async (deals: any[]): Promise<any[] | Response> => {
-    const ids = [...new Set(deals.map((d) => d.contact_id))];
+    const ids = [...new Set(deals.map((d) => d.contact_id).filter(Boolean))];
     const contacts = new Map<string, any>();
     for (let i = 0; i < ids.length; i += 200) {
       const { data, error } = await admin.from("crm_contacts")
@@ -9447,6 +9448,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // Follow merges (bounded) and heal the deal rows that pointed at a tombstone.
     for (const d of deals) {
+      if (!d.contact_id) continue;
       let c = contacts.get(d.contact_id);
       for (let hop = 0; c?.merged_into && hop < 5; hop++) {
         const { data } = await admin.from("crm_contacts")
@@ -9463,10 +9465,40 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const seen = await visibleContactIds(deals.map((d) => d.contact_id));
     if (!seen) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
-    return deals.filter((d) => seen.has(d.contact_id)).map((d) => {
-      const c = contacts.get(d.contact_id) ?? {};
-      return { ...d, contact: { id: d.contact_id, name: c.name ?? null, company: c.company ?? null, phone: c.phone ?? null, email: c.email ?? null, ownerUserId: c.owner_user_id ?? null } };
-    });
+    // A DESIGN CARD (migration 302) carries the design: the card shows its building, estimate
+    // number and status, and its value is the design's LIVE total (never a copy). A design with
+    // neither phone nor email has no contact: like that design everywhere else (193 edge case 2),
+    // only someone who is not narrowed sees it.
+    const codes = [...new Set(deals.map((d) => d.short_code).filter(Boolean))];
+    const designs = new Map<string, any>();
+    for (let i = 0; i < codes.length; i += 200) {
+      const { data, error } = await admin.from("designs")
+        .select("short_code, status, contact, total_cents, ss_quote_number, ghl_estimate_number, expected_close_date, created_at, updated_at, sel_style:selections->>style, sel_size:selections->>size")
+        .eq("client_id", clientId).in("short_code", codes.slice(i, i + 200));
+      if (error) return dbFail(req, clientId, "load the deals' estimates", error);
+      (data ?? []).forEach((r: any) => designs.set(r.short_code, r));
+    }
+    return deals
+      .filter((d) => (d.contact_id ? seen.has(d.contact_id) : !ownContacts && !!d.short_code))
+      .filter((d) => !d.short_code || designs.has(d.short_code))
+      .map((d) => {
+        const c = (d.contact_id && contacts.get(d.contact_id)) || {};
+        const g = d.short_code ? designs.get(d.short_code) : null;
+        const blob = (g && g.contact && typeof g.contact === "object") ? g.contact : {};
+        return {
+          ...d,
+          value_cents: g ? (g.total_cents ?? null) : d.value_cents,
+          expected_close_date: g ? (g.expected_close_date ?? null) : d.expected_close_date,
+          contact: {
+            id: d.contact_id ?? null, name: c.name ?? blob.name ?? null, company: c.company ?? null,
+            phone: c.phone ?? blob.phone ?? null, email: c.email ?? blob.email ?? null, ownerUserId: c.owner_user_id ?? null,
+          },
+          design: g ? {
+            status: g.status, estimateNumber: g.ss_quote_number || (g.ghl_estimate_number != null ? String(g.ghl_estimate_number) : null),
+            style: g.sel_style || null, size: g.sel_size || null, createdAt: g.created_at, updatedAt: g.updated_at,
+          } : null,
+        };
+      });
   };
 
   if (action === "crm_pipelines_list") {
@@ -9492,11 +9524,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const pipelineId = String(payload.pipelineId ?? "").toLowerCase();
     if (!isUuidLike(pipelineId)) return json({ error: "Pick a pipeline." }, 400);
     // Won and lost deals stay on the board for 90 days after they closed, so this month's wins
-    // are visible; older closed deals are reached from the contact's record.
+    // are visible; older closed deals are reached from the contact's record. DESIGN cards are
+    // exempt: the old Pipeline board showed every design whatever its age, and still should.
     const since = new Date(Date.now() - 90 * 86400000).toISOString();
     const { data, error } = await admin.from("crm_deals").select(DEAL_COLS)
       .eq("client_id", clientId).eq("pipeline_id", pipelineId).is("archived_at", null)
-      .or(`and(won_at.is.null,lost_at.is.null),won_at.gte.${since},lost_at.gte.${since}`)
+      .or(`short_code.not.is.null,and(won_at.is.null,lost_at.is.null),won_at.gte.${since},lost_at.gte.${since}`)
       .order("stage_entered_at", { ascending: false }).limit(3000);
     if (error) return dbFail(req, clientId, "load the deals", error);
     const out = await withContacts(data ?? []);
@@ -9514,7 +9547,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("contact_id", contactId).is("archived_at", null)
       .order("created_at", { ascending: false }).limit(100);
     if (error) return dbFail(req, clientId, "load this contact's deals", error);
-    return json({ ok: true, deals: data ?? [] });
+    const out = await withContacts(data ?? []);
+    if (out instanceof Response) return out;
+    return json({ ok: true, deals: out });
   }
 
   if (action === "crm_create_lead") {
@@ -9687,7 +9722,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { data: made, error } = await admin.from("crm_pipeline_stages").insert({
         client_id: clientId, pipeline_id: pipelineId, name: s.name, color: s.color ?? "#64748B",
         kind: s.kind ?? "open", position: (Number(top?.position) || 0) + 1024,
+        design_status: s.designStatus ?? null,
       }).select("id").single();
+      if (String(error?.code) === "23505") return json({ error: "Another stage in this pipeline already takes estimates with that status." }, 409);
       if (error) return dbFail(req, clientId, "add that stage", error);
       return json({ ok: true, id: made.id });
     }
@@ -9695,8 +9732,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (s.name) patch.name = s.name;
     if (s.color) patch.color = s.color;
     if (s.kind) patch.kind = s.kind;
+    if (s.designStatus !== undefined) patch.design_status = s.designStatus;
     if (s.archive) patch.archived_at = new Date().toISOString();
     const { error } = await admin.from("crm_pipeline_stages").update(patch).eq("client_id", clientId).eq("id", s.id);
+    if (String(error?.code) === "23505") return json({ error: "Another stage in this pipeline already takes estimates with that status." }, 409);
     if (error) return dbFail(req, clientId, "save that stage", error);
     audit("crm_stage_save", 1, `stage=${s.id} archive=${s.archive}`).catch(() => {});
     return json({ ok: true, id: s.id });

@@ -205,14 +205,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // has ever stocked: a lot with hundreds of buildings was read in full to label the handful
   // of designs that came from one. Nothing here is a filter — an id with no serial yet just
   // renders the chip without a number, exactly as it does before this resolves.
-  // EXPECTED CLOSE DATE, edited from the card (Carolyn, 2026-09-07: "editable straight from
-  // the card"). `closeEdit` is the short_code whose date input is open — one at a time, so a
-  // stray click elsewhere on the board closes it rather than leaving several open.
-  //
-  // Operator view-as is READ-ONLY here: the write goes through portal-settings under the
-  // tenant's own JWT, and an operator's save would be attributed to the wrong tenant.
-  const [closeEdit, setCloseEdit] = useState(null);
-  const canEditClose = !viewingLabel && !fetchDesigns;
   const [unitSerials, setUnitSerials] = useState({});
   const unitIdKey = useMemo(() => {
     const ids = new Set();
@@ -335,34 +327,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
   // so the list refetches without a manual Refresh click.
   useEffect(() => { load(); }, [load, refreshKey]);
-
-  // Save an expected close date from the board (migration 206).
-  //
-  // Through portal-settings, NOT sb.from("designs").update(): the board READS designs over
-  // direct PostgREST, but the restrictive policies from 154/193 are select-only — there is no
-  // update policy on that table for a tenant, and there should not be one. Writes go through
-  // an action that resolves the tenant server-side.
-  //
-  // OPTIMISTIC, and deliberately so: this is one date on a card someone is scanning, and a
-  // full reload to show it would throw away their scroll position on a board they are reading.
-  // A failure repaints the old value and says so.
-  const saveCloseDate = useCallback(async (shortCode, value) => {
-    const iso = value || null;
-    setCloseEdit(null);
-    const prev = (rows || []).find((x) => x.short_code === shortCode)?.expected_close_date ?? null;
-    if (iso === prev) return;
-    setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)));
-    try {
-      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
-        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
-      });
-      if (e) throw new Error(await fnError(e));
-      if (r && r.error) throw new Error(r.error);
-    } catch (err) {
-      setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: prev } : x)));
-      setError(err.message || "That close date did not save.");
-    }
-  }, [rows]);
 
   // Status chips. Counts are taken over ALL loaded rows (not the searched subset) so the
   // numbers don't shuffle while someone types — the chips describe the dataset, the search
@@ -522,8 +486,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   return (
     <div style={S.card}>
       <CardHead
-        title="Designs"
-        count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        title={shownView === "pipeline" ? "Pipeline" : "Designs"}
+        count={shownView === "pipeline" ? null : (rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null)}
         right={(
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
@@ -552,7 +516,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </div>
         )}
       />
-      {rows && rows.length > 0 && (
+      {rows && rows.length > 0 && shownView !== "pipeline" && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
           {/* Filters LEFT, search RIGHT (Carolyn, 2026-09-07). The search box used to lead and
               sat 20px above the facet controls, because those carry a heading and it does not —
@@ -571,14 +535,14 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </div>
         </div>
       )}
-      {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
+      {rows && rows.length > 0 && shownView !== "pipeline" && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && (invMsg.err || invMsg.ok) && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {invMsg && invMsg.note && <div style={SS_TAX_NOTE_STYLE}>{invMsg.note}</div>}
       {error && <div style={S.err}>{error}</div>}
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
-      {(rows === null || !shownView) && !error && (
+      {(!shownView || (rows === null && shownView === "list")) && !error && (
         <div style={{ overflowX: "auto" }} data-ss-designs-view="loading">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -588,10 +552,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </table>
         </div>
       )}
-      {rows && shownView && rows.length === 0 && !error && (
+      {rows && shownView === "list" && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
-      {rows && shownView && rows.length > 0 && filtered.length === 0 && (
+      {rows && shownView === "list" && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
             ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
@@ -600,121 +564,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
-      {/* ── PIPELINE BOARD ──────────────────────────────────────────────────────────
-          Columns are the stage KINDS, and a design's column is DERIVED from the status the
-          system can prove — accepted is won, invoiced is invoiced. There is no drag here on
-          purpose: dragging implies the rep sets the stage, and `designs.status` is a
-          read-only projection that sync-design-status overwrites on every list load, so a
-          dragged card would snap back and look broken. Moving a deal by hand needs the
-          local crm_stages table, which is the next increment, not this one. */}
-      {rows && filtered.length > 0 && shownView === "pipeline" && (
-        <div style={{ overflowX: "auto", paddingBottom: 4 }} data-ss-designs-view="pipeline">
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
-            {CRM_STAGES.map((st) => {
-              const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
-              // 240px, up from 190 (Carolyn, 2026-09-07). The card carries a value, a status, a
-              // close date and two dated lines now; at 190px the labelled date row wraps —
-              // "Created Sep 2, 26 · Updated Sep 4, 26" needs ~187px of text against 172px of
-              // content box, measured.
-              //
-              // ⚠️ THE BOARD NOW SCROLLS SIDEWAYS ON A LAPTOP, and the claim that it would not
-              // (made when this width was proposed) was wrong. Six columns at 240 plus five
-              // 10px gaps is 1490px; the sidebar is 240px (.ss-side), so a 1500px screen leaves
-              // about 1260px of main. Five stages are visible and Delivered needs a scroll.
-              // That is not fixable by picking a smaller number — anything above ~195px has the
-              // same problem, so the real choice was "all six visible and cramped" or "roomy
-              // and scrolled", and Carolyn chose roomy. The board has always had overflowX
-              // auto, and every kanban she compared this to (Pipedrive) scrolls the same way.
-              return (
-                <div key={st.kind} style={{ flex: "1 0 240px", minWidth: 240, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
-                  </div>
-                  {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
-                  {cards.map((r) => {
-                    const c = r.contact || {}; const s = r.selections || {};
-                    const money = fmtMoneyWhole(r.total_cents);
-                    const closeIso = r.expected_close_date || null;
-                    // Local-midnight compare, not Date.parse of the bare yyyy-mm-dd (which is
-                    // parsed as UTC and reads as yesterday for anyone west of Greenwich — every
-                    // one of these builders). A date closing TODAY is not late.
-                    const overdue = !!closeIso && closeIso < new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-                    const editingClose = closeEdit === r.short_code;
-                    return (
-                      <div key={r.short_code} style={{ position: "relative", marginBottom: 6 }}>
-                      <button type="button"
-                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code, r.contact_id) : (onOpenDesign && onOpenDesign(r.short_code)))}
-                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {c.name || c.email || c.phone || "—"}
-                          </span>
-                          {/* NULL is "No quote yet", never $0 — 104 of the 153 designs on the
-                              platform have no estimate lines at all (drafts, browsing leads), and
-                              a $0 pipeline card is a lie about a real deal. */}
-                          <span style={{ fontSize: 13, fontWeight: money ? 800 : 600, color: money ? "#1E293B" : "#94A3B8", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                            {money || "No estimate yet"}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
-                        </div>
-                        {/* Status pill on every card (Carolyn, 2026-09-07). Note it repeats
-                            the column: CRM_STAGE_FOR_STATUS is 1:1, so every card in
-                            "Proposal Made" is Sent and every card in "Contract Signed" is
-                            Accepted. It earns its place as a TRANSLATION — the columns carry
-                            Carolyn's Pipedrive stage names, the pill carries the status the
-                            rest of the product shows — and it stops being redundant the day a
-                            second status maps into one stage. */}
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
-                          <StatusPill status={r.status} small />
-                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
-                          {/* The close date is the reason this field exists: teal while there is
-                              still time, red the moment it passes. A date nobody is warned about
-                              is a date nobody acts on. Spacer only — the real control is the
-                              sibling button below, because a <button> inside a <button> is
-                              invalid HTML and swallows the card's own click. */}
-                          <span style={{ marginLeft: "auto", visibility: "hidden" }} aria-hidden="true">
-                            {closeIso ? fmtDateShort(closeIso) : "Set close"}
-                          </span>
-                        </div>
-                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", gap: 5, fontVariantNumeric: "tabular-nums" }}>
-                          <span>Created {fmtDateShort(r.created_at)}</span>
-                          <span style={{ opacity: 0.55 }}>·</span>
-                          <span>Updated {fmtDateShort(r.updated_at)}</span>
-                        </div>
-                      </button>
-                      {/* THE CLOSE-DATE CONTROL, a SIBLING of the card button and positioned over
-                          the spacer above it. Nesting it would be invalid HTML and every click on
-                          the date would also open the customer record. */}
-                      {editingClose ? (
-                        <input type="date" autoFocus defaultValue={closeIso || ""}
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={(e) => saveCloseDate(r.short_code, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
-                          style={{ position: "absolute", right: 7, top: 46, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
-                      ) : (
-                        <button type="button" title={closeIso ? "Expected close — click to change" : "Set an expected close date"}
-                          onClick={(e) => { e.stopPropagation(); setCloseEdit(r.short_code); }}
-                          disabled={!canEditClose}
-                          style={{
-                            position: "absolute", right: 7, top: 47, zIndex: 2, border: "none", borderRadius: 4,
-                            padding: closeIso ? "0 4px" : "0 3px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
-                            cursor: canEditClose ? "pointer" : "default",
-                            background: overdue ? "#FEF2F2" : "transparent",
-                            color: closeIso ? (overdue ? "#DC2626" : "#1B7895") : "#CBD5E1",
-                          }}>
-                          {closeIso ? fmtDateShort(closeIso) : (canEditClose ? "+ close" : "—")}
-                        </button>
-                      )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
+      {/* ── PIPELINE BOARD (migration 302, Carolyn 2026-10-09) ────────────────────────
+          The draggable board from the Leads tab, now the Pipeline page's only board: "I like the
+          way this pipeline view looks and works better than the Pipeline one ... move the Leads
+          pipeline into the pipeline page and we have the ability to have multiple pipelines."
+          Every design is a card on the builder's design-fed pipeline (the designs_pipeline_sync
+          trigger), cards can be dragged anywhere, and an estimate's status change moves its card
+          to the stage tied to that status. The six fixed CRM_STAGES columns derived in the
+          browser are gone from here (the record's stage rail still uses them).
+          The list's search, facets and status chips are the LIST's; the board has its own
+          search, owner filter and pipeline picker, so they are hidden while it shows. */}
+      {shownView === "pipeline" && (
+        <div data-ss-designs-view="pipeline">
+          <SalesPipelines embedded clientId={clientId} viewing={!!viewingLabel || !!fetchDesigns} refreshKey={refreshKey}
+            onOpenRecord={(code, contactId) => (onOpenRecord ? onOpenRecord(code, contactId) : (code && onOpenDesign && onOpenDesign(code)))} />
         </div>
       )}
       {rows && filtered.length > 0 && shownView === "list" && (
@@ -3546,7 +3409,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [dealOpen, setDealOpen] = useState(null);
   const [dealBusy, setDealBusy] = useState(false);
 
-  // Optimistic, and deliberately the SAME action the Pipeline board's saveCloseDate calls:
+  // Optimistic, and deliberately the SAME action the Pipeline board's close-date control calls:
   // one write path means the board and the contact record cannot disagree about what a close
   // date is. `designs` has no tenant UPDATE policy (154/193 are SELECT-only), so the edge
   // function is not a convenience here — it is the only way in.
@@ -5375,7 +5238,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
 
   const saveStage = (s, patch) => run(async () => {
     await ssPipeCall("crm_stage_save", { id: s.id, ...patch });
-    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch } : x)));
+    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch, ...(patch.designStatus !== undefined ? { designStatus: patch.designStatus || null } : {}) } : x)));
   });
   const move = (i, d) => {
     const j = i + d;
@@ -5401,6 +5264,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
         <input style={S.input} value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
           onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
       <span style={S.lbl}>Stages</span>
+      {pipeline.feedsDesigns && <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px" }}>New designs appear in this pipeline. The last column says which estimate status moves a card to that stage by itself.</p>}
       <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
         {stages.map((s, i) => (
           <div key={s.id} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", borderBottom: i < stages.length - 1 ? "1px solid #F1F5F9" : "none" }}>
@@ -5413,6 +5277,15 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
             <select aria-label="Kind" value={s.kind} onChange={(e) => saveStage(s, { kind: e.target.value })} style={{ ...S.input, width: 80, padding: "5px 6px" }}>
               <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
             </select>
+            {/* Only on the pipeline new designs land in (migration 302): which estimate status
+                moves a card here on its own. */}
+            {pipeline.feedsDesigns && (
+              <select aria-label="Estimates that land here" title="An estimate that reaches this status moves here"
+                value={s.designStatus || ""} onChange={(e) => saveStage(s, { designStatus: e.target.value })} style={{ ...S.input, width: 112, padding: "5px 6px" }}>
+                <option value="">No auto-move</option>
+                {["draft", "sent", "accepted", "invoiced", "delivered"].map((k) => <option key={k} value={k}>{STATUS_LABELS[k]}</option>)}
+              </select>
+            )}
             <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>
             <button type="button" title="Move down" disabled={busy || i === stages.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>
             <button type="button" title="Remove stage" disabled={busy}
@@ -5440,7 +5313,10 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   );
 }
 
-function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPickPipeline = null, onOpenRecord = null }) {
+// `embedded`: drawn inside the Pipeline page's own card (DesignsTable), so no card or title of
+// its own. onOpenRecord(shortCode, contactId) is DesignsTable's signature: a design card opens its
+// customer with that deal picked, a lead card (no design) opens its contact.
+function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onOpenRecord = null }) {
   const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
   const [deals, setDeals] = useState(null);    // null = loading
   const [err, setErr] = useState(null);
@@ -5450,6 +5326,7 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
   const [dragId, setDragId] = useState(null);
   const [overStage, setOverStage] = useState(null);
   const [pickedLocal, setPickedLocal] = useState(null);
+  const [closeEdit, setCloseEdit] = useState(null);  // deal id whose close-date input is open
 
   const loadMeta = useCallback(async () => {
     try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
@@ -5475,7 +5352,7 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
     try { const r = await ssPipeCall("crm_deals_list", { pipelineId: pipeId }); setDeals(r.deals || []); setErr(null); }
     catch (e) { setErr(e.message); setDeals([]); }
   }, [pipeId]);
-  useEffect(() => { loadDeals(); }, [loadDeals]);
+  useEffect(() => { loadDeals(); }, [loadDeals, refreshKey]);
 
   // Operator view-as is read-only here, as on the Pipeline board: a write would go under the
   // tenant's account with the operator's session.
@@ -5484,6 +5361,21 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
   const teamName = (id) => { const m = team.find((x) => x.userId === id); return m ? (m.name || "Team member") : null; };
 
   // Optimistic: the card jumps at once, and a refusal puts it back and says why.
+  // EXPECTED CLOSE DATE, from the card (Carolyn 2026-09-07: "editable straight from the card").
+  // A design card's date lives on the design (set_expected_close, migration 206, the same field
+  // the record shows); a lead's lives on its deal. Optimistic, like the move.
+  const saveClose = async (deal, value) => {
+    setCloseEdit(null);
+    const iso = value || null;
+    if (iso === (deal.expected_close_date || null)) return;
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, expected_close_date: iso } : d)));
+    try {
+      if (deal.short_code) await ssPipeCall("set_expected_close", { shortCode: deal.short_code, expectedCloseDate: iso });
+      else await ssPipeCall("crm_deal_update", { id: deal.id, expectedCloseDate: iso || "" });
+    } catch (e) { setDeals(prev); setErr(e.message); }
+  };
+
   const moveDeal = async (deal, stage, lostReason) => {
     const prev = deals;
     setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
@@ -5504,18 +5396,16 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
     if (owner === "none" && c.ownerUserId) return false;
     if (owner !== "all" && owner !== "none" && c.ownerUserId !== owner) return false;
     if (!q) return true;
-    return [c.company, c.name, c.phone, c.email, d.title].some((v) => v && String(v).toLowerCase().includes(q));
+    const g = d.design || {};
+    return [c.company, c.name, c.phone, c.email, d.title, g.estimateNumber, g.style, g.size, d.short_code].some((v) => v && String(v).toLowerCase().includes(q));
   });
   const ghost = { ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" };
 
-  if (!meta) return <div style={S.card}><CardHead title="Leads" /><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+  if (!meta) return embedded
+    ? <p style={{ fontSize: 13, color: "#64748B" }}>Loading pipelines…</p>
+    : <div style={S.card}><CardHead title="Leads" /><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
 
-  return (
-    <div style={S.card} data-ss-sales-pipelines="">
-      <CardHead
-        title="Leads"
-        count={deals ? (q || owner !== "all" ? `${shown.length} of ${deals.length}` : deals.length) : null}
-        right={(
+  const toolbar = (
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             {pipelines.length > 0 && (
               <select aria-label="Pipeline" value={pipeId || ""} onChange={(e) => pick(e.target.value)}
@@ -5526,10 +5416,19 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
             {meta.canManage && !viewing && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
             {meta.canManage && !viewing && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
             {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
-            <button type="button" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
+            {!embedded && <button type="button" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>}
           </div>
-        )}
-      />
+  );
+  const count = deals ? (q || owner !== "all" ? `${shown.length} of ${deals.length}` : deals.length) : null;
+
+  return (
+    <div style={embedded ? undefined : S.card} data-ss-sales-pipelines="">
+      {embedded
+        ? <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            {toolbar}
+            {count !== null && <span style={{ fontSize: 12, fontWeight: 700, color: "#94A3B8" }}>{count} {count === 1 ? "card" : "cards"}</span>}
+          </div>
+        : <CardHead title="Leads" count={count} right={toolbar} />}
       <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ flex: "1 1 280px", minWidth: 220 }}>
           <SearchInput value={query} onChange={setQuery} placeholder="Search: company, name, phone, email…" />
@@ -5562,23 +5461,35 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
                   {deals && cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
                   {cards.map((d) => {
                     const c = d.contact || {};
+                    const g = d.design;
                     const head = c.company || c.name || c.phone || c.email || "—";
-                    const sub = c.company ? (c.name || c.phone || c.email) : (d.title || null);
+                    const building = g ? [titleCase(g.style), g.size].filter(Boolean).join(" ") : "";
+                    const sub = g ? (building || d.short_code) : (c.company ? (c.name || c.phone || c.email) : (d.title || null));
+                    const closeIso = d.expected_close_date || null;
+                    const closeLate = !!closeIso && closeIso < ssLocalIso(new Date());
                     const days = ssDaysSince(d.stage_entered_at);
                     const ownerName = teamName(c.ownerUserId);
                     const follow = d.next_follow_up_at ? Date.parse(d.next_follow_up_at) : null;
                     const late = follow !== null && follow < Date.now();
                     return (
-                      <button key={d.id} type="button" draggable={canWrite} data-ss-deal={d.id}
+                      <div key={d.id} style={{ position: "relative", marginBottom: 6 }}>
+                      <button type="button" draggable={canWrite} data-ss-deal={d.id}
                         onDragStart={(e) => { setDragId(d.id); try { e.dataTransfer.setData("text/plain", d.id); e.dataTransfer.effectAllowed = "move"; } catch (_e) { /* old browsers */ } }}
                         onDragEnd={() => { setDragId(null); setOverStage(null); }}
-                        onClick={() => onOpenRecord && onOpenRecord(d.contact_id)}
-                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", marginBottom: 6, cursor: canWrite ? "grab" : "pointer", fontFamily: "inherit", opacity: dragId === d.id ? 0.5 : 1 }}>
+                        onClick={() => onOpenRecord && onOpenRecord(d.short_code || null, d.contact_id || null)}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", cursor: canWrite ? "grab" : "pointer", fontFamily: "inherit", opacity: dragId === d.id ? 0.5 : 1 }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                           <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{head}</span>
                           {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{fmtMoneyWhole(d.value_cents)}</span>}
                         </div>
                         {sub && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
+                        {/* The estimate's own status on a design card: the stage is where a person
+                            put it, the pill is what the estimate actually is. The right-hand gap is
+                            the close-date control's spot (a sibling: a button in a button is invalid). */}
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
+                          {g && <StatusPill status={g.status} small />}
+                          {g && g.estimateNumber && <span>#{g.estimateNumber}</span>}
+                        </div>
                         {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
                         <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#94A3B8" }}>
                           <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
@@ -5593,6 +5504,22 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
                           )}
                         </div>
                       </button>
+                      {/* THE CLOSE-DATE CONTROL, a sibling positioned over the card (see above). */}
+                      {closeEdit === d.id ? (
+                        <input type="date" autoFocus defaultValue={closeIso || ""}
+                          onBlur={(e) => saveClose(d, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
+                          style={{ position: "absolute", right: 7, top: 44, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
+                      ) : (
+                        <button type="button" title={closeIso ? "Expected close: click to change" : "Set an expected close date"}
+                          onClick={(e) => { e.stopPropagation(); setCloseEdit(d.id); }} disabled={!canWrite}
+                          style={{ position: "absolute", right: 7, top: 45, zIndex: 2, border: "none", borderRadius: 4, padding: "0 4px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
+                            cursor: canWrite ? "pointer" : "default", background: closeLate ? "#FEF2F2" : "transparent",
+                            color: closeIso ? (closeLate ? "#DC2626" : "#1B7895") : "#CBD5E1" }}>
+                          {closeIso ? fmtDateShort(closeIso) : (canWrite ? "+ close" : "")}
+                        </button>
+                      )}
+                      </div>
                     );
                   })}
                 </div>
@@ -5601,10 +5528,10 @@ function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPic
           </div>
         </div>
       )}
-      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it. Click a card to open the contact, where the stage can also be changed.</p>}
+      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it. Click a card to open the customer, where the stage can also be changed.{pipe.feedsDesigns ? " New designs appear here on their own, and a card moves when its estimate's status changes." : ""}</p>}
       {dialog === "add" && (
         <SsAddLeadDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly} me={meta.me}
-          onClose={() => setDialog(null)} onOpenRecord={onOpenRecord}
+          onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
           onAdded={(r) => { setDialog(null); loadDeals(); }} />
       )}
       {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); }} />}
@@ -5650,7 +5577,10 @@ function SsContactDeals({ contactId, canEdit = false }) {
         return (
           <div key={d.id} style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{at ? at.pipe.name : "Pipeline"}{d.title ? ` · ${d.title}` : ""}</span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>
+                {at ? at.pipe.name : "Pipeline"}
+                {d.design ? ` · Estimate ${d.design.estimateNumber ? "#" + d.design.estimateNumber : d.short_code}` : (d.title ? ` · ${d.title}` : "")}
+              </span>
               {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800 }}>{fmtMoneyWhole(d.value_cents)}</span>}
             </div>
             {at && (

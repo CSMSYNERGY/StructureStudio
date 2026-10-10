@@ -154,9 +154,14 @@ export function parsePipelineSave(b: Record<string, unknown>): Parsed<PipelineIn
   return { ok: true, id: id ? id.toLowerCase() : null, name, lostReasons, archive: b.archive === true };
 }
 
+/** The estimate statuses a stage can take cards from (migration 302). */
+export const DESIGN_STATUSES = ["draft", "sent", "accepted", "invoiced", "delivered"] as const;
+
 export type StageIn = {
   id: string | null; pipelineId: string | null; name: string | null;
   color: string | null; kind: StageKind | null; archive: boolean;
+  /** undefined = not being edited; null = this stage takes no estimates automatically. */
+  designStatus?: string | null;
 };
 
 export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
@@ -171,9 +176,16 @@ export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
   if (color && !/^#[0-9A-Fa-f]{6}$/.test(color)) return { ok: false, error: "Pick a colour from the list." };
   const kindRaw = str(b.kind, 8);
   if (kindRaw && !(STAGE_KINDS as readonly string[]).includes(kindRaw)) return { ok: false, error: "A stage is open, won or lost." };
+  let designStatus: string | null | undefined = undefined;
+  if (b.designStatus !== undefined) {
+    designStatus = str(b.designStatus, 12);
+    if (designStatus && !(DESIGN_STATUSES as readonly string[]).includes(designStatus)) {
+      return { ok: false, error: "Pick an estimate status from the list." };
+    }
+  }
   return {
     ok: true, id: id ? id.toLowerCase() : null, pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
-    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true,
+    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true, designStatus,
   };
 }
 

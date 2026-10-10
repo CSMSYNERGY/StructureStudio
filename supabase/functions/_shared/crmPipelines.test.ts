@@ -58,6 +58,13 @@ Deno.test("pipeline and stage saves", () => {
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "maybe" }).ok, false, "bad kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", color: "red" }).ok, false, "bad colour");
   eq(parseStageSave({ id: U, color: "#AABBCC" }).ok, true, "edit colour only");
+  const st = parseStageSave({ id: U, designStatus: "sent" });
+  eq(st.ok && st.designStatus, "sent", "design status");
+  const cl = parseStageSave({ id: U, designStatus: "" });
+  eq(cl.ok && cl.designStatus, null, "design status cleared");
+  eq(parseStageSave({ id: U, designStatus: "inventory" }).ok, false, "inventory is never a stage's status");
+  const none = parseStageSave({ id: U, name: "X" });
+  eq(none.ok && none.designStatus, undefined, "absent means unchanged");
 });
 
 Deno.test("stage order: every id once", () => {
