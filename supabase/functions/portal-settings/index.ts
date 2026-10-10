@@ -221,6 +221,11 @@ import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 // Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
 import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
+// Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
+import {
+  isUuidLike, parseDealPatch, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder, parseStageSave,
+  stageSetRefusal, type StageKind as PipeStageKind,
+} from "../_shared/crmPipelines.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
 // account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
 import { cpEnvOf, cpMerchant, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
@@ -483,6 +488,25 @@ const GATES: GateTable = {
   // called. CONTACT_ROW_SCOPE marks it tenantWide, so a caller limited to their own customers is
   // refused; the crm_ prefix brings the CRM subscription check. A dry run unless dryRun: false.
   crm_import_ghl_contacts: { area: "contacts", level: "edit" },
+  // ── Sales pipelines (migration 301) ── hand-moved boards of deals, for every CRM builder.
+  // Carolyn 2026-10-09: her reps cold-calling shed manufacturers work them in a pipeline, and
+  // each prospect lands in contacts. A deal has NO owner of its own ("we do not ever assign
+  // deals", 2026-09-04): it rides on its CONTACT, so every deal action sits on the contacts
+  // area and contacts:'own' is narrowed through CONTACT_ROW_SCOPE like every other write, and
+  // the reads are narrowed in the branch (visibleContactIds). No new area, so access.ts and its
+  // SQL twin are untouched. The stage editor is a Settings card, so it sits on settings_crm.
+  // The crm_ prefix brings the CRM subscription check to every one of them.
+  crm_pipelines_list:    { area: "contacts", level: "view" },
+  crm_deals_list:        { area: "contacts", level: "view" },
+  crm_contact_deals:     { area: "contacts", level: "view" },
+  crm_create_lead:       { area: "contacts", level: "edit" },
+  crm_deal_create:       { area: "contacts", level: "edit" },
+  crm_deal_update:       { area: "contacts", level: "edit" },
+  crm_deal_move:         { area: "contacts", level: "edit" },
+  crm_deal_archive:      { area: "contacts", level: "edit" },
+  crm_pipeline_save:     { area: "settings_crm", level: "edit" },
+  crm_stage_save:        { area: "settings_crm", level: "edit" },
+  crm_stages_reorder:    { area: "settings_crm", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -1439,9 +1463,19 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
      *  the caller), so the row is theirs by construction. The branch must keep doing that;
      *  it is the whole of this rule's safety. */
     creates?: boolean;
+    /** The rowTable has no short_code column (crm_deals), so only its contact_id is read. */
+    noCode?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
     crm_create_contact:    { creates: true },
+    // Sales pipelines (301). crm_create_lead makes the caller the new contact's owner when they
+    // are narrowed (the `creates` promise); a match on an existing contact writes nothing and is
+    // answered only when the caller may see that contact. The deal verbs find their deal's contact.
+    crm_create_lead:       { creates: true },
+    crm_deal_create:       { contactKeys: ["contactId"] },
+    crm_deal_update:       { rowTable: "crm_deals", noCode: true },
+    crm_deal_move:         { rowTable: "crm_deals", noCode: true },
+    crm_deal_archive:      { rowTable: "crm_deals", noCode: true },
     // Reads a whole GoHighLevel location and writes the whole tenant's customer list.
     crm_import_ghl_contacts: { tenantWide: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -1481,8 +1515,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     const rowId = rule.rowTable && payload.id ? String(payload.id).slice(0, 64) : "";
 
     if (rowId) {
-      const { data, error } = await admin.from(rule.rowTable!)
-        .select("contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      const { data: found, error } = await admin.from(rule.rowTable!)
+        .select(rule.noCode ? "contact_id" : "contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      const data = found as { contact_id?: string | null; short_code?: string | null } | null;
       if (error) return dbFail(req, clientId, "check who this customer is assigned to", error);
       // Gone, or another tenant's: the same answer a narrowed caller gets for a row that is
       // simply not theirs, so the refusal never distinguishes the two.
@@ -9335,6 +9370,355 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return dbFail(req, clientId, "save that contact", error);
     }
     return json({ ok: true, changed: Number(n ?? 0) });
+  }
+
+  // ══ SALES PIPELINES (migration 301) ════════════════════════════════════════════════════
+  // Hand-moved boards of deals, for every CRM builder. Carolyn 2026-10-09: "I want a pipeline
+  // in Structure Studio for these. This will also add these contacts to our Structure Studio
+  // list of contacts." Her first pipeline is our own account's Manufacturer Outreach.
+  //
+  // WHO SEES A DEAL is who sees its CONTACT (no deal owner — see GATES). The writes are narrowed
+  // by CONTACT_ROW_SCOPE before dispatch; the READS are narrowed here, by visibleContactIds,
+  // because the service role is BYPASSRLS and the tables have no browser path at all.
+  //
+  // Postgres refusals the SQL raises on purpose (check_violation / no_data_found /
+  // foreign_key_violation) are answered with our own sentence; anything else goes to dbFail.
+  const pipeRefusal = (error: { code?: string; message?: string } | null): Response | null => {
+    const msg = String(error?.message ?? "");
+    if (/a lost reason is required/i.test(msg)) return json({ error: "Pick the reason this one was lost." }, 400);
+    if (/cannot start lost/i.test(msg)) return json({ error: "A deal can't start in a lost stage — pick an open one." }, 400);
+    if (/deal not found/i.test(msg)) return json({ error: "That deal no longer exists." }, 404);
+    if (/stage not found/i.test(msg)) return json({ error: "That stage no longer exists — refresh and try again." }, 404);
+    if (/contact not found/i.test(msg)) return json({ error: "That contact no longer exists." }, 404);
+    if (/owner is not on this team/i.test(msg)) return json({ error: "That person isn't on this team any more. Pick someone from the list." }, 400);
+    if (/phone number or an email is required/i.test(msg)) return json({ error: "A lead needs a phone number or an email." }, 400);
+    if (/name or a company is required/i.test(msg)) return json({ error: "Give the lead a name or a company." }, 400);
+    if (String(error?.code) === "23505") return json({ error: "Another contact already has that phone number or email. Search Contacts for it instead." }, 409);
+    return null;
+  };
+
+  /** The tenant's live pipelines with their live stages, seeding the starter "Sales" once. */
+  const readPipelines = async (): Promise<{ pipelines: any[] } | { dbError: unknown }> => {
+    const read = () => admin.from("crm_pipelines")
+      .select("id, name, position, lost_reasons, seed_kind")
+      .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
+    let { data: pipes, error } = await read();
+    if (error) return { dbError: error };
+    if (!pipes || !pipes.length) {
+      // A write under a read gate, deliberately: the starter pipeline is what an empty board
+      // means, it is idempotent per tenant (crm_pipelines_seed_once), and no person's data is in it.
+      const seeded = await admin.rpc("crm_seed_pipeline", { p_client_id: clientId, p_kind: "sales" });
+      if (seeded.error) return { dbError: seeded.error };
+      ({ data: pipes, error } = await read());
+      if (error) return { dbError: error };
+    }
+    const ids = (pipes ?? []).map((p: any) => p.id);
+    const { data: stages, error: sErr } = ids.length
+      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
+          .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
+          .order("position", { ascending: true })
+      : { data: [], error: null };
+    if (sErr) return { dbError: sErr };
+    return {
+      pipelines: (pipes ?? []).map((p: any) => ({
+        id: p.id, name: p.name, position: p.position, lostReasons: p.lost_reasons ?? [], seedKind: p.seed_kind ?? null,
+        stages: (stages ?? []).filter((s: any) => s.pipeline_id === p.id)
+          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position })),
+      })),
+    };
+  };
+
+  const DEAL_COLS = "id, pipeline_id, stage_id, contact_id, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at";
+
+  /**
+   * Deals → the same deals with their contact attached, narrowed to what this caller may see.
+   * A deal whose contact was MERGED is re-pointed at the surviving contact here (crm_merge_contacts
+   * does not move deals — 301's header), so a tombstone never hides a deal.
+   */
+  const withContacts = async (deals: any[]): Promise<any[] | Response> => {
+    const ids = [...new Set(deals.map((d) => d.contact_id))];
+    const contacts = new Map<string, any>();
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await admin.from("crm_contacts")
+        .select("id, name, company, phone, email, owner_user_id, merged_into")
+        .eq("client_id", clientId).in("id", ids.slice(i, i + 200));
+      if (error) return dbFail(req, clientId, "load the deals' contacts", error);
+      (data ?? []).forEach((c: any) => contacts.set(c.id, c));
+    }
+    // Follow merges (bounded) and heal the deal rows that pointed at a tombstone.
+    for (const d of deals) {
+      let c = contacts.get(d.contact_id);
+      for (let hop = 0; c?.merged_into && hop < 5; hop++) {
+        const { data } = await admin.from("crm_contacts")
+          .select("id, name, company, phone, email, owner_user_id, merged_into")
+          .eq("client_id", clientId).eq("id", c.merged_into).maybeSingle();
+        if (!data) break;
+        contacts.set(data.id, data);
+        c = data;
+      }
+      if (c && c.id !== d.contact_id) {
+        await admin.from("crm_deals").update({ contact_id: c.id }).eq("client_id", clientId).eq("id", d.id);
+        d.contact_id = c.id;
+      }
+    }
+    const seen = await visibleContactIds(deals.map((d) => d.contact_id));
+    if (!seen) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    return deals.filter((d) => seen.has(d.contact_id)).map((d) => {
+      const c = contacts.get(d.contact_id) ?? {};
+      return { ...d, contact: { id: d.contact_id, name: c.name ?? null, company: c.company ?? null, phone: c.phone ?? null, email: c.email ?? null, ownerUserId: c.owner_user_id ?? null } };
+    });
+  };
+
+  if (action === "crm_pipelines_list") {
+    const r = await readPipelines();
+    if ("dbError" in r) return dbFail(req, clientId, "load your pipelines", r.dbError);
+    // The roster for the owner picker and the cards' owner initials. client_users is unreadable to
+    // a portal user (client_users_select_own), so names come from here — crm_record's reasoning.
+    const { data: roster } = await admin.from("client_users")
+      .select("user_id, full_name, title").eq("client_id", clientId)
+      .order("full_name", { ascending: true, nullsFirst: false }).limit(200);
+    return json({
+      ok: true,
+      pipelines: r.pipelines,
+      team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
+      canManage: canEdit("settings_crm"),
+      canWrite: canEdit("contacts"),
+      ownOnly: ownContacts,
+      me: userId ?? null,
+    });
+  }
+
+  if (action === "crm_deals_list") {
+    const pipelineId = String(payload.pipelineId ?? "").toLowerCase();
+    if (!isUuidLike(pipelineId)) return json({ error: "Pick a pipeline." }, 400);
+    // Won and lost deals stay on the board for 90 days after they closed, so this month's wins
+    // are visible; older closed deals are reached from the contact's record.
+    const since = new Date(Date.now() - 90 * 86400000).toISOString();
+    const { data, error } = await admin.from("crm_deals").select(DEAL_COLS)
+      .eq("client_id", clientId).eq("pipeline_id", pipelineId).is("archived_at", null)
+      .or(`and(won_at.is.null,lost_at.is.null),won_at.gte.${since},lost_at.gte.${since}`)
+      .order("stage_entered_at", { ascending: false }).limit(3000);
+    if (error) return dbFail(req, clientId, "load the deals", error);
+    const out = await withContacts(data ?? []);
+    if (out instanceof Response) return out;
+    return json({ ok: true, deals: out, capped: (data ?? []).length >= 3000 });
+  }
+
+  if (action === "crm_contact_deals") {
+    const contactId = String(payload.contactId ?? "").toLowerCase();
+    if (!isUuidLike(contactId)) return json({ error: "A contact id is required." }, 400);
+    const seen = await visibleContactIds([contactId]);
+    if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    if (!seen.has(contactId)) return json({ error: "That customer is not one of yours." }, 404);
+    const { data, error } = await admin.from("crm_deals").select(DEAL_COLS)
+      .eq("client_id", clientId).eq("contact_id", contactId).is("archived_at", null)
+      .order("created_at", { ascending: false }).limit(100);
+    if (error) return dbFail(req, clientId, "load this contact's deals", error);
+    return json({ ok: true, deals: data ?? [] });
+  }
+
+  if (action === "crm_create_lead") {
+    const lead = parseLead((payload ?? {}) as Record<string, unknown>);
+    if (!lead.ok) return json({ error: lead.error }, 400);
+    const me = String(userId ?? "").toLowerCase();
+    if (ownContacts && !isUuidLike(me)) return json({ error: "Sign in again to add a lead." }, 401);
+    // Narrowed: the lead is theirs, whatever the picker said (CONTACT_ROW_SCOPE `creates`).
+    const owner = ownContacts ? me : lead.ownerUserId;
+    const { data: made, error } = await admin.rpc("crm_create_lead", {
+      p_client_id: clientId, p_name: lead.name, p_company: lead.company, p_phone: lead.phone,
+      p_email: lead.email, p_owner: owner, p_actor: isUuidLike(me) ? me : null, p_source: "manual",
+      p_stage: lead.stageId, p_title: lead.title, p_value_cents: lead.valueCents, p_on_match: "refuse",
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "add that lead", error);
+    const out = (made ?? {}) as { existing?: string; contactId?: string; dealId?: string | null };
+    if (out.existing) {
+      // Already a contact. Name it only to someone who may open it; a narrowed caller is told it
+      // belongs to someone else, which is the useful sentence and confirms no detail of it.
+      const seen = await visibleContactIds([out.existing]);
+      if (seen && seen.has(out.existing)) {
+        return json({ error: "That phone number or email is already a contact. Open them and add the deal from their record.", existingContactId: out.existing }, 409);
+      }
+      return json({ error: "That phone number or email is already a contact assigned to someone else on your team. Ask your manager to reassign them." }, 409);
+    }
+    if (!out.contactId) return dbFail(req, clientId, "add that lead", { message: "crm_create_lead returned no contact" });
+    audit("crm_create_lead", 1, `contact=${out.contactId} deal=${out.dealId ?? "none"} owner=${owner ? "set" : "none"}`).catch(() => {});
+    return json({ ok: true, contactId: out.contactId, dealId: out.dealId ?? null });
+  }
+
+  if (action === "crm_deal_create") {
+    const contactId = String(payload.contactId ?? "").toLowerCase();
+    const stageId = String(payload.stageId ?? "").toLowerCase();
+    if (!isUuidLike(contactId)) return json({ error: "A contact id is required." }, 400);
+    if (!isUuidLike(stageId)) return json({ error: "Pick a stage." }, 400);
+    const value = parseMoneyCents(payload.value);
+    if (value === "bad") return json({ error: "The deal value should be an amount, like 2500 or $2,500." }, 400);
+    const title = payload.title == null ? null : String(payload.title).trim().slice(0, 200) || null;
+    const { data: dealId, error } = await admin.rpc("crm_add_deal", {
+      p_client_id: clientId, p_contact: contactId, p_stage: stageId,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      p_title: title, p_value_cents: value ?? null, p_source: "manual",
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "add that deal", error);
+    audit("crm_deal_create", 1, `deal=${dealId}`).catch(() => {});
+    return json({ ok: true, dealId });
+  }
+
+  if (action === "crm_deal_update") {
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const p = parseDealPatch((payload ?? {}) as Record<string, unknown>);
+    if (!p.ok) return json({ error: p.error }, 400);
+    const { data, error } = await admin.from("crm_deals")
+      .update({ ...p.patch, updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("id", id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that deal", error);
+    if (!data || !data.length) return json({ error: "That deal no longer exists." }, 404);
+    return json({ ok: true });
+  }
+
+  if (action === "crm_deal_move") {
+    const id = String(payload.id ?? "").toLowerCase();
+    const stageId = String(payload.stageId ?? "").toLowerCase();
+    if (!isUuidLike(id) || !isUuidLike(stageId)) return json({ error: "Pick the deal and the stage to move it to." }, 400);
+    const { data, error } = await admin.rpc("crm_move_deal", {
+      p_client_id: clientId, p_deal: id, p_stage: stageId,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      p_lost_reason: payload.lostReason == null ? null : String(payload.lostReason).slice(0, 200),
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "move that deal", error);
+    return json({ ok: true, ...(data as Record<string, unknown> ?? {}) });
+  }
+
+  if (action === "crm_deal_archive") {
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const restore = payload.restore === true;
+    const { data, error } = await admin.from("crm_deals")
+      .update({ archived_at: restore ? null : new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("id", id).select("id");
+    if (error) return dbFail(req, clientId, restore ? "restore that deal" : "remove that deal", error);
+    if (!data || !data.length) return json({ error: "That deal no longer exists." }, 404);
+    audit("crm_deal_archive", 1, `deal=${id} restore=${restore}`).catch(() => {});
+    return json({ ok: true });
+  }
+
+  // ── Settings → CRM → Pipelines ──────────────────────────────────────────────────────────
+  if (action === "crm_pipeline_save") {
+    const p = parsePipelineSave((payload ?? {}) as Record<string, unknown>);
+    if (!p.ok) return json({ error: p.error }, 400);
+    if (!p.id) {
+      // A new pipeline starts with the three stages every pipeline needs; the editor renames them.
+      const { data: top } = await admin.from("crm_pipelines").select("position")
+        .eq("client_id", clientId).order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_pipelines").insert({
+        client_id: clientId, name: p.name, lost_reasons: p.lostReasons ?? [],
+        position: (Number(top?.position) || 0) + 1024, created_by: isUuidLike(String(userId ?? "")) ? userId : null,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "create that pipeline", error);
+      const { error: sErr } = await admin.from("crm_pipeline_stages").insert([
+        { client_id: clientId, pipeline_id: made.id, name: "New", color: "#64748B", kind: "open", position: 1024 },
+        { client_id: clientId, pipeline_id: made.id, name: "Won", color: "#16A34A", kind: "won", position: 2048 },
+        { client_id: clientId, pipeline_id: made.id, name: "Lost", color: "#DC2626", kind: "lost", position: 3072 },
+      ]);
+      if (sErr) {
+        await admin.from("crm_pipelines").delete().eq("client_id", clientId).eq("id", made.id);
+        return dbFail(req, clientId, "create that pipeline", sErr);
+      }
+      audit("crm_pipeline_save", 1, `created=${made.id}`).catch(() => {});
+      return json({ ok: true, id: made.id });
+    }
+    if (p.archive) {
+      const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("pipeline_id", p.id).is("archived_at", null);
+      if (cErr) return dbFail(req, clientId, "check that pipeline's deals", cErr);
+      if ((count ?? 0) > 0) return json({ error: `That pipeline still has ${count} deal${count === 1 ? "" : "s"}. Move or remove them first.` }, 409);
+      const { count: live } = await admin.from("crm_pipelines").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).is("archived_at", null);
+      if ((live ?? 0) <= 1) return json({ error: "Keep at least one pipeline." }, 409);
+    }
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (p.name) patch.name = p.name;
+    if (p.lostReasons) patch.lost_reasons = p.lostReasons;
+    if (p.archive) patch.archived_at = new Date().toISOString();
+    const { data, error } = await admin.from("crm_pipelines").update(patch)
+      .eq("client_id", clientId).eq("id", p.id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that pipeline", error);
+    if (!data || !data.length) return json({ error: "That pipeline wasn't found." }, 404);
+    audit("crm_pipeline_save", 1, `pipeline=${p.id} archive=${p.archive}`).catch(() => {});
+    return json({ ok: true, id: p.id });
+  }
+
+  if (action === "crm_stage_save") {
+    const s = parseStageSave((payload ?? {}) as Record<string, unknown>);
+    if (!s.ok) return json({ error: s.error }, 400);
+    // The stage's pipeline, from the row when editing (never from the body), else the body.
+    let pipelineId = s.pipelineId;
+    let current: { kind: PipeStageKind } | null = null;
+    if (s.id) {
+      const { data: row, error } = await admin.from("crm_pipeline_stages").select("pipeline_id, kind")
+        .eq("client_id", clientId).eq("id", s.id).is("archived_at", null).maybeSingle();
+      if (error) return dbFail(req, clientId, "find that stage", error);
+      if (!row) return json({ error: "That stage wasn't found." }, 404);
+      pipelineId = row.pipeline_id; current = { kind: row.kind as PipeStageKind };
+    } else {
+      const { data: pipe } = await admin.from("crm_pipelines").select("id")
+        .eq("client_id", clientId).eq("id", pipelineId!).is("archived_at", null).maybeSingle();
+      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+    }
+    // Would the pipeline still have an open stage after this?
+    if (s.id && (s.archive || (s.kind && s.kind !== current!.kind))) {
+      const { data: rest } = await admin.from("crm_pipeline_stages").select("id, kind")
+        .eq("client_id", clientId).eq("pipeline_id", pipelineId!).is("archived_at", null);
+      const kinds = (rest ?? []).filter((x: any) => !(s.archive && x.id === s.id))
+        .map((x: any) => (x.id === s.id && s.kind ? s.kind : x.kind) as PipeStageKind);
+      const bad = stageSetRefusal(kinds);
+      if (bad) return json({ error: bad }, 409);
+    }
+    if (s.id && s.archive) {
+      const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("stage_id", s.id).is("archived_at", null);
+      if (cErr) return dbFail(req, clientId, "check that stage's deals", cErr);
+      if ((count ?? 0) > 0) return json({ error: `${count} deal${count === 1 ? " is" : "s are"} still in that stage. Move ${count === 1 ? "it" : "them"} first.` }, 409);
+    }
+    if (!s.id) {
+      const { data: top } = await admin.from("crm_pipeline_stages").select("position")
+        .eq("client_id", clientId).eq("pipeline_id", pipelineId!).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_pipeline_stages").insert({
+        client_id: clientId, pipeline_id: pipelineId, name: s.name, color: s.color ?? "#64748B",
+        kind: s.kind ?? "open", position: (Number(top?.position) || 0) + 1024,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "add that stage", error);
+      return json({ ok: true, id: made.id });
+    }
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (s.name) patch.name = s.name;
+    if (s.color) patch.color = s.color;
+    if (s.kind) patch.kind = s.kind;
+    if (s.archive) patch.archived_at = new Date().toISOString();
+    const { error } = await admin.from("crm_pipeline_stages").update(patch).eq("client_id", clientId).eq("id", s.id);
+    if (error) return dbFail(req, clientId, "save that stage", error);
+    audit("crm_stage_save", 1, `stage=${s.id} archive=${s.archive}`).catch(() => {});
+    return json({ ok: true, id: s.id });
+  }
+
+  if (action === "crm_stages_reorder") {
+    const o = parseStageOrder((payload ?? {}) as Record<string, unknown>);
+    if (!o.ok) return json({ error: o.error }, 400);
+    const { data: live, error } = await admin.from("crm_pipeline_stages").select("id")
+      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
+    if (error) return dbFail(req, clientId, "reorder those stages", error);
+    const have = new Set((live ?? []).map((x: any) => x.id));
+    if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
+      return json({ error: "The stages changed while you were editing — refresh and try again." }, 409);
+    }
+    for (let i = 0; i < o.ids.length; i++) {
+      const { error: uErr } = await admin.from("crm_pipeline_stages")
+        .update({ position: (i + 1) * 1024, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", o.ids[i]);
+      if (uErr) return dbFail(req, clientId, "reorder those stages", uErr);
+    }
+    return json({ ok: true });
   }
 
   if (action === "contact_activity") {

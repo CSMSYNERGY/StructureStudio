@@ -77,7 +77,7 @@ Deno.test("no saved order (null, empty, not a list) is the registry order", () =
 Deno.test("the saved keys that are showing come first, in saved order, then the rest in registry order", () => {
   const visible = showing(contactCtx());
   const got = keys(crmOrderSections(visible, ["overview", "repairs", "summary"]));
-  assertEquals(got, ["overview", "repairs", "summary", "details", "deals", "orders", "build", "delivery"]);
+  assertEquals(got, ["overview", "repairs", "summary", "details", "deals", "salesPipelines", "orders", "build", "delivery"]);
 });
 
 Deno.test("a key this build doesn't know is ignored, and a repeated key draws its card once", () => {
@@ -137,7 +137,7 @@ Deno.test("`kinds` agrees with `when`: every card a kind can show is one My Prof
 });
 
 Deno.test("the two lists My Profile shows", () => {
-  assertEquals(keys(ofKind("contact")), ["summary", "details", "deals", "orders", "tax", "build", "delivery", "repairs", "overview"]);
+  assertEquals(keys(ofKind("contact")), ["summary", "details", "deals", "salesPipelines", "orders", "tax", "build", "delivery", "repairs", "overview"]);
   assertEquals(keys(ofKind("design")), ["summary", "details", "person", "tax", "build", "delivery", "repairs", "overview"]);
   // The only card that comes and goes says when it shows.
   const notes = CRM_SECTIONS.filter((s) => s.note).map((s) => s.key);

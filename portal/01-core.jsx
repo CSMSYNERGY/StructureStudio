@@ -550,6 +550,11 @@ const TAB_META = {
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
+  // Hand-moved deal boards (migration 301, Carolyn 2026-10-09), labelled "Leads" by her choice.
+  // NOT "Pipeline", which is the designs board above and is derived from estimate status; this
+  // one a person drags. The id stays `pipelines`: `leads` is already SS_TAB_ALIASES' old name for
+  // Contacts, and bookmarked /portal/leads links must keep landing there.
+  pipelines: ["Leads", "Leads and deals you move through your own pipeline stages"],
   orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -697,7 +702,7 @@ if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch
 // data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "pipelines", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -721,6 +726,8 @@ const TAB_AREA = {
   // The same customers, seen by their latest message: whoever may open Contacts may open this,
   // and crm_inbox narrows contacts:'own' and the calls row by row on the server.
   conversations: "contacts",
+  // A deal has no owner of its own: it is seen by whoever sees its contact (migration 301).
+  pipelines: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",
@@ -1675,6 +1682,7 @@ const ROW_SCOPE_AREA = {
   orders: "contacts",      // orders_designs is filtered server-side by the same rule
   inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
   conversations: "contacts", // crm_inbox narrows every thread through crm_visible_contact_ids
+  pipelines: "contacts",     // crm_deals_list keeps only deals whose contact this person may see
 };
 
 // Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
@@ -2868,6 +2876,7 @@ const SS_NAV_WARM = {
   designs: ["sync-design-status"],                      // REST list paints, then the status sync
   contacts: ["sync-design-status"],
   conversations: ["portal-settings"],                   // crm_inbox
+  pipelines: ["portal-settings"],                       // crm_pipelines_list, crm_deals_list
   inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
   orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
   "build-schedule": ["portal-schedule"],

@@ -2062,6 +2062,9 @@ const CRM_SECTIONS = [
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
   { key: "deals", title: "Deals", kinds: ["contact"], when: (c) => c.kind === "contact" },
+  // SALES PIPELINES (migration 301): the hand-moved boards, which hold people with no design at
+  // all (a manufacturer prospect). Separate from Deals above, which are this person's DESIGNS.
+  { key: "salesPipelines", title: "Sales pipelines", kinds: ["contact"], when: (c) => c.kind === "contact" },
   // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
   // you should see the deal. You should see the orders." Deals were already here; orders
   // are what say whether any of them turned into a sale. Contact-side only — a design's
@@ -4062,6 +4065,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         <div style={{ fontSize: 13, color: "#475569" }}>{sel.style || "—"} · {sel.size || "—"}</div>
       );
     }
+    if (key === "salesPipelines") {
+      return data.contact && data.contact.id
+        ? <SsContactDeals contactId={data.contact.id} canEdit={!!canEdit} />
+        : null;
+    }
     if (key === "deals") {
       return (
         <div>
@@ -5162,6 +5170,522 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         </div>
       </div>
       {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
+    </div>
+  );
+}
+
+// ══ SALES PIPELINES (migration 301) ═══════════════════════════════════════════════════════
+// Hand-moved boards of deals, for every CRM builder. Carolyn 2026-10-09: her reps cold-calling
+// shed manufacturers work those prospects in a pipeline inside Structure Studio, and every
+// prospect lands in Contacts. Her first one is our own account's "Manufacturer Outreach".
+//
+// NOT the Pipeline tab. That board (DesignsTable above) is DERIVED from designs.status and cannot
+// be dragged; this one is the "local crm_stages table" its comment called the next increment.
+// Different data, different tab: /portal/pipelines[/<pipeline id>].
+//
+// A DEAL HAS NO OWNER (Carolyn 2026-09-04: "we do not ever assign deals. We only assign contacts
+// and followers"). A card shows its CONTACT's owner, and the server returns only the deals whose
+// contact this person may see, so a rep limited to their own customers sees their own cards.
+//
+// Every read and write goes through portal-settings: the tables have no browser path at all.
+
+// One call, answering the data or throwing an Error that carries the server's JSON body as
+// `.body`, so a 409 can hand back `existingContactId` beside its sentence.
+async function ssPipeCall(action, body) {
+  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
+  if (error) {
+    let b = null;
+    try {
+      const ctx = error.context;
+      if (ctx && typeof ctx.json === "function") b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+    } catch (_e) { /* no body */ }
+    const e = new Error((b && b.error) || (await fnError(error)));
+    e.body = b;
+    throw e;
+  }
+  if (data && data.error) { const e = new Error(data.error); e.body = data; throw e; }
+  return data || {};
+}
+
+const SS_PIPE_LAST = "ss_pipeline_last";
+const ssPipeInitials = (name) => String(name || "").trim().split(/\s+/).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join("") || "?";
+// Whole days since an instant, for "4d in stage". A duration, so no local-date handling is needed.
+const ssDaysSince = (iso) => (iso ? Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86400000)) : null);
+const SS_STAGE_COLORS = ["#64748B", "#0EA5E9", "#14B8A6", "#6366F1", "#8B5CF6", "#EC4899", "#F59E0B", "#F97316", "#94A3B8", "#16A34A", "#DC2626"];
+
+function SsPipeModal({ title, onClose, children, width = 460 }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    const unlock = ssLockBodyScroll();
+    return () => { window.removeEventListener("keydown", onKey); unlock(); };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, width: `min(${width}px, 100%)`, maxHeight: "90vh", overflowY: "auto", padding: 20, boxShadow: "0 20px 50px rgba(0,0,0,0.3)", boxSizing: "border-box" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#1E293B", flex: 1 }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ background: "none", border: "none", fontSize: 20, lineHeight: 1, color: "#94A3B8", cursor: "pointer" }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// "+ Add lead": a contact and a deal in one step. A phone or email that is already a contact is
+// refused with a way to open them, rather than a silent second deal on someone else's customer.
+function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onClose, onAdded, onOpenRecord }) {
+  const [f, setF] = useState({ company: "", name: "", phone: "", email: "", title: "", value: "",
+    pipelineId: defaultPipelineId || (pipelines[0] && pipelines[0].id) || "", stageId: "", ownerUserId: "" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [existing, setExisting] = useState(null);
+  const pipe = pipelines.find((p) => p.id === f.pipelineId) || pipelines[0];
+  const openStages = pipe ? pipe.stages.filter((s) => s.kind !== "lost") : [];
+  const stageId = f.stageId && openStages.some((s) => s.id === f.stageId) ? f.stageId : (openStages[0] && openStages[0].id) || "";
+  const set = (k) => (e) => { const v = e.target.value; setF((p) => ({ ...p, [k]: v })); };
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null); setExisting(null);
+    try {
+      const r = await ssPipeCall("crm_create_lead", {
+        company: f.company, name: f.name, phone: f.phone, email: f.email, title: f.title, value: f.value,
+        stageId, ownerUserId: f.ownerUserId || null,
+      });
+      onAdded(r);
+    } catch (e2) {
+      setErr(e2.message);
+      if (e2.body && e2.body.existingContactId) setExisting(e2.body.existingContactId);
+    } finally { setBusy(false); }
+  };
+  const row = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10, marginBottom: 10 };
+  return (
+    <SsPipeModal title="Add a lead" onClose={onClose} width={520}>
+      <form onSubmit={submit}>
+        <div style={row}>
+          <label><span style={S.lbl}>Company</span><input style={S.input} value={f.company} onChange={set("company")} autoFocus placeholder="Acme Sheds" /></label>
+          <label><span style={S.lbl}>Contact name</span><input style={S.input} value={f.name} onChange={set("name")} placeholder="Pat Jones" /></label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Phone</span><input style={S.input} value={f.phone} onChange={set("phone")} inputMode="tel" placeholder="(816) 555-0100" /></label>
+          <label><span style={S.lbl}>Email</span><input style={S.input} value={f.email} onChange={set("email")} type="email" placeholder="pat@acmesheds.com" /></label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Pipeline</span>
+            <select style={S.input} value={f.pipelineId} onChange={(e) => { const v = e.target.value; setF((p) => ({ ...p, pipelineId: v, stageId: "" })); }}>
+              {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <label><span style={S.lbl}>Stage</span>
+            <select style={S.input} value={stageId} onChange={set("stageId")}>
+              {openStages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Deal name (optional)</span><input style={S.input} value={f.title} onChange={set("title")} placeholder="Annual subscription" /></label>
+          <label><span style={S.lbl}>Value (optional)</span><input style={S.input} value={f.value} onChange={set("value")} inputMode="decimal" placeholder="$2,500" /></label>
+        </div>
+        {/* Someone limited to their own customers always owns what they add (the server enforces
+            it too), so the picker is offered only to people who can assign. */}
+        {!ownOnly && (
+          <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Owner</span>
+            <select style={S.input} value={f.ownerUserId} onChange={set("ownerUserId")}>
+              <option value="">Unassigned</option>
+              {(team || []).map((m) => <option key={m.userId} value={m.userId}>{m.name || "Team member"}{m.userId === me ? " (me)" : ""}</option>)}
+            </select>
+          </label>
+        )}
+        {err && (
+          <div style={S.err}>
+            {err}
+            {existing && onOpenRecord && (
+              <> <button type="button" onClick={() => onOpenRecord(existing)}
+                style={{ background: "none", border: "none", color: "#DC2626", textDecoration: "underline", fontWeight: 800, cursor: "pointer", fontFamily: "inherit", fontSize: 13, padding: 0 }}>Open them</button></>
+            )}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+          <button type="submit" disabled={busy || !stageId} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Adding…" : "Add lead"}</button>
+        </div>
+      </form>
+    </SsPipeModal>
+  );
+}
+
+// Moving a deal to a LOST stage asks why: the pipeline's own list first, then "Other".
+function SsLostReasonDialog({ reasons, onCancel, onPick }) {
+  const list = reasons || [];
+  const [pick, setPick] = useState(list[0] || "__other");
+  const [other, setOther] = useState("");
+  const useOther = pick === "__other";
+  const value = useOther ? other.trim() : pick;
+  return (
+    <SsPipeModal title="Why was it lost?" onClose={onCancel} width={400}>
+      {list.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+          {list.concat(["__other"]).map((r) => (
+            <label key={r} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600, color: "#1E293B", cursor: "pointer" }}>
+              <input type="radio" name="ss-lost" checked={pick === r} onChange={() => setPick(r)} />
+              {r === "__other" ? "Other…" : r}
+            </label>
+          ))}
+        </div>
+      )}
+      {useOther && <input style={{ ...S.input, marginBottom: 12 }} autoFocus value={other} onChange={(e) => setOther(e.target.value)} placeholder="What happened?" maxLength={200} />}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button type="button" onClick={onCancel} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+        <button type="button" disabled={!value} onClick={() => onPick(value)} style={{ ...S.btn("#DC2626", "#FFF"), opacity: value ? 1 : 0.5 }}>Mark lost</button>
+      </div>
+    </SsPipeModal>
+  );
+}
+
+// Stages, colours, kinds and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
+// (owner/admin by preset); the server refuses everyone else whatever this shows.
+function SsPipelineEditor({ pipeline, onClose, onCreated }) {
+  const [name, setName] = useState(pipeline ? pipeline.name : "");
+  const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
+  const [reasons, setReasons] = useState(pipeline ? (pipeline.lostReasons || []).join("\n") : "");
+  const [newStage, setNewStage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
+
+  if (!pipeline) {
+    return (
+      <SsPipeModal title="New pipeline" onClose={onClose} width={400}>
+        <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Name</span>
+          <input style={S.input} autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="Dealer recruiting" /></label>
+        <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px" }}>It starts with New, Won and Lost. Rename them and add stages next.</p>
+        {err && <div style={S.err}>{err}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+          <button type="button" disabled={busy || !name.trim()} style={S.btn(ACCENT, "#FFF")}
+            onClick={() => run(async () => { const r = await ssPipeCall("crm_pipeline_save", { name }); onCreated(r.id); })}>Create</button>
+        </div>
+      </SsPipeModal>
+    );
+  }
+
+  const saveStage = (s, patch) => run(async () => {
+    await ssPipeCall("crm_stage_save", { id: s.id, ...patch });
+    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch } : x)));
+  });
+  const move = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= stages.length) return;
+    const next = stages.slice(); const t = next[i]; next[i] = next[j]; next[j] = t;
+    setStages(next);
+    run(() => ssPipeCall("crm_stages_reorder", { pipelineId: pipeline.id, ids: next.map((s) => s.id) }));
+  };
+  const addStage = () => run(async () => {
+    const label = newStage.trim();
+    const r = await ssPipeCall("crm_stage_save", { pipelineId: pipeline.id, name: label, kind: "open" });
+    // The server adds it last; an open stage belongs before the first won/lost one.
+    const next = stages.slice();
+    const at = next.findIndex((x) => x.kind !== "open");
+    next.splice(at < 0 ? next.length : at, 0, { id: r.id, name: label, color: "#64748B", kind: "open" });
+    setStages(next); setNewStage("");
+    if (at >= 0) await ssPipeCall("crm_stages_reorder", { pipelineId: pipeline.id, ids: next.map((s) => s.id) });
+  });
+  const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  return (
+    <SsPipeModal title={`Edit “${pipeline.name}”`} onClose={onClose} width={560}>
+      <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Pipeline name</span>
+        <input style={S.input} value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
+          onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
+      <span style={S.lbl}>Stages</span>
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
+        {stages.map((s, i) => (
+          <div key={s.id} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", borderBottom: i < stages.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+            <select aria-label="Colour" value={s.color} onChange={(e) => saveStage(s, { color: e.target.value })}
+              style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: s.color, color: "transparent", cursor: "pointer" }}>
+              {SS_STAGE_COLORS.concat(SS_STAGE_COLORS.includes(s.color) ? [] : [s.color]).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
+            </select>
+            <input aria-label="Stage name" style={{ ...S.input, flex: 1, minWidth: 0, padding: "5px 8px" }} defaultValue={s.name} maxLength={60}
+              onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.name) saveStage(s, { name: v }); }} />
+            <select aria-label="Kind" value={s.kind} onChange={(e) => saveStage(s, { kind: e.target.value })} style={{ ...S.input, width: 80, padding: "5px 6px" }}>
+              <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
+            </select>
+            <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>
+            <button type="button" title="Move down" disabled={busy || i === stages.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>
+            <button type="button" title="Remove stage" disabled={busy}
+              onClick={() => { if (window.confirm(`Remove the “${s.name}” stage?`)) run(async () => { await ssPipeCall("crm_stage_save", { id: s.id, archive: true }); setStages((all) => all.filter((x) => x.id !== s.id)); }); }}
+              style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <input style={{ ...S.input, flex: 1 }} value={newStage} maxLength={60} onChange={(e) => setNewStage(e.target.value)} placeholder="New stage name"
+          onKeyDown={(e) => { if (e.key === "Enter" && newStage.trim()) { e.preventDefault(); addStage(); } }} />
+        <button type="button" disabled={busy || !newStage.trim()} style={S.btn(ACCENT, "#FFF")} onClick={addStage}>Add stage</button>
+      </div>
+      <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Lost reasons, one per line</span>
+        <textarea style={{ ...S.input, minHeight: 90 }} value={reasons} onChange={(e) => setReasons(e.target.value)}
+          onBlur={() => run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, lostReasons: reasons.split("\n") }))} /></label>
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <button type="button" disabled={busy}
+          onClick={() => { if (window.confirm(`Remove the “${pipeline.name}” pipeline? It must have no deals left.`)) run(async () => { await ssPipeCall("crm_pipeline_save", { id: pipeline.id, archive: true }); onClose(); }); }}
+          style={S.btn("#FEF2F2", "#DC2626")}>Remove pipeline</button>
+        <button type="button" disabled={busy} onClick={onClose} style={S.btn(ACCENT, "#FFF")}>Done</button>
+      </div>
+    </SsPipeModal>
+  );
+}
+
+function SalesPipelines({ clientId, viewing = false, urlPipelineId = null, onPickPipeline = null, onOpenRecord = null }) {
+  const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
+  const [deals, setDeals] = useState(null);    // null = loading
+  const [err, setErr] = useState(null);
+  const [query, setQuery] = useState("");
+  const [owner, setOwner] = useState("all");
+  const [dialog, setDialog] = useState(null);  // "add" | "edit" | "new" | { lost: { deal, stage } }
+  const [dragId, setDragId] = useState(null);
+  const [overStage, setOverStage] = useState(null);
+  const [pickedLocal, setPickedLocal] = useState(null);
+
+  const loadMeta = useCallback(async () => {
+    try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
+    catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], team: [] }); }
+  }, [clientId]);
+  useEffect(() => { loadMeta(); }, [loadMeta]);
+
+  const pipelines = (meta && meta.pipelines) || [];
+  let remembered = null;
+  try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
+  const want = urlPipelineId || pickedLocal || remembered;
+  const pipe = pipelines.find((p) => p.id === want) || pipelines[0] || null;
+  const pipeId = pipe ? pipe.id : null;
+  const pick = (id) => {
+    try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, id); } catch (_e) { /* private mode */ }
+    setPickedLocal(id);
+    if (onPickPipeline) onPickPipeline(id);
+  };
+
+  const loadDeals = useCallback(async () => {
+    if (!pipeId) return;
+    setDeals(null);
+    try { const r = await ssPipeCall("crm_deals_list", { pipelineId: pipeId }); setDeals(r.deals || []); setErr(null); }
+    catch (e) { setErr(e.message); setDeals([]); }
+  }, [pipeId]);
+  useEffect(() => { loadDeals(); }, [loadDeals]);
+
+  // Operator view-as is read-only here, as on the Pipeline board: a write would go under the
+  // tenant's account with the operator's session.
+  const canWrite = !!(meta && meta.canWrite) && !viewing;
+  const team = (meta && meta.team) || [];
+  const teamName = (id) => { const m = team.find((x) => x.userId === id); return m ? (m.name || "Team member") : null; };
+
+  // Optimistic: the card jumps at once, and a refusal puts it back and says why.
+  const moveDeal = async (deal, stage, lostReason) => {
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
+    try { await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null }); }
+    catch (e) { setDeals(prev); setErr(e.message); }
+  };
+  const onDrop = (stage) => {
+    const deal = (deals || []).find((d) => d.id === dragId);
+    setDragId(null); setOverStage(null);
+    if (!deal || deal.stage_id === stage.id) return;
+    if (stage.kind === "lost") { setDialog({ lost: { deal, stage } }); return; }
+    moveDeal(deal, stage);
+  };
+
+  const q = query.trim().toLowerCase();
+  const shown = (deals || []).filter((d) => {
+    const c = d.contact || {};
+    if (owner === "none" && c.ownerUserId) return false;
+    if (owner !== "all" && owner !== "none" && c.ownerUserId !== owner) return false;
+    if (!q) return true;
+    return [c.company, c.name, c.phone, c.email, d.title].some((v) => v && String(v).toLowerCase().includes(q));
+  });
+  const ghost = { ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" };
+
+  if (!meta) return <div style={S.card}><CardHead title="Leads" /><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+
+  return (
+    <div style={S.card} data-ss-sales-pipelines="">
+      <CardHead
+        title="Leads"
+        count={deals ? (q || owner !== "all" ? `${shown.length} of ${deals.length}` : deals.length) : null}
+        right={(
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {pipelines.length > 0 && (
+              <select aria-label="Pipeline" value={pipeId || ""} onChange={(e) => pick(e.target.value)}
+                style={{ ...S.input, width: "auto", padding: "6px 10px", fontWeight: 700 }}>
+                {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+            {meta.canManage && !viewing && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
+            {meta.canManage && !viewing && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
+            {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
+            <button type="button" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
+          </div>
+        )}
+      />
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ flex: "1 1 280px", minWidth: 220 }}>
+          <SearchInput value={query} onChange={setQuery} placeholder="Search: company, name, phone, email…" />
+        </div>
+        {!meta.ownOnly && team.length > 0 && (
+          <FacetSelect label="Owner" value={owner} onChange={setOwner} allLabel="Everyone"
+            options={[{ value: "none", label: "Unassigned" }].concat(team.map((m) => ({ value: m.userId, label: m.name || "Team member" })))} />
+        )}
+      </div>
+      {meta.ownOnly && <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 10 }}>You see the leads assigned to you or that you follow.</div>}
+      {err && <div style={S.err}>{err}</div>}
+      {!pipe && !err && <p style={{ fontSize: 13, color: "#64748B" }}>No pipelines yet.</p>}
+      {pipe && (
+        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
+            {pipe.stages.map((st) => {
+              const cards = shown.filter((d) => d.stage_id === st.id);
+              const total = cards.reduce((a, d) => a + (Number(d.value_cents) || 0), 0);
+              const over = overStage === st.id && !!dragId;
+              return (
+                <div key={st.id} data-ss-stage={st.id}
+                  onDragOver={canWrite ? (e) => { e.preventDefault(); if (overStage !== st.id) setOverStage(st.id); } : undefined}
+                  onDrop={canWrite ? (e) => { e.preventDefault(); onDrop(st); } : undefined}
+                  style={{ flex: "1 0 230px", minWidth: 230, background: over ? "#EEF2FF" : "#F8FAFC", border: "1px solid " + (over ? ACCENT : "#E2E8F0"), borderTop: "3px solid " + st.color, borderRadius: 10, padding: 8, minHeight: 120 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7, gap: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", whiteSpace: "nowrap" }}>{deals ? cards.length : "…"}{total ? ` · ${fmtMoneyWhole(total)}` : ""}</span>
+                  </div>
+                  {deals === null && <div style={{ height: 54, background: "#EEF2F7", borderRadius: 8 }} />}
+                  {deals && cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
+                  {cards.map((d) => {
+                    const c = d.contact || {};
+                    const head = c.company || c.name || c.phone || c.email || "—";
+                    const sub = c.company ? (c.name || c.phone || c.email) : (d.title || null);
+                    const days = ssDaysSince(d.stage_entered_at);
+                    const ownerName = teamName(c.ownerUserId);
+                    const follow = d.next_follow_up_at ? Date.parse(d.next_follow_up_at) : null;
+                    const late = follow !== null && follow < Date.now();
+                    return (
+                      <button key={d.id} type="button" draggable={canWrite} data-ss-deal={d.id}
+                        onDragStart={(e) => { setDragId(d.id); try { e.dataTransfer.setData("text/plain", d.id); e.dataTransfer.effectAllowed = "move"; } catch (_e) { /* old browsers */ } }}
+                        onDragEnd={() => { setDragId(null); setOverStage(null); }}
+                        onClick={() => onOpenRecord && onOpenRecord(d.contact_id)}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", marginBottom: 6, cursor: canWrite ? "grab" : "pointer", fontFamily: "inherit", opacity: dragId === d.id ? 0.5 : 1 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{head}</span>
+                          {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{fmtMoneyWhole(d.value_cents)}</span>}
+                        </div>
+                        {sub && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
+                        {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
+                        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#94A3B8" }}>
+                          <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
+                            style={{ width: 20, height: 20, flexShrink: 0, borderRadius: "50%", background: ownerName ? "#E0E7FF" : "#F1F5F9", color: ownerName ? ACCENT : "#94A3B8", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 800 }}>
+                            {ownerName ? ssPipeInitials(ownerName) : "–"}
+                          </span>
+                          {days !== null && <span>{days === 0 ? "New today" : `${days}d in stage`}</span>}
+                          {follow !== null && (
+                            <span style={{ marginLeft: "auto", fontWeight: 700, color: late ? "#DC2626" : "#1B7895", background: late ? "#FEF2F2" : "transparent", borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap" }}>
+                              {late ? "Overdue " : "Follow up "}{fmtDateShort(d.next_follow_up_at)}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it. Click a card to open the contact, where the stage can also be changed.</p>}
+      {dialog === "add" && (
+        <SsAddLeadDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly} me={meta.me}
+          onClose={() => setDialog(null)} onOpenRecord={onOpenRecord}
+          onAdded={(r) => { setDialog(null); loadDeals(); }} />
+      )}
+      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); }} />}
+      {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}
+        onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
+      {dialog && dialog.lost && (
+        <SsLostReasonDialog reasons={pipe ? pipe.lostReasons : []} onCancel={() => setDialog(null)}
+          onPick={(reason) => { const { deal, stage } = dialog.lost; setDialog(null); moveDeal(deal, stage, reason); }} />
+      )}
+    </div>
+  );
+}
+
+// The contact record's sales-pipeline section: which pipeline and stage this person is in, moved
+// from a drop-down (the board's drag has no phone equivalent), and "+ Add to a pipeline".
+function SsContactDeals({ contactId, canEdit = false }) {
+  const [meta, setMeta] = useState(null);
+  const [deals, setDeals] = useState(null);
+  const [err, setErr] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [addStage, setAddStage] = useState("");
+  const [lost, setLost] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const [m, d] = await Promise.all([ssPipeCall("crm_pipelines_list"), ssPipeCall("crm_contact_deals", { contactId })]);
+      setMeta(m); setDeals(d.deals || []); setErr(null);
+    } catch (e) { setErr(e.message); setDeals((x) => x || []); }
+  }, [contactId]);
+  useEffect(() => { load(); }, [load]);
+  const pipes = (meta && meta.pipelines) || [];
+  const stageOf = (id) => { for (const p of pipes) { const s = p.stages.find((x) => x.id === id); if (s) return { pipe: p, stage: s }; } return null; };
+  const doMove = async (deal, stageId, reason) => {
+    try { await ssPipeCall("crm_deal_move", { id: deal.id, stageId, lostReason: reason || null }); load(); }
+    catch (e) { setErr(e.message); }
+  };
+  if (deals === null) return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Loading…</div>;
+  return (
+    <div data-ss-contact-deals="">
+      {err && <div style={S.err}>{err}</div>}
+      {deals.length === 0 && !adding && <div style={{ fontSize: 12.5, color: "#94A3B8", marginBottom: 6 }}>Not in a sales pipeline.</div>}
+      {deals.map((d) => {
+        const at = stageOf(d.stage_id);
+        return (
+          <div key={d.id} style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{at ? at.pipe.name : "Pipeline"}{d.title ? ` · ${d.title}` : ""}</span>
+              {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800 }}>{fmtMoneyWhole(d.value_cents)}</span>}
+            </div>
+            {at && (
+              <select disabled={!canEdit} value={d.stage_id} aria-label="Stage"
+                onChange={(e) => { const s = at.pipe.stages.find((x) => x.id === e.target.value); if (!s) return; if (s.kind === "lost") setLost({ deal: d, stage: s, reasons: at.pipe.lostReasons }); else doMove(d, s.id); }}
+                style={{ ...S.input, marginTop: 6, padding: "5px 8px", borderLeft: "4px solid " + at.stage.color }}>
+                {at.pipe.stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            )}
+            {d.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {d.lost_reason}</div>}
+          </div>
+        );
+      })}
+      {canEdit && !adding && pipes.length > 0 && (
+        <button type="button" onClick={() => { setAdding(true); const s = pipes[0].stages.find((x) => x.kind === "open"); setAddStage(s ? s.id : ""); }}
+          style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>＋ Add to a pipeline</button>
+      )}
+      {adding && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <select aria-label="Pipeline stage" value={addStage} onChange={(e) => setAddStage(e.target.value)} style={{ ...S.input, width: "auto", flex: "1 1 160px", padding: "5px 8px" }}>
+            {pipes.map((p) => (
+              <optgroup key={p.id} label={p.name}>
+                {p.stages.filter((s) => s.kind !== "lost").map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </optgroup>
+            ))}
+          </select>
+          <button type="button" disabled={!addStage} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 10px" }}
+            onClick={async () => { try { await ssPipeCall("crm_deal_create", { contactId, stageId: addStage }); setAdding(false); load(); } catch (e) { setErr(e.message); } }}>Add</button>
+          <button type="button" onClick={() => setAdding(false)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 10px" }}>Cancel</button>
+        </div>
+      )}
+      {lost && (
+        <SsLostReasonDialog reasons={lost.reasons} onCancel={() => setLost(null)}
+          onPick={(reason) => { const l = lost; setLost(null); doMove(l.deal, l.stage.id, reason); }} />
+      )}
     </div>
   );
 }

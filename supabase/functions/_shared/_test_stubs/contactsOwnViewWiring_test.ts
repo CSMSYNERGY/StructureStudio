@@ -45,6 +45,9 @@ const SETTINGS_WRITES = [
   "crm_save_contact", "crm_create_contact", "crm_save_note", "crm_delete_note", "crm_save_activity",
   "crm_complete_activity", "crm_send_email", "crm_send_sms", "crm_record_consent", "crm_file_sign",
   "crm_file_attach", "crm_file_delete", "crm_import_ghl_contacts",
+  // Sales pipelines (migration 301): a lead and its deal are customer-record writes, so a
+  // view-only person adds and moves nothing.
+  "crm_create_lead", "crm_deal_create", "crm_deal_update", "crm_deal_move", "crm_deal_archive",
 ];
 
 Deno.test("portal-settings: every customer-record write is a contacts:'edit' gate, and own_view fails each one", () => {
@@ -62,7 +65,7 @@ Deno.test("portal-settings: every customer-record write is a contacts:'edit' gat
 
 Deno.test("portal-settings: the reads an own_view person needs still open", () => {
   const g = gates(SETTINGS, "portal-settings");
-  for (const action of ["crm_record", "crm_feed", "crm_inbox"]) {
+  for (const action of ["crm_record", "crm_feed", "crm_inbox", "crm_pipelines_list", "crm_deals_list", "crm_contact_deals"]) {
     assertEquals(checkGate(g[action], OWN_VIEW), null, `${action} refused own_view — they could not see their own customers`);
   }
 });
