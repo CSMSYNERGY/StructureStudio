@@ -48,6 +48,8 @@ const SETTINGS_WRITES = [
   // Sales pipelines (migration 301): a lead and its deal are customer-record writes, so a
   // view-only person adds and moves nothing.
   "crm_create_lead", "crm_deal_create", "crm_deal_update", "crm_deal_move", "crm_deal_archive",
+  // Card statuses (migration 302): setting one on a card is the same write as moving it.
+  "crm_deal_set_status",
 ];
 
 Deno.test("portal-settings: every customer-record write is a contacts:'edit' gate, and own_view fails each one", () => {

@@ -4706,6 +4706,10 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       )}
       {/* The company rate lives on Company → Tax now; the Estimates & Invoices card links there. */}
       {sub === "connection" && <SettingsView section="connection" onOpenTax={() => setSub("tax")} />}
+      {/* Statuses and pipeline stages belong to the built-in CRM (the actions refuse without it). */}
+      {sub === "pipelines" && (crmUnlocked || crmPending
+        ? <PipelineSettings viewing={!!viewingLabel} />
+        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked

@@ -1,5 +1,6 @@
 // Unit tests for _shared/crmPipelines.ts (migration 301). Self-contained: no registry imports.
 import {
+  parseIdOrder, parseStatusSave,
   parseDay, parseDealPatch, parseInstant, parseLead, parseMoneyCents, parsePipelineSave,
   parseStageOrder, parseStageSave, stageSetRefusal,
 } from "./crmPipelines.ts";
@@ -58,13 +59,13 @@ Deno.test("pipeline and stage saves", () => {
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "maybe" }).ok, false, "bad kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", color: "red" }).ok, false, "bad colour");
   eq(parseStageSave({ id: U, color: "#AABBCC" }).ok, true, "edit colour only");
-  const st = parseStageSave({ id: U, designStatus: "sent" });
-  eq(st.ok && st.designStatus, "sent", "design status");
-  const cl = parseStageSave({ id: U, designStatus: "" });
-  eq(cl.ok && cl.designStatus, null, "design status cleared");
-  eq(parseStageSave({ id: U, designStatus: "inventory" }).ok, false, "inventory is never a stage's status");
+  const st = parseStageSave({ id: U, statusId: U.toUpperCase() });
+  eq(st.ok && st.statusId, U, "status link");
+  const cl = parseStageSave({ id: U, statusId: "" });
+  eq(cl.ok && cl.statusId, null, "status link cleared");
+  eq(parseStageSave({ id: U, statusId: "sent" }).ok, false, "a link is a status id");
   const none = parseStageSave({ id: U, name: "X" });
-  eq(none.ok && none.designStatus, undefined, "absent means unchanged");
+  eq(none.ok && none.statusId, undefined, "absent means unchanged");
 });
 
 Deno.test("stage order: every id once", () => {
@@ -75,4 +76,17 @@ Deno.test("stage order: every id once", () => {
 Deno.test("a pipeline keeps an open stage", () => {
   eq(stageSetRefusal(["won", "lost"]) !== null, true, "no open stage refused");
   eq(stageSetRefusal(["open"]), null, "one open is enough");
+});
+
+Deno.test("statuses: name, colour and the automatic trigger", () => {
+  eq(parseStatusSave({}).ok, false, "new needs a name");
+  const a = parseStatusSave({ name: "Appt Set", color: "#0EA5E9", triggerEvent: "" });
+  eq(a.ok && [a.name, a.triggerEvent], ["Appt Set", null], "set by hand");
+  const b = parseStatusSave({ id: U, triggerEvent: "paid_in_full" });
+  eq(b.ok && b.triggerEvent, "paid_in_full", "trigger");
+  eq(parseStatusSave({ id: U, triggerEvent: "whenever" }).ok, false, "unknown trigger");
+  eq(parseStatusSave({ name: "x".repeat(41) }).ok, false, "too long");
+  const c = parseStatusSave({ id: U, name: "New" });
+  eq(c.ok && c.triggerEvent, undefined, "absent trigger means unchanged");
+  eq(parseIdOrder({ ids: [U, U] }).ok, false, "duplicate");
 });

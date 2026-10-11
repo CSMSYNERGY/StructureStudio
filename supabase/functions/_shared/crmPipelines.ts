@@ -154,14 +154,12 @@ export function parsePipelineSave(b: Record<string, unknown>): Parsed<PipelineIn
   return { ok: true, id: id ? id.toLowerCase() : null, name, lostReasons, archive: b.archive === true };
 }
 
-/** The estimate statuses a stage can take cards from (migration 302). */
-export const DESIGN_STATUSES = ["draft", "sent", "accepted", "invoiced", "delivered"] as const;
-
 export type StageIn = {
   id: string | null; pipelineId: string | null; name: string | null;
   color: string | null; kind: StageKind | null; archive: boolean;
-  /** undefined = not being edited; null = this stage takes no estimates automatically. */
-  designStatus?: string | null;
+  /** The status this stage is LINKED to (migration 302): a card moved here takes it, and a card
+   *  given it moves here. undefined = not being edited; null = no link. */
+  statusId?: string | null;
 };
 
 export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
@@ -176,16 +174,15 @@ export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
   if (color && !/^#[0-9A-Fa-f]{6}$/.test(color)) return { ok: false, error: "Pick a colour from the list." };
   const kindRaw = str(b.kind, 8);
   if (kindRaw && !(STAGE_KINDS as readonly string[]).includes(kindRaw)) return { ok: false, error: "A stage is open, won or lost." };
-  let designStatus: string | null | undefined = undefined;
-  if (b.designStatus !== undefined) {
-    designStatus = str(b.designStatus, 12);
-    if (designStatus && !(DESIGN_STATUSES as readonly string[]).includes(designStatus)) {
-      return { ok: false, error: "Pick an estimate status from the list." };
-    }
+  let statusId: string | null | undefined = undefined;
+  if (b.statusId !== undefined) {
+    statusId = str(b.statusId, 64);
+    if (statusId && !isUuidLike(statusId)) return { ok: false, error: "Pick a status from the list." };
+    statusId = statusId ? statusId.toLowerCase() : null;
   }
   return {
     ok: true, id: id ? id.toLowerCase() : null, pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
-    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true, designStatus,
+    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true, statusId,
   };
 }
 
@@ -197,6 +194,51 @@ export function parseStageOrder(b: Record<string, unknown>): Parsed<{ pipelineId
   const ids = b.ids.map((v) => String(v).toLowerCase());
   if (ids.some((v) => !isUuidLike(v)) || new Set(ids).size !== ids.length) return { ok: false, error: "Send each stage once." };
   return { ok: true, pipelineId: pipelineId.toLowerCase(), ids };
+}
+
+// ── Card statuses (migration 302, Settings → Pipelines) ──────────────────────────────────
+/** The system events a status can be set by — the "Set automatically when" drop-down. Mirrors
+ *  crm_statuses.trigger_event's CHECK; the labels are what the drop-down reads. */
+export const STATUS_EVENTS: Record<string, string> = {
+  design_submitted: "A design is submitted",
+  estimate_sent: "The estimate is sent",
+  estimate_accepted: "The estimate is accepted",
+  invoiced: "The invoice is sent",
+  paid_in_full: "It is paid in full",
+  build_scheduled: "It is added to the build schedule",
+  delivered: "It is delivered",
+};
+export const STATUS_NAME_MAX = 40;
+
+export type StatusIn = {
+  id: string | null; name: string | null; color: string | null;
+  /** undefined = not being edited; null = set by hand only. */
+  triggerEvent?: string | null;
+  archive: boolean;
+};
+
+export function parseStatusSave(b: Record<string, unknown>): Parsed<StatusIn> {
+  const id = str(b.id, 64);
+  if (id && !isUuidLike(id)) return { ok: false, error: "That status wasn't found." };
+  const name = str(b.name, STATUS_NAME_MAX + 1);
+  if (name && name.length > STATUS_NAME_MAX) return { ok: false, error: `Keep the status name under ${STATUS_NAME_MAX} characters.` };
+  if (!id && !name) return { ok: false, error: "Name the new status." };
+  const color = str(b.color, 7);
+  if (color && !/^#[0-9A-Fa-f]{6}$/.test(color)) return { ok: false, error: "Pick a colour from the list." };
+  let triggerEvent: string | null | undefined = undefined;
+  if (b.triggerEvent !== undefined) {
+    triggerEvent = str(b.triggerEvent, 32);
+    if (triggerEvent && !(triggerEvent in STATUS_EVENTS)) return { ok: false, error: "Pick when it is set from the list." };
+  }
+  return { ok: true, id: id ? id.toLowerCase() : null, name, color, triggerEvent, archive: b.archive === true };
+}
+
+/** A full ordering of a list (statuses): every id exactly once. */
+export function parseIdOrder(b: Record<string, unknown>): Parsed<{ ids: string[] }> {
+  if (!Array.isArray(b.ids) || !b.ids.length || b.ids.length > 100) return { ok: false, error: "Send the list in its new order." };
+  const ids = b.ids.map((v) => String(v).toLowerCase());
+  if (ids.some((v) => !isUuidLike(v)) || new Set(ids).size !== ids.length) return { ok: false, error: "Send each one once." };
+  return { ok: true, ids };
 }
 
 /**

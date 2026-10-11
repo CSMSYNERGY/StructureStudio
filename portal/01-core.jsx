@@ -784,6 +784,8 @@ const SETTINGS_TAB_AREA = {
   crews: "settings_team",
   drivers: "settings_team",
   connection: "settings_crm",
+  // Statuses and pipeline stages (migration 302): every write is gated settings_crm:edit.
+  pipelines: "settings_crm",
   // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
   // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
   // the company rate and the location rates — a tab on any other area would show someone a
@@ -1431,6 +1433,9 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // it towards since she said the catalog four "aren't grouped ... they have their own nav
     // on the side". Only My Profile still carries a heading, because it is the one item on this
     // rail that configures the PERSON rather than the business.
+    // Card statuses and the built-in pipelines' stages (migration 302, Carolyn 2026-10-11:
+    // "I do want to have these stages in the settings"). Above CRM Connection, which is GHL's.
+    ["pipelines", "Pipelines", "Card statuses, when each is set automatically, and each pipeline's stages", null],
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
     // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —

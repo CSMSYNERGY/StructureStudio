@@ -30,7 +30,7 @@ const ROUTES = [
   // a hub that lost its render branch would land people on Structures rather than erroring.
   // That is invisible from the outside and exactly what this list is for: EVERY slug, or the
   // suite stops proving anything about the ones it skips.
-  "/portal/settings/structures", "/portal/settings/designer", "/portal/settings/connection",
+  "/portal/settings/structures", "/portal/settings/designer", "/portal/settings/connection", "/portal/settings/pipelines",
   "/portal/settings/quickbooks", "/portal/settings/email", "/portal/settings/sms",
   // My Synergy Phone's calling setup. Offered only where ssPhoneOffered says so (beta hosts, a tenant
   // with calling on, operators in view-as); elsewhere it CLAMPS to Structures, which is a render.

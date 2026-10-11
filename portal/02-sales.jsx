@@ -5076,6 +5076,32 @@ const ssPipeInitials = (name) => String(name || "").trim().split(/\s+/).slice(0,
 const ssDaysSince = (iso) => (iso ? Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86400000)) : null);
 const SS_STAGE_COLORS = ["#64748B", "#0EA5E9", "#14B8A6", "#6366F1", "#8B5CF6", "#EC4899", "#F59E0B", "#F97316", "#94A3B8", "#16A34A", "#DC2626"];
 
+// ── CARD STATUS (migration 302) ── Carolyn 2026-10-11: "a STATUS for all Pipeline cards ... All
+// of these status's should show on the card as a pill and all have their own color." The pill IS
+// the control: a <select> dressed as a pill, so changing a status is one click on the card.
+// Tinted the way StatusPill is: the colour at ~12% behind the colour itself.
+const ssStatusTint = (hex) => (/^#[0-9A-Fa-f]{6}$/.test(hex || "") ? hex + "1F" : "#F1F5F9");
+function SsStatusPill({ statuses, value, onChange, disabled = false, style = null }) {
+  const cur = (statuses || []).find((x) => x.id === value) || null;
+  const color = cur ? cur.color : "#64748B";
+  return (
+    <select aria-label="Status" value={value || ""} disabled={disabled || !onChange}
+      title={disabled || !onChange ? (cur ? cur.name : "No status") : "Change the status"}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => { if (onChange && e.target.value) onChange(e.target.value); }}
+      style={{
+        appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
+        background: ssStatusTint(color), color, border: "1px solid " + color + "55", borderRadius: 999,
+        padding: "1px 9px", fontSize: 10.5, fontWeight: 800, fontFamily: "inherit", lineHeight: "16px",
+        cursor: disabled || !onChange ? "default" : "pointer", maxWidth: 150, textOverflow: "ellipsis",
+        ...(style || {}),
+      }}>
+      {!cur && <option value="">No status</option>}
+      {(statuses || []).map((t) => <option key={t.id} value={t.id} style={{ color: "#1E293B", background: "#FFF" }}>{t.name}</option>)}
+    </select>
+  );
+}
+
 function SsPipeModal({ title, onClose, children, width = 460 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -5211,7 +5237,7 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
 
 // Stages, colours, kinds and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
 // (owner/admin by preset); the server refuses everyone else whatever this shows.
-function SsPipelineEditor({ pipeline, onClose, onCreated }) {
+function SsPipelineEditor({ pipeline, statuses = [], onClose, onCreated }) {
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
   const [reasons, setReasons] = useState(pipeline ? (pipeline.lostReasons || []).join("\n") : "");
@@ -5238,7 +5264,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
 
   const saveStage = (s, patch) => run(async () => {
     await ssPipeCall("crm_stage_save", { id: s.id, ...patch });
-    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch, ...(patch.designStatus !== undefined ? { designStatus: patch.designStatus || null } : {}) } : x)));
+    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch, ...(patch.statusId !== undefined ? { statusId: patch.statusId || null } : {}) } : x)));
   });
   const move = (i, d) => {
     const j = i + d;
@@ -5264,7 +5290,12 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
         <input style={S.input} value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
           onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
       <span style={S.lbl}>Stages</span>
-      {pipeline.feedsDesigns && <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px" }}>New designs appear in this pipeline. The last column says which estimate status moves a card to that stage by itself.</p>}
+      <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+        {pipeline.feedsDesigns ? "New designs appear in this pipeline. " : ""}
+        Link a stage to a status, and a card dragged there gets that status, while a card that gets that
+        status (by hand, or automatically: see Settings → Pipelines) moves there.
+        {pipeline.mirrorsStatuses ? " This pipeline's stages are your statuses: rename, add or remove them in Settings → Pipelines." : ""}
+      </p>
       <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
         {stages.map((s, i) => (
           <div key={s.id} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", borderBottom: i < stages.length - 1 ? "1px solid #F1F5F9" : "none" }}>
@@ -5277,15 +5308,12 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
             <select aria-label="Kind" value={s.kind} onChange={(e) => saveStage(s, { kind: e.target.value })} style={{ ...S.input, width: 80, padding: "5px 6px" }}>
               <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
             </select>
-            {/* Only on the pipeline new designs land in (migration 302): which estimate status
-                moves a card here on its own. */}
-            {pipeline.feedsDesigns && (
-              <select aria-label="Estimates that land here" title="An estimate that reaches this status moves here"
-                value={s.designStatus || ""} onChange={(e) => saveStage(s, { designStatus: e.target.value })} style={{ ...S.input, width: 112, padding: "5px 6px" }}>
-                <option value="">No auto-move</option>
-                {["draft", "sent", "accepted", "invoiced", "delivered"].map((k) => <option key={k} value={k}>{STATUS_LABELS[k]}</option>)}
-              </select>
-            )}
+            {/* The status LINK (migration 302): drag here → this status; this status → here. */}
+            <select aria-label="Linked status" title="A card dragged here gets this status, and a card given this status moves here"
+              value={s.statusId || ""} onChange={(e) => saveStage(s, { statusId: e.target.value })} style={{ ...S.input, width: 118, padding: "5px 6px" }}>
+              <option value="">No status link</option>
+              {statuses.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
             <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>
             <button type="button" title="Move down" disabled={busy || i === stages.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>
             <button type="button" title="Remove stage" disabled={busy}
@@ -5358,6 +5386,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
   // tenant's account with the operator's session.
   const canWrite = !!(meta && meta.canWrite) && !viewing;
   const team = (meta && meta.team) || [];
+  const statuses = (meta && meta.statuses) || [];
   const teamName = (id) => { const m = team.find((x) => x.userId === id); return m ? (m.name || "Team member") : null; };
 
   // Optimistic: the card jumps at once, and a refusal puts it back and says why.
@@ -5378,8 +5407,21 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
 
   const moveDeal = async (deal, stage, lostReason) => {
     const prev = deals;
-    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
+    // A stage LINKED to a status gives the card that status (crm_move_deal does the same).
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, status_id: stage.statusId || d.status_id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
     try { await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null }); }
+    catch (e) { setDeals(prev); setErr(e.message); }
+  };
+  // A status set by hand from the pill. If this pipeline has a stage linked to that status the
+  // card moves there too (crm_set_deal_status), so the optimistic paint does the same.
+  const setStatus = async (deal, statusId) => {
+    if (statusId === deal.status_id) return;
+    const prev = deals;
+    const linked = pipe ? pipe.stages.find((x) => x.statusId === statusId) : null;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id
+      ? { ...d, status_id: statusId, ...(linked && linked.id !== d.stage_id ? { stage_id: linked.id, stage_entered_at: new Date().toISOString() } : {}) }
+      : d)));
+    try { await ssPipeCall("crm_deal_set_status", { id: deal.id, statusId }); }
     catch (e) { setDeals(prev); setErr(e.message); }
   };
   const onDrop = (stage) => {
@@ -5464,7 +5506,9 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                     const g = d.design;
                     const head = c.company || c.name || c.phone || c.email || "—";
                     const building = g ? [titleCase(g.style), g.size].filter(Boolean).join(" ") : "";
-                    const sub = g ? (building || d.short_code) : (c.company ? (c.name || c.phone || c.email) : (d.title || null));
+                    const sub = g
+                      ? [building || d.short_code, g.estimateNumber ? "#" + g.estimateNumber : null].filter(Boolean).join(" · ")
+                      : (c.company ? (c.name || c.phone || c.email) : (d.title || null));
                     const closeIso = d.expected_close_date || null;
                     const closeLate = !!closeIso && closeIso < ssLocalIso(new Date());
                     const days = ssDaysSince(d.stage_entered_at);
@@ -5483,13 +5527,10 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                           {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{fmtMoneyWhole(d.value_cents)}</span>}
                         </div>
                         {sub && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
-                        {/* The estimate's own status on a design card: the stage is where a person
-                            put it, the pill is what the estimate actually is. The right-hand gap is
-                            the close-date control's spot (a sibling: a button in a button is invalid). */}
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6, minHeight: 18 }}>
-                          {g && <StatusPill status={g.status} small />}
-                          {g && g.estimateNumber && <span>#{g.estimateNumber}</span>}
-                        </div>
+                        {/* The row the STATUS PILL (left) and the close date (right) sit over. Both are
+                            siblings positioned on top, because a control inside a <button> is invalid
+                            HTML and would swallow the card's own click. */}
+                        <div style={{ marginTop: 5, minHeight: 20 }} aria-hidden="true" />
                         {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
                         <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#94A3B8" }}>
                           <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
@@ -5504,16 +5545,19 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                           )}
                         </div>
                       </button>
+                      <SsStatusPill statuses={statuses} value={d.status_id} disabled={!canWrite}
+                        onChange={(id) => setStatus(d, id)}
+                        style={{ position: "absolute", left: 9, top: sub ? 45 : 30, zIndex: 2 }} />
                       {/* THE CLOSE-DATE CONTROL, a sibling positioned over the card (see above). */}
                       {closeEdit === d.id ? (
                         <input type="date" autoFocus defaultValue={closeIso || ""}
                           onBlur={(e) => saveClose(d, e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
-                          style={{ position: "absolute", right: 7, top: 44, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
+                          style={{ position: "absolute", right: 7, top: sub ? 44 : 29, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
                       ) : (
                         <button type="button" title={closeIso ? "Expected close: click to change" : "Set an expected close date"}
                           onClick={(e) => { e.stopPropagation(); setCloseEdit(d.id); }} disabled={!canWrite}
-                          style={{ position: "absolute", right: 7, top: 45, zIndex: 2, border: "none", borderRadius: 4, padding: "0 4px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
+                          style={{ position: "absolute", right: 7, top: sub ? 47 : 32, zIndex: 2, border: "none", borderRadius: 4, padding: "0 4px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
                             cursor: canWrite ? "pointer" : "default", background: closeLate ? "#FEF2F2" : "transparent",
                             color: closeIso ? (closeLate ? "#DC2626" : "#1B7895") : "#CBD5E1" }}>
                           {closeIso ? fmtDateShort(closeIso) : (canWrite ? "+ close" : "")}
@@ -5528,13 +5572,13 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
           </div>
         </div>
       )}
-      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it. Click a card to open the customer, where the stage can also be changed.{pipe.feedsDesigns ? " New designs appear here on their own, and a card moves when its estimate's status changes." : ""}</p>}
+      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it, and click its status to change it. Click a card to open the customer.{pipe.feedsDesigns ? " New designs appear here on their own." : ""}{pipe.stages.some((x) => x.statusId) ? " Here a card also moves when its status changes." : ""}</p>}
       {dialog === "add" && (
         <SsAddLeadDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly} me={meta.me}
           onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
           onAdded={(r) => { setDialog(null); loadDeals(); }} />
       )}
-      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); }} />}
+      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} statuses={statuses} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
       {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}
         onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
       {dialog && dialog.lost && (
@@ -5567,6 +5611,11 @@ function SsContactDeals({ contactId, canEdit = false }) {
     try { await ssPipeCall("crm_deal_move", { id: deal.id, stageId, lostReason: reason || null }); load(); }
     catch (e) { setErr(e.message); }
   };
+  const doStatus = async (deal, statusId) => {
+    try { await ssPipeCall("crm_deal_set_status", { id: deal.id, statusId }); load(); }
+    catch (e) { setErr(e.message); }
+  };
+  const statuses = (meta && meta.statuses) || [];
   if (deals === null) return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Loading…</div>;
   return (
     <div data-ss-contact-deals="">
@@ -5583,11 +5632,20 @@ function SsContactDeals({ contactId, canEdit = false }) {
               </span>
               {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800 }}>{fmtMoneyWhole(d.value_cents)}</span>}
             </div>
+            <div style={{ marginTop: 6 }}>
+              <SsStatusPill statuses={statuses} value={d.status_id} disabled={!canEdit} onChange={(id) => doStatus(d, id)} />
+            </div>
+            {/* Every pipeline's stages, so a card can move to ANOTHER pipeline from here
+                (Carolyn: "one card per design that you can choose to move to other pipelines"). */}
             {at && (
-              <select disabled={!canEdit} value={d.stage_id} aria-label="Stage"
-                onChange={(e) => { const s = at.pipe.stages.find((x) => x.id === e.target.value); if (!s) return; if (s.kind === "lost") setLost({ deal: d, stage: s, reasons: at.pipe.lostReasons }); else doMove(d, s.id); }}
+              <select disabled={!canEdit} value={d.stage_id} aria-label="Pipeline and stage"
+                onChange={(e) => { const hit = stageOf(e.target.value); if (!hit) return; if (hit.stage.kind === "lost") setLost({ deal: d, stage: hit.stage, reasons: hit.pipe.lostReasons }); else doMove(d, hit.stage.id); }}
                 style={{ ...S.input, marginTop: 6, padding: "5px 8px", borderLeft: "4px solid " + at.stage.color }}>
-                {at.pipe.stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {pipes.map((p) => (
+                  <optgroup key={p.id} label={p.name}>
+                    {p.stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </optgroup>
+                ))}
               </select>
             )}
             {d.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {d.lost_reason}</div>}
@@ -5617,5 +5675,116 @@ function SsContactDeals({ contactId, canEdit = false }) {
           onPick={(reason) => { const l = lost; setLost(null); doMove(l.deal, l.stage.id, reason); }} />
       )}
     </div>
+  );
+}
+
+// ── SETTINGS → PIPELINES (migration 302) ─────────────────────────────────────────────────────
+// Carolyn 2026-10-11: "I do want to have these stages in the settings, so that each builder can
+// then rename them if they want and we also want them to add others if they want and they will set
+// up When they get that stage such as when an estimate is accepted then it gets that stage. so we
+// need a drop down similar to how we have it in GHL settings."
+// The STATUSES card is that list; each one's "Set automatically when" drop-down names the system
+// event that sets it (one status per event). The PIPELINES card opens each pipeline's stage editor.
+// settings_crm:edit to change anything (owner/admin by preset); the server refuses everyone else.
+const SS_STATUS_EVENTS = [
+  ["design_submitted", "A design is submitted"],
+  ["estimate_sent", "The estimate is sent"],
+  ["estimate_accepted", "The estimate is accepted"],
+  ["invoiced", "The invoice is sent"],
+  ["paid_in_full", "It is paid in full"],
+  ["build_scheduled", "It is added to the build schedule"],
+  ["delivered", "It is delivered"],
+];
+function PipelineSettings({ viewing = false }) {
+  const [meta, setMeta] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [editing, setEditing] = useState(null);   // pipeline object | "new"
+  const load = useCallback(async () => {
+    try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
+    catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], statuses: [] }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); await load(); } catch (e) { setErr(e.message); await load(); } finally { setBusy(false); } };
+  if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines &amp; Statuses</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+  const can = !!meta.canManage && !viewing;
+  const statuses = meta.statuses || [];
+  const save = (t, patch) => run(() => ssPipeCall("crm_status_save", { id: t.id, ...patch }));
+  const move = (i, d) => {
+    const j = i + d; if (j < 0 || j >= statuses.length) return;
+    const ids = statuses.map((t) => t.id); const x = ids[i]; ids[i] = ids[j]; ids[j] = x;
+    run(() => ssPipeCall("crm_statuses_reorder", { ids }));
+  };
+  const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
+  return (
+    <>
+      <div style={S.card} data-ss-pipeline-settings="">
+        <div style={S.h2}>Statuses</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Every card on every pipeline shows its status as a coloured pill. Rename them, recolour them, put them in
+          order and add your own. <b>Set automatically when</b> moves a card's status by itself when that happens
+          to its design. It only ever moves forward in this order, and anyone can still change a status by hand.
+          In the pipeline new designs land in, the stages are these statuses, so a card moves with its status.
+        </p>
+        {err && <div style={S.err}>{err}</div>}
+        <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 10 }}>
+          {statuses.map((t, i) => (
+            <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "7px 9px", borderBottom: i < statuses.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+              <select aria-label="Colour" disabled={!can || busy} value={t.color} onChange={(e) => save(t, { color: e.target.value })}
+                style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: t.color, color: "transparent", cursor: can ? "pointer" : "default" }}>
+                {SS_STAGE_COLORS.concat(["#84CC16", "#0F766E", "#60A5FA", "#EF4444"]).concat(SS_STAGE_COLORS.includes(t.color) ? [] : [t.color])
+                  .filter((c, k, a) => a.indexOf(c) === k).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
+              </select>
+              <input key={t.id + t.name} aria-label="Status name" disabled={!can || busy} style={{ ...S.input, flex: "1 1 150px", minWidth: 120, padding: "5px 8px" }}
+                defaultValue={t.name} maxLength={40}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== t.name) save(t, { name: v }); }} />
+              <label style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 230px", fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>
+                Set automatically when
+                <select aria-label="Set automatically when" disabled={!can || busy} value={t.triggerEvent || ""}
+                  onChange={(e) => save(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
+                  <option value="">Never (set by hand)</option>
+                  {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
+                </select>
+              </label>
+              {can && <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>}
+              {can && <button type="button" title="Move down" disabled={busy || i === statuses.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>}
+              {can && <button type="button" title="Remove status" disabled={busy}
+                onClick={() => { if (window.confirm(`Remove the “${t.name}” status? Cards must have another status first.`)) save(t, { archive: true }); }}
+                style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>}
+            </div>
+          ))}
+        </div>
+        {can && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <input style={{ ...S.input, flex: 1 }} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)} placeholder="New status name"
+              onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { e.preventDefault(); run(async () => { await ssPipeCall("crm_status_save", { name: newName.trim() }); setNewName(""); }); } }} />
+            <button type="button" disabled={busy || !newName.trim()} style={S.btn(ACCENT, "#FFF")}
+              onClick={() => run(async () => { await ssPipeCall("crm_status_save", { name: newName.trim() }); setNewName(""); })}>Add status</button>
+          </div>
+        )}
+      </div>
+      <div style={S.card}>
+        <div style={S.h2}>Pipelines</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          New designs land in the pipeline marked <b>new designs</b>. Open a pipeline to rename its stages, add stages,
+          link stages to statuses and set its lost reasons.
+        </p>
+        {(meta.pipelines || []).map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
+            <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+              {p.name}
+              {p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
+              <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}>{p.stages.length} stages</span>
+            </span>
+            {can && <button type="button" onClick={() => setEditing(p)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>Edit stages</button>}
+          </div>
+        ))}
+        {can && <button type="button" onClick={() => setEditing("new")} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 10 }}>＋ New pipeline</button>}
+      </div>
+      {editing && editing !== "new" && <SsPipelineEditor pipeline={editing} statuses={statuses} onClose={() => { setEditing(null); load(); }} />}
+      {editing === "new" && <SsPipelineEditor pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
+    </>
   );
 }
