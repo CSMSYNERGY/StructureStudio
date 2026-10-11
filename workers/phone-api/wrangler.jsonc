@@ -76,11 +76,11 @@
     // phone-call-summary edge function for a summary of each. Anything else: off. Set the Supabase
     // function secret of the same name with it (portal-settings reads it for the Settings card).
     "CALL_TRANSCRIBE": "off",
-    // One Twilio sub-account per builder (SETUP.md 7f). "manual" (2026-10-11, the support-demo test):
-    // businesses that already have a sub-account run in it; nobody gets a new one by themselves.
+    // One Twilio sub-account per builder (SETUP.md 7f). "on" since 2026-10-11 (go-live, after the
+    // support-demo call tests): a builder's first number or first texting submit makes their sub-account.
     // Set the Supabase function secret of the same name to the same value. After any builder is on
     // a sub-account, never unset it: "manual" is the rollback.
-    "TWILIO_SUBACCOUNTS": "manual"
+    "TWILIO_SUBACCOUNTS": "on"
     // The wallet floor that refuses an outbound call is no longer a var here: it is
     // phone_billing_settings.floor_cents (migration 259), so calls and texts share one number.
   },
