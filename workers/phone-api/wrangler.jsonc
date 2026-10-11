@@ -75,7 +75,12 @@
     // below, Deepgram nova-3, about $0.005-0.01 per minute) from the minute tick, and asks the
     // phone-call-summary edge function for a summary of each. Anything else: off. Set the Supabase
     // function secret of the same name with it (portal-settings reads it for the Settings card).
-    "CALL_TRANSCRIBE": "off"
+    "CALL_TRANSCRIBE": "off",
+    // One Twilio sub-account per builder (SETUP.md 7f). "manual" (2026-10-11, the support-demo test):
+    // businesses that already have a sub-account run in it; nobody gets a new one by themselves.
+    // Set the Supabase function secret of the same name to the same value. After any builder is on
+    // a sub-account, never unset it: "manual" is the rollback.
+    "TWILIO_SUBACCOUNTS": "manual"
     // The wallet floor that refuses an outbound call is no longer a var here: it is
     // phone_billing_settings.floor_cents (migration 259), so calls and texts share one number.
   },
