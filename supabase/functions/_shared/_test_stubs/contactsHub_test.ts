@@ -262,11 +262,14 @@ Deno.test("the hub is mounted under Contacts, with records opening inside it", (
   assert(/!gateLocked && activeTab === "contacts" && sub && \/\^\[cd\]-\/\.test\(sub\) \? \(\s*<CrmRecord/.test(SHELL), "records do not open under Contacts");
   assert(!/activeTab === "designs"/.test(SHELL), "something still renders under the old Pipeline page");
   // A card or a Design list row opens the record with the hub tab it came from as its Back (C22).
-  const open = slice(SHELL, "const hubOpenRecord = (code, contactId, fromSub) => {", "\n  };", "hubOpenRecord");
+  const open = slice(SHELL, "const hubOpenRecord = (code, contactId, fromSub, dealId) => {", "\n  };", "hubOpenRecord");
   assert(open.includes('const from = { page: "contacts", pageSub: fromSub || null };'), "the record's Back loses the hub tab");
-  assert(open.includes('navigate("contacts", "c-" + contactId, false, { deal: code || null, from })'), "a card does not open its customer on the deal");
+  assert(open.includes('navigate("contacts", "c-" + contactId, false, { deal: code || dealId || null, from })'), "a card does not open its customer on the deal");
   assert(open.includes('navigate("contacts", "d-" + code, false, { from })'), "a design without a customer does not open its record");
-  assert(/onOpenRecord=\{\(code, contactId\) => onOpenRecord\(code, contactId, fromPipe\)\}/.test(SALES), "a board card does not say which pipeline it came from");
+  assert(!open.includes('"d-" + dealId') && !open.includes('"d-" + (code || dealId)'), "a lead card's id is used as a design address");
+  assert(/onOpenRecord=\{\(code, contactId, dealId\) => onOpenRecord\(code, contactId, fromPipe, dealId\)\}/.test(SALES), "a board card does not say which pipeline it came from");
+  // A lead card has no short code, so it names its customer's deal by the card id (C22).
+  assert(SALES.includes("onOpenRecord(d.short_code || null, d.contact_id || null, d.id)"), "a lead card opens its customer with nothing picked");
   assert(SHELL.includes("onOpenRecord={(code, contactId) => hubOpenRecord(code, contactId, SS_HUB_DESIGNS)}"), "a Design list row does not say it came from there");
   // The navigate() every caller goes through maps the old page ids (the schedules' "designs").
   const nav = slice(SHELL, "const navigate = useCallback(", "}, []);", "navigate");

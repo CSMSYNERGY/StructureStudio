@@ -2547,9 +2547,13 @@ function Dashboard({ session }) {
   //     (see the record mount's own comment), and a Crew Leader (designs only) opens designs.
   //     Routing a free-tier tenant's Design list click at the upsell would take away the page
   //     they have today, which is a regression dressed as a feature.
-  const hubOpenRecord = (code, contactId, fromSub) => {
+  // `dealId` is the board card's own id. A lead card (a deal with no design) has no short code,
+  // so the customer opens with that card's row picked by its id, which CrmRecord accepts as
+  // initialDeal. Only ever on the contact path: a design record is addressed by short code, and
+  // a d-<uuid> address would open "That design no longer exists".
+  const hubOpenRecord = (code, contactId, fromSub, dealId) => {
     const from = { page: "contacts", pageSub: fromSub || null };
-    if (contactId && crmUnlocked && hubReach.people) navigate("contacts", "c-" + contactId, false, { deal: code || null, from });
+    if (contactId && crmUnlocked && hubReach.people) navigate("contacts", "c-" + contactId, false, { deal: code || dealId || null, from });
     else if (code) navigate("contacts", "d-" + code, false, { from });
   };
   // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation

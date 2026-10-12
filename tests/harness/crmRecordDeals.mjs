@@ -347,6 +347,21 @@ try {
       ok("L2 with the bar on its pipeline and stage", opened && opened.label === "Shed Deals" && opened.lit.join() === "Attempting Contact", JSON.stringify(opened));
       await shot(page, "opened-from-board");
     }
+    // A LEAD card (no design, so no short code) opens its customer with that deal picked (C22).
+    await go(`/portal/contacts/p-${SOLD.id}`);
+    const leadCard = page.locator(`[data-ss-deal="${LEAD_ID}"]`);
+    await leadCard.waitFor({ timeout: 20000 }).catch(() => {});
+    if (ok("L3 the lead card is on the Sold board", (await leadCard.count()) === 1)) {
+      await leadCard.click();
+      await page.waitForFunction(() => !!document.querySelector('[data-ss-stage-label="sales"]'), null, { timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(400);
+      const leadOpened = await barRow(page);
+      const leadPicked = await page.locator(`${rowEl(LEAD_ID)} button[aria-pressed="true"]`).count();
+      ok("L4 a lead card opens its customer with that lead picked", leadPicked === 1 && /\/contacts\/c-/.test(await page.evaluate(() => location.pathname)),
+        await page.evaluate(() => location.pathname));
+      ok("L5 and the bar on the lead's pipeline and stage", leadOpened && leadOpened.label === "Sold" && leadOpened.lit.join() === "Signed", JSON.stringify(leadOpened));
+      await shot(page, "lead-opened-from-board");
+    }
 
     ok("Z1 nothing on the record set a status", !calls.some((c) => c.action === "crm_deal_set_status"), JSON.stringify(calls.map((c) => c.action)));
     ok("Z2 no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));

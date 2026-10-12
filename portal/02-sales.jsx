@@ -333,7 +333,7 @@ function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked
             urlPipelineId={r.pipeId}
             onPickPipeline={(id) => onRoute("p-" + String(id).toLowerCase(), false)}
             onPipelines={replace}
-            onOpenRecord={(code, contactId) => onOpenRecord(code, contactId, fromPipe)} />
+            onOpenRecord={(code, contactId, dealId) => onOpenRecord(code, contactId, fromPipe, dealId)} />
         </div>
       )}
     </div>
@@ -6241,7 +6241,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                     const ownerName = teamName(c.ownerUserId);
                     const follow = d.next_follow_up_at ? Date.parse(d.next_follow_up_at) : null;
                     const late = follow !== null && follow < Date.now();
-                    const openCard = () => { if (onOpenRecord) onOpenRecord(d.short_code || null, d.contact_id || null); };
+                    const openCard = () => { if (onOpenRecord) onOpenRecord(d.short_code || null, d.contact_id || null, d.id); };
                     return (
                       // THE CARD is a focusable div acting as a button (Enter or Space opens it, like a
                       // click), not a <button>: the close date below is a control of its own, and a
