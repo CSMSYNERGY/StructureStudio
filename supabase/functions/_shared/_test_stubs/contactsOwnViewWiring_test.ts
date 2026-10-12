@@ -48,7 +48,8 @@ const SETTINGS_WRITES = [
   // Sales pipelines (migration 301): a lead and its deal are customer-record writes, so a
   // view-only person adds and moves nothing.
   "crm_create_lead", "crm_deal_create", "crm_deal_update", "crm_deal_move", "crm_deal_archive",
-  // Card statuses (migration 302): setting one on a card is the same write as moving it.
+  // Card statuses (migration 302): setting one on a card is the same write as moving it. Since 303
+  // the branch refuses everyone (statuses are system-driven); the gate stays, so it stays listed.
   "crm_deal_set_status",
 ];
 

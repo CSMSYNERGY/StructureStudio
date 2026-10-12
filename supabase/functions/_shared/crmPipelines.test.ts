@@ -1,6 +1,6 @@
 // Unit tests for _shared/crmPipelines.ts (migration 301). Self-contained: no registry imports.
 import {
-  parseIdOrder, parseStatusSave,
+  parseIdOrder, parseStatusSave, STAGE_STATUS_LINK_RETIRED, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   parseDay, parseDealPatch, parseInstant, parseLead, parseMoneyCents, parsePipelineSave,
   parseStageOrder, parseStageSave, stageSetRefusal,
 } from "./crmPipelines.ts";
@@ -59,13 +59,18 @@ Deno.test("pipeline and stage saves", () => {
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "maybe" }).ok, false, "bad kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", color: "red" }).ok, false, "bad colour");
   eq(parseStageSave({ id: U, color: "#AABBCC" }).ok, true, "edit colour only");
+});
+
+Deno.test("a stage never carries a status (migration 303): a stale editor's link is refused, a blank one ignored", () => {
   const st = parseStageSave({ id: U, statusId: U.toUpperCase() });
-  eq(st.ok && st.statusId, U, "status link");
-  const cl = parseStageSave({ id: U, statusId: "" });
-  eq(cl.ok && cl.statusId, null, "status link cleared");
-  eq(parseStageSave({ id: U, statusId: "sent" }).ok, false, "a link is a status id");
-  const none = parseStageSave({ id: U, name: "X" });
-  eq(none.ok && none.statusId, undefined, "absent means unchanged");
+  eq(st, { ok: false, error: STAGE_STATUS_LINK_RETIRED }, "a real link is refused, not dropped");
+  eq(parseStageSave({ pipelineId: U, name: "Call", statusId: U }).ok, false, "a new stage with a link is refused too");
+  eq(parseStageSave({ id: U, statusId: "sent" }).ok, false, "junk refused");
+  for (const blank of ["", null, "  "]) {
+    const cl = parseStageSave({ id: U, name: "Call", statusId: blank });
+    eq(cl.ok && "statusId" in cl, false, `a blank link (${JSON.stringify(blank)}) is ignored, and nothing carries one`);
+  }
+  eq(/quote/i.test(STAGE_STATUS_LINK_RETIRED), false, "estimate wording");
 });
 
 Deno.test("stage order: every id once", () => {
@@ -81,7 +86,7 @@ Deno.test("a pipeline keeps an open stage", () => {
 Deno.test("statuses: name, colour and the automatic trigger", () => {
   eq(parseStatusSave({}).ok, false, "new needs a name");
   const a = parseStatusSave({ name: "Appt Set", color: "#0EA5E9", triggerEvent: "" });
-  eq(a.ok && [a.name, a.triggerEvent], ["Appt Set", null], "set by hand");
+  eq(a.ok && [a.name, a.triggerEvent], ["Appt Set", null], "no event yet");
   const b = parseStatusSave({ id: U, triggerEvent: "paid_in_full" });
   eq(b.ok && b.triggerEvent, "paid_in_full", "trigger");
   eq(parseStatusSave({ id: U, triggerEvent: "whenever" }).ok, false, "unknown trigger");
@@ -89,4 +94,14 @@ Deno.test("statuses: name, colour and the automatic trigger", () => {
   const c = parseStatusSave({ id: U, name: "New" });
   eq(c.ok && c.triggerEvent, undefined, "absent trigger means unchanged");
   eq(parseIdOrder({ ids: [U, U] }).ok, false, "duplicate");
+});
+
+Deno.test("statuses are system-driven (Carolyn 2026-10-12): the sentences a person reads", () => {
+  // The refusal names the events, says estimate (never quote), and never sends anyone to an owner:
+  // nobody can set a status by hand, an owner included.
+  eq(/by hand/.test(STATUS_IS_SYSTEM_SET) && /estimate/.test(STATUS_IS_SYSTEM_SET), true, "says why");
+  eq(/quote|owner|admin/i.test(STATUS_IS_SYSTEM_SET), false, "no quote, no owner");
+  eq(statusArchiveRefusal(1), "1 card has this status, so it can't be removed. Rename it or change its colour instead.", "one");
+  eq(statusArchiveRefusal(3).startsWith("3 cards have this status"), true, "many");
+  eq(/another status first/.test(statusArchiveRefusal(2)), false, "never asks for a hand-set");
 });

@@ -132,6 +132,10 @@ export function parseDealPatch(b: Record<string, unknown>): Parsed<{ patch: Deal
 }
 
 // ── Pipelines and stages (Settings → CRM → Pipelines) ────────────────────────────────────
+/** Removing the pipeline new designs land in (Shed Deals since migration 303). Without it a new
+ *  design would get no card at all, so it stays. */
+export const DESIGN_FEED_STAYS = "New designs land in this pipeline, so it can't be removed. Rename it or change its stages instead.";
+
 export type PipelineIn = { id: string | null; name: string | null; lostReasons: string[] | null; archive: boolean };
 
 export function parsePipelineSave(b: Record<string, unknown>): Parsed<PipelineIn> {
@@ -157,11 +161,17 @@ export function parsePipelineSave(b: Record<string, unknown>): Parsed<PipelineIn
 export type StageIn = {
   id: string | null; pipelineId: string | null; name: string | null;
   color: string | null; kind: StageKind | null; archive: boolean;
-  /** The status this stage is LINKED to (migration 302): a card moved here takes it, and a card
-   *  given it moves here. undefined = not being edited; null = no link. */
-  statusId?: string | null;
 };
 
+/** A stage no longer carries a status (migration 303): what a stale editor that sends one is told. */
+export const STAGE_STATUS_LINK_RETIRED =
+  "Stages don't set a card's status any more. Statuses are set automatically: see Settings → Pipelines.";
+
+/**
+ * Migration 302 let a stage be LINKED to a status (a card dragged there took it, and a card given it
+ * moved there). Carolyn, 2026-10-12: "the statuses are system-driven, 100%", so 303 retired the link.
+ * A blank statusId (an editor clearing it) is ignored; a real one is refused, never silently dropped.
+ */
 export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
   const id = str(b.id, 64);
   if (id && !isUuidLike(id)) return { ok: false, error: "That stage wasn't found." };
@@ -174,15 +184,10 @@ export function parseStageSave(b: Record<string, unknown>): Parsed<StageIn> {
   if (color && !/^#[0-9A-Fa-f]{6}$/.test(color)) return { ok: false, error: "Pick a colour from the list." };
   const kindRaw = str(b.kind, 8);
   if (kindRaw && !(STAGE_KINDS as readonly string[]).includes(kindRaw)) return { ok: false, error: "A stage is open, won or lost." };
-  let statusId: string | null | undefined = undefined;
-  if (b.statusId !== undefined) {
-    statusId = str(b.statusId, 64);
-    if (statusId && !isUuidLike(statusId)) return { ok: false, error: "Pick a status from the list." };
-    statusId = statusId ? statusId.toLowerCase() : null;
-  }
+  if (str(b.statusId, 64)) return { ok: false, error: STAGE_STATUS_LINK_RETIRED };
   return {
     ok: true, id: id ? id.toLowerCase() : null, pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
-    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true, statusId,
+    name, color, kind: (kindRaw as StageKind) ?? null, archive: b.archive === true,
   };
 }
 
@@ -197,6 +202,22 @@ export function parseStageOrder(b: Record<string, unknown>): Parsed<{ pipelineId
 }
 
 // ── Card statuses (migration 302, Settings → Pipelines) ──────────────────────────────────
+// SYSTEM-DRIVEN ONLY since migration 303. Carolyn, 2026-10-12: "those statuses are automatically
+// set, like, it is not even possible for them to make the changes, it is system-driven, okay, the
+// statuses are system-driven, 100%." A builder still names, colours, orders and adds statuses and
+// picks the event that sets each one; nobody sets one on a card.
+
+/** What a request to set a card's status by hand is told (portal-settings crm_deal_set_status). */
+export const STATUS_IS_SYSTEM_SET =
+  "A card's status can't be changed by hand. It changes by itself as the estimate is sent and accepted, "
+  + "and as the job is invoiced, paid, scheduled and delivered.";
+
+/** Removing a status that cards still have. Nobody can give those cards another one by hand any
+ *  more, so the useful answer is to rename it, not "move them first". */
+export function statusArchiveRefusal(cards: number): string {
+  return `${cards} card${cards === 1 ? " has" : "s have"} this status, so it can't be removed. Rename it or change its colour instead.`;
+}
+
 /** The system events a status can be set by — the "Set automatically when" drop-down. Mirrors
  *  crm_statuses.trigger_event's CHECK; the labels are what the drop-down reads. */
 export const STATUS_EVENTS: Record<string, string> = {
@@ -212,7 +233,7 @@ export const STATUS_NAME_MAX = 40;
 
 export type StatusIn = {
   id: string | null; name: string | null; color: string | null;
-  /** undefined = not being edited; null = set by hand only. */
+  /** undefined = not being edited; null = no event sets it. */
   triggerEvent?: string | null;
   archive: boolean;
 };
