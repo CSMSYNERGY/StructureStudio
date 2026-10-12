@@ -1005,6 +1005,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "search_numbers": {
+        // 2026-10-12 (C55): the builder's own account is made or FINISHED before a number is looked
+        // for, as buy_number does. A sub left 'failed' or 'provisioning' (at builder creation, say:
+        // admin-catalog twilioAtCreate.ts) makes tenantCreds refuse, so the search would otherwise
+        // refuse for good. An active, finished sub is one read; off, none.
+        const notReady = await ensureAccount();
+        if (notReady) return notReady;
         if (!trustHubConfigured()) return json({ error: "Text messaging is not switched on yet." }, 503);
         // An area code, or the area code and up to three more digits (_shared/numberSearch.ts, the
         // same reading as Settings → Phone). The screen sends both keys, so a server from before

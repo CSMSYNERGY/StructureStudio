@@ -3,9 +3,12 @@
  * phase 3), plus what the operator console does to one (phase 9: look, suspend, reactivate, close).
  *
  * IMPORTERS (deploy every one when this file changes; re-run the importer grep at deploy time):
- *   portal-settings/index.ts   phone_buy_number: ensureTwilioAccount before the wallet hold
- *   portal-sms/index.ts        advance (first submit) and buy_number: ensureTwilioAccount
+ *   portal-settings/index.ts   phone_buy_number: ensureTwilioAccount before the wallet hold;
+ *                              phone_search_numbers: the same, before the search (ensureTenantAccount)
+ *   portal-sms/index.ts        advance (first submit), search_numbers and buy_number: ensureTwilioAccount
  *   admin-catalog/index.ts     twilio_account_get / _provision / _suspend / _close, delete_client
+ *   admin-catalog/twilioAtCreate.ts  create_client (TWILIO_SUBACCOUNTS "on" only): ensureTwilioAccount
+ *                              with the console's options (same deploy target as index.ts)
  * Leaf-ish: its one import is _shared/twilioAccount.ts (zero imports itself). Every Twilio request
  * goes through an injectable `http`, so the tests drive every step offline.
  *
