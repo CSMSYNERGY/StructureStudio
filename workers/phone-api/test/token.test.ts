@@ -265,6 +265,15 @@ describe("POST /token", () => {
     expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
   });
 
+  it("says this Worker serves list search (features.list_search), on every platform", async () => {
+    const s = await setup();
+    for (const platform of ["chrome", "android", "ios"]) {
+      const req = appRequest("POST", "/token", await s.auth.token(USER_A), { platform, build_type: "prod", app_version: "1" });
+      const { json } = await call(s.env, req);
+      expect(json.features).toEqual({ handoff: true, recordings: true, list_search: true });
+    }
+  });
+
   // Migration 264: the apps show who rings in your place while you're away from this answer.
   it("settings carry the cover (null when none is chosen), read from the caller's own row", async () => {
     const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod", app_version: "1" });
