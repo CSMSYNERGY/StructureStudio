@@ -6,7 +6,8 @@
 // or rewrites an entry. So everything here either accepts the person's text as it stands or
 // refuses it with a reason; nothing in this file edits a title.
 //
-// THE TRAILERS (the final paragraph of the commit message, the same block as Co-Authored-By):
+// THE TRAILERS (the final paragraph of the commit message, the same block as Co-Authored-By; a
+// Release-note paragraph just above the Co-Authored-By one is read too, see trailerBlock):
 //
 //     Release-note: feature: Estimates can now carry a second contact      (or `fix: ...`)
 //     Release-section: Contacts                                            (optional)
@@ -67,20 +68,11 @@ const SECTION_SHAPE = /^(?=[^A-Za-z]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9 &/+-]*$/;
 /** Length in characters (code points), not UTF-16 units, so an accent counts once. */
 const chars = (s: string) => Array.from(s).length;
 
-/**
- * The commit's trailer block as [key, value, continuationLines] triples, or [] when it has none.
- *
- * Git's shape, kept strict: the LAST paragraph of a message that has more than one, and only when
- * every line in it is `Key: value` or an indented continuation of the line above. A last paragraph
- * that is prose (or the subject of a one-paragraph message) carries no trailers.
- */
-export function trailerBlock(message: string): Array<[string, string, number]> {
-  const text = String(message ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
-  const paras = text.split(/\n[ \t]*\n/).filter((p) => p.trim() !== "");
-  if (paras.length < 2) return [];
-  const lines = paras[paras.length - 1].split("\n");
+/** One paragraph as trailer triples, or null when any line in it is not `Key: value` or an
+ *  indented continuation of the line above (a paragraph cannot open with a continuation). */
+function trailerParagraph(para: string): Array<[string, string, number]> | null {
   const out: Array<[string, string, number]> = [];
-  for (const line of lines) {
+  for (const line of para.split("\n")) {
     if (CONTINUATION.test(line) && out.length) {
       const last = out[out.length - 1];
       last[1] = `${last[1]} ${line.trim()}`.trim();
@@ -88,10 +80,36 @@ export function trailerBlock(message: string): Array<[string, string, number]> {
       continue;
     }
     const m = TRAILER_LINE.exec(line);
-    if (!m) return [];
+    if (!m) return null;
     out.push([m[1].toLowerCase(), m[2].trim(), 0]);
   }
   return out;
+}
+
+/**
+ * The commit's trailer block as [key, value, continuationLines] triples, or [] when it has none.
+ *
+ * Git's shape with ONE allowance. Git reads trailers from the last paragraph only, and only when
+ * every line in it is `Key: value` or an indented continuation. This reads the RUN of closing
+ * paragraphs that are all trailer lines, so a `Release-note:` written in its own paragraph just
+ * above the `Co-Authored-By:` one still counts. That is how people write it: of the 35 commits
+ * that carried a Release-note line between 2026-09-22 and 2026-10-12, 15 had it one blank line
+ * above Co-Authored-By, and git's rule read each of them as "no trailer" (a fix written for the
+ * Support page went nowhere). The words are still copied exactly as written. A paragraph of prose
+ * ends the run, so a Release-note line with prose after it is still not a trailer, and the
+ * subject (the first paragraph) never is one.
+ */
+export function trailerBlock(message: string): Array<[string, string, number]> {
+  const text = String(message ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+  const paras = text.split(/\n[ \t]*\n/).filter((p) => p.trim() !== "");
+  if (paras.length < 2) return [];
+  const blocks: Array<Array<[string, string, number]>> = [];
+  for (let i = paras.length - 1; i >= 1; i -= 1) {
+    const block = trailerParagraph(paras[i]);
+    if (!block) break;
+    blocks.unshift(block);
+  }
+  return blocks.flat();
 }
 
 /** Turn a Projects token into lowercase hex (8-32), or null when it is not a uuid / uuid prefix. */

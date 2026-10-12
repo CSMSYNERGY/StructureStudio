@@ -46,11 +46,28 @@ Deno.test("Release-note: none, and no trailer at all, are different answers", ()
   assertEquals([absent.note, absent.refused], [null, null]);
 });
 
-Deno.test("the trailer block is the LAST paragraph, and only when every line in it is a trailer", () => {
-  // In the body, not the final block: not a trailer.
-  assertEquals(parseReleaseTrailers("Subject\n\nRelease-note: fix: The body is not the trailer block\n\n" + CO).note, null);
+Deno.test("the trailer block is the closing run of all-trailer paragraphs, never prose, never the subject", () => {
+  // Its own paragraph just above Co-Authored-By: read (15 of 35 notes were written this way, 09-22..10-12).
+  const above = parseReleaseTrailers("Subject\n\nWhy it changed.\n\nRelease-note: fix: The payment box scrolls on a small screen\n\n" + CO + "\n");
+  assertEquals(above.note && above.note !== "none" ? above.note.title : null, "The payment box scrolls on a small screen");
+  assertEquals(parseReleaseTrailers("Subject\n\nBody.\n\nRelease-note: none\n\n" + CO).note, "none");
+  // Section and detail in that paragraph travel with it; Projects can sit in either paragraph.
+  const split = parseReleaseTrailers("Subject\n\nRelease-note: feature: Notes split from the sign-off\nRelease-section: Orders\n\nProjects: 3f2a9c1e\n" + CO);
+  assertEquals(split.refused, null);
+  assertEquals(split.note && split.note !== "none" ? split.note.section : null, "Orders");
+  assertEquals(split.projects, ["3f2a9c1e"]);
+  // Prose after it ends the run: a Release-note line in the body is not a trailer.
+  assertEquals(parseReleaseTrailers("Subject\n\nRelease-note: fix: The body is not the trailer block\n\nMore prose here.\n\n" + CO).note, null);
   // A final paragraph with prose in it is not a trailer block (git's rule, kept strict).
   assertEquals(parseReleaseTrailers("Subject\n\nRelease-note: fix: Mixed with prose is not a block\nsee above\n").note, null);
+  // ...and a mixed paragraph above the sign-off is not one either.
+  assertEquals(parseReleaseTrailers("Subject\n\nRelease-note: fix: Mixed with prose above the sign-off\nsee above\n\n" + CO).note, null);
+  // The subject is never a trailer, even when the paragraph after it is.
+  assertEquals(parseReleaseTrailers("Release-note: fix: A subject line is not a trailer\n\n" + CO).note, null);
+  // Two notes across the run are two notes: refused, never one picked.
+  assert(/More than one Release-note/.test(
+    parseReleaseTrailers("Subject\n\nRelease-note: fix: The first note of the two\n\nRelease-note: none\n" + CO).refused || "",
+  ));
   // A one-paragraph message has no trailers: the subject is never one.
   assertEquals(parseReleaseTrailers("Release-note: fix: A subject line is not a trailer").note, null);
   // CRLF and trailing blank lines are fine.

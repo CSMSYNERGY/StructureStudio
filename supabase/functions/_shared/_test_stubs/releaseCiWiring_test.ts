@@ -323,6 +323,18 @@ Deno.test("on_beta with writes on: every result, the note copied verbatim as 'be
   assertEquals(r.body.commits[0].newSection, undefined, "\"contacts\" is the existing Contacts chip, not a new one");
 });
 
+Deno.test("a Release-note in its own paragraph above Co-Authored-By is copied (the shape that was read as no trailer)", async () => {
+  // 2026-10-12: a fix written for the Support page sat one blank line above the sign-off, git's
+  // last-paragraph rule saw only Co-Authored-By, and release-ci answered `none`.
+  const t = world();
+  const split = { sha: sha("8"), message: `Subject\n\nBody.\n\nRelease-note: fix: The payment box scrolls on a small screen\nRelease-section: Orders\n\n${CO}\n` };
+  const prose = { sha: sha("9"), message: `Subject\n\nRelease-note: fix: A line in the body is not a note\n\nMore body after it.\n\n${CO}\n` };
+  const r = await call(t, { action: "on_beta", commits: [split, prose] }, ON);
+  assertEquals(r.body.commits.map((c: Row) => [c.sha, c.result]), [["8888888", "inserted"], ["9999999", "none"]]);
+  const note = t.release_notes.find((n) => n.source_commit === sha("8"));
+  assertEquals([note?.kind, note?.title, note?.section, note?.status], ["fix", "The payment box scrolls on a small screen", "Orders", "beta"]);
+});
+
 Deno.test("the holds read the detail and the section, not only the title", async () => {
   // The source: the held text is title + detail + section, and both holds read that text.
   assert(CI.includes('const text = [note.title, note.detail || "", note.section || ""].join(" \\n ");'),

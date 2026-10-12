@@ -1090,6 +1090,10 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   const effTab = subtab || lead || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
+  // How many of this tab's entries are on beta, for the line under its heading (Carolyn
+  // 2026-10-12: testers need to see which changes are on beta). The badge alone says "On beta
+  // for testing" on each one; the line says what that means, once, and only when it applies.
+  const betaHere = active.list ? active.list.filter((r) => r.status === "beta").length : 0;
 
   return (
     <div>
@@ -1133,6 +1137,15 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
               <span style={{ ...S.h2, marginBottom: 0 }}>{active.label}</span>
               <span style={{ fontSize: 12, color: "#94A3B8" }}>({active.list.length})</span>
             </div>
+            {betaHere > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5, color: "#9A3412", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "7px 10px", margin: "8px 0 4px", lineHeight: 1.45 }}>
+                {statusBadge("beta")}
+                <span>
+                  {betaHere === 1 ? "1 entry here is" : `${betaHere} entries here are`} live on beta now and
+                  {betaHere === 1 ? " comes" : " come"} to everyone with the next release.
+                </span>
+              </div>
+            )}
             {active.list.length === 0
               ? <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>{active.empty}</div>
               : active.list.map(entry)}
