@@ -41,6 +41,8 @@ import {
 } from "../_shared/twilioTrustHub.ts";
 // Workstream 2: every Twilio call here runs as the TENANT'S account (tenantCreds below).
 import { trustHubHttp, type TrustHubCreds } from "../_shared/twilioTrustHub.ts";
+// The number search: an area code, or the area code and up to three more digits.
+import { numberSearchOf, startsWithPrefix } from "../_shared/numberSearch.ts";
 // Workstream 2, phase 6: a sub-account's secondary profile links ACROSS accounts to the parent's
 // primary. A refusal there is typed, and the profile it stopped on is finished on the next press.
 import { fetchCustomerProfile, finishSecondaryCustomerProfile, PrimaryProfileLinkError } from "../_shared/twilioTrustHub.ts";
@@ -1004,13 +1006,19 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
       case "search_numbers": {
         if (!trustHubConfigured()) return json({ error: "Text messaging is not switched on yet." }, 503);
+        // An area code, or the area code and up to three more digits (_shared/numberSearch.ts, the
+        // same reading as Settings → Phone). The screen sends both keys, so a server from before
+        // this still searches the area code. A body with only areaCode: three digits search as
+        // before, and a partial one is refused with a sentence instead of searching anywhere.
+        const q = numberSearchOf(p.startsWith ?? p.areaCode);
+        if (!q.ok) return json({ error: q.error }, 400);
         const results = await searchAvailableNumbers({
-          areaCode: String(p.areaCode ?? "").replace(/\D/g, "").slice(0, 3) || undefined,
-          contains: p.contains ? String(p.contains) : undefined,
+          areaCode: q.areaCode ?? undefined,
+          contains: q.contains ?? (p.contains ? String(p.contains) : undefined),
           inRegion: p.region ? String(p.region).toUpperCase().slice(0, 2) : undefined,
           limit: 10,
         }, await tenantCreds());
-        return json({ ok: true, numbers: results });
+        return json({ ok: true, numbers: startsWithPrefix(results, q.prefix) });
       }
 
       case "buy_number": {

@@ -204,7 +204,8 @@ Deno.test("the timeline plays a voicemail from the Worker, never preloading it, 
 Deno.test("the Phone tab offers Connect and a calling-only number, each only where the server will accept it", () => {
   const view = slice(SMS, "function PhoneSettingsView(", "// ── The Calls page", "PhoneSettingsView");
   assert(/phoneAction\("phone_enable_number", \{ numberId: sel\.id \}\)/.test(view), "Connect names the open number (migration 266)");
-  assert(/phoneAction\("phone_search_numbers", \{ areaCode: numQ \}\)/.test(view));
+  // The box: an area code, or up to six digits (numberSearch_test.ts).
+  assert(/phoneAction\("phone_search_numbers", phoneSearchBody\(numQ\)\)/.test(view));
   assert(/phoneAction\("phone_buy_number", \{ phoneNumber: e164 \}\)/.test(view));
   assert(/data\.scope === "team" && !data\.number && data\.canBuyNumber && data\.numbersForSale/.test(view), "buying is offered only to someone canBuyNumber allows");
   assert(/disabled=\{busy \|\| !on \|\| !data\.voiceSetup\}/.test(view), "Connect waits for calling to be on and the server to be set up");

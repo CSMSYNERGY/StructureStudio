@@ -159,6 +159,15 @@ const shots = shotsDir("my-synergy-phone");
 const pageErrors = [];
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
+// The number search's stub answer, for both screens (2026-10-12: the area code and up to three
+// more digits). A longer search answers with numbers that start with it, as the server keeps only
+// those; "555999" finds none. Nothing is searched anywhere.
+const stubSearchE164s = (body) => {
+  const d = String(body.startsWith ?? body.areaCode ?? "");
+  if (d === "555999") return [];
+  if (d.length > 3) return [1, 2].map((i) => `+1${d}${String(i).padStart(10 - d.length, "0")}`);
+  return ["+15555550101", "+15555550102"];
+};
 
 /**
  * One fresh browser context per scenario. Returns { page, calls, sent() }:
@@ -312,6 +321,9 @@ async function scenario(browser, opts) {
     if (url.includes("/portal-sms")) {
       if (!state.sms) return json(route, { ok: true });
       calls.push({ fn: "portal-sms", ...body });
+      if (body.action === "search_numbers") {
+        return json(route, { ok: true, numbers: stubSearchE164s(body).map((e164) => ({ phoneNumber: e164, friendlyName: null, locality: null, region: "MO" })) });
+      }
       if (body.action === "buy_number") {
         // What the server answers after adopting (My Synergy Phone phase 6): the number joins the
         // Messaging Service, the registration moves to number_pending. A STUB: nothing at Twilio.
@@ -445,10 +457,7 @@ async function scenario(browser, opts) {
         state.number = { ...state.number, voiceReady: true };
         return json(route, { ok: true, number: { id: state.number.id, e164: state.number.e164, voiceReady: true } });
       case "phone_search_numbers":
-        return json(route, { ok: true, numbers: [
-          { e164: "+15555550101", locality: "Example City", region: "MO" },
-          { e164: "+15555550102", locality: null, region: "MO" },
-        ] });
+        return json(route, { ok: true, numbers: stubSearchE164s(body).map((e164, i) => ({ e164, locality: i ? null : "Example City", region: "MO" })) });
       case "phone_buy_number":
         if (state.number) return json(route, { error: "This account already has a number." }, 409);
         state.number = { id: "num-2", e164: body.phoneNumber, textingStatus: "pending_registration", voiceReady: state.phoneStatus === "on", callingOnly: true };
@@ -1009,7 +1018,24 @@ try {
       const box = (id) => s.page.locator(`[data-ss-phone-member="${id}"] input[type=checkbox]`);
       const inOrder = s.page.locator("label", { hasText: "Ring one after another, in this order" }).locator("input");
       ok("L8a the answer list can be chosen before there is a number", (await tick(box(REP))) && (await tick(inOrder)));
-      await s.page.locator("[data-ss-phone-areacode]").fill("555");
+      // 2026-10-12: the area code AND up to three more digits, typed however (the box keeps digits).
+      const areaBox = s.page.locator("[data-ss-phone-areacode]");
+      await areaBox.fill("555-300");
+      ok("L4a the box takes the area code and three more digits, formatting dropped", (await areaBox.inputValue()) === "555300");
+      await tap(s.page.locator("[data-ss-phone-search]"));
+      await s.page.waitForSelector('[data-ss-phone-result="+15553000001"]', { timeout: 8000 }).catch(() => {});
+      const longer = s.calls.filter((c) => c.action === "phone_search_numbers").pop();
+      ok("L4b a longer search sends the digits AND the area code (an older server still searches its area code), and lists what came back",
+        !!longer && longer.startsWith === "555300" && longer.areaCode === "555"
+          && (await s.page.locator("[data-ss-phone-result]").count()) === 2, JSON.stringify(longer));
+      await s.page.screenshot({ path: join(shots, "L-number-search-prefix.png"), fullPage: true });
+      await areaBox.fill("555999");
+      await tap(s.page.locator("[data-ss-phone-search]"));
+      await s.page.waitForSelector("[data-ss-phone-search-empty]", { timeout: 8000 }).catch(() => {});
+      ok("L4c nothing found names the digits searched, and says to try fewer",
+        (await s.page.locator("[data-ss-phone-search-empty]").innerText().catch(() => "")) === "No numbers start with 555-999 right now — try fewer digits.");
+      await s.page.screenshot({ path: join(shots, "L-number-search-none.png"), fullPage: true });
+      await areaBox.fill("555");
       await tap(s.page.locator("[data-ss-phone-search]"));
       await s.page.waitForSelector('[data-ss-phone-result="+15555550101"]', { timeout: 8000 }).catch(() => {});
       const search = s.calls.filter((c) => c.action === "phone_search_numbers").pop();
@@ -1191,6 +1217,31 @@ try {
           !!buy2 && !("phoneNumber" in buy2) && (await s2.page.locator("[data-ss-sms-adopt]").count()) === 0, JSON.stringify(buy2));
       }
       await s2.ctx.close();
+    }
+
+    // 2026-10-12: with nothing to adopt, "Choose your number" searches by the area code and up to
+    // three more digits, the same as Settings -> Phone.
+    {
+      const s3 = await scenario(browser, { name: "O7", smsStatus: { ...smsStatus, numbers: [] } });
+      await s3.go("/portal/settings/sms");
+      await s3.page.waitForSelector("[data-ss-sms-areacode]", { timeout: 15000 }).catch(() => {});
+      const box = s3.page.locator("[data-ss-sms-areacode]");
+      if (ok("O7 with nothing to adopt, 'Choose your number' offers the search", (await box.count()) === 1)) {
+        await box.fill("+1 (555) 300");
+        ok("O7a the box keeps the six digits, without the +1", (await box.inputValue()) === "555300");
+        await tap(s3.page.locator("[data-ss-sms-search]"));
+        await s3.page.waitForFunction(() => /\+15553000001/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
+        const q = s3.calls.filter((c) => c.fn === "portal-sms" && c.action === "search_numbers").pop();
+        ok("O7b search_numbers sends the digits AND the area code, and the numbers are listed",
+          !!q && q.startsWith === "555300" && q.areaCode === "555" && /\+15553000001/.test(await s3.page.locator("body").innerText()), JSON.stringify(q));
+        await s3.page.screenshot({ path: join(shots, "O7-sms-number-search.png"), fullPage: true });
+        await box.fill("555999");
+        await tap(s3.page.locator("[data-ss-sms-search]"));
+        await s3.page.waitForSelector("[data-ss-sms-search-empty]", { timeout: 8000 }).catch(() => {});
+        ok("O7c nothing found names the digits searched, and says to try fewer",
+          (await s3.page.locator("[data-ss-sms-search-empty]").innerText().catch(() => "")) === "No numbers start with 555-999 right now — try fewer digits.");
+      }
+      await s3.ctx.close();
     }
   }
 

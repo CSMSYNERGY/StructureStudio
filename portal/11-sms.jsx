@@ -546,6 +546,24 @@ function smsE164(raw) {
   return "";
 }
 
+/** The "find a number" box (Text Messaging's "Choose your number", Settings → Phone): an area
+ *  code, or the area code and up to three more digits, the way the old phone system searched
+ *  (the 2026-10-12 call). Typed or pasted ("816-300", "+1 816 300") → digits only, a leading 1
+ *  dropped (no US area code starts with 1, so it is a pasted country code), at most six. The
+ *  server reads the same box the same way (_shared/numberSearch.ts numberSearchOf). */
+function phoneSearchDigits(raw) {
+  return String(raw == null ? "" : raw).replace(/\D/g, "").replace(/^1+/, "").slice(0, 6);
+}
+/** "816" → "816", "816300" → "816-300": a search, the way a sentence says it. */
+function phoneSearchLabel(d) {
+  return d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
+}
+/** What a search sends. Both keys: a server from before the longer search reads only areaCode
+ *  (three digits or nothing), so it still searches the right area code. */
+function phoneSearchBody(d) {
+  return { areaCode: d.slice(0, 3), startsWith: d };
+}
+
 function SmsField({ label, hint, children, wide }) {
   return (
     <label style={{ display: "block", marginBottom: 12, gridColumn: wide ? "1 / -1" : "auto" }}>
@@ -599,8 +617,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const copy = copyBox.copy;
   const setCopy = useCallback((next) => setCopyBox((b) => ({ ...b, copy: typeof next === "function" ? next(b.copy) : next })), []);
   const copySuggested = !!copyBox.suggested;
-  const [areaCode, setAreaCode] = useState("");
+  const [areaCode, setAreaCode] = useState("");      // the search box: an area code, or up to 6 digits
   const [found, setFound] = useState(null);
+  const [foundFor, setFoundFor] = useState("");      // the digits `found` came back for
   const [problems, setProblems] = useState([]);
 
   const call = useCallback(async (action, body) => {
@@ -1198,18 +1217,23 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Choose your number</h4>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 12 }}>
-            <SmsField label="Area code">
-              <input style={{ ...SMS_INPUT, width: 110 }} value={areaCode} placeholder="512" maxLength={3}
-                onChange={(e) => setAreaCode(e.target.value.replace(/\D/g, ""))} />
+            <SmsField label="Area code or first digits">
+              {/* maxLength leaves room to paste a formatted number; phoneSearchDigits keeps six digits. */}
+              <input style={{ ...SMS_INPUT, width: 170 }} value={areaCode} placeholder="e.g. 816 or 816300" maxLength={20}
+                inputMode="numeric" onChange={(e) => setAreaCode(phoneSearchDigits(e.target.value))} data-ss-sms-areacode />
             </SmsField>
-            <button type="button" disabled={busy}
-              onClick={() => act(async () => { const d = await call("search_numbers", { areaCode }); setFound(d.numbers || []); })}
+            <button type="button" disabled={busy} data-ss-sms-search
+              onClick={() => act(async () => { const d = await call("search_numbers", phoneSearchBody(areaCode)); setFound(d.numbers || []); setFoundFor(areaCode); })}
               style={{ background: "#fff", border: "1px solid #CBD5E1", borderRadius: 8, padding: "9px 16px", cursor: "pointer", fontWeight: 700, fontSize: 13, marginBottom: 12, fontFamily: "inherit" }}>
               Search
             </button>
           </div>
           {found && found.length === 0 && (
-            <div style={{ fontSize: 13, color: "#64748B" }}>No numbers free in that area code — try a nearby one.</div>
+            <div style={{ fontSize: 13, color: "#64748B" }} data-ss-sms-search-empty>
+              {foundFor.length > 3
+                ? `No numbers start with ${phoneSearchLabel(foundFor)} right now — try fewer digits.`
+                : "No numbers free in that area code — try a nearby one."}
+            </div>
           )}
           {found && found.length > 0 && (
             <div style={{ display: "grid", gap: 8 }}>
@@ -1611,6 +1635,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // search / purchase / connect said.
   const [numQ, setNumQ] = useState("");
   const [numResults, setNumResults] = useState(null);  // null = not searched yet
+  const [numFor, setNumFor] = useState("");            // the digits numResults came back for
   const [numNote, setNumNote] = useState(null);        // { ok } | { err }
   // Plan phase 6, caller ID (plan §14): what the last register / check said, and the Voice
   // Integrity answers an operator fills in (opened by its button).
@@ -1816,8 +1841,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const searchNumbers = async () => {
     setBusy(true); setNumNote(null);
     try {
-      const d = await phoneAction("phone_search_numbers", { areaCode: numQ });
+      const d = await phoneAction("phone_search_numbers", phoneSearchBody(numQ));
       setNumResults(d.numbers || []);
+      setNumFor(numQ);
     } catch (e) { setNumNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1918,16 +1944,22 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const searchBlock = (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <input value={numQ} inputMode="numeric" maxLength={3} placeholder="Area code, e.g. 816"
-          onChange={(e) => setNumQ(e.target.value.replace(/\D/g, "").slice(0, 3))}
-          style={{ ...S.input, width: 170 }} data-ss-phone-areacode />
+        {/* An area code, or the area code and up to three more digits (the 2026-10-12 call).
+            maxLength leaves room to paste a formatted number; phoneSearchDigits keeps six digits. */}
+        <input value={numQ} inputMode="numeric" maxLength={20} placeholder="Area code or first digits, e.g. 816 or 816300"
+          onChange={(e) => setNumQ(phoneSearchDigits(e.target.value))}
+          style={{ ...S.input, width: 320, maxWidth: "100%" }} data-ss-phone-areacode />
         <button type="button" disabled={busy} onClick={searchNumbers} data-ss-phone-search
           style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
           {busy && !numResults ? "Searching…" : "Search"}
         </button>
       </div>
       {numResults && numResults.length === 0 && (
-        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }}>No numbers available there right now. Try a nearby area code, or leave it empty.</div>
+        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }} data-ss-phone-search-empty>
+          {numFor.length > 3
+            ? `No numbers start with ${phoneSearchLabel(numFor)} right now — try fewer digits.`
+            : "No numbers available there right now. Try a nearby area code, or leave it empty."}
+        </div>
       )}
       {numResults && numResults.length > 0 && (
         <div style={{ display: "grid", gap: 6, marginTop: 10 }}>

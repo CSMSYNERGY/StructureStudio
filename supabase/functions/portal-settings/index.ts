@@ -178,11 +178,13 @@ import {
 // Plan phase 6: a number for calls, bought with portal-sms's own purchase helper (one purchase
 // path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
 import {
-  areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
+  applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
   numberVoicemailConfig, pickedNumber, smsInboundUrl, subVoicemailUrlOf, switchCalling, voiceEnv, type HoldResult, type SwitchNumber,
 } from "./phoneNumber.ts";
 import { attachToTexting, TEXTING_JOIN_FAILED } from "./phoneNumber.ts";
 import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
+// The number search: an area code, or the area code and up to three more digits.
+import { numberSearchOf, startsWithPrefix } from "../_shared/numberSearch.ts";
 // Workstream 2: every Twilio call below runs as the TENANT'S account, resolved once per request
 // (tenantTwilio). trustHubHttp binds the shared helpers' transport to it.
 import { trustHubHttp } from "../_shared/twilioTrustHub.ts";
@@ -11015,16 +11017,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const refused = await phoneRolloutGate();
     if (refused) return refused;
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // An area code, or the area code and up to three more digits (_shared/numberSearch.ts; the
+    // 2026-10-12 call). The screen sends both keys, so a server from before this still searches
+    // the area code it understands. An older screen sends only areaCode: three digits search as
+    // before, and a partial one is now refused with a sentence instead of searching anywhere.
+    const q = numberSearchOf(payload?.startsWith ?? payload?.areaCode);
+    if (!q.ok) return json({ error: q.error }, 400);
     const tw = await tenantTwilio();
     if (!tw.ok) return tenantTwilioRefused(tw.error);
-    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 }, tw.account)
+    const results = await searchAvailableNumbers({ areaCode: q.areaCode ?? undefined, contains: q.contains ?? undefined, limit: 10 }, tw.account)
       .catch((e: unknown) => ({ failed: e }));
     if (!Array.isArray(results)) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_search_failed",
         message: `Twilio number search failed: ${(results.failed as Error)?.message ?? "unknown"}`, severity: "info" }).catch(() => {});
       return filedHere(json({ error: "Couldn't look up numbers just now. Try again in a minute." }, 502));
     }
-    return json({ ok: true, numbers: results.map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
+    return json({ ok: true, numbers: startsWithPrefix(results, q.prefix).map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
   }
 
   if (action === "phone_enable_number") {
