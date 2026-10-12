@@ -514,6 +514,12 @@ begin
 end;
 $acc$;
 
+-- 301's lazy starter was an empty "Sales" pipeline (seed_kind 'sales'); midwest-mini-barns got one on
+-- 2026-10-11 when its Leads board was opened. Quotes and Shed Deals replace it: retire it while empty.
+update public.crm_pipelines p set archived_at = now(), updated_at = now()
+ where p.seed_kind = 'sales' and p.archived_at is null
+   and not exists (select 1 from public.crm_deals d where d.pipeline_id = p.id);
+
 -- Cards that already exist (301's leads) get the tenant's first status.
 update public.crm_deals d set status_id = (select s.id from public.crm_statuses s
    where s.client_id = d.client_id and s.archived_at is null order by s.position limit 1)
