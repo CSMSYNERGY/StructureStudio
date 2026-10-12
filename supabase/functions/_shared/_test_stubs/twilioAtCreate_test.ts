@@ -583,6 +583,32 @@ Deno.test("Text Messaging tab: search_numbers finishes an unfinished sub the sam
   assertEquals(searched(tw)[0]?.url.pathname, `/2010-04-01/Accounts/${tw.sub!.sid}/AvailablePhoneNumbers/US/Local.json`);
 });
 
+// Integration (c1012 U5 + U7 in one handler): the 3-6 digit prefix search and the resumed
+// provisioning must both hold on the same request, on both tabs.
+Deno.test("both tabs: a 6-digit prefix search finishes an unfinished sub, then searches that prefix inside it", async () => {
+  for (const [fn, mod, body] of [
+    ["portal-settings", SETTINGS, { action: "phone_search_numbers", startsWith: "(816) 300", areaCode: "816" }],
+    ["portal-sms", SMS, { action: "search_numbers", startsWith: "816300", areaCode: "816" }],
+  ] as const) {
+    const { db, tw } = await createdUnfinished();
+    const r = await asBuilder(mod, fn, db, tw, body);
+    assertEquals(r.status, 200, `${fn}: ${r.raw}`);
+    assertEquals([db.accounts.get(NEW)!.status, db.accounts.get(NEW)!.provision_step], ["active", "done"], `${fn}: the sub was not finished`);
+    const q = searched(tw);
+    assertEquals(q.length, 1, fn);
+    assertEquals(q[0].url.pathname, `/2010-04-01/Accounts/${tw.sub!.sid}/AvailablePhoneNumbers/US/Local.json`, `${fn}: not inside the builder's sub`);
+    assertEquals([q[0].url.searchParams.get("AreaCode"), q[0].url.searchParams.get("Contains")], ["816", "+1816300"], `${fn}: ${q[0].url.search}`);
+    // The fake answers +18165550101 whatever is asked; it does not start with 816-300, so the
+    // server's own prefix filter drops it rather than offering a number that doesn't match.
+    assertEquals(r.body.numbers, [], `${fn}: a number outside the prefix was offered`);
+  }
+  // And a partial prefix is refused with a sentence, as U5 built it, after the same resume.
+  const { db, tw } = await createdUnfinished();
+  const bad = await asBuilder(SETTINGS, "portal-settings", db, tw, { action: "phone_search_numbers", startsWith: "81" });
+  assertEquals(bad.status, 400, bad.raw);
+  assertEquals(searched(tw).length, 0, "Twilio was asked for a partial prefix");
+});
+
 Deno.test("Phone tab: an active, finished sub searches with no provisioning call at all", async () => {
   const log: string[] = [];
   const db = new Db(log), tw = new Twilio(log);
