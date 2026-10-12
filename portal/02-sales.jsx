@@ -5507,7 +5507,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                     const head = c.company || c.name || c.phone || c.email || "—";
                     const building = g ? [titleCase(g.style), g.size].filter(Boolean).join(" ") : "";
                     const sub = g
-                      ? [building || d.short_code, g.estimateNumber ? "#" + g.estimateNumber : null].filter(Boolean).join(" · ")
+                      ? (building || d.short_code)
                       : (c.company ? (c.name || c.phone || c.email) : (d.title || null));
                     const closeIso = d.expected_close_date || null;
                     const closeLate = !!closeIso && closeIso < ssLocalIso(new Date());
@@ -5531,6 +5531,16 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                             siblings positioned on top, because a control inside a <button> is invalid
                             HTML and would swallow the card's own click. */}
                         <div style={{ marginTop: 5, minHeight: 20 }} aria-hidden="true" />
+                        {/* THE OLD BOARD'S DETAILS on a design card (Carolyn 2026-10-11, pointing at it:
+                            "I want this to be listed on the cards of the newly created pipeline"):
+                            the ESTIMATE's own status and number. The pill above is the card's status,
+                            which a person sets; this one is what the estimate really is. */}
+                        {g && (
+                          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                            <StatusPill status={g.status} small />
+                            {g.estimateNumber && <span>#{g.estimateNumber}</span>}
+                          </div>
+                        )}
                         {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
                         <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#94A3B8" }}>
                           <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
@@ -5543,6 +5553,13 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
                               {late ? "Overdue " : "Follow up "}{fmtDateShort(d.next_follow_up_at)}
                             </span>
                           )}
+                        </div>
+                        {/* Created · Updated, as on the old board: the design's own dates on a design
+                            card, the card's on a lead. */}
+                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", gap: 5, fontVariantNumeric: "tabular-nums" }}>
+                          <span>Created {fmtDateShort(g ? g.createdAt : d.created_at)}</span>
+                          <span style={{ opacity: 0.55 }}>·</span>
+                          <span>Updated {fmtDateShort(g ? g.updatedAt : d.updated_at)}</span>
                         </div>
                       </button>
                       <SsStatusPill statuses={statuses} value={d.status_id} disabled={!canWrite}
