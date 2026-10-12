@@ -160,6 +160,11 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-tname{font-size:15.5px;font-weight:800;color:#FFF;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
 .ss-inner{max-width:1240px}
+/* Pipeline board (2026-10-12, Carolyn: "I am going to make this like the designer where it can be
+   as wide as it needs to be"): while the board shows, the page drops its 1240px cap, and the stage
+   columns share the full width or wrap onto another row, never a scroll bar (SalesPipelines,
+   ssBoardColumns). Keyed on the board itself, so whichever page hosts it gets the width. */
+.ss-inner:has([data-ss-board-wide]){max-width:none}
 /* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
    (body scroll would double-scroll under the sticky topbar). */
 .ss-main.ss-designer-active{height:100vh;height:100dvh}
@@ -267,7 +272,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=ccf24294"></script>
-<script defer src="/portal.app.compiled.js?v=1eae1e52" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=c5d8a06f" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline
