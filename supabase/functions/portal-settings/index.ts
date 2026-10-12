@@ -28,6 +28,8 @@ import { cleanContactsView, mergePrefs } from "../_shared/savePrefs.ts";
 import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
 import { replyFromNumber, sendTenantSms } from "../_shared/smsSend.ts";
+// An opt-out read the way the send path reads it, and worded by its reason (crm_record, crm_record_consent).
+import { readSmsOptOut, smsOptOutFacts, smsOptOutRefusal } from "../_shared/smsOptOut.ts";
 import { changeOrderEmail, cleanTemplateCopy, estimateEmail, invoiceEmail, templatePreviewEmail, TEMPLATE_KINDS, tenantStylePhotoUrl, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
@@ -8340,9 +8342,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // available" sends people off editing a contact that is fine. Same lesson the Email
       // tab's hint already carries.
       (async () => {
-        // The config and the consent grant do NOT depend on each other, so they go together
-        // rather than one after the other — the same reason this whole block is a Promise.all.
-        const [cfgRes, grantRes] = await Promise.all([
+        // The config, the consent grant and the opt-out do NOT depend on each other, so they go
+        // together rather than one after the other — the same reason this whole block is a
+        // Promise.all.
+        const [cfgRes, grantRes, optOutRes] = await Promise.all([
           admin.from("client_settings")
             .select("sms_number, sms_status").eq("client_id", clientId).maybeSingle(),
           contact && contact.phone_digits
@@ -8351,7 +8354,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 .eq("phone_digits", contact.phone_digits).eq("action", "granted")
                 .limit(1).maybeSingle()
             : Promise.resolve({ data: null, error: null }),
+          // The opt-out smsSend actually checks before every send: sms_opt_outs, keyed on the
+          // PHONE. crm_contacts.sms_opt_out_at alone missed every opt-out recorded only there — a
+          // STOP from a number saved as a contact afterwards, an import's do-not-disturb, a
+          // contact re-created or merged after its STOP, Twilio's 21610 on a text to an unsaved
+          // number — so the record said nothing and Send failed. Asked 2026-10-12: "Can we see if
+          // a customer has opted out?"
+          readSmsOptOut(admin, clientId, contact && contact.phone_digits),
         ]);
+        // Either record of it, as the send path refuses on either: the number's sms_opt_outs row,
+        // or the contact's own older flag.
+        const optOut = smsOptOutFacts(optOutRes.data, contact ? contact.sms_opt_out_at : null);
         const smsCfg = cfgRes.data;
         // The number a text from this composer goes out from (migration 266): the one this
         // customer last texted with, else the reader's own, else the main number; crm_send_sms
@@ -8364,7 +8377,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // The tenant's own number, shown in the composer so a rep knows which number the
           // customer will see. Never the platform's, and never another tenant's.
           from: (smsCfg && smsCfg.sms_status === "active") ? (replyFrom ?? smsCfg.sms_number ?? null) : null,
-          optedOut: !!(contact && contact.sms_opt_out_at),
+          optedOut: optOut.optedOut,
+          // Why, so the composer can say it truly (2026-10-13): 'stop' a STOP or Twilio's 21610,
+          // 'team' recorded by the team, 'other' an import, a web form or only the contact's flag;
+          // null when not opted out. Additive: main's frontend reads optedOut alone.
+          optOutReason: optOut.reason,
           // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
           // rather than let someone type a message and discover it on Send. Asked as "is there a
           // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
@@ -9026,10 +9043,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ⛔ AN OPT-OUT OUTRANKS THIS, ALWAYS. Someone who replied STOP cannot be put back by a
     // colleague ticking a box — only they can, by replying START. Refusing loudly here is the
     // difference between a control and a loophole.
-    if (c.sms_opt_out_at) {
-      return json({
-        error: "This customer replied STOP. Only they can undo that, by replying START to that number.",
-      }, 409);
+    //
+    // Both records of it, as the send path and crm_record read them (2026-10-13): the contact's
+    // flag alone let a grant be recorded for a number opted out only on sms_opt_outs (a STOP from
+    // before the contact was saved, the team's, an import's), and Send still refused it. A failed
+    // read refuses too: this is the one place a wrong "no" would let someone attest over an opt-out.
+    const { data: optOutRow, error: optOutErr } = await readSmsOptOut(admin, clientId, c.phone_digits);
+    if (optOutErr) return dbFail(req, clientId, "check whether this customer opted out of texts", optOutErr);
+    const optOut = smsOptOutFacts(optOutRow, c.sms_opt_out_at);
+    if (optOut.optedOut) {
+      return json({ error: smsOptOutRefusal(optOut.reason) }, 409);
     }
 
     const attestation = payload.attestation ? String(payload.attestation).trim().slice(0, 1000) : "";

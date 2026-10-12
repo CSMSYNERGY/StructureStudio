@@ -118,6 +118,10 @@ async function setup(ctx: Record<string, unknown>, visible: string[] | null = nu
   net.rest("GET", "client_settings", table([READY]));
   net.rest("GET", "billing_plans", table([CRM_PLAN]));
   net.rest("GET", "billing_subscriptions", table([CRM_SUB]));
+  // A thread with a number also reads whether it can be texted (test/threadSms.test.ts): no
+  // opt-out and no grant, unless a test says otherwise.
+  net.rest("GET", "sms_opt_outs", () => []);
+  net.rest("GET", "sms_consent_log", () => []);
   return { net, token: await auth.token(USER_A), env: makeEnv() };
 }
 

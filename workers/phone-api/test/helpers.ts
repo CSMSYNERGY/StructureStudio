@@ -203,6 +203,131 @@ export function eventRows(rows: EventFixture[]): Reply {
   };
 }
 
+// ── A table that answers the way PostgREST would (list search, 2026-10-13) ──────────
+// Honours what the Worker sends: eq, lt, gte, is.null, not.is.null, in, cs, like and ilike;
+// `or` (and `and(...)` / `or(...)` nested inside it); filters on an embedded table
+// (`crm_contacts.name=ilike.*jo*`), which with `!inner` in the select drop the parent row; and
+// order, offset and limit. Rows carry their embeds as plain keys (crm_contacts, phone_voicemails).
+// Rows the Worker must never see (another tenant's, a deleted voicemail) sit in the fixtures, so
+// a filter it forgets shows up as a wrong answer, not as a passing test.
+
+/** Split on the commas that are not inside parentheses or quotes. */
+export function splitTop(s: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quoted && ch === "\\") { cur += ch + s[++i]; continue; }
+    if (ch === '"') quoted = !quoted;
+    else if (!quoted && ch === "(") depth++;
+    else if (!quoted && ch === ")") depth--;
+    else if (!quoted && ch === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+const unquoteValue = (v: string) => (v.startsWith('"') ? v.slice(1, -1).replace(/\\(.)/g, "$1") : v);
+
+/** One PostgREST operator against one value. */
+export function pgHolds(val: unknown, expr: string): boolean {
+  if (expr === "is.null") return val == null;
+  if (expr === "not.is.null") return val != null;
+  const i = expr.indexOf(".");
+  const op = expr.slice(0, i);
+  const arg = expr.slice(i + 1);
+  if (op === "eq") return val != null && String(val) === arg;
+  if (op === "lt") return val != null && String(val) < arg;
+  if (op === "gte") return val != null && String(val) >= arg;
+  if (op === "in") return val != null && splitTop(arg.slice(1, -1)).map(unquoteValue).includes(String(val));
+  if (op === "cs") return Array.isArray(val) && arg.slice(1, -1).split(",").every((x) => (val as unknown[]).map(String).includes(x));
+  if (op === "like" || op === "ilike") {
+    // PostgREST's * is SQL's %; _ is any one character.
+    const re = [...arg].map((ch) => (ch === "*" || ch === "%" ? ".*" : ch === "_" ? "." : ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))).join("");
+    return val != null && new RegExp(`^${re}$`, op === "ilike" ? "is" : "s").test(String(val));
+  }
+  throw new Error(`pgTable(): the fake has no "${op}" filter`);
+}
+
+/** `a.op.v`, `and(...)` or `or(...)` against a row. */
+function pgExpr(row: Record<string, unknown>, part: string): boolean {
+  if (part.startsWith("and(")) return splitTop(part.slice(4, -1)).every((p) => pgExpr(row, p));
+  if (part.startsWith("or(")) return splitTop(part.slice(3, -1)).some((p) => pgExpr(row, p));
+  const dot = part.indexOf(".");
+  return pgHolds(row[part.slice(0, dot)], part.slice(dot + 1));
+}
+
+export function pgTable(rows: Record<string, unknown>[]) {
+  return (s: Seen) => {
+    const p = s.url.searchParams;
+    const select = p.get("select") ?? "*";
+    const embedded = (name: string) => select.includes(`${name}!inner(`) ? "inner" : select.includes(`${name}(`) ? "left" : null;
+    let out: Record<string, unknown>[] = [];
+    for (const r of rows) {
+      const row: Record<string, unknown> = { ...r };
+      let keep = true;
+      for (const [k, v] of p.entries()) {
+        if (k === "select" || k === "order" || k === "limit" || k === "offset") continue;
+        if (k === "or") { if (!splitTop(v.slice(1, -1)).some((part) => pgExpr(row, part))) keep = false; continue; }
+        const dot = k.indexOf(".");
+        if (dot > 0) {
+          // A filter on an embedded table: narrows the embed; with !inner an empty embed drops the row.
+          const name = k.slice(0, dot);
+          const col = k.slice(dot + 1);
+          const how = embedded(name);
+          if (!how) throw new Error(`pgTable(): ${k} filters ${name}, which the select does not embed`);
+          if (how !== "inner") throw new Error(`pgTable(): ${k} filters a left-joined ${name}; the Worker only filters inner joins`);
+          const e = row[name];
+          const list = (Array.isArray(e) ? e : e ? [e] : []) as Record<string, unknown>[];
+          const kept = list.filter((x) => pgHolds(x[col], v));
+          row[name] = Array.isArray(e) ? kept : kept[0] ?? null;
+          if (!kept.length) keep = false;
+          continue;
+        }
+        if (!pgHolds(row[k], v)) keep = false;
+      }
+      // An !inner embed with nothing to join drops the row even without a filter on it.
+      for (const name of ["crm_contacts", "phone_voicemails", "phone_call_recordings"]) {
+        if (embedded(name) === "inner") {
+          const e = row[name];
+          if (e == null || (Array.isArray(e) && !e.length)) keep = false;
+        }
+      }
+      if (keep) out.push(row);
+    }
+    const order = p.get("order");
+    if (order) {
+      const keys = order.split(",").map((o) => {
+        const [col, dir, nulls] = o.split(".");
+        return { col, sign: dir === "desc" ? -1 : 1, nullsFirst: nulls === "nullsfirst" };
+      });
+      out = [...out].sort((a, b) => {
+        for (const { col, sign, nullsFirst } of keys) {
+          const x = a[col], y = b[col];
+          if (x == null || y == null) {
+            if (x == null && y == null) continue;
+            return (x == null) === nullsFirst ? -1 : 1;
+          }
+          if (String(x) !== String(y)) return String(x) < String(y) ? -sign : sign;
+        }
+        return 0;
+      });
+    }
+    const offset = p.get("offset");
+    if (offset) out = out.slice(Number(offset));
+    const limit = p.get("limit");
+    if (limit) out = out.slice(0, Number(limit));
+    if (select === "*") return out;
+    // Only the columns asked for (an embed whole), so a column the Worker forgets to select is
+    // missing here as it would be live.
+    const cols = splitTop(select).map((c) => c.trim()).map((c) => (c.includes("(") ? c.slice(0, c.indexOf("(")).replace(/!inner$/, "") : c));
+    return out.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
+  };
+}
+
 /** A PostgREST filter value from a request, e.g. eq("id") → the id asked for. */
 export function filter(s: Seen, col: string): string | null {
   const v = s.url.searchParams.get(col);

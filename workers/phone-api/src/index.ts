@@ -31,7 +31,7 @@ import { events, transfer, voicemailAudio } from "./routes/calls";
 import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
-import { getThread, listCalls, listContacts, listThreads, search, team } from "./routes/reads";
+import { getThread, listCalls, listContacts, listThreads, search, searchCalls, searchThreads, team } from "./routes/reads";
 import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushEmail, pushText } from "./routes/push";
@@ -175,8 +175,12 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/handoff\/pending$/, h: (r, env) => pendingHandoff(env, r) },
   { method: "POST", re: /^\/sms\/send$/, h: (r, env, ec) => sendSms(env, ec, r) },
   { method: "GET", re: /^\/threads$/, h: (r, env) => listThreads(env, r) },
+  // List search (2026-10-13): the term only ever in the POST body. Before /threads/:key, so the
+  // key route can never take it.
+  { method: "POST", re: /^\/threads\/search$/, h: (r, env) => searchThreads(env, r) },
   { method: "GET", re: /^\/threads\/([^/]+)$/, h: (r, env, _ec, m) => getThread(env, r, m[1]) },
   { method: "GET", re: /^\/calls$/, h: (r, env) => listCalls(env, r) },
+  { method: "POST", re: /^\/calls\/search$/, h: (r, env) => searchCalls(env, r) },
   { method: "GET", re: /^\/search$/, h: (r, env) => search(env, r) },
   { method: "GET", re: /^\/contacts$/, h: (r, env) => listContacts(env, r) },
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },

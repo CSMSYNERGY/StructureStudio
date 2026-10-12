@@ -5074,11 +5074,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   {data.sms && data.sms.from ? <> — they see <strong>{data.sms.from}</strong>, this account&rsquo;s number.</> : null}
                 </div>
                 {/* Opted out is not an error state to discover by pressing Send. STOP is a
-                    legal instruction, so the composer says so and offers no box. */}
+                    legal instruction, so the composer says so and offers no box. Worded by why
+                    (crm_record's optOutReason, 2026-10-13): an opt-out the team recorded or an
+                    import brought in is not a STOP, and saying so would be untrue. A server
+                    without the field says STOP, as before. */}
                 {data.sms && data.sms.optedOut ? (
                   <div style={{ ...S.err, marginBottom: 0 }}>
-                    This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
-                    same number to opt back in.
+                    {data.sms.optOutReason === "team"
+                      ? <>Your team recorded that this customer doesn&rsquo;t want texts, so we can&rsquo;t text them.</>
+                      : data.sms.optOutReason === "other"
+                        ? <>This customer opted out of texts, so we can&rsquo;t text them.</>
+                        : <>This customer replied STOP, so we can&rsquo;t text them.</>}
+                    {" "}They can reply START to that same number to opt back in.
                   </div>
                 ) : (data.sms && !data.sms.consented) ? (
                   /* ⚠️ NO PERMISSION ON FILE — say so BEFORE they type, not on Send. Every

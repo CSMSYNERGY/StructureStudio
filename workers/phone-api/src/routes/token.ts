@@ -183,7 +183,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     // the server behind it has the endpoint. handoff: moving a live call to the person's
     // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and
     // GET /calls/:id/transcript, and the recording keys on a call (routes/reads.ts).
-    features: { handoff: true, recordings: true },
+    // list_search (2026-10-13): POST /threads/search, POST /calls/search and GET /calls?voicemail=1
+    // (routes/reads.ts). An older Worker has no search routes and ignores voicemail=1.
+    features: { handoff: true, recordings: true, list_search: true },
     // Whether this token can register the phone for incoming calls (it carries the build's push
     // credential). false: the Worker has no credential for this platform and build, so register()
     // would only fail. null: not a phone token (the extension, or the setup test).
