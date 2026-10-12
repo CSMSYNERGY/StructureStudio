@@ -4173,7 +4173,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       });
       return;
     }
-    const out = await ssPhoneSend("sss.text", msg);
+    // The name rides along (optional, SPEC section 5) so the extension's Quick sends fill
+    // {first_name} as this page's own do; an older extension ignores it.
+    const out = await ssPhoneSend("sss.text", { ...msg, name: (data.contact && data.contact.name) || null });
     if (out.reply && out.reply.ok) { setPhoneUi({ what: "text", kind: "texting", to: msg.to_e164 }); return; }
     setPhoneUi({ what: "text", kind: "elsewhere", text: `${ssPhoneRefusal(out.reply)} You can still text from here.` });
   };
