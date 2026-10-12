@@ -648,7 +648,7 @@ try {
     }
 
     // J. Call on the contact LIST.
-    await s.go("/portal/contacts");
+    await s.go("/portal/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     const listRendered = ok("J0 the contact list rendered a Call button on the row", (await rowCall.count()) === 1);
@@ -740,7 +740,7 @@ try {
           && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
       await s.page.screenshot({ path: join(shots, "E-view-as-disabled.png") });
     }
-    await s.go("/portal/contacts");
+    await s.go("/portal/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("E8 the list's Call is greyed in view-as with the record's hint", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())
@@ -762,7 +762,7 @@ try {
     ok("Q11 with calling off, a recorded call shows its summary but no Play recording or Show transcript",
       (await s.page.locator("[data-ss-call-summary]").count()) === 1
         && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
-    await s.go("/portal/contacts");
+    await s.go("/portal/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("F5 the list's Call is greyed and says calling is off, like the record", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())

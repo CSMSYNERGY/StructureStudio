@@ -95,6 +95,7 @@ const SENDS = ["crm_send_email", "crm_send_sms", "email_send_test", "resend_quot
 function savePrefs(raw, server) {
   const clean = {};
   if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+  if (typeof raw.contactsView === "string" && /^(people|designs|p-[0-9a-f-]{36})$/.test(raw.contactsView)) clean.contactsView = raw.contactsView;
   if (typeof raw.emailSignature === "string" && raw.emailSignature.trim()) clean.emailSignature = raw.emailSignature.trim();
   const order = (raw.cardOrder && typeof raw.cardOrder === "object" && !Array.isArray(raw.cardOrder)) ? raw.cardOrder : null;
   if (order && server !== "old") {
@@ -326,16 +327,16 @@ try {
     const s = await scenario(browser, { name: "slow-mixed", saveDelay: 900 });
     await openProfile(s);
     for (let i = 0; i < 2; i++) { await tap(arrow(s.page, "contact", "Overview", "down")); await s.page.waitForTimeout(60); }
-    // The first order save is out and the second is queued: switch the Pipeline default now.
-    await tap(s.page.getByRole("button", { name: "List", exact: true }));
+    // The first order save is out and the second is queued: switch the Contacts tab's default now.
+    await tap(s.page.locator('[data-ss-view-pick="designs"]'));
     await settle(s.page);
     await s.page.waitForTimeout(1500);
     const WANT2 = ["repairs", "delivery", "overview", "build", "tax", "orders", "deals", "details", "summary"];
     const sv = saves(s).map((x) => x.prefs);
     const last = sv[sv.length - 1] || {};
-    ok("E6 a Pipeline default saved mid-run rides along: the run's last save still says List",
-      sv.length >= 3 && last.designsView === "list" && same(last.cardOrder && last.cardOrder.contact, WANT2),
-      JSON.stringify(sv.map((p) => [p.designsView, p.cardOrder && p.cardOrder.contact && p.cardOrder.contact.slice(0, 3)])));
+    ok("E6 a Contacts default saved mid-run rides along: the run's last save still says the Design list",
+      sv.length >= 3 && last.contactsView === "designs" && last.designsView === "list" && same(last.cardOrder && last.cardOrder.contact, WANT2),
+      JSON.stringify(sv.map((p) => [p.contactsView, p.designsView, p.cardOrder && p.cardOrder.contact && p.cardOrder.contact.slice(0, 3)])));
     ok("E7 and the person's other preferences with it", last.emailSignature === "Sam\nAcme Sheds" && same(last.cardOrder && last.cardOrder.design, SAVED_DESIGN), JSON.stringify(last));
     await s.ctx.close();
   }

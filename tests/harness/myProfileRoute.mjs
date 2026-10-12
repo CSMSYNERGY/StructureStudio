@@ -12,7 +12,7 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the shape
 // supportConsoles.mjs uses. SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file
 // instead — against the artifact before this fix, A, B and C fail (the address bar ends on
-// /portal/designs and "How the Pipeline tab opens" never renders).
+// /portal/designs and "How the Contacts tab opens" never renders).
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,7 +101,7 @@ async function run(S, path, act) {
   return out;
 }
 
-const PROFILE_MARK = "How the Pipeline tab opens";
+const PROFILE_MARK = "How the Contacts tab opens";
 try {
   // A: a sales rep's cold deep link.
   const A = await run({ role: "user", access: SALES_REP }, "/portal/settings/myprofile");

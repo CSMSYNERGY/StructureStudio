@@ -161,7 +161,7 @@ async function run(label, S) {
   if (S.revisit) {
     // Leave and come back within the tab cache's ten minutes: the second open starts from the
     // cached ledger (no paint leg) and must still reconcile before anything is armed.
-    await page.click('a[href="/portal/designs"]');
+    await page.click('a[href="/portal/contacts"]');
     await page.waitForTimeout(800);
     phase = "revisit";
     firstEnd = Date.now();

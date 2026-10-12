@@ -319,9 +319,9 @@ try {
     // A hop away by the rail, then the browser's Back onto the record (review 2026-10-05): the chip
     // and the record's Back used to be spent the moment the address moved, so it came back on All
     // with a Back to Contacts while the browser's Back still went to Conversations.
-    await tap(s.page.locator(".ss-ws-nav .ss-nav a", { hasText: "Pipeline" }));
+    await tap(s.page.locator(".ss-ws-nav .ss-nav a", { hasText: "Inventory" }));
     await s.page.waitForTimeout(400);
-    ok("E8b the rail leaves the record", (await path(s.page)) === "/portal/designs", await path(s.page));
+    ok("E8b the rail leaves the record", (await path(s.page)) === "/portal/inventory", await path(s.page));
     await s.page.goBack();
     await s.page.waitForFunction(() => !!document.querySelector("[data-ss-crm-chip]"), null, { timeout: 20000 }).catch(() => {});
     await s.page.waitForTimeout(300);
@@ -347,7 +347,7 @@ try {
     await s.page.waitForFunction(() => !!document.querySelector("[data-ss-crm-chip]"), null, { timeout: 20000 }).catch(() => {});
     ok("E13 a record opened from elsewhere opens on All", (await activeChip(s.page)) === "all", await activeChip(s.page));
     await recordBack(s);
-    ok("E14 and its Back still goes to Contacts", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("E14 and its Back still goes to Contacts", (await path(s.page)) === "/portal/contacts/people", await path(s.page));
 
     // Keyboard: Enter on a name opens the record.
     await s.go("/portal/conversations/email");

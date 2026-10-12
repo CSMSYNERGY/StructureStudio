@@ -3181,20 +3181,34 @@ function CommissionsReport({ clientId }) {
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
 // _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
 const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
-function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false }) {
-  // THE PIPELINE DEFAULT. `picked` is what this person chose, or null when they never have.
-  // Someone who never chose gets the default that follows the CRM (Carolyn Q12, 2026-10-06):
-  // the board with the built-in CRM, the list without. Without the CRM the board is locked,
-  // so the list is what applies whatever was picked, and the card says so.
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null }) {
+  // WHICH TAB CONTACTS OPENS ON (Carolyn 2026-10-12, C25): "we need them to set the default of
+  // what they want the default to be." Contacts, the Design list, or any one pipeline. `picked` is
+  // what this person chose (ssSavedHubView: contactsView, or the old Pipeline tab's choice), or
+  // null when they never have. Someone who never chose gets the hub's default: the first pipeline
+  // with the built-in CRM, the Design list without it. What applies is worked out by the hub's own
+  // rule (ssHubResolve), so this card and the tab can never disagree.
+  //
+  // Only the views this person may open are offered (hubReach, the hub's ssHubCan answers): a Crew
+  // Leader with designs and no contacts is offered the Design list alone.
   //
   // crmPending: on your own portal the CRM answer (portal-billing) lands a moment after this
   // card can, and until it does crmUnlocked's false means "not known yet". The card then lights
   // only the person's own pick, shows no padlock and refuses nothing; a press saves the pick as
   // usual (save_prefs keeps it whatever the plan, and without the CRM the line below says the
-  // list applies once the answer is in).
-  const [picked, setVal] = useState(ssSavedDesignsView({ prefs }));
-  const viewApplies = crmPending ? picked : (!crmUnlocked ? "list" : (picked || "pipeline"));
-  const val = viewApplies;
+  // Design list applies once the answer is in).
+  const reach = hubReach || { people: true, designs: true };
+  const [picked, setVal] = useState(ssSavedHubView({ prefs }));
+  const pipesOn = !!crmUnlocked && !!reach.people;
+  const { pipelines } = useSsPipelineList(clientId, pipesOn && !!clientId);
+  const applied = ssHubResolve({ sub: null, saved: picked, reach, crm: !!crmUnlocked, crmKnown: !crmPending, pipelines: pipesOn ? pipelines : null });
+  const appliedId = applied.view === "pipe" ? "p-" + applied.pipeId
+    : (applied.view === "people" || applied.view === "designs" || applied.view === "locked") ? applied.canon : null;
+  const val = crmPending ? picked : appliedId;
+  // Names as the tab row shows them.
+  const pipeName = (v) => { const id = ssHubPipeId(v); const p = id && (pipelines || []).find((x) => x.id === id); return p ? p.name : null; };
+  const nameOf = (v) => (v === SS_HUB_PEOPLE ? "Contacts" : v === SS_HUB_DESIGNS ? "the Design list"
+    : v === SS_HUB_PIPELINE ? "your pipeline board" : (pipeName(v) || "a pipeline"));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   // A refusal said while the plan read one way must not outlive it: the CRM answer arriving (or
@@ -3265,9 +3279,13 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     return (data && data.prefs) || null;
   };
 
+  // contactsView is the choice. designsView rides along for the build of the portal that still has
+  // a separate Pipeline tab (production until the next promotion, same prefs): the Design list is
+  // its "list" and a pipeline its "pipeline", and Contacts clears it there (null drops the key).
   const save = async (next) => {
     setVal(next); setBusy(true); setMsg(null);
-    try { await commit({ designsView: next }); setMsg({ ok: "Saved." }); }
+    const mirror = next === SS_HUB_DESIGNS ? "list" : (ssHubPipeId(next) ? "pipeline" : null);
+    try { await commit({ contactsView: next, designsView: mirror }); setMsg({ ok: "Saved." }); }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -3417,21 +3435,25 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           card the name-and-phone nudge sends people to, so it should be the one they land on. */}
       <YourDetailsCard profile={profile} email={email} onSaved={onProfileSaved} />
       <div style={S.card}>
-        <div style={S.h2}>How the Pipeline tab opens</div>
+        <div style={S.h2}>How the Contacts tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          Your own default, not the business's — everyone on your team picks their own. Opening a
-          direct link to a list or a board still shows whichever the link names.
+          Pick the tab you land on when you open Contacts. Your own default, not the business's —
+          everyone on your team picks their own. A link to one tab still opens that tab.
         </p>
-        <div style={{ display: "flex", gap: 8 }}>
-          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => {
-            // Never a silent disabled button: without the CRM the board button keeps its
-            // padlock and the DesignsTable toggle's own title, and a click says why.
-            const locked = k === "pipeline" && !crmUnlocked && !crmPending;
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[
+            ...(reach.people ? [[SS_HUB_PEOPLE, "Contacts", true]] : []),
+            ...(reach.designs ? [[SS_HUB_DESIGNS, "Design list", false]] : []),
+            ...(pipesOn ? (pipelines || []).map((p) => ["p-" + p.id, p.name, true]) : []),
+          ].map(([k, label, needsCrm]) => {
+            // Never a silent disabled button: without the CRM, Contacts keeps its padlock and the
+            // tab row's own title, and a click says why.
+            const locked = needsCrm && !crmUnlocked && !crmPending;
             return (
-              <button key={k} disabled={busy} aria-pressed={val === k}
-                title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
+              <button key={k} disabled={busy} aria-pressed={val === k} data-ss-view-pick={k}
+                title={locked ? "Part of the built-in CRM" : undefined}
                 onClick={() => (locked
-                  ? setMsg({ err: "The pipeline board is part of the built-in CRM, so the Pipeline tab opens on the list." })
+                  ? setMsg({ err: "Contacts is part of the built-in CRM, so the Contacts tab opens on the Design list." })
                   : save(k))}
                 style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : (locked ? "#94A3B8" : "#334155")), opacity: busy ? 0.6 : 1 }}>
                 {locked ? `🔒 ${label}` : label}
@@ -3441,18 +3463,20 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
         </div>
         <div data-ss-view-default style={{ marginTop: 10, fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
           {crmPending
-            ? (picked
-              ? `You picked the ${picked === "pipeline" ? "pipeline board" : "list"}. Checking your plan…`
-              : "Checking your plan…")
-            : !crmUnlocked
-            ? (picked === "pipeline"
-              ? "You picked the pipeline board, but the board is part of the built-in CRM, so the Pipeline tab opens on the list."
-              : picked
-                ? "The Pipeline tab opens on the list (your choice)."
-                : "The Pipeline tab opens on the list, the default without the built-in CRM.")
-            : picked
-              ? `The Pipeline tab opens on the ${picked === "pipeline" ? "pipeline board" : "list"} (your choice).`
-              : "You haven't picked one, so the Pipeline tab opens on the pipeline board, the default with the built-in CRM."}
+            ? (picked ? `You picked ${nameOf(picked)}. Checking your plan…` : "Checking your plan…")
+            : applied.view === "loading"
+            ? "Loading your pipelines…"
+            : !picked
+            ? (applied.view === "pipe"
+              ? `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}, your first pipeline.`
+              : applied.view === "designs"
+                ? `You haven't picked one, so the Contacts tab opens on the Design list${pipesOn ? "." : ", the default without the built-in CRM."}`
+                : `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}.`)
+            : (appliedId === picked || (picked === SS_HUB_PIPELINE && applied.view === "pipe"))
+            ? `The Contacts tab opens on ${nameOf(appliedId)} (your choice).`
+            : `You picked ${nameOf(picked)}, but ${(picked === SS_HUB_PEOPLE || ssHubPipeId(picked) || picked === SS_HUB_PIPELINE) && !crmUnlocked
+                ? "that is part of the built-in CRM"
+                : "that isn't one of your tabs any more"}, so the Contacts tab opens on ${appliedId ? nameOf(appliedId) : "the first tab you have"}.`}
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
@@ -4636,7 +4660,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
@@ -4735,7 +4759,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
       {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
-        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending} />}
+        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
+        clientId={clientId} hubReach={hubReach} />}
     </div>
   );
 }

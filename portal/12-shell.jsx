@@ -1,34 +1,6 @@
-// The merged Contacts & Designs era (2026-08-24 → 08-26, commit 4a54dad) published two
-// sub-view URLs: /portal/designs/people and /portal/designs/deals. The 08-26 split makes
-// each of those views a whole tab again, so the two legacy subs rewrite themselves —
-// "people" is now /portal/contacts, "deals" is now plain /portal/designs.
-//
-// `replace` so an alias never sits in history and traps the back button on itself.
-//
-// ⚠️ RECORD SUBS (c-…/d-…) ARE DELIBERATELY NOT TOUCHED HERE. The record dispatch below
-// accepts them under either tab, and rewriting one across tabs would be actively harmful:
-// the URL-normalising effect nulls a refused tab's sub, so sending a designs-only user's
-// /portal/designs/c-<id> over to `contacts` would bounce off the clamp and lose the record
-// they were looking at. A legacy record URL renders the record; only the two list views
-// need correcting, because only they stopped existing.
-function DesignsLegacySub({ sub, navigate }) {
-  useEffect(() => {
-    if (sub === "people") navigate("contacts", null, true);
-    else if (sub === "deals") navigate("designs", null, true);
-  }, [sub]);
-  return null;
-}
-
-// The Leads tab's old address (/portal/pipelines[/<id>], migration 301) → the Pipeline page's board.
-// The pipeline it named is remembered the way SalesPipelines remembers a pick (SS_PIPE_LAST), so
-// the board opens on it. `replace`, like DesignsLegacySub, so Back never lands on the alias.
-function PipelinesLegacyRedirect({ sub, clientId, navigate }) {
-  useEffect(() => {
-    if (sub && clientId) { try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, sub); } catch (_e) { /* private mode */ } }
-    navigate("designs", "pipeline", true);
-  }, [sub, clientId]);
-  return null;
-}
+// (DesignsLegacySub and PipelinesLegacyRedirect lived here. Every old /portal/designs and
+// /portal/pipelines address is now mapped into the Contacts hub by ssCanonRoute in 01-core.jsx,
+// before any page renders, so neither redirect has anything left to do. 2026-10-12.)
 
 // ── Nav rail glyphs ───────────────────────────────────────────────────────────
 // MODULE SCOPE, not a Dashboard local. These are ~22 static SVG trees with nothing
@@ -642,10 +614,10 @@ const SS_ADVANCED_HOLD_MS = 8000;
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
-  // An unknown slug falls back to designs rather than rendering an empty shell.
+  // An unknown slug falls back to the Contacts hub rather than rendering an empty shell.
   const [tab, setTab] = useState(() => {
     const p = ssParsePath();
-    return (p.page && TAB_META[p.page]) ? p.page : "designs";
+    return (p.page && TAB_META[p.page]) ? p.page : "contacts";
   });
   // The Settings / Admin sub-page, lifted out of those shells so it can live in the URL.
   const [sub, setSub] = useState(() => ssParsePath().sub || null);
@@ -715,6 +687,11 @@ function Dashboard({ session }) {
   // Left out, it clears, which is what every ordinary navigation wants.
   const navigate = useCallback((page, nextSub = null, replace = false, rec = null) => {
     wanted.current = null;                 // an explicit click supersedes the boot intent
+    // An old page id ("designs", "pipelines") names a place in the Contacts hub now, and
+    // ssCanonRoute (01-core) maps it the way ssParsePath maps an old URL, so a caller written
+    // before the hub (the schedules' customer link opens "designs") still lands, on the hub.
+    const canon = ssCanonRoute(page, nextSub);
+    page = canon.page; nextSub = canon.sub;
     const ctx = rec ? { ...rec, sub: nextSub } : null;
     setRecordCtx(ctx);
     setTab(page);
@@ -1141,8 +1118,17 @@ function Dashboard({ session }) {
     // proper (first render) isOperator is still false, and stripping then would cost an
     // operator's /portal/admin/<sub> deep link its sub before the answer arrives.
     if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
-    if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
-    try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
+    // The ADDRESS, not only the parsed route: ssParsePath maps an old address (/portal/designs/list,
+    // /portal/leads, /portal/pipelines/<id>) onto today's route, so a parsed match alone left the
+    // old address showing in the bar. It is rewritten here once, without a history entry, and the
+    // entry's record context (recordCtx) rides along so a reload of it still opens on the deal.
+    if (p.page === resolvedTab && (p.sub || null) === (sub || null)
+      && window.location.pathname + window.location.search === ssPagePath(resolvedTab, sub)) return;
+    try {
+      const st = window.history.state;
+      const keep = st && st.rec && st.rec.sub === (sub || null) ? { rec: st.rec } : {};
+      window.history.replaceState({ page: resolvedTab, sub, ...keep }, "", ssPagePath(resolvedTab, sub));
+    } catch (_e) {}
     // `canProjects` is in this list because `gatesResolved` above READS it. Left out, a
     // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
     // a non-admin on /portal/admin, where projects is not what is being refused — never
@@ -1211,10 +1197,10 @@ function Dashboard({ session }) {
     // live GHL estimate refs) into what the operator expects to be a blank designer.
     setOpenDesign(null);
     ssTargetClientId = c.clientId;              // same tick as the click, before the re-render
-    setViewing(c); setTab("designs"); setSub(null);
+    setViewing(c); setTab("contacts"); setSub(null);
     // replaceState, not navigate(): entering an account is not a page change, and the path
-    // is rebuilt so ?view= rides alongside /portal/designs instead of replacing it.
-    try { window.history.replaceState({ page: "designs", sub: null }, "", "/portal/designs?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
+    // is rebuilt so ?view= rides alongside /portal/contacts instead of replacing it.
+    try { window.history.replaceState({ page: "contacts", sub: null }, "", "/portal/contacts?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
   };
   const exitAccount = () => {
     // Leaving remounts the Advanced page too. Only its UNSAVED work asks: that page reports it, and
@@ -1301,7 +1287,7 @@ function Dashboard({ session }) {
       // on the same deal or chip, with the same Back. Anything else clears.
       const st = window.history.state;
       setRecordCtx(st && st.rec && st.rec.sub === (p.sub || null) ? st.rec : null);
-      setTab(p.page && TAB_META[p.page] ? p.page : "designs");
+      setTab(p.page && TAB_META[p.page] ? p.page : "contacts");
       setSub(p.sub || null);
       if (crosses) {
         setOpenDesign(null);                    // same replay guard as openAccount/exitAccount
@@ -2516,9 +2502,11 @@ function Dashboard({ session }) {
   // row, the click that opens it for THIS reader, or null to leave the name as plain text. Where
   // it goes is schedCustomerDest's rule (05-schedule.jsx), the Pipeline's onOpenRecord fallback:
   // the contact record ON that deal, else the design's record, else nothing. Each "may open" is
-  // asked through ssClampTab, so it cannot promise a page the router would refuse (the hazard
-  // CrmRecord's onNavigate documents). Null outright when this reader may open neither record,
-  // so a crew member gets no link at all rather than one per row that goes nowhere.
+  // the Contacts hub's own answer for that view (ssHubCan, 01-core: the contact list needs
+  // contacts, the Design list needs designs), the same answer ssClampTab gave for the old Contacts
+  // and Pipeline pages, so a Crew Leader still opens the design. Null outright when this reader
+  // may open neither record, so a crew member gets no link at all rather than one per row that
+  // goes nowhere. (schedCustomerDest still names the design's page "designs"; navigate() maps it.)
   //
   // BACK PARITY, her explicit condition ("What happens when I hit the back button up here? I
   // want to make sure that ... they function the same way"): recordCtx's `from` sends the
@@ -2528,8 +2516,8 @@ function Dashboard({ session }) {
   const scheduleCustomerOpener = (fromPage) => {
     const reach = {
       crm: crmUnlocked,
-      contacts: ssClampTab("contacts", isOperator, canAdmin, myAccess, supportView) === "contacts",
-      designs: ssClampTab("designs", isOperator, canAdmin, myAccess, supportView) === "designs",
+      contacts: ssHubCan("people", canAdmin, myAccess),
+      designs: ssHubCan("designs", canAdmin, myAccess),
     };
     if (!(reach.crm && reach.contacts) && !reach.designs) return null;
     return (link) => {
@@ -2540,6 +2528,29 @@ function Dashboard({ session }) {
         from: { page: fromPage, pageSub: null },
       });
     };
+  };
+  // ── The Contacts hub's views THIS person may open (ssHubCan, 01-core) ──
+  // The same two answers the schedule opener above asks for, so the hub's tab row and every way
+  // into a record agree on who sees the contact list and who sees the Design list.
+  const hubReach = { people: ssHubCan("people", canAdmin, myAccess), designs: ssHubCan("designs", canAdmin, myAccess) };
+  // A CARD OR A DESIGN OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19, after
+  // watching it: "this pipeline click is going to take you into the customer view where you can
+  // see everything about that customer ... I don't want the two different views." The deal she
+  // clicked rides along so the record opens ON it rather than on the "pick one" hint, and so does
+  // the hub tab it was opened from (`fromSub`: "designs" or "p-<uuid>"), which is where the
+  // record's Back returns (Carolyn 2026-10-12, C22).
+  //
+  // TWO fallbacks to the design record, and both are load-bearing:
+  //   • no contact_id — crm_ensure_contact returns NULL for a design carrying neither phone nor
+  //     email, so there is no customer to open.
+  //   • no CRM, or no contacts area — a contact record is paywalled and a design record is not
+  //     (see the record mount's own comment), and a Crew Leader (designs only) opens designs.
+  //     Routing a free-tier tenant's Design list click at the upsell would take away the page
+  //     they have today, which is a regression dressed as a feature.
+  const hubOpenRecord = (code, contactId, fromSub) => {
+    const from = { page: "contacts", pageSub: fromSub || null };
+    if (contactId && crmUnlocked && hubReach.people) navigate("contacts", "c-" + contactId, false, { deal: code || null, from });
+    else if (code) navigate("contacts", "d-" + code, false, { from });
   };
   // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation
   // only — the server re-checks {area:'orders', level:'edit'} whatever the browser believes.
@@ -2805,18 +2816,15 @@ function Dashboard({ session }) {
               `advancedOn` is false until the entitlement answers, so the item arrives late on a
               cold load and never flashes for anyone else. */}
           {advancedOn && navItem("advanced", "Advanced")}
-          {/* TWO items again. Carolyn, 2026-08-26 12:15, having used the merged one: "we have
-              contacts as one, and then we have another one that says pipeline ... I would
-              rather have more tabs and one specific name on it." Contacts first — a person,
-              then what they are quoting. The List | Pipeline board toggle stays INSIDE
-              Pipeline (02-sales); it is the section, not a third nav item. */}
+          {/* ONE item again (Carolyn 2026-10-12): "One place." Contacts holds the contact list,
+              the Design list and every pipeline as tabs of its own (ContactsHub, 02-sales), so
+              the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute). */}
           {navItem("contacts", "Contacts")}
           {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
               Contacts: the same people, seen by their latest message. Only with the CRM: unlike
               Contacts, which stays in the rail to sell it, one locked item there is enough. A
               typed /portal/conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
-          {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
@@ -3201,14 +3209,14 @@ function Dashboard({ session }) {
                 the same."
 
                 Routed on the `sub` segment: /portal/contacts/c-<uuid> for a contact and
-                /portal/designs/d-<code> for a design. The prefix (c-/d-) is what tells the
+                /portal/contacts/d-<code> for a design. The prefix (c-/d-) is what tells the
                 two record kinds apart, so ONE shell serves both.
 
-                It accepts a record sub under EITHER tab, which is what keeps the merged
-                era's /portal/designs/c-<uuid> links working after the 08-26 split. The tab
-                only decides which nav item is highlighted; the prefix decides what renders.
-                Do not "tidy" this into a per-tab check — that would 404 every record link
-                shared between 08-24 and 08-26. */}
+                INSIDE THE CONTACTS HUB (Carolyn 2026-10-12): both kinds open under the one
+                Contacts tab, so the sidebar never moves when a card, a Design list row or a
+                contact is opened, and the record's Back returns to the hub tab it came from
+                (recordCtx.from). Every older record address (/portal/designs/c-…|d-…,
+                /portal/leads/c-…) reaches here through ssCanonRoute. */}
             {/* ⚠️ canEdit WAS `ssCanRead(myAccess, "contacts") === "edit"`, which was ALWAYS
                 FALSE: ssCanRead returns a BOOLEAN (01-core), so it compared `true` to the
                 string "edit". The whole conversation half of the record page — Activity,
@@ -3219,10 +3227,10 @@ function Dashboard({ session }) {
                 directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
                 admin or owner always holds it, otherwise read the area out of the map. */}
             {/* A CONTACT record (c-) is CRM and needs the subscription; a DESIGN record (d-)
-                is not — it is what opens from the free Pipeline list, and its server branch
+                is not — it is what opens from the free Design list, and its server branch
                 reads `designs` only. Same split the portal-settings gate makes, and the two
                 must agree or one of them produces a 403 the other never predicted. */}
-            {!gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^c-/.test(sub) && !crmUnlocked ? (
+            {!gateLocked && activeTab === "contacts" && sub && /^c-/.test(sub) && !crmUnlocked ? (
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
@@ -3235,7 +3243,7 @@ function Dashboard({ session }) {
                 cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
                 available
               />
-            ) : !gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^[cd]-/.test(sub) ? (
+            ) : !gateLocked && activeTab === "contacts" && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
@@ -3266,29 +3274,25 @@ function Dashboard({ session }) {
                 /* The History chip a Conversations row asked for, under the same rule as the deal. */
                 initialChip={recordCtx && recordCtx.sub === sub ? (recordCtx.chip || null) : null}
                 onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
-                /* Back goes to the list this record belongs to, which after the split is a
-                   whole tab rather than a sub-view; or to the page that opened it, when that
-                   page said so (recordCtx.from: Conversations, on the filter the reader left; a
-                   Build or Delivery Schedule, which reopens on the week it left). */
+                /* Back goes to the hub tab that opened the record (recordCtx.from: the exact
+                   pipeline, the Design list or the contact list), or to the page that opened
+                   it from outside the hub (Conversations, on the filter the reader left; a
+                   Build or Delivery Schedule, which reopens on the week it left). A record
+                   reached by a pasted link has neither, and goes to the list its kind belongs
+                   to: the contact list for a customer, the Design list for a design. */
                 onBack={() => (recordCtx && recordCtx.sub === sub && recordCtx.from
                   ? navigate(recordCtx.from.page, recordCtx.from.pageSub || null)
-                  : navigate(sub.charAt(0) === "c" ? "contacts" : "designs"))}
-                /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
-                   record shell above serves EITHER kind under EITHER tab, so the tab here is
-                   cosmetic — which nav item highlights — and switching to one the clamp
-                   refuses costs the reader the record entirely: the URL-normalising effect
-                   nulls a refused tab's sub and dumps them on a list with no message. That is
-                   the hazard the header comment names for legacy record URLs, and a crew
-                   leader (designs:view, contacts none) hit it on every click through to a
-                   customer. Stay on the tab we are already on when the record's own is
-                   refused; the server serves the record either way (crm_record's gate is
-                   `any: [contacts view, designs view]`). Asked through ssClampTab so this
-                   can never drift from what the router will actually do. */
-                onNavigate={(k, id) => {
-                  const kindTab = k === "contact" ? "contacts" : "designs";
-                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess, supportView) === kindTab ? kindTab : activeTab;
-                  navigate(dest, (k === "contact" ? "c-" : "d-") + id);
-                }}
+                  : navigate("contacts", sub.charAt(0) === "c" ? SS_HUB_PEOPLE : SS_HUB_DESIGNS))}
+                /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). Both
+                   kinds open under the one Contacts tab, which either area opens, so the hop
+                   can never be refused by the router; the server serves the record either way
+                   (crm_record's gate is `any: [contacts view, designs view]`). A crew leader
+                   (designs:view, contacts none) used to lose the record here when the hop
+                   switched tabs; with one tab there is nothing left to switch. The way Back
+                   rides along, so a hop from a card's customer to their design still returns
+                   to that board. */
+                onNavigate={(k, id) => navigate("contacts", (k === "contact" ? "c-" : "d-") + id, false,
+                  recordCtx && recordCtx.sub === sub && recordCtx.from ? { from: recordCtx.from } : null)}
                 onOpenDesign={(code) => openInDesigner(code)}
                 /* The Orders card can link out now that the order detail has a URL.
                    ssClampTab first, because a crew leader may hold the record and not
@@ -3339,100 +3343,89 @@ function Dashboard({ session }) {
                 cardOrder={viewing ? null : ((tenant.prefs && tenant.prefs.cardOrder) || null)}
               />
             ) : null}
-            {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
-            {!gateLocked && activeTab === "designs" && (sub === "people" || sub === "deals") ? (
-              <DesignsLegacySub sub={sub} navigate={navigate} />
-            ) : null}
-            {/* PIPELINE — the designs list, with the List | Pipeline board toggle inside it.
-                `sub === "deals"` still renders it, so a legacy /portal/designs/deals link
-                shows content immediately instead of a blank frame while the URL normalises.
-                Anything unrecognised renders it too — the same treatment SettingsShell gives
-                an unknown slug, so a stray segment never leaves the section bodiless. */}
-            {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
-              <DesignsTable key={"t-" + effClientId} clientId={effClientId}
-                fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={mirrorAdmin} crmUnlocked={crmUnlocked}
-                onSeeBilling={() => navigate("settings", "billing")}
-                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                /* PIPELINE OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19,
-                   after watching it: "this pipeline click is going to take you into the
-                   customer view where you can see everything about that customer ... I don't
-                   want the two different views." The deal she clicked rides along so the
-                   record opens ON it rather than on the "pick one" hint.
+            {/* THE CONTACTS HUB (Carolyn 2026-10-12): "Let's have one tab and we can have contacts,
+                and we can have this instead of list is designs, and then we have pipelines." One
+                sidebar item, and inside it a tab row: Contacts (the contact list), Design list (the
+                old Pipeline page's List view), then every pipeline in the account's order. The hub
+                (02-sales.jsx) decides which tab shows and keeps the address on it; this mount only
+                hands it the three views it cannot build itself, already wired to this shell.
 
-                   TWO fallbacks to the design record, and both are load-bearing:
-                   • no contact_id — crm_ensure_contact returns NULL for a design carrying
-                     neither phone nor email, so there is no customer to open.
-                   • no CRM subscription — a contact record is paywalled and a design record
-                     is not (see the record mount's own comment above). Routing a free-tier
-                     tenant's Pipeline click at the upsell would take away the page they have
-                     today, which is a regression dressed as a feature. */
-                onOpenRecord={(code, contactId) => {
-                  if (contactId && crmUnlocked) navigate("contacts", "c-" + contactId, false, { deal: code });
-                  else navigate("designs", "d-" + code);
-                }}
-                /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
-                   deliberately carries no view of its own so the saved preference can fill
-                   it -- pinning it to "list" here would quietly outrank the setting. */
-                urlView={sub === "pipeline" || sub === "list" ? sub : null}
-                /* THE DEFAULT for someone who never picked one follows the CRM (Carolyn Q12,
-                   2026-10-06): the board with the built-in CRM, the list without. A saved
-                   choice from My Profile still wins, and the URL above outranks both. On your
-                   own portal crmUnlocked reads false until portal-billing answers, so the
-                   table holds its loading body (viewPending) until then rather than painting
-                   the list and snapping to the board. Never pending in view-as, where
-                   featureOn already reads a still-loading tenant as on (operator only). */
-                defaultView={ssSavedDesignsView(tenant) || (crmUnlocked ? "pipeline" : "list")}
-                viewPending={!viewing && !ssSavedDesignsView(tenant) && !(sub === "pipeline" || sub === "list") && !entitlementSettled}
-                onViewChange={(v) => navigate("designs", v)}
-                onOpenDesign={openInDesigner} />
-            )}
-            {/* CONTACTS — its own tab again, at /portal/contacts (was /portal/leads; aliased).
-                Behind the built-in CRM subscription since migration 160; the nav item stays
-                visible (like Build Schedule) so the locked card can do the selling. */}
+                A RECORD OPENS INSIDE THIS TAB (C22): "I don't like that when I click on one of this
+                it goes back to the contact and then I'm like wait where what was I". The sidebar
+                stays on Contacts, and the record's Back returns to the hub tab it was opened from,
+                the exact pipeline included (recordCtx.from).
+
+                Each view asks for its own area (ssHubCan): the Design list needs designs, the
+                contact list and the pipelines need contacts, and those two also need the built-in
+                CRM. Without the CRM the Contacts tab stays, padlocked, to sell it (the locked card
+                below), and the Design list is what the tab opens on (C14). */}
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
-              crmUnlocked ? (
-                <>
-                {/* WHY THE LIST IS SHORT, for someone limited to their own customers (contacts
-                    'own' or, since migration 286, 'own_view' — which also says they may look but
-                    not change). ssRowScopeNote existed for exactly this sentence and was never
-                    rendered; null for everyone else, so nobody else sees a thing. Not gated on
-                    the role: an admin narrowed to own_view gets the same short list and needs the
-                    same sentence, and a platform operator's mirrorAccess is null. */}
-                {ssRowScopeNote(mirrorAccess, "contacts") && (
-                  <div data-ss-row-scope-note="" style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8,
-                    padding: "9px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.45, marginBottom: 12 }}>
-                    {ssRowScopeNote(mirrorAccess, "contacts")}
-                  </div>
+              <ContactsHub key={"h-" + effClientId} clientId={effClientId} sub={sub}
+                viewing={!!viewing} reach={hubReach} crmUnlocked={crmUnlocked}
+                /* On your own portal crmUnlocked reads false until portal-billing answers, so the
+                   hub holds its loading body until then rather than painting the Design list and
+                   snapping to the board. entitlementSettled ends the wait on a failure or a hang
+                   too. Never pending in view-as, where featureOn already reads a still-loading
+                   tenant as on (operator only). */
+                crmKnown={!!viewing || entitlementSettled}
+                /* Which view this person opens on (My Profile), or the old Pipeline tab's choice. */
+                saved={ssSavedHubView(tenant)}
+                refreshKey={designsRefreshKey}
+                onRoute={(next, replace) => navigate("contacts", next, !!replace)}
+                onOpenRecord={hubOpenRecord}
+                people={(
+                  <>
+                  {/* WHY THE LIST IS SHORT, for someone limited to their own customers (contacts
+                      'own' or, since migration 286, 'own_view' — which also says they may look but
+                      not change). ssRowScopeNote existed for exactly this sentence and was never
+                      rendered; null for everyone else, so nobody else sees a thing. Not gated on
+                      the role: an admin narrowed to own_view gets the same short list and needs the
+                      same sentence, and a platform operator's mirrorAccess is null. */}
+                  {ssRowScopeNote(mirrorAccess, "contacts") && (
+                    <div data-ss-row-scope-note="" style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8,
+                      padding: "9px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.45, marginBottom: 12 }}>
+                      {ssRowScopeNote(mirrorAccess, "contacts")}
+                    </div>
+                  )}
+                  <LeadsTable key={"t-" + effClientId} clientId={effClientId}
+                    fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
+                    onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId, false, { from: { page: "contacts", pageSub: SS_HUB_PEOPLE } })}
+                    onOpenDesign={openInDesigner}
+                    /* MY SYNERGY PHONE: Call on each row, fed EXACTLY what CrmRecord's Call tab is fed
+                       below, so the row and the record answer the same way. callOffered is the
+                       one ssPhoneOffered rule: no Call column where calling is not offered. */
+                    callOffered={phoneOffered}
+                    viewing={!!viewing}
+                    userId={session.user ? session.user.id : null}
+                    canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
+                    phoneOn={phoneOffered && effPhoneStatus === "on"} />
+                  </>
                 )}
-                <LeadsTable key={"t-" + effClientId} clientId={effClientId}
-                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
-                  onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
-                  onOpenDesign={openInDesigner}
-                  /* MY SYNERGY PHONE: Call on each row, fed EXACTLY what CrmRecord's Call tab is fed
-                     below, so the row and the record answer the same way. callOffered is the
-                     one ssPhoneOffered rule: no Call column where calling is not offered. */
-                  callOffered={phoneOffered}
-                  viewing={!!viewing}
-                  userId={session.user ? session.user.id : null}
-                  canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
-                  phoneOn={phoneOffered && effPhoneStatus === "on"} />
-                </>
-              ) : (
-                <ComingSoon
-                  title="Contacts"
-                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-                  blurb="Every buyer in one place, with the whole story attached — their designs and estimates, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline board comes with it, so you can see who's where at a glance."
-                  bullets={[
-                    "One record per customer: designs, estimates, notes and files",
-                    "Text and email them from inside the record — the thread stays",
-                    "Follow-up activities so nobody quietly goes cold",
-                    "The pipeline board view, alongside your list",
-                  ]}
-                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
-                  available
-                />
-              )
+                designs={(
+                  <DesignsTable key={"t-" + effClientId} clientId={effClientId}
+                    fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
+                    isAdmin={mirrorAdmin}
+                    viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                    onOpenRecord={(code, contactId) => hubOpenRecord(code, contactId, SS_HUB_DESIGNS)}
+                    onOpenDesign={openInDesigner} />
+                )}
+                /* The contact list and the boards are the built-in CRM. The tab stays (like Build
+                   Schedule) so this card can do the selling. */
+                locked={(
+                  <ComingSoon
+                    title="Contacts"
+                    icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+                    blurb="Every buyer in one place, with the whole story attached — their designs and estimates, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline boards come with it, so you can see who's where at a glance."
+                    bullets={[
+                      "One record per customer: designs, estimates, notes and files",
+                      "Text and email them from inside the record — the thread stays",
+                      "Follow-up activities so nobody quietly goes cold",
+                      "A pipeline board for every pipeline, beside your Design list",
+                    ]}
+                    cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                    available
+                  />
+                )} />
             )}
             {/* CONVERSATIONS — /portal/conversations[/email|texts|calls]. The sub is the filter, so
                 the browser's Back from a record restores it. Behind the built-in CRM like Contacts;
@@ -3465,10 +3458,6 @@ function Dashboard({ session }) {
                 />
               )
             )}
-            {/* /portal/pipelines[/<pipeline id>] was the Leads tab (migration 301, one day on beta).
-                Its board IS the Pipeline page's board since 302 (Carolyn 2026-10-09: "move the Leads
-                pipeline into the pipeline page"), so old links land there, on the pipeline named. */}
-            {activeTab === "pipelines" && <PipelinesLegacyRedirect sub={sub} clientId={effClientId} navigate={navigate} />}
             {/* Deliberately NOT behind `!gateLocked`, like Admin and Projects below: since view-as
                 mirrors the viewed tenant's billing lock (2026-09-15), the switcher is how an
                 operator LEAVES a locked account. Behind the gate it would trap them there. */}
@@ -3617,12 +3606,14 @@ function Dashboard({ session }) {
                 advanced={advancedSwitch}
                 /* The same answer the rail's list was built from, or the two disagree. */
                 phoneOffered={phoneOffered}
-                /* My Profile's "How the Pipeline tab opens" shows the default that applies,
+                /* My Profile's "How the Contacts tab opens" shows the default that applies,
                    which follows the CRM for someone who never picked one. Until the CRM answer
-                   is in (own portal only, as viewPending), crmUnlocked's false means "not known
-                   yet", so the card must not padlock the board or refuse it on that. */
+                   is in (own portal only, as the hub's crmKnown), crmUnlocked's false means "not
+                   known yet", so the card must not padlock the boards or refuse them on that. */
                 crmUnlocked={crmUnlocked}
                 crmPending={!viewing && !entitlementSettled}
+                /* ...and offers only the views this person may open, the hub's own answer. */
+                hubReach={hubReach}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real

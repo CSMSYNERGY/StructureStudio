@@ -229,7 +229,7 @@ async function run(label, S) {
   await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
   if (S.artifact) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: S.artifact }));
 
-  await page.goto(`${BASE}/portal/contacts${S.query || ""}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/portal/contacts/people${S.query || ""}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   // The list, with its rows (not the skeleton): a tbody row whose first cell has text.
   const rendered = await page.waitForFunction(() => {

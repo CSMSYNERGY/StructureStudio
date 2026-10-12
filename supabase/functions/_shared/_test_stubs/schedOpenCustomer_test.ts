@@ -52,20 +52,23 @@ const schedCustomerDest = new Function(`${DEST_SRC}; return schedCustomerDest;`)
 
 // The clamp, exactly as tabClamp_test lifts it (window pinned to a production host).
 const CLAMP_SRC = slice(CORE, "function ssIsBetaHost()", "const ACCENT =", "the clamp block");
-const { ssClampTab } = new Function("window", `${CLAMP_SRC}; return { ssClampTab };`)(
+const { ssClampTab, ssHubCan } = new Function("window", `${CLAMP_SRC}; return { ssClampTab, ssHubCan };`)(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssClampTab: (...a: unknown[]) => string };
+) as { ssClampTab: (...a: unknown[]) => string; ssHubCan: (...a: unknown[]) => boolean };
+// The old page ids' map into the Contacts hub (2026-10-12), which navigate() applies.
+const ROUTE_SRC = slice(CORE, "const SS_HUB_PEOPLE =", "function ssParsePath()", "ssCanonRoute");
+const ssCanonRoute = new Function(`${ROUTE_SRC}; return ssCanonRoute;`)() as (p: string, s: string | null) => { page: string; sub: string | null };
 
 const OPENER_SRC = slice(SHELL, "const scheduleCustomerOpener = (fromPage) => {", "// Mirrors portal-settings' own gate", "scheduleCustomerOpener");
 type World = { crm?: boolean; isOperator?: boolean; canAdmin?: boolean; access?: Record<string, string> | null; supportView?: boolean };
 function opener(w: World, fromPage = "build-schedule") {
   const did: { nav: unknown[][] } = { nav: [] };
   const make = new Function(
-    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "schedCustomerDest", "navigate",
+    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "ssHubCan", "schedCustomerDest", "navigate",
     `${OPENER_SRC}; return scheduleCustomerOpener;`,
   );
   const scheduleCustomerOpener = make(
-    w.crm ?? true, w.isOperator ?? false, w.canAdmin ?? false, w.access ?? null, w.supportView ?? false, ssClampTab, schedCustomerDest,
+    w.crm ?? true, w.isOperator ?? false, w.canAdmin ?? false, w.access ?? null, w.supportView ?? false, ssClampTab, ssHubCan, schedCustomerDest,
     (...a: unknown[]) => did.nav.push(a),
   );
   return { open: scheduleCustomerOpener(fromPage) as null | ((l: Link) => null | (() => void)), did };
@@ -262,11 +265,11 @@ Deno.test("the record context rides in the history entry, and every other naviga
     },
   };
   const navigate = new Function(
-    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "window",
+    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window",
     `${NAV_SRC}}, []); return navigate;`,
   )(
     (f: unknown) => f, { current: "x" }, (v: unknown) => { state.ctx = v; }, (v: unknown) => { state.tab = v; },
-    (v: unknown) => { state.sub = v; }, (p: string, s: string | null) => "/portal/" + p + (s ? "/" + s : ""), fakeWindow,
+    (v: unknown) => { state.sub = v; }, (p: string, s: string | null) => "/portal/" + p + (s ? "/" + s : ""), ssCanonRoute, fakeWindow,
   ) as (...a: unknown[]) => void;
   const from = { page: "build-schedule", pageSub: null };
   navigate("contacts", "c-" + C1, false, { deal: WITH.code, from });
@@ -279,6 +282,14 @@ Deno.test("the record context rides in the history entry, and every other naviga
   assertEquals(state.entries.pop(), { s: { page: "designer", sub: null }, u: "/portal/designer", replace: false });
   navigate("conversations", "texts", true);
   assertEquals([state.ctx, state.entries.pop()!.s], [null, { page: "conversations", sub: "texts" }]);
+  // A design's record, asked for under the old Pipeline page's id (schedCustomerDest still says
+  // "designs"), opens inside the Contacts hub, and its context is kept for the record it names.
+  navigate("designs", "d-" + WITH.code, false, { deal: null, from });
+  assertEquals([state.tab, state.sub], ["contacts", "d-" + WITH.code]);
+  assertEquals(state.entries.pop(), {
+    s: { page: "contacts", sub: "d-" + WITH.code, rec: { deal: null, from, sub: "d-" + WITH.code } },
+    u: "/portal/contacts/d-" + WITH.code, replace: false,
+  });
 
   // Back/forward: restored from the entry it lands on, and only for the record it was captured for.
   const POP_SRC = slice(SHELL, "const st = window.history.state;\n      setRecordCtx(", ";\n", "onPop's restore");
