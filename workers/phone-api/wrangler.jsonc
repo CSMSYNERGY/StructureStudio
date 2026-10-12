@@ -57,9 +57,14 @@
     "PHONE_USAGE_COST_CAPTURE": "on",
     // Days a voicemail recording is kept at Twilio before the daily job deletes it.
     "VOICEMAIL_RETENTION_DAYS": "365",
-    // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, about
-    // $0.05/minute, English, 2 s to 2 min). Anything else: off.
-    "TRANSCRIBE": "off",
+    // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, $0.05/minute
+    // at Twilio's US price, American English, 2 s to 2 min; a longer message still records, with
+    // no text). Anything else: off. "on" since Carolyn's call of 2026-10-12 ("voicemails, I really
+    // want transcribed"). ⚠️ The privacy site goes out FIRST: it said transcription was off and
+    // promised an update before it went on (phone repo site/, then this Worker). The transcript
+    // is kept as long as the voicemail (VOICEMAIL_RETENTION_DAYS; cron/retention.ts deletes both
+    // copies, Twilio's and ours). Turning it off again is "off" + deploy + commit.
+    "TRANSCRIBE": "on",
     // Release B2, call recording's kill switch. Exactly "on" lets a business whose switch is on
     // (on by default since migration 287, Carolyn 2026-10-06; only the owner turns it off, in
     // Settings › Phone) have its calls announced ("This call may be recorded.") and recorded,
