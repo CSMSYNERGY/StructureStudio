@@ -1158,6 +1158,120 @@ async function ssPhoneSend(type, payload) {
   return { installed: true, reply };
 }
 
+// "OPEN IN STRUCTURE STUDIO" SHOWS THE PAGE IN THIS TAB (Carolyn 2026-10-12, on a new tab opening
+// for every click: "I'm already here? Why would I the first time want to go to a new tab?").
+// My Synergy Phone 0.1.4 keeps a list of the Structure Studio tabs open on this computer: each one
+// keeps ONE port open to it (chrome.runtime.connect, name "sss.portal"). Its "Open in Structure
+// Studio" asks the tab the person used last to show the page in place, through the router below,
+// and brings that tab forward; only when no tab answers does it open a new one. The protocol is
+// SPEC section 5 ("Open in Structure Studio") in the phone repo:
+//   page → extension  { type: "sss.hello" | "sss.seen", visible, seen_at, routable }
+//                     { type: "sss.navigated", id, ok, error? }
+//   extension → page  { type: "sss.welcome" }  (it keeps the list)
+//                     { type: "sss.navigate", id, page, sub }
+// An extension older than 0.1.4 has no listener: the port closes at once with no welcome, and this
+// tab asks again only when it comes back into view, at most once a minute. Chrome closes every port
+// when it stops the extension's idle service worker; a welcomed port reconnects a second later, so
+// the tab is never missing from the list for long. A tab in view-as (?view=) or the Projects
+// pop-out (?popout=1) says routable:false and refuses: the extension's contact belongs to the
+// person's own account, and routing that tab would drop the account being looked at.
+const SS_PHONE_PORT_RETRY_MS = 60000;
+let ssPhonePort = null;       // { port, welcomed } while one is open
+let ssPhonePortTriedAt = 0;   // the last connect that got no welcome
+let ssPhoneSeenAt = 0;        // when this tab last came forward (this computer's clock)
+
+// The page the extension asks for, checked: a router slug and an optional sub-slug, never a URL.
+// → { page, sub } or null.
+function ssPhoneNavTarget(m) {
+  if (!m || typeof m !== "object") return null;
+  const page = typeof m.page === "string" ? m.page : "";
+  const sub = m.sub == null ? null : (typeof m.sub === "string" ? m.sub : "");
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(page)) return null;
+  if (sub !== null && !/^[A-Za-z0-9][A-Za-z0-9-]{0,79}$/.test(sub)) return null;
+  return { page, sub };
+}
+
+// May this tab be routed for the extension? Not in view-as, and not the Projects pop-out.
+function ssPhoneRoutable(search) {
+  try {
+    const q = new URLSearchParams(search == null ? window.location.search : search);
+    return !q.get("view") && q.get("popout") !== "1";
+  } catch (_e) { return false; }
+}
+
+// Show the page in this tab the way Back and Forward do: the address moves (pushState), then the
+// shell's own popstate handler routes to it. Nothing reloads, so a design open in the Designer
+// stays open. → false when this tab refuses.
+function ssPhoneShowHere(t) {
+  if (!t || !ssPhoneRoutable()) return false;
+  const url = ssPagePath(t.page, t.sub);
+  if (window.location.pathname + window.location.search !== url) {
+    window.history.pushState({ page: t.page, sub: t.sub }, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+  }
+  return true;
+}
+
+function ssPhonePortSay(type) {
+  const p = ssPhonePort && ssPhonePort.port;
+  if (!p) return;
+  try {
+    p.postMessage({ type, visible: document.visibilityState === "visible", seen_at: ssPhoneSeenAt || null, routable: ssPhoneRoutable() });
+  } catch (_e) { /* closed: the next visit opens another */ }
+}
+
+// Open the port, once a My Synergy Phone answers the ping. Never on a phone's browser, and never
+// where chrome.runtime has no connect (another browser, or no extension exposing itself).
+async function ssPhonePortOpen() {
+  const rt = window.chrome && window.chrome.runtime;
+  if (ssPhonePort || !rt || typeof rt.connect !== "function" || ssIsPhoneBrowser()) return;
+  if (ssPhonePortTriedAt && Date.now() - ssPhonePortTriedAt < SS_PHONE_PORT_RETRY_MS) return;
+  ssPhonePortTriedAt = Date.now();
+  const found = await ssPhonePing();
+  if (!found || ssPhonePort) return;
+  let port;
+  try { port = rt.connect(found.id, { name: "sss.portal" }); } catch (_e) { return; }
+  const entry = { port, welcomed: false };
+  ssPhonePort = entry;
+  port.onMessage.addListener((m) => {
+    if (!m || typeof m !== "object") return;
+    if (m.type === "sss.welcome") { entry.welcomed = true; ssPhonePortTriedAt = 0; return; }
+    if (m.type !== "sss.navigate") return;
+    const t = ssPhoneNavTarget(m);
+    let ok = false;
+    try { ok = ssPhoneShowHere(t); } catch (_e) { ok = false; }
+    if (ok) ssPhoneSeenAt = Date.now();
+    try { port.postMessage(ok ? { type: "sss.navigated", id: m.id, ok: true } : { type: "sss.navigated", id: m.id, ok: false, error: t ? "not_here" : "bad_request" }); }
+    catch (_e) { /* closed meanwhile: the extension tries another tab */ }
+  });
+  port.onDisconnect.addListener(() => {
+    // Read it, or Chrome logs "Unchecked runtime.lastError" for an extension with no listener.
+    void (window.chrome && window.chrome.runtime && window.chrome.runtime.lastError);
+    if (ssPhonePort === entry) ssPhonePort = null;
+    if (entry.welcomed) setTimeout(() => { void ssPhonePortOpen(); }, 1000);
+  });
+  ssPhonePortSay("sss.hello");
+}
+
+// This tab came forward or went to the background: say so (the extension asks the tab used last),
+// or open the port if there is none yet.
+function ssPhonePortVisit() {
+  if (document.visibilityState === "visible") ssPhoneSeenAt = Date.now();
+  if (ssPhonePort) ssPhonePortSay("sss.seen");
+  else void ssPhonePortOpen();
+}
+
+// Started once, when the app loads in a browser tab (never in the tests that run this block
+// outside a browser, where there is no document).
+if (typeof document !== "undefined" && typeof window.addEventListener === "function") {
+  if (document.visibilityState === "visible") ssPhoneSeenAt = Date.now();
+  document.addEventListener("visibilitychange", ssPhonePortVisit);
+  window.addEventListener("focus", ssPhonePortVisit);
+  // Back from the back-forward cache: Chrome closed the port when the page went in.
+  window.addEventListener("pageshow", (e) => { if (e.persisted) ssPhonePortVisit(); });
+  setTimeout(() => { void ssPhonePortOpen(); }, 0);
+}
+
 // What each refusal means, in words a builder can act on. Codes are the extension's (SPEC
 // section 5 plus the bridge's own busy / bad_request / emergency_blocked).
 function ssPhoneRefusal(reply) {
