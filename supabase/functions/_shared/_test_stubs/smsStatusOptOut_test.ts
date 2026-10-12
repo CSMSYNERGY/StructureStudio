@@ -56,8 +56,8 @@ const CUSTOMER = "+15550100002";
 const DIGITS = "5550100002";
 
 // ── In-memory database ─────────────────────────────────────────────────────────────────────
-// What the handler and recordTwilioOptOut call: select · update · upsert · insert · eq · limit ·
-// maybeSingle · await. Every call is recorded with its table, operation, payload and filters.
+// What the handler and recordTwilioOptOut call: select · update · upsert · insert · eq · is ·
+// limit · maybeSingle · await. Every call is recorded with its table, operation, payload and filters.
 
 type Row = Record<string, unknown>;
 type Op = { table: string; op: string; payload: unknown; opts: unknown; filters: [string, unknown][] };
@@ -87,6 +87,7 @@ class FakeDb {
       upsert: (p: unknown, o: unknown) => { op.op = "upsert"; op.payload = p; op.opts = o; return q; },
       insert: (p: unknown) => { op.op = "insert"; op.payload = p; return q; },
       eq: (c: string, v: unknown) => { op.filters.push([c, v]); return q; },
+      is: (c: string, v: unknown) => { op.filters.push([c, `is.${v}`]); return q; },
       limit: () => q,
       maybeSingle: () => {
         const r = result();
@@ -177,11 +178,13 @@ Deno.test("a late 21610 marks the text failed AND records the opt-out on our row
     const [oo] = db.writes("sms_opt_outs");
     assertEquals(oo.op, "upsert");
     assertEquals(oo.payload, { client_id: TENANT, phone_digits: DIGITS, reason: "sms_stop", note: TWILIO_OPT_OUT_NOTE });
-    assertEquals(oo.opts, { onConflict: "client_id,phone_digits" });
+    // A number already opted out (a STOP that came in first, the team's, an import's) keeps its
+    // row, and the contact its first time: recordTwilioOptOut adds, never rewrites.
+    assertEquals(oo.opts, { onConflict: "client_id,phone_digits", ignoreDuplicates: true });
     const [contact] = db.writes("crm_contacts");
     assertEquals(contact.op, "update");
     assert(typeof (contact.payload as Row).sms_opt_out_at === "string", "the contact's flag is set");
-    assertEquals(contact.filters, [["client_id", TENANT], ["id", CONTACT]]);
+    assertEquals(contact.filters, [["client_id", TENANT], ["id", CONTACT], ["sms_opt_out_at", "is.null"]]);
     // Found by the text's sid, with the columns the opt-out needs.
     const [lookup] = db.reads("sms_messages");
     assertEquals(lookup.filters, [["provider_sid", SID]]);

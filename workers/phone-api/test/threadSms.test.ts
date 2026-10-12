@@ -5,11 +5,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CUSTOMER, FakeNet, USER_A,
   appRequest, call, callerCtx, jsonRes, makeEnv, pgTable,
 } from "./helpers";
+import { resetLogThrottle } from "../src/log";
 import { optOutReasonOf } from "../src/routes/reads";
 
 type Row = Record<string, unknown>;
@@ -55,6 +56,9 @@ const text = (id: string, over: Row): Row => ({
 });
 
 describe("GET /threads/:key sms (opt-out state)", () => {
+  // sms_state_read_failed is written at most once a minute per isolate; each test starts afresh.
+  beforeEach(() => resetLogThrottle());
+
   it("a customer who replied STOP: opted out, revoked, when, and why; keyed on the number's 10 digits in THIS business", async () => {
     const { net, token, env } = await setup(callerCtx(), {
       sms: [text("m1", {})],
@@ -139,6 +143,26 @@ describe("GET /threads/:key sms (opt-out state)", () => {
     expect(rows.map((r) => r.code)).toEqual(["sms_state_read_failed"]);
     expect(JSON.stringify(rows)).not.toContain(DIGITS);
     expect(JSON.stringify(rows)).toContain("57014");
+  });
+
+  it("an unknown number's thread whose read fails: the app_errors row names no number, not even in its url", async () => {
+    // The thread's path is /threads/n:%2B1..., the number itself, so the row carries the route's
+    // template, never the request's path.
+    const { net, token, env } = await setup(callerCtx({ contacts_level: "view" }), {
+      contact: null,
+      sms: [text("u1", { contact_id: null, from_number: UNKNOWN })],
+    });
+    net.rest("GET", "sms_opt_outs", () => jsonRes({ code: "57014", message: "canceling statement due to statement timeout" }, 500));
+    const { res, json } = await call(env, read(token, `n:${UNKNOWN}`));
+    expect(res.status).toBe(200);
+    expect(json.messages).toHaveLength(1);
+    expect(json).not.toHaveProperty("sms");
+    const rows = net.writes("app_errors").map((w) => w.json);
+    expect(rows.map((r) => r.code)).toEqual(["sms_state_read_failed"]);
+    expect(rows[0].url ?? null).toBeNull();
+    expect(rows[0].context).toEqual({ route: "GET /threads/:key" });
+    const said = JSON.stringify(rows);
+    for (const n of ["5555550150", "555-0150", "%2B1555", "+1555"]) expect(said).not.toContain(n);
   });
 });
 

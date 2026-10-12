@@ -13,6 +13,7 @@
 
 import { senderVerifiedFrom } from "../../../../supabase/functions/_shared/crmFeed.ts";
 import { hasPaidFeature } from "../../../../supabase/functions/_shared/featureCheck.ts";
+import { readSmsOptOut, smsOptOutFacts, smsOptOutReasonOf, type SmsOptOutReason } from "../../../../supabase/functions/_shared/smsOptOut.ts";
 import type { Env } from "../env";
 import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
@@ -540,11 +541,13 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
     smsStateFor(c, textTo, contactOptOutAt).catch(async (e: unknown) => {
       // Advice only (the send path checks again), so a failed read leaves `sms` out and the
       // thread still opens: the apps then say nothing new, as with an older Worker. Logged with
-      // the database's code, never its message, which can quote the number.
+      // the database's code, never its message, which can quote the number. And never with the
+      // request: app_errors.url would keep its path, and an unknown number's thread is
+      // /threads/n:+1..., the number itself. The route's template instead.
       await logFault({
         code: "sms_state_read_failed",
         message: `The thread's texting state could not be read (${e instanceof DbError ? `${e.op}: ${e.pgCode ?? "no code"}` : "unexpected"}); sms left out.`,
-        req, clientId: c.ctx.client_id, throttleMs: 60_000,
+        context: { route: "GET /threads/:key" }, clientId: c.ctx.client_id, throttleMs: 60_000,
       });
       return undefined;
     }),
@@ -570,7 +573,7 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
 // ── opt-out state ───────────────────────────────────────────────────────────────────
 
 export type SmsConsent = "granted" | "none" | "revoked";
-export type SmsOptOutReason = "stop" | "team" | "other";
+export type { SmsOptOutReason };
 
 export interface SmsState {
   e164: string;
@@ -580,10 +583,11 @@ export interface SmsState {
   opted_out_reason: SmsOptOutReason | null;
 }
 
-/** sms_opt_outs.reason as the apps read it: a STOP (or Twilio's 21610), the team, anything else. */
-export function optOutReasonOf(reason: string | null | undefined): SmsOptOutReason {
-  return reason === "sms_stop" ? "stop" : reason === "operator" ? "team" : "other";
-}
+/**
+ * sms_opt_outs.reason as the apps read it: a STOP (or Twilio's 21610), the team, anything else.
+ * _shared/smsOptOut.ts's, so the portal's contact record says the same (crm_record optOutReason).
+ */
+export const optOutReasonOf = smsOptOutReasonOf;
 
 /**
  * GET /threads/:key `sms` (2026-10-13, asked for 2026-10-12: "Can we see if a customer has opted
@@ -599,20 +603,20 @@ export async function smsStateFor(c: Caller, e164: string | null, contactOptOutA
   const digits = phoneDigits(e164);
   if (!e164 || !digits) return null;
   const [oo, grant] = await Promise.all([
-    c.admin.from("sms_opt_outs").select("reason, effective_at")
-      .eq("client_id", c.ctx.client_id).eq("phone_digits", digits).maybeSingle(),
+    readSmsOptOut(c.admin, c.ctx.client_id, digits),
     c.admin.from("sms_consent_log").select("action")
       .eq("client_id", c.ctx.client_id).eq("phone_digits", digits).eq("action", "granted").limit(1).maybeSingle(),
   ]);
   const row = must(oo, "read the number's opt-out") as { reason: string | null; effective_at: string | null } | null;
   const granted = !!must(grant, "read the number's texting consent");
-  const optedOut = !!row || !!contactOptOutAt;
+  // Either record of it, read as portal-settings crm_record reads it (_shared/smsOptOut.ts).
+  const o = smsOptOutFacts(row, contactOptOutAt);
   return {
     e164,
-    opted_out: optedOut,
-    opted_out_at: optedOut ? row?.effective_at ?? contactOptOutAt ?? null : null,
-    consent: optedOut ? "revoked" : granted ? "granted" : "none",
-    opted_out_reason: row ? optOutReasonOf(row.reason) : optedOut ? "other" : null,
+    opted_out: o.optedOut,
+    opted_out_at: o.at,
+    consent: o.optedOut ? "revoked" : granted ? "granted" : "none",
+    opted_out_reason: o.reason,
   };
 }
 

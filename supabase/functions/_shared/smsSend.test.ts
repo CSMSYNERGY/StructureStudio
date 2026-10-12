@@ -218,10 +218,11 @@ Deno.test("Twilio refuses with 21610 at send time: the opt-out is recorded on th
   const optOut = w.written.find((x) => x.table === "sms_opt_outs");
   assertEquals(optOut?.op, "upsert");
   assertEquals(optOut?.row, { client_id: "tenant-a", phone_digits: "5550100002", reason: "sms_stop", note: TWILIO_OPT_OUT_NOTE });
-  assertEquals(optOut?.opts, { onConflict: "client_id,phone_digits" });
+  // An opt-out already on record is kept as it is (smsOptOut.test.ts: "adds, never rewrites").
+  assertEquals(optOut?.opts, { onConflict: "client_id,phone_digits", ignoreDuplicates: true });
   const contact = w.written.find((x) => x.table === "crm_contacts");
   assert(typeof contact?.row.sms_opt_out_at === "string", "the contact's flag is set");
-  assertEquals(contact?.filters, ["eq:client_id=tenant-a", "eq:id=contact-1"]);
+  assertEquals(contact?.filters, ["eq:client_id=tenant-a", "eq:id=contact-1", "is:sms_opt_out_at=null"]);
   // Any other refusal records no opt-out.
   const other = await inWorld({ meters: "off", twilioCode: 30007 });
   assertEquals(other.out.reason, "failed");

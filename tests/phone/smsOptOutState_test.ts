@@ -2,15 +2,19 @@
 //
 // Three places must agree with the send path (_shared/smsSend.ts), which refuses a text when the
 // NUMBER has an sms_opt_outs row or the contact has the older crm_contacts.sms_opt_out_at:
-//   * portal-settings crm_record: the record page's composer (`sms.optedOut`). It read only the
-//     contact's flag, so an opt-out recorded on the number alone (a STOP before the contact was
-//     saved, an import's do-not-disturb, a contact re-created after its STOP) showed nothing and
-//     Send failed;
+//   * portal-settings crm_record: the record page's composer (`sms.optedOut`, and since the fix
+//     round `sms.optOutReason`). It read only the contact's flag, so an opt-out recorded on the
+//     number alone (a STOP before the contact was saved, an import's do-not-disturb, a contact
+//     re-created after its STOP) showed nothing and Send failed. Its "Customer agreed to texts"
+//     (crm_record_consent) had the same gap and could record a grant over such an opt-out;
 //   * the phone-api Worker's GET /threads/:key `sms` (workers/phone-api/test/threadSms.test.ts
 //     drives it end to end);
 //   * the writers of a Twilio 21610: smsSend at send time, sms-status when it comes later in a
 //     delivery status, both through _shared/smsOptOut.ts recordTwilioOptOut (one write, never two
 //     copies; smsStatusOptOut_test.ts and smsOptOut.test.ts drive them).
+// The screens read it through ONE helper, _shared/smsOptOut.ts smsOptOutFacts (smsOptOut.test.ts
+// drives it: the number's row alone, the contact's flag alone, both, neither), so the portal and
+// the Worker cannot word or decide it differently.
 //
 // portal-settings and sms-status end in Deno.serve, so their wiring is checked on the SHIPPED
 // source between stable anchors, the crmCreateContact_test way. If an anchor moves, re-point it;
@@ -32,22 +36,38 @@ const slice = (src: string, a: string, b: string, what: string) => {
   return src.slice(i, j + b.length);
 };
 
-Deno.test("crm_record: optedOut asks the number's sms_opt_outs row as well as the contact's flag, in the same wait", () => {
+Deno.test("crm_record: optedOut asks the number's sms_opt_outs row as well as the contact's flag, in the same wait, and says why", () => {
+  assert(SETTINGS.includes('import { readSmsOptOut, smsOptOutFacts, smsOptOutRefusal } from "../_shared/smsOptOut.ts";'), "the shared reader");
   const block = slice(SETTINGS, "const [cfgRes, grantRes, optOutRes] = await Promise.all([", "consented:", "crm_record's SMS block");
-  const read = slice(block, 'admin.from("sms_opt_outs")', ".maybeSingle()", "the opt-out read");
-  assert(read.includes('.eq("client_id", clientId)'), "this business's opt-outs only");
-  assert(read.includes('.eq("phone_digits", contact.phone_digits)'), "keyed on the phone, as smsSend is");
-  assert(block.includes("contact && contact.phone_digits\n            ? admin.from(\"sms_opt_outs\")"), "asked only when the contact has a number");
-  assert(block.includes("optedOut: !!(contact && contact.sms_opt_out_at) || !!optOutRes.data,"), "either record of it is opted out");
+  // readSmsOptOut: this business's row on the contact's 10 digits, nothing asked without a number
+  // (smsOptOut.test.ts drives it, another business's row included).
+  assert(block.includes("readSmsOptOut(admin, clientId, contact && contact.phone_digits),"), "the number's row, read the shared way, in the same wait");
+  assert(!block.includes('admin.from("sms_opt_outs")'), "no second copy of the read");
+  assert(block.includes("const optOut = smsOptOutFacts(optOutRes.data, contact ? contact.sms_opt_out_at : null);"), "either record of it, folded the shared way");
+  assert(block.includes("optedOut: optOut.optedOut,"), "opted out on either");
+  assert(block.includes("optOutReason: optOut.reason,"), "and why (additive: main's frontend reads optedOut alone)");
+});
+
+Deno.test("crm_record_consent: a grant is refused over EITHER record of an opt-out, worded by its reason, before anything is written", () => {
+  const action = slice(SETTINGS, 'if (action === "crm_record_consent") {', 'await admin.from("sms_consent_log").insert({', "crm_record_consent");
+  assert(action.includes("const { data: optOutRow, error: optOutErr } = await readSmsOptOut(admin, clientId, c.phone_digits);"), "this business's row for this contact's number");
+  assert(action.includes('if (optOutErr) return dbFail(req, clientId, "check whether this customer opted out of texts", optOutErr);'), "a failed read refuses: a wrong \"no\" would let a grant through");
+  assert(action.includes("const optOut = smsOptOutFacts(optOutRow, c.sms_opt_out_at);"), "both records, read the shared way");
+  assert(action.includes("return json({ error: smsOptOutRefusal(optOut.reason) }, 409);"), "a 409 in the customer's terms");
+  assert(!action.includes("if (c.sms_opt_out_at) {"), "no longer the contact's flag alone");
+  // The refusal comes before the attestation is even read, so nothing is written for an opted-out number.
+  assert(action.indexOf("smsOptOutRefusal(") < action.indexOf("const attestation ="), "refused before the attestation");
 });
 
 Deno.test("smsSend checks the same two facts the screens now show", () => {
   assert(SEND.includes('admin.from("sms_opt_outs")\n      .select("reason").eq("client_id", clientId).eq("phone_digits", key).maybeSingle();'), "the number's opt-out");
   assert(SEND.includes('.select("sms_opt_out_at").eq("client_id", clientId).eq("id", msg.contactId).maybeSingle();'), "the contact's flag");
   const state = slice(READS, "export async function smsStateFor(", "\n}\n", "the Worker's smsStateFor");
-  assert(state.includes('c.admin.from("sms_opt_outs")') && state.includes('.eq("phone_digits", digits)'), "the Worker asks the number's opt-out");
+  assert(state.includes("readSmsOptOut(c.admin, c.ctx.client_id, digits),"), "the Worker asks the number's opt-out, the shared way");
   assert(state.includes('.eq("action", "granted").limit(1)'), "and, like smsSend, \"is there a grant?\", not the newest row");
-  assert(state.includes("const optedOut = !!row || !!contactOptOutAt;"), "either record of it");
+  assert(state.includes("const o = smsOptOutFacts(row, contactOptOutAt);"), "either record of it, read as the portal reads it");
+  assert(READS.includes('from "../../../../supabase/functions/_shared/smsOptOut.ts";'), "the shared reader");
+  assert(READS.includes("export const optOutReasonOf = smsOptOutReasonOf;"), "one reason mapping for the Worker and the portal");
 });
 
 Deno.test("a 21610 is written one way: smsSend and sms-status both call recordTwilioOptOut, and neither writes it by hand", () => {
