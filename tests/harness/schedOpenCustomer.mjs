@@ -13,7 +13,7 @@
 //   B. the record's Back lands on /portal/build-schedule on the SAME week and view it left; the
 //      browser's Back does too; from the Table view, Back comes back to the Table view
 //   C. a job whose design is gone shows its name as plain text; a spec build has no link
-//   D. a job whose design has no customer opens the design's record (/portal/designs/d-<code>)
+//   D. a job whose design has no customer opens the design's record (/portal/contacts/d-<code>)
 //   E. unsaved edits in the popup: following the link asks first; "Cancel" stays put
 //   F. the same customer opened from Contacts still shows the hint and Backs to Contacts (the
 //      schedule's hand-off is spent, and A's "no hint" is not vacuous)
@@ -317,7 +317,7 @@ try {
     await openTableRow(s.page, "Utility Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-CASE0003"]'));
     await recordReady(s.page);
-    ok("D1 a design with no customer opens the design's record", (await path(s.page)) === "/portal/designs/d-SS-CASE0003", await path(s.page));
+    ok("D1 a design with no customer opens the design's record", (await path(s.page)) === "/portal/contacts/d-SS-CASE0003", await path(s.page));
     ok("D2 (asked as a design record)", lastRecord(s).kind === "design" && lastRecord(s).id === "SS-CASE0003", JSON.stringify(lastRecord(s)));
     await recordBack(s.page);
     ok("D3 and its Back returns to the Build Schedule", (await path(s.page)) === "/portal/build-schedule", await path(s.page));
@@ -346,13 +346,13 @@ try {
     ok("E4 with nothing changed it doesn't ask", s.dialogs.length === quiet && (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`);
 
     // ── F. The same customer opened another way ──
-    await s.go("/portal/contacts");
+    await s.go("/portal/contacts/people");
     await s.go(`/portal/contacts/c-${C_ALEX}`);
     await recordReady(s.page);
     await s.page.waitForTimeout(500);
     ok("F1 opened from Contacts, the record asks for a deal (so A6 means something)", (await dealPicked(s.page)) === false, String(await dealPicked(s.page)));
     await recordBack(s.page);
-    ok("F2 and its Back goes to Contacts, not the schedule", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("F2 and its Back goes to Contacts, not the schedule", (await path(s.page)) === "/portal/contacts/people", await path(s.page));
 
     // ── G. Delivery Schedule ──
     await s.go("/portal/delivery-schedule");
@@ -410,7 +410,7 @@ try {
     ok("P3 the browser's Back reopens it on the same deal", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
       `${await path(s.page)} ${await dealPicked(s.page)}`);
     await recordBack(s.page);
-    ok("P4 and its own Back still goes to Contacts, as before", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("P4 and its own Back returns to the Design list it came from (C22)", (await path(s.page)) === "/portal/contacts/designs", await path(s.page));
     await s.ctx.close();
   }
 
@@ -424,7 +424,7 @@ try {
     await openTableRow(s.page, "Gable Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("H1 a crew leader (designs, no contacts) lands on the design's record", (await path(s.page)) === "/portal/designs/d-SS-ALEX0001"
+    ok("H1 a crew leader (designs, no contacts) lands on the design's record", (await path(s.page)) === "/portal/contacts/d-SS-ALEX0001"
       && lastRecord(s).kind === "design", `${await path(s.page)} ${JSON.stringify(lastRecord(s))}`);
     await recordBack(s.page);
     ok("H2 and Back returns to the Build Schedule", (await path(s.page)) === "/portal/build-schedule", await path(s.page));
@@ -464,7 +464,7 @@ try {
     await openTableRow(s.page, "Gable Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("H6 without the CRM, the design's record (not the CRM sales card)", (await path(s.page)) === "/portal/designs/d-SS-ALEX0001", await path(s.page));
+    ok("H6 without the CRM, the design's record (not the CRM sales card)", (await path(s.page)) === "/portal/contacts/d-SS-ALEX0001", await path(s.page));
     await s.ctx.close();
   }
 

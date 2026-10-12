@@ -97,7 +97,7 @@ Deno.test("the shell: routable, the contacts area, under Contacts only with the 
   assert(/\n {2}conversations: \["Conversations", "[^"]+"\],/.test(CORE), "TAB_META has no conversations page");
   assert(/\n {2}conversations: "contacts",/.test(slice(CORE, "const TAB_AREA = {", "};", "TAB_AREA")), "conversations does not need the contacts area");
   assert(/const NONADMIN_TABS = \[[^\]]*"conversations"/.test(CORE), "the pre-100 access shape can't reach conversations");
-  const nav = slice(SHELL, '{navItem("contacts", "Contacts")}', '{navItem("designs", "Pipeline")}', "the nav under Contacts");
+  const nav = slice(SHELL, '{navItem("contacts", "Contacts")}', '{navItem("inventory", "Inventory")}', "the nav under Contacts");
   assert(nav.includes('{crmUnlocked && navItem("conversations", "Conversations")}'), "the nav item is not right under Contacts, behind the CRM");
   assert(/initialChip=\{recordCtx && recordCtx\.sub === sub \? \(recordCtx\.chip \|\| null\) : null\}/.test(SHELL), "the record mount does not pass the chip");
   // One navigate, carrying the chip for the row's channel and a Back to the filter left; it rides

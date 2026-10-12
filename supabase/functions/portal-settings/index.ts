@@ -23,6 +23,7 @@ import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
 // The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
 import { buildReplyAddress } from "../_shared/emailInbound.ts";
 import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
+import { cleanContactsView, mergePrefs } from "../_shared/savePrefs.ts";
 // Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
 import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
@@ -1901,6 +1902,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? payload.prefs as Record<string, any> : {};
     const clean: Record<string, unknown> = {};
     if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // Which tab the Contacts hub opens on (Carolyn 2026-10-12): the contact list, the Design list,
+    // or one pipeline by id. Shaped, never looked up (_shared/savePrefs.ts says why).
+    {
+      const view = cleanContactsView(raw.contactsView);
+      if (view) clean.contactsView = view;
+    }
     // A person's own reply-to address (Carolyn 2026-09-04 @35:06: "every user should be able to
     // go in and say, when somebody replies to an email, send it here. But that should be in
     // their profile"). It is ADVERTISED TO CUSTOMERS — sendTenantEmail puts it in Reply-To
@@ -1911,11 +1918,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // every sender applies on the way OUT (since 2026-10-05) and the My Profile box applies
     // before it saves, so the three can't disagree about what counts as an address.
     //
-    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
-    // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
-    // not merely fail to save — it is DESTROYED by the next save from any screen, including
-    // someone changing their Pipeline default on the same card. Every future per-user pref has
-    // to be added here or it silently evaporates.
+    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch,
+    // the keys the save did not name are filled in from the stored blob (mergePrefs, below, which
+    // carries only _shared/savePrefs.ts PREF_KEYS), and the update REPLACES the whole jsonb column
+    // with the result. So a key that is not listed in both places does not merely fail to save —
+    // it is DESTROYED by the next save from any screen. Every future per-user pref has to be added
+    // here and there or it silently evaporates.
     //
     // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
     // string is how the UI clears it, and correctly arrives here as "drop the key".
@@ -1925,9 +1933,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // Whether this person also gets a copy of customers' replies in their own inbox (My Profile,
     // 2026-10-07; _shared/repReplyTo.ts reads it on the way out). OFF by default, so only `true`
-    // is kept: false, "true" or a missing key all store nothing, and nothing means OFF. A save
-    // from a screen that doesn't know the key therefore turns copies off, which is the safe way
-    // round: replies still land on the record.
+    // is kept: false or "true" store nothing, and nothing means OFF. A save that does not name
+    // the key leaves the stored answer alone (the merge below); My Profile names it on every save.
     if (raw.replyCopy === true) clean.replyCopy = true;
     // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
     // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
@@ -1948,6 +1955,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
       if (Object.keys(co).length) clean.cardOrder = co;
+    }
+    // MERGE, NOT REPLACE (2026-10-12): a key this save does not name keeps what is stored, so a
+    // screen that knows only some prefs cannot wipe another card's choice (_shared/savePrefs.ts).
+    // Read the way `status` reads it: the caller's own row, by the verified user id.
+    {
+      const { data: cur, error: curErr } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
+      if (curErr) return dbFail(req, clientId, "save your preferences", curErr);
+      // Everything this save decided, plus the stored keys it did not name.
+      Object.assign(clean, mergePrefs(clean, raw, cur?.prefs));
     }
     const { error } = await admin.from("client_users")
       .update({ prefs: Object.keys(clean).length ? clean : null })

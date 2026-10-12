@@ -1,3 +1,345 @@
+// ── THE CONTACTS HUB (Carolyn 2026-10-12) ───────────────────────────────────────────────────
+// "Let's have one tab and we can have contacts, and we can have this instead of list is designs,
+// and then we have pipelines." And for the row itself: "this whole thing will have always
+// contacts, always on the left side, and then always design list, and then every pipeline that
+// they create will be next, next, next, next."
+//
+// So the sidebar's Contacts opens this, and this is a tab row over one view:
+//   Contacts      the contact list (LeadsTable)                 contacts area + the built-in CRM
+//   Design list   the old Pipeline page's List view             designs area, never the CRM
+//   <pipeline>…   one board per pipeline, in the account's order contacts area + the built-in CRM
+// It replaced the List | Pipeline toggle and the board's pipeline <select>, both of which sat
+// where the row sits now (she drew the arrow from "26 cards" to the toggle: "up here").
+//
+// HOW MANY PIPELINE TABS (C27, C29): "let's say they can display five pipelines ... And then if
+// they have more, the very last pipeline will have a drop down and they have to click down." And
+// on Ahsan's scroll-left/right idea: "I just don't like a scroll bar." So at most five pipeline
+// positions, and with more than five the fifth is the last pipeline WITH a drop-down: its name
+// opens that pipeline in one click, its ▾ lists the rest, and while one of the rest is open the
+// fifth tab wears that one's name. Where the row is narrower than that, more pipelines fold into
+// the drop-down (ssHubFit); the row never scrolls. The order is the account's, the same for
+// everyone (C28, per-person ordering, was Ahsan's idea and was not taken up).
+//
+// WHICH TAB IT OPENS ON (C24, C25): "by default, when they come here, they are going to be looking
+// at Pipeline first ... as long as they have the CRM", then "we need them to set the default of
+// what they want the default to be". So the person's own pick from My Profile (contactsView, or the
+// old Pipeline tab's choice) when they made one, else the first pipeline with the CRM, else the
+// Design list (C14: "we need to keep the list view for those not using the CRM"). A view the
+// person cannot open is never shown: a Crew Leader holding designs:view and no contacts gets the
+// Design list and nothing else. Every view has its own address (/portal/contacts/<sub>, see
+// SS_HUB_* in 01-core), and the hub keeps the address on the view it shows.
+const SS_HUB_MAX_PIPES = 5;
+
+// The account's pipelines as the tab row needs them, in the order crm_pipelines_list sends them
+// (crm_pipelines.position).
+const ssHubPipes = (ps) => (Array.isArray(ps) ? ps : [])
+  .filter((p) => p && p.id)
+  .map((p) => ({ id: String(p.id).toLowerCase(), name: String(p.name || "Pipeline") }));
+
+// Which view the hub shows. Pure, so it is tested without a browser (contactsHub_test.ts).
+//   sub        the address's sub under /portal/contacts (null, a SS_HUB_* value, "p-<uuid>", junk)
+//   saved      ssSavedHubView: the person's own pick, or null
+//   reach      { people, designs }: ssHubCan's answers for this person
+//   crm        the built-in CRM is on; crmKnown: the answer has landed (own portal), so "off" is real
+//   pipelines  ssHubPipes(...), or null while they load (or when they are not asked for)
+//   remembered the pipeline picked last on this browser, for "the board" (SS_HUB_PIPELINE)
+// Returns { view, pipeId?, canon }. view: "people" | "designs" | "pipe" | "locked" | "loading" |
+// "none". canon is the sub the address should carry for it (null: leave the address alone).
+function ssHubResolve({ sub = null, saved = null, reach, crm, crmKnown, pipelines, remembered = null }) {
+  const has = (id) => !!pipelines && pipelines.some((p) => p.id === id);
+  // One candidate: the address (explicit) or the saved pick. Null = this one can't be shown here.
+  const take = (want, explicit) => {
+    if (!want) return null;
+    if (want === SS_HUB_DESIGNS) return reach.designs ? { view: "designs", canon: want } : null;
+    const pid = ssHubPipeId(want);
+    if (want !== SS_HUB_PEOPLE && want !== SS_HUB_PIPELINE && !pid) return null;   // not a hub view
+    if (!reach.people) return null;
+    // Contacts and the boards are the CRM's. Until the answer is in, wait rather than paint the
+    // Design list and snap away from it; once it is in and says no, an address that asked for one
+    // gets the card that sells it, and a saved pick quietly falls back to the default.
+    if (!crmKnown) return { view: "loading", canon: explicit ? want : null };
+    if (!crm) return explicit ? { view: "locked", canon: pid ? SS_HUB_PIPELINE : want } : null;
+    if (want === SS_HUB_PEOPLE) return { view: "people", canon: want };
+    // A named pipeline opens at once, before the list has said it exists; a pipeline that turns out
+    // to be gone (removed, or another account's) falls through to the default.
+    if (pid) return (!pipelines || has(pid)) ? { view: "pipe", pipeId: pid, canon: want } : null;
+    if (!pipelines) return { view: "loading", canon: null };
+    const id = remembered && has(remembered) ? remembered : (pipelines[0] ? pipelines[0].id : null);
+    return id ? { view: "pipe", pipeId: id, canon: "p-" + id } : null;
+  };
+  const picked = take(sub, true) || take(saved, false);
+  if (picked) return picked;
+  // THE DEFAULT: the first pipeline with the CRM, else the Design list, else the contact list.
+  if (reach.people && !crmKnown) return { view: "loading", canon: null };
+  if (reach.people && crm) {
+    if (!pipelines) return { view: "loading", canon: null };
+    if (pipelines.length) return { view: "pipe", pipeId: pipelines[0].id, canon: "p-" + pipelines[0].id };
+  }
+  if (reach.designs) return { view: "designs", canon: SS_HUB_DESIGNS };
+  if (reach.people) return crm ? { view: "people", canon: SS_HUB_PEOPLE } : { view: "locked", canon: SS_HUB_PEOPLE };
+  return { view: "none", canon: null };
+}
+
+// How many pipeline tabs fit in the row inline. Pure, tested with contactsHub_test.ts.
+//   avail    the row's width; fixedW: the Contacts and Design list tabs together
+//   pipeW    each pipeline tab's width, in order; caretW: the drop-down's ▾
+//   activeIdx  the open pipeline's index, or -1: the drop-down wears its name when it holds it
+// Returns k: pipelines [0, k) are tabs, and when k < pipeW.length the rest sit in the drop-down,
+// whose own tab is the (k+1)th position. At most SS_HUB_MAX_PIPES positions in all.
+function ssHubFit({ avail, fixedW, pipeW, caretW, activeIdx = -1, max = SS_HUB_MAX_PIPES, gap = 2 }) {
+  const n = pipeW.length;
+  const run = (k) => pipeW.slice(0, k).reduce((a, w) => a + w + gap, 0);
+  if (n <= max && fixedW + run(n) <= avail) return n;
+  for (let k = Math.min(n - 1, max - 1); k > 0; k--) {
+    const shown = activeIdx >= k ? activeIdx : k;
+    if (fixedW + run(k) + pipeW[shown] + caretW + gap <= avail) return k;
+  }
+  return 0;
+}
+
+// The account's pipelines, for the tab row and for My Profile's picker. Cached like a tab
+// (ssTabCache), so coming back to Contacts paints the row at once and refreshes behind it.
+// `replace` takes a fresh list from the board itself (SalesPipelines' onPipelines), so a pipeline
+// added or removed there reaches the row without a second read. Not asked for at all when `enabled`
+// is false: crm_pipelines_list is the CRM's, and the contacts area's.
+function useSsPipelineList(clientId, enabled) {
+  const [list, setList] = useState(null);   // null = not loaded (or not asked)
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!enabled) { setList(null); setErr(null); return undefined; }
+    const hit = ssCacheGet("portal-settings", "crm_pipelines_list", clientId);
+    if (hit) setList(hit);
+    let off = false;
+    ssPipeCall("crm_pipelines_list").then((r) => {
+      if (off) return;
+      const ps = ssHubPipes(r.pipelines);
+      ssCachePut("portal-settings", "crm_pipelines_list", clientId, ps);
+      setList(ps); setErr(null);
+    }, (e) => { if (!off) { setErr(e.message || String(e)); setList((cur) => cur || []); } });
+    return () => { off = true; };
+  }, [clientId, enabled]);
+  const replace = useCallback((raw) => {
+    const ps = ssHubPipes(raw);
+    ssCachePut("portal-settings", "crm_pipelines_list", clientId, ps);
+    setList(ps); setErr(null);
+  }, [clientId]);
+  return { pipelines: enabled ? list : null, error: enabled ? err : null, replace };
+}
+
+// One tab's look. The underline strip Settings' hubs use (SubTabs, 08-integrations), so the two
+// kinds of sub-navigation read alike; the active tab carries the accent underline.
+const ssHubTabStyle = (on, locked) => ({
+  display: "inline-flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer",
+  fontFamily: "inherit", padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+  whiteSpace: "nowrap", textDecoration: "none", boxSizing: "border-box",
+  color: on ? ACCENT : (locked ? "#94A3B8" : "#64748B"),
+  borderBottom: on ? `2px solid ${ACCENT}` : "2px solid transparent", marginBottom: -2,
+});
+// A pipeline's name is capped, so one long name cannot take the row from the others.
+const SS_HUB_NAME = { display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "bottom" };
+const SS_HUB_CRM_TITLE = "Part of the built-in CRM";
+
+// The row. Real links (Carolyn 2026-09-11: every nav button opens in a new tab on a right or
+// middle click), one click per tab. `fixed` and `pipes` are [{ id, label, locked? }]; `active` is
+// the open tab's id.
+function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
+  const boxRef = useRef(null);
+  const measRef = useRef(null);
+  const ddRef = useRef(null);
+  const menuRef = useRef(null);
+  const [avail, setAvail] = useState(null);
+  const [widths, setWidths] = useState(null);   // { fixed, pipes: [], caret } in px, or null
+  const [menu, setMenu] = useState(null);       // { top, left } in viewport px, or null = shut
+  const labelKey = fixed.concat(pipes).map((t) => (t.locked ? "!" : "") + t.label).join("\u0001");
+  // Every label measured in an invisible copy of the row (same type, same padding), so the fit is
+  // decided before the first paint and never by trial and error on screen. Again once the page's
+  // font has loaded, since a label is wider in it than in the fallback.
+  React.useLayoutEffect(() => {
+    let off = false;
+    const measure = () => {
+      const m = measRef.current;
+      if (off || !m) return;
+      const w = Array.from(m.children).map((x) => Math.ceil(x.getBoundingClientRect().width));
+      setWidths({ fixed: w.slice(0, fixed.length).reduce((a, x) => a + x + 2, 0), pipes: w.slice(fixed.length, fixed.length + pipes.length), caret: w[w.length - 1] || 24 });
+    };
+    measure();
+    try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure, () => {}); } catch (_e) { /* no font API */ }
+    return () => { off = true; };
+  }, [labelKey]);
+  React.useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const read = () => setAvail(el.clientWidth);
+    read();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", read);
+      return () => window.removeEventListener("resize", read);
+    }
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // The drop-down's list: painted in viewport coordinates (RowMenu's reason: nothing it sits in
+  // may clip it or grow a scroll bar for it), and shut by a click away, Escape, a scroll or a resize.
+  useEffect(() => {
+    if (!menu) return undefined;
+    const away = (e) => {
+      if (ddRef.current && ddRef.current.contains(e.target)) return;
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setMenu(null);
+    };
+    const key = (e) => { if (e.key === "Escape") setMenu(null); };
+    const shut = () => setMenu(null);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", shut, true);
+    window.addEventListener("resize", shut);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", shut, true);
+      window.removeEventListener("resize", shut);
+    };
+  }, [menu]);
+
+  const n = pipes.length;
+  const activeIdx = pipes.findIndex((t) => t.id === active);
+  const k = (widths && avail)
+    ? ssHubFit({ avail, fixedW: widths.fixed, pipeW: widths.pipes, caretW: widths.caret, activeIdx })
+    : (n <= SS_HUB_MAX_PIPES ? n : SS_HUB_MAX_PIPES - 1);
+  const inline = pipes.slice(0, k);
+  const rest = pipes.slice(k);
+  const shownRest = rest.length ? (activeIdx >= k ? pipes[activeIdx] : rest[0]) : null;
+
+  const tab = (t, extra = null) => {
+    const on = t.id === active;
+    return (
+      <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={on ? "true" : "false"} data-ss-hub-tab={t.id}
+        title={t.locked ? SS_HUB_CRM_TITLE : t.label}
+        onClick={ssNavClick(() => { setMenu(null); onPick(t.id); })}
+        style={{ ...ssHubTabStyle(on, t.locked), ...(extra || {}) }}>
+        {t.locked && <span aria-hidden="true">🔒</span>}
+        <span style={SS_HUB_NAME}>{t.label}</span>
+      </a>
+    );
+  };
+  const openMenu = () => {
+    const r = ddRef.current.getBoundingClientRect();
+    const W = 240;
+    setMenu({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - W - 8)), width: W });
+  };
+  return (
+    <div ref={boxRef} role="tablist" aria-label="Contacts views" data-ss-hub-tabs=""
+      style={{ position: "relative", display: "flex", gap: 2, alignItems: "flex-end", flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14, minWidth: 0 }}>
+      {/* The measuring copy: no size of its own and clipped, so it can never widen the page. */}
+      <div aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden", pointerEvents: "none" }}>
+        <div ref={measRef} style={{ display: "flex", width: "max-content" }}>
+          {fixed.concat(pipes).map((t) => (
+            <span key={t.id} style={ssHubTabStyle(false, t.locked)}>
+              {t.locked && <span>🔒</span>}
+              <span style={SS_HUB_NAME}>{t.label}</span>
+            </span>
+          ))}
+          <span style={{ ...ssHubTabStyle(false, false), padding: "12px 8px 10px" }}>▾</span>
+        </div>
+      </div>
+      {fixed.map((t) => tab(t))}
+      {inline.map((t) => tab(t))}
+      {shownRest && (
+        <span ref={ddRef} data-ss-hub-more="" style={{ display: "inline-flex", alignItems: "flex-end" }}>
+          {tab(shownRest, { paddingRight: 4 })}
+          <button type="button" aria-haspopup="menu" aria-expanded={menu ? "true" : "false"}
+            aria-label={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`} title={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`}
+            onClick={() => (menu ? setMenu(null) : openMenu())}
+            style={{ ...ssHubTabStyle(shownRest.id === active, false), padding: "12px 8px 10px", fontSize: 12 }}>▾</button>
+        </span>
+      )}
+      {menu && (
+        <div ref={menuRef} role="menu" data-ss-hub-menu=""
+          style={{ position: "fixed", top: menu.top, left: menu.left, width: menu.width, zIndex: 60, background: "#FFF",
+            border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, boxShadow: "0 10px 26px rgba(15,23,42,0.16)", maxHeight: "60vh", overflowY: "auto" }}>
+          {rest.map((t) => {
+            const on = t.id === active;
+            return (
+              <a key={t.id} href={hrefFor(t.id)} role="menuitem" aria-current={on ? "page" : undefined}
+                onClick={ssNavClick(() => { setMenu(null); onPick(t.id); })}
+                style={{ display: "block", padding: "7px 9px", borderRadius: 6, fontSize: 13, fontWeight: on ? 800 : 700, textDecoration: "none",
+                  color: on ? ACCENT : "#334155", background: on ? "#EEF2FF" : "transparent", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.label}
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The hub. The shell builds the three views it cannot (they need its routing, phone and access
+// wiring) and hands them in as elements; the boards are built here.
+//   sub          the address's sub under /portal/contacts (records never reach here)
+//   onRoute(sub, replace)              moves the address (navigate("contacts", sub, replace))
+//   onOpenRecord(code, contactId, fromSub)  opens a card's customer or design, Back to `fromSub`
+function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
+  onRoute, onOpenRecord, people = null, designs = null, locked = null }) {
+  const canPipes = !!crmUnlocked && !!reach.people;
+  const { pipelines, error, replace } = useSsPipelineList(clientId, canPipes);
+  let remembered = null;
+  try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
+  const r = ssHubResolve({ sub, saved, reach, crm: !!crmUnlocked, crmKnown, pipelines, remembered });
+  // Keep the address on the view that shows (a bare /portal/contacts, "the board", or a view this
+  // person cannot open), without a history entry, so a refresh or a copied link lands right back.
+  useEffect(() => {
+    if (r.canon && r.canon !== (sub || null)) onRoute(r.canon, true);
+  }, [r.canon, sub]);
+  // The board last looked at, for "the board" (/portal/contacts/pipeline and every old Pipeline
+  // address).
+  useEffect(() => {
+    if (r.view !== "pipe" || !r.pipeId) return;
+    try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, r.pipeId); } catch (_e) { /* private mode */ }
+  }, [r.view, r.pipeId, clientId]);
+
+  const crmOff = crmKnown && !crmUnlocked;
+  const fixed = [];
+  if (reach.people) fixed.push({ id: SS_HUB_PEOPLE, label: "Contacts", locked: crmOff });
+  if (reach.designs) fixed.push({ id: SS_HUB_DESIGNS, label: "Design list" });
+  // Without the CRM there are no boards to list, and one padlocked "Pipeline" tab stays to say
+  // they exist, where the padlocked Pipeline button used to.
+  const pipes = canPipes ? (pipelines || []).map((p) => ({ id: "p-" + p.id, label: p.name }))
+    : (reach.people && crmOff ? [{ id: SS_HUB_PIPELINE, label: "Pipeline", locked: true }] : []);
+  const active = r.view === "people" ? SS_HUB_PEOPLE
+    : r.view === "designs" ? SS_HUB_DESIGNS
+    : r.view === "pipe" ? "p-" + r.pipeId
+    : r.canon;
+  const fromPipe = r.view === "pipe" ? "p-" + r.pipeId : null;
+
+  return (
+    <div data-ss-contacts-hub="">
+      <SsHubTabs fixed={fixed} pipes={pipes} active={active}
+        hrefFor={(id) => ssPagePath("contacts", id)}
+        onPick={(id) => onRoute(id, false)} />
+      {error && canPipes && (pipelines || []).length === 0 && <div style={S.err}>{error}</div>}
+      {r.view === "loading" && (
+        <div style={S.card} data-ss-hub-view="loading" aria-busy="true">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody><SkelRows cols={5} rows={6} /></tbody></table>
+        </div>
+      )}
+      {r.view === "people" && <div data-ss-hub-view="people">{people}</div>}
+      {r.view === "designs" && <div data-ss-hub-view="designs">{designs}</div>}
+      {r.view === "locked" && <div data-ss-hub-view="locked">{locked}</div>}
+      {r.view === "pipe" && (
+        <div style={S.card} data-ss-hub-view="pipe">
+          <SalesPipelines embedded hosted clientId={clientId} viewing={viewing} refreshKey={refreshKey}
+            urlPipelineId={r.pipeId}
+            onPickPipeline={(id) => onRoute("p-" + String(id).toLowerCase(), false)}
+            onPipelines={replace}
+            onOpenRecord={(code, contactId) => onOpenRecord(code, contactId, fromPipe)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── "⋯" — THE ROW ACTIONS THAT DON'T FIT ────────────────────────────────────────────────
 // Ahsan, 2026-08-28: "the pipeline view is floating off the screen from the right side. So
 // under actions just add two options, Open and PDF … I'll add three dot options, so when I
@@ -145,52 +487,14 @@ async function ssReadAllRows(page, keyOf) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, viewPending = false, onViewChange = null }) {
-  // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
-  // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
-  // pipelines ... this may become the pipeline view."
-  //
-  // It is a VIEW over rows this table already loads, not a second data path — which is
-  // exactly why it is cheap and why it lives here rather than in its own tab. The same
-  // search, the same facets and the same status chips narrow both renderings, so a filter a
-  // builder sets in the list is still set when they flip to the board.
-  // The BOARD is part of the built-in CRM ($400/mo, migration 160); the LIST is not, and
-  // never becomes so — Carolyn 2026-08-29: "they only get the list view". crmUnlocked
-  // defaults TRUE so that any caller that has not been taught about the prop (or an operator
-  // path) behaves exactly as before rather than silently locking a tab.
-  // ── WHICH VIEW, AND WHO DECIDES ───────────────────────────────────────────────────
-  // Two separate asks, and they compose. Carolyn, 2026-08-28 @42:00: "I'm trying to think
-  // which I want to have the default. I want them to be able to decide if they want the
-  // default. I don't want it to always be list. They can decide to set their default to be
-  // pipeline or list, whichever one that they want." And @41:03, on the back button: "if
-  // you hit the back button, you lost everything on that screen ... I just don't want it to
-  // be like, oh no, you can't click that back button."
-  //
-  // So: the URL wins when it names a view, the SAVED PREFERENCE fills a bare URL, and list
-  // is the fallback for someone who has never set one. Flipping the toggle navigates, which
-  // is what makes Back walk between the two instead of leaving the tab.
-  //
-  // Local state stays as the fallback for any host that does not supply a router, so this
-  // component still works mounted anywhere -- the same shape OrdersView uses for openId.
-  const [viewLocal, setViewLocal] = useState(null);
-  const routed = !!onViewChange;
-  const view = routed
-    ? (urlView === "pipeline" || urlView === "list" ? urlView : (defaultView === "pipeline" ? "pipeline" : "list"))
-    : (viewLocal || (defaultView === "pipeline" ? "pipeline" : "list"));
-  const setView = (v) => { if (routed) onViewChange(v); else setViewLocal(v); };
-  // A locked tenant can hold no view but "list". Enforced here rather than only at the
-  // toggle: `view` also survives in this component across a refresh of the entitlement, and
-  // a builder who was mid-board when their subscription lapsed must not keep the board.
-  //
-  // THE DEFAULT FOLLOWS THE CRM (Carolyn Q12, 2026-10-06): someone who never picked a view
-  // opens on the board when the business has the built-in CRM, and on the list when it does
-  // not. The shell works that default out and passes it as defaultView, so a saved choice
-  // still wins. On your own portal the CRM answer arrives a moment after the rows can, so the
-  // shell passes viewPending until it does: the body stays on its loading blocks with neither
-  // toggle lit, rather than painting the list and snapping to the board under the cursor.
-  // It clears when the entitlement call FAILS too (the shell's entitlementSettled), so the
-  // table can never hang here.
-  const shownView = viewPending ? null : (crmUnlocked ? view : "list");
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+  // THE DESIGN LIST (Carolyn 2026-10-12): "instead of list is designs". This was the Pipeline
+  // page's List view, with a List | Pipeline toggle beside it that flipped the same card to the
+  // board. The page is now one tab of the Contacts hub (ContactsHub, top of this file), and the
+  // boards are tabs of their own beside it, one per pipeline, so the toggle and the board it drew
+  // are gone from here and this is the list only. It never needs the CRM — Carolyn 2026-08-29:
+  // "they only get the list view" — which is why it is the tab an account without the CRM opens
+  // on (C14). Which tab opens, and the person's own choice of it, is the hub's business now.
   // Cache-seeded so returning to Designs paints at once and refreshes behind it (see
   // ssTabCache in 01-core, and LeadsTable/Orders which already do this). Operator view-as
   // reads through a service-role path and is left uncached, same rule as Contacts.
@@ -473,50 +777,25 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
-  // Paging applies to the LIST only. A board showing "30 of 400" cards is not a pipeline —
-  // the whole point of the board is seeing where everything sits at once, and a column that
-  // silently holds back its tail would be read as an empty stage.
+  // Paged. (The board this list used to flip to never was: a board showing "30 of 400" cards is
+  // not a pipeline. The boards are the hub's pipeline tabs now.)
   const [pageSize, setPageSize] = usePageSize("designs");
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, shownView]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   return (
     <div style={S.card}>
+      {/* The hub's tab row names this view "Design list"; the card keeps the count it always
+          had. The List | Pipeline toggle that sat on the right is the hub's tab row now. */}
       <CardHead
-        title={shownView === "pipeline" ? "Pipeline" : "Designs"}
-        count={shownView === "pipeline" ? null : (rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null)}
-        right={(
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
-              {/* The Pipeline button stays VISIBLE when locked, with a padlock, and routes to
-                  Billing instead of switching view. Hiding it would make the thing being sold
-                  invisible to the only people who might buy it. */}
-              {/* While viewPending the CRM answer is not in yet, so crmUnlocked's false means
-                  "not known": no padlock, and a press switches view like any other (the view it
-                  names goes into the URL and wins) instead of sending a CRM builder to Billing. */}
-              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => {
-                const locked = k === "pipeline" && !crmUnlocked && !viewPending;
-                return (
-                  <button key={k} aria-pressed={shownView === k}
-                    title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
-                    onClick={() => { if (!locked) { setView(k); } else if (onSeeBilling) { onSeeBilling(); } }}
-                    style={{
-                      background: shownView === k ? ACCENT : "#FFF",
-                      color: shownView === k ? "#FFF" : (locked ? "#94A3B8" : "#334155"),
-                      border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700,
-                      cursor: locked && !onSeeBilling ? "default" : "pointer", fontFamily: "inherit",
-                    }}>{locked ? `🔒 ${label}` : label}</button>
-                );
-              })}
-            </div>
-            <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
-          </div>
-        )}
+        title="Designs"
+        count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
+        right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       />
-      {rows && rows.length > 0 && shownView !== "pipeline" && (
+      {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
           {/* Filters LEFT, search RIGHT (Carolyn, 2026-09-07). The search box used to lead and
               sat 20px above the facet controls, because those carry a heading and it does not —
@@ -535,14 +814,14 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </div>
         </div>
       )}
-      {rows && rows.length > 0 && shownView !== "pipeline" && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
+      {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
       {invMsg && (invMsg.err || invMsg.ok) && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
       {invMsg && invMsg.note && <div style={SS_TAX_NOTE_STYLE}>{invMsg.note}</div>}
       {error && <div style={S.err}>{error}</div>}
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
-      {(!shownView || (rows === null && shownView === "list")) && !error && (
+      {rows === null && !error && (
         <div style={{ overflowX: "auto" }} data-ss-designs-view="loading">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -552,10 +831,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </table>
         </div>
       )}
-      {rows && shownView === "list" && rows.length === 0 && !error && (
+      {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No designs yet. Share your customer link above — submitted designs show up here.</p>
       )}
-      {rows && shownView === "list" && rows.length > 0 && filtered.length === 0 && (
+      {rows && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
           {query
             ? <>No designs match “{query}”{statusFilter !== "all" ? <> in <strong>{STATUS_LABELS[statusFilter]}</strong></> : null}{hasFacets ? " with the current filters" : ""}.</>
@@ -564,23 +843,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
-      {/* ── PIPELINE BOARD (migration 302, Carolyn 2026-10-09) ────────────────────────
-          The draggable board from the Leads tab, now the Pipeline page's only board: "I like the
-          way this pipeline view looks and works better than the Pipeline one ... move the Leads
-          pipeline into the pipeline page and we have the ability to have multiple pipelines."
-          Every design is a card on the builder's design-fed pipeline (the designs_pipeline_sync
-          trigger), cards can be dragged anywhere, and an estimate's status change moves its card
-          to the stage tied to that status. The six fixed CRM_STAGES columns derived in the
-          browser are gone from here (the record's stage rail still uses them).
-          The list's search, facets and status chips are the LIST's; the board has its own
-          search, owner filter and pipeline picker, so they are hidden while it shows. */}
-      {shownView === "pipeline" && (
-        <div data-ss-designs-view="pipeline">
-          <SalesPipelines embedded clientId={clientId} viewing={!!viewingLabel || !!fetchDesigns} refreshKey={refreshKey}
-            onOpenRecord={(code, contactId) => (onOpenRecord ? onOpenRecord(code, contactId) : (code && onOpenDesign && onOpenDesign(code)))} />
-        </div>
-      )}
-      {rows && filtered.length > 0 && shownView === "list" && (
+      {rows && filtered.length > 0 && (
         <div style={{ overflowX: "auto" }} data-ss-designs-view="list">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -5769,10 +6032,15 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   );
 }
 
-// `embedded`: drawn inside the Pipeline page's own card (DesignsTable), so no card or title of
-// its own. onOpenRecord(shortCode, contactId) is DesignsTable's signature: a design card opens its
-// customer with that deal picked, a lead card (no design) opens its contact.
-function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onOpenRecord = null }) {
+// `embedded`: drawn inside a card its host owns, so no card or title of its own. onOpenRecord
+// (shortCode, contactId): a design card opens its customer with that deal picked, a lead card (no
+// design) opens its contact.
+// HOSTED BY THE CONTACTS HUB (2026-10-12): `hosted` hides the pipeline picker, because the hub's tab
+// row IS the picker now (one tab per pipeline, Carolyn: "every pipeline that they create will be
+// next, next, next"), and urlPipelineId names the tab's pipeline. `onPipelines` hands the hub every
+// fresh list this board loads, so a pipeline added, renamed or removed from "+ Pipeline" or "Edit
+// stages" shows in the tab row at once.
+function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onPipelines = null, onOpenRecord = null }) {
   const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
   const [deals, setDeals] = useState(null);    // null = loading
   const [err, setErr] = useState(null);
@@ -5801,7 +6069,11 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
   const [closeEdit, setCloseEdit] = useState(null);  // deal id whose close-date input is open
 
   const loadMeta = useCallback(async () => {
-    try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
+    try {
+      const m = await ssPipeCall("crm_pipelines_list");
+      setMeta(m); setErr(null);
+      if (onPipelines) onPipelines(m.pipelines || []);
+    }
     catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], team: [] }); }
   }, [clientId]);
   useEffect(() => { loadMeta(); }, [loadMeta]);
@@ -5892,7 +6164,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
 
   const toolbar = (
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-            {pipelines.length > 0 && (
+            {pipelines.length > 0 && !hosted && (
               <select aria-label="Pipeline" value={pipeId || ""} onChange={(e) => pick(e.target.value)}
                 style={{ ...S.input, width: "auto", padding: "6px 10px", fontWeight: 700 }}>
                 {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}

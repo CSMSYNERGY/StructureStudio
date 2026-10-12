@@ -363,7 +363,7 @@ try {
     await page.screenshot({ path: join(SHOTS, "advpage-page-leanto.png"), fullPage: true });
 
     // Kept mounted: another page and back keeps the building.
-    await page.locator('.ss-nav a[href^="/portal/designs"]').click();
+    await page.locator('.ss-nav a[href^="/portal/contacts"]').click();
     await settle(page, 800);
     ok("A: another page hides it", !(await page.getByText("Every shape control on one building").first().isVisible()));
     await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
@@ -594,7 +594,7 @@ try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await settle(page, 1000);
     // History: another builder's Pipeline, then this page again — so Back lands in that builder.
-    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/designs?view=" + o); history.pushState({}, "", "/portal/advanced?view=" + u); }, [OTHER, OURS]);
+    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/contacts?view=" + o); history.pushState({}, "", "/portal/advanced?view=" + u); }, [OTHER, OURS]);
     const from = calls.length;
     const eAsked = [];
     page.on("dialog", (d) => { eAsked.push(d.message()); d.accept(); });
@@ -608,7 +608,7 @@ try {
     const landed = await page.evaluate(() => location.pathname + location.search);
     ok("E: Back into another builder mid-save asks first — a save still going is unsaved work (review ADV-3)",
       eAsked.length === 1 && eAsked[0] === "Opening another account will discard the building you haven't saved on the Advanced page. Continue?", JSON.stringify(eAsked));
-    ok("E: …and on Yes, Back really did land in the other builder mid-save", landed === `/portal/designs?view=${OTHER}`, landed);
+    ok("E: …and on Yes, Back really did land in the other builder mid-save", /^\/portal\/contacts(\/[^?]*)?\?view=/.test(landed) && landed.endsWith(`?view=${OTHER}`), landed);
     ok("E: create, hide and shape ALL went to our account — none to the builder on screen",
       W.length === 3 && W.every((c) => c.body.targetClientId === OURS), W.map((c) => `${c.action}:${c.body.targetClientId}`).join(" "));
     ok("E: …in the order create → hide → shape, on the style that was made",
@@ -629,9 +629,9 @@ try {
     await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 });
     await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
-    await page.locator('.ss-nav a[href^="/portal/designs"]').click();
+    await page.locator('.ss-nav a[href^="/portal/contacts"]').click();
     await settle(page, 500);
-    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/designs?view=" + o); history.pushState({}, "", "/portal/designs?view=" + u); }, [OTHER, OURS]);
+    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/contacts?view=" + o); history.pushState({}, "", "/portal/contacts?view=" + u); }, [OTHER, OURS]);
     await page.evaluate(() => history.back());
     const samples = [];
     for (let k = 0; k < 14; k++) {
@@ -761,8 +761,10 @@ try {
     let answer = true;
     page.on("dialog", (d) => { dialogs.push(d.message()); if (answer) d.accept(); else d.dismiss(); });
     const where = () => page.evaluate(() => location.pathname + location.search);
+    // Somewhere in the Contacts hub, on this builder (the hub puts the address on the view it shows).
+    const inHub = (url, tenant) => /^\/portal\/contacts(\/[^?]*)?\?view=/.test(url) && url.endsWith(`?view=${tenant}`);
     await settle(page, 1500);
-    await page.locator('.ss-nav a[href^="/portal/designs"]').first().click();
+    await page.locator('.ss-nav a[href^="/portal/contacts"]').first().click();
     await settle(page, 800);
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Internal" }).click();
@@ -774,13 +776,13 @@ try {
     const n0 = dialogs.length;
     await page.goBack();
     await settle(page, 800);
-    ok("K: Back inside the viewed account (Advanced → Designs) does not ask", dialogs.length === n0 && (await where()) === `/portal/designs?view=${OURS}`, `${await where()}; ${dialogs.length - n0} dialogs`);
+    ok("K: Back inside the viewed account (Advanced → Contacts) does not ask", dialogs.length === n0 && inHub(await where(), OURS), `${await where()}; ${dialogs.length - n0} dialogs`);
     answer = false;
     await page.goBack();
     await settle(page, 1200);
     ok("K: Back out of the viewed account with a changed building asks first, in Exit's words",
       dialogs.length === n0 + 1 && dialogs[n0] === "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?", JSON.stringify(dialogs.slice(n0)));
-    ok("K: …and No keeps the account and puts the address back", (await where()) === `/portal/designs?view=${OURS}`, await where());
+    ok("K: …and No keeps the account and puts the address back", inHub(await where(), OURS), await where());
     await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 20000 });
     ok("K: …with the building still there (lean-to 6)", (await leanBox(page).inputValue()) === "6", await leanBox(page).inputValue());

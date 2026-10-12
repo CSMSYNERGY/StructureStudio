@@ -159,7 +159,7 @@ async function open(label, S, path) {
 
 // ── R/E: a rep's Contacts list and a customer's record ─────────────────────────────────────
 async function repView(label, accessMap, artifact = null, role = "user") {
-  const r = await open(label, { role, access: accessMap, artifact }, "/portal/contacts");
+  const r = await open(label, { role, access: accessMap, artifact }, "/portal/contacts/people");
   const out = { label, booted: r.booted };
   out.navContacts = await r.page.locator('a[href="/portal/contacts"]').count() > 0;
   out.path = await r.page.evaluate(() => location.pathname);

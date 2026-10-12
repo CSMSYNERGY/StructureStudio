@@ -6,7 +6,16 @@ import { expect } from "@playwright/test";
 import { test, guardLogError, loginWithMagicToken, watchConsole } from "./helpers.mjs";
 
 const ROUTES = [
-  "/portal/designer", "/portal/contacts", "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline",
+  "/portal/designer",
+  // The Contacts hub (2026-10-12): the tab, and each of its views by address. Without the CRM the
+  // contact list and the board are the CRM card, which is a render.
+  "/portal/contacts", "/portal/contacts/people", "/portal/contacts/designs", "/portal/contacts/pipeline",
+  // LEGACY, every one of them: the separate Pipeline page (/portal/designs, its /list and /pipeline
+  // views and the merged era's /people and /deals), the Leads tab's board (/portal/pipelines) and
+  // the pre-09-02 Contacts address (/portal/leads). ssCanonRoute lands each in the hub; delete it
+  // and these turn red instead of a builder's bookmark landing nowhere.
+  "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline", "/portal/designs/people", "/portal/designs/deals",
+  "/portal/pipelines", "/portal/leads",
   "/portal/inventory", "/portal/orders", "/portal/build-schedule", "/portal/delivery-schedule", "/portal/repairs",
   "/portal/commissions", "/portal/quickbooks", "/portal/view-3d",
   // My Synergy Phone's Calls report. It resolves for anyone with phone access (owners always).
@@ -87,6 +96,23 @@ test.describe("portal routes", () => {
       expect(errors, "console errors").toEqual([]);
     });
   }
+
+  // The address bar follows: an old Pipeline or Leads address is rewritten into the hub, the Design
+  // list's own address included, so a refresh or a copied link stays where the reader is.
+  test("old Pipeline and Leads addresses land in the Contacts hub", async () => {
+    for (const [route, want] of [
+      ["/portal/designs/list", /^\/portal\/contacts\/designs$/],
+      ["/portal/designs", /^\/portal\/contacts\/(designs|people|pipeline|p-[0-9a-f-]{36})$/],
+      ["/portal/designs/pipeline", /^\/portal\/contacts\/(designs|people|pipeline|p-[0-9a-f-]{36})$/],
+      ["/portal/pipelines", /^\/portal\/contacts\/(designs|people|pipeline|p-[0-9a-f-]{36})$/],
+      ["/portal/leads", /^\/portal\/contacts\//],
+    ]) {
+      await page.goto(route);
+      await page.waitForFunction(() => window.__ssAppBooted === true);
+      await expect.poll(() => page.evaluate(() => location.pathname), { timeout: 20_000 }).toMatch(want);
+      await expect(page.locator("[data-ss-hub-tabs]")).toBeVisible({ timeout: 20_000 });
+    }
+  });
 
   test("operator-only routes are clamped for a tenant owner", async () => {
     for (const route of ["/portal/accounts", "/portal/admin", "/portal/projects"]) {

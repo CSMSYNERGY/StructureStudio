@@ -524,36 +524,24 @@ const TAB_META = {
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
   projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
-  // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
+  // ONE SECTION AGAIN: THE CONTACTS HUB (Carolyn 2026-10-12). Contacts and Pipeline were two
+  // sidebar items from 08-26 to 10-12, and on the 10-12 call she asked for one: "Let's have one
+  // tab and we can have contacts, and we can have this instead of list is designs, and then we
+  // have pipelines." The tab keeps the name Contacts. Inside it a tab row: Contacts (the contact
+  // list), Design list (the old Pipeline page's List view), then one tab per pipeline in the
+  // account's own order (ContactsHub, 02-sales.jsx).
   //
-  // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
-  // consolidated" — and then, on 08-26 at 12:15, having used it: "I was envisioning it that
-  // we have contacts as one, and then we have another one that says pipeline. I would call
-  // it a pipeline, not opportunities ... I would rather have MORE TABS and one specific
-  // name on it." Ahsan confirmed on the call that they do not need to be one tab.
+  // What she disliked, said on the same call: a card click "goes back to the contact and then
+  // I'm like wait where what was I". A record opened from any of those tabs now opens INSIDE
+  // this one, so the sidebar never moves, and Back returns to the tab it came from.
   //
-  // What she actually disliked on 08-24 turned out to be the two lists looking alike, not
-  // their being separate — she could not find the pipeline board at all until Ahsan pointed
-  // at it ("I didn't see that you had the pipeline thing"). The board is what makes this
-  // section different from a contact list, so the section is now NAMED after it.
-  //
-  // The ids stay `designs` and `leads` so deep links from BOTH eras keep working: these are
-  // native pages again, and the merged era's /portal/designs/people|deals normalise
-  // themselves in the shell. `leads` was already the pre-merge id for Contacts, so this is
-  // a genuine revert rather than a third naming scheme.
-  //
-  // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
-  // do more than one quote for one deal, so let's leave it on the deals side right now."
-  designs: ["Pipeline", "Customer designs and estimates — as a list or a pipeline board"],
-  contacts: ["Contacts", "Everyone who has enquired, and their activity"],
+  // `designs` and `pipelines` are no longer pages. Their old addresses (bookmarks, links already
+  // sent, browser history) all land here through ssCanonRoute below.
+  contacts: ["Contacts", "Everyone who has enquired, their designs, and your pipelines"],
   // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
-  // The Leads tab's address for one day on beta (migration 301). Since 302 its board is the
-  // Pipeline page's board, and this route only redirects there (12-shell PipelinesLegacyRedirect).
-  // Kept routable so a saved /portal/pipelines link still arrives.
-  pipelines: ["Pipeline", "Redirecting to the Pipeline board"],
   orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -600,6 +588,49 @@ const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // a renamed slug does not announce itself, it silently lands the reader on Structures, which
 // is the one failure mode nobody reports because it looks like they mis-clicked.
 const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
+
+// ── THE CONTACTS HUB'S ADDRESSES (Carolyn 2026-10-12) ───────────────────────────────────────
+// Every view in the hub has its own URL, so a refresh or the browser's Back lands where it says:
+//   /portal/contacts               the view this person opens on (My Profile, else the default)
+//   /portal/contacts/people        the contact list (the tab labelled "Contacts")
+//   /portal/contacts/designs       the Design list
+//   /portal/contacts/p-<uuid>      one pipeline's board
+//   /portal/contacts/pipeline      "the board": the pipeline picked last, else the first one
+//   /portal/contacts/c-… and d-…   a customer or a design record, opened inside the hub
+// The hub (02-sales.jsx) rewrites a bare, a "pipeline" or an unknown sub to the view it shows.
+const SS_HUB_PEOPLE = "people";
+const SS_HUB_DESIGNS = "designs";
+const SS_HUB_PIPELINE = "pipeline";
+const SS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The pipeline a hub sub names ("p-<uuid>"), or null.
+function ssHubPipeId(sub) {
+  const m = /^p-(.+)$/.exec(String(sub || ""));
+  return m && SS_UUID_RE.test(m[1]) ? m[1].toLowerCase() : null;
+}
+// THE OLD ADDRESSES, all of them, into the hub. One place, so the router, navigate() and the
+// popstate handler cannot disagree, and so the wave that drops /portal edits one function.
+//   /portal/designs                 → /portal/contacts (the person's own view)
+//   /portal/designs/list            → the Design list
+//   /portal/designs/pipeline        → the board
+//   /portal/designs/people|deals    → the contact list | the person's own view (the 08-24 era)
+//   /portal/designs/c-…|d-…         → the same record, inside the hub
+//   /portal/pipelines[/<uuid>]      → that pipeline, or the board (the Leads tab, migration 301)
+// /portal/leads[/c-…] reaches /portal/contacts through SS_TAB_ALIASES before this runs.
+function ssCanonRoute(page, sub) {
+  if (page === "designs") {
+    if (sub && /^[cd]-/.test(sub)) return { page: "contacts", sub };
+    switch (sub) {
+      case "list": return { page: "contacts", sub: SS_HUB_DESIGNS };
+      case "pipeline": return { page: "contacts", sub: SS_HUB_PIPELINE };
+      case "people": return { page: "contacts", sub: SS_HUB_PEOPLE };
+      default: return { page: "contacts", sub: null };
+    }
+  }
+  if (page === "pipelines") {
+    return { page: "contacts", sub: sub && SS_UUID_RE.test(sub) ? "p-" + sub.toLowerCase() : SS_HUB_PIPELINE };
+  }
+  return { page, sub };
+}
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
@@ -610,15 +641,16 @@ function ssParsePath() {
   // name: it carries the setup checklist and two-way submission threads, not just a changelog.
   // Its sub-paths ride the alias for free, which matters because /portal/releases/setup and
   // /portal/releases/mine are both linked from elsewhere in the product.
-  // Three live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid>
-  // (record deep links and browser history), and /portal/designs/people (the merged-era alias).
-  // Without it every caller does `TAB_META[p.page] ? p.page : "designs"`, so a stale link would
-  // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
-  // existing replaceState then rewrites the address bar to the new path, with no history entry.
+  // Live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid> (record
+  // deep links and browser history), and every /portal/designs and /portal/pipelines address
+  // (ssCanonRoute above). Without it every caller does `TAB_META[p.page] ? p.page : "contacts"`,
+  // so a stale link would land silently on the default view and a record link would lose its
+  // `sub` entirely. The shell's URL effect then rewrites the address bar to the new path, with
+  // no history entry.
   const page = parts[1] || null;
-  const resolved = (page && SS_TAB_ALIASES[page]) || page;
-  const sub = parts[2] || null;
-  return { page: resolved, sub: (resolved === "settings" && sub && SS_SETTINGS_SUB_ALIASES[sub]) || sub };
+  const aliased = (page && SS_TAB_ALIASES[page]) || page;
+  const r = ssCanonRoute(aliased, parts[2] || null);
+  return { page: r.page, sub: (r.page === "settings" && r.sub && SS_SETTINGS_SUB_ALIASES[r.sub]) || r.sub };
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -696,12 +728,12 @@ const SS_POPOUT = (() => {
 })();
 if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch (_e) {} }
 
-// Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
-// setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
-// data). Everything else is
+// Non-admins are confined to the Contacts hub (contacts, designs and pipelines), the Support tab
+// (product news, the setup checklist and their own submissions), and the coming-soon teaser tabs
+// (previews, no data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "pipelines", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -716,17 +748,15 @@ const TAB_AREA = {
   // The same area as the Designer: it IS the designer, one building at a time. Whether the page
   // exists at all for this tenant is ssAdvancedOn's question, asked by ssClampTab, not this map's.
   advanced: "designer",
-  // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
-  // the contacts list, and each gates on the area whose data it actually shows. The merged
-  // tab needed EITHER because it showed both; a rep granted only contacts must not get the
-  // customer-designs list back through a tab that no longer contains it.
-  designs: "designs",
-  contacts: "contacts",
+  // THE CONTACTS HUB (2026-10-12) holds the contact list and the pipelines (the contacts area)
+  // AND the Design list (the designs area), so EITHER area opens the tab. Inside it each view
+  // still asks for its own area (ssHubCan below): a Crew Leader holding designs:view and no
+  // contacts gets the hub with the Design list in it and nothing else, and a rep granted only
+  // contacts never gets the customer-designs list through it.
+  contacts: ["contacts", "designs"],
   // The same customers, seen by their latest message: whoever may open Contacts may open this,
   // and crm_inbox narrows contacts:'own' and the calls row by row on the server.
   conversations: "contacts",
-  // A deal has no owner of its own: it is seen by whoever sees its contact (migration 301).
-  pipelines: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",
@@ -1725,26 +1755,39 @@ function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
   if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
   const area = TAB_AREA[tab];
-  // An ARRAY means "any of these is enough". No entry uses one since the 08-26 split undid
-  // the merged Contacts & Designs tab, but the branch stays: it mirrors the server's
-  // `{ any: [...] }` gate shape, and the next page that needs it should not have to
-  // rediscover that the two must agree.
+  // An ARRAY means "any of these is enough". The Contacts hub uses it (2026-10-12): contacts OR
+  // designs opens it. It mirrors the server's `{ any: [...] }` gate shape (crm_record's), and the
+  // two must agree.
   if (Array.isArray(area)) return area.some((a) => ssCanRead(access, a));
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
+}
+
+// May this person open one VIEW of the Contacts hub? The tab itself is TAB_AREA.contacts (either
+// area); inside it each view needs its own: "people" (the contact list, and with the CRM every
+// pipeline board, since a deal is seen by whoever sees its contact) needs contacts, "designs" (the
+// Design list) needs designs. The same answer ssClampTab gave for the old Contacts and Pipeline
+// pages, which these views were, so nobody gains or loses a list by the merge: owners, admins and
+// operators always (canAdmin), and the pre-migration-100 shape (no map) saw both.
+const SS_HUB_VIEW_AREA = { people: "contacts", designs: "designs" };
+function ssHubCan(view, canAdmin, access) {
+  const area = SS_HUB_VIEW_AREA[view];
+  if (!area) return false;
+  return !!canAdmin || !access || ssCanRead(access, area);
 }
 
 // Where the clamp LANDS someone must itself pass ssCanSeeTab, or the fallback recreates
 // the exact leak the clamp exists to stop: a hardcoded "designs" put every migration-100
 // driver (designs absent from their map = none) on the full customer-designs list at each
-// bare /portal login — a page their own nav hides (audit 2026-08-20). Designs first, so
-// the pre-migration-100 shape lands exactly where it always did; then the first page the
+// bare /portal login — a page their own nav hides (audit 2026-08-20). The Contacts hub first
+// (it was Pipeline, the designs list, until 2026-10-12), so the pre-migration-100 shape lands
+// where it always did; then the first page the
 // person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
 // ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
 // "support": product news and one's own submissions, no other tenant data, never refused
 // for any access map — which is why it is the last-resort landing page below.
 function ssFallbackTab(access) {
-  if (ssCanSeeTab("designs", access)) return "designs";
-  const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
+  if (ssCanSeeTab("contacts", access)) return "contacts";
+  const t = NONADMIN_TABS.find((x) => x !== "contacts" && TAB_AREA[x] && ssCanSeeTab(x, access));
   return t || "support";
 }
 
@@ -2198,10 +2241,24 @@ function ssEntitlementChanged() {
 // ─── The Pipeline view this person SAVED (My Profile), or null when they never picked one ───
 // Anything else stored under the key reads as "never picked", so the default fills in for it.
 // Takes anything carrying `prefs` (the shell's tenant, or { prefs }); "none" is the shell's
-// no-mapping sentinel. The default that fills a null follows the CRM (12-shell.jsx).
+// no-mapping sentinel. Superseded by contactsView below (2026-10-12) and read only through it.
 function ssSavedDesignsView(holder) {
   const v = holder && holder !== "none" && holder.prefs ? holder.prefs.designsView : null;
   return v === "pipeline" || v === "list" ? v : null;
+}
+
+// ─── Which view the Contacts tab opens on for this person (My Profile, 2026-10-12) ───────────
+// Carolyn on the 10-12 call: "we need them to set the default of what they want the default to
+// be." Saved as prefs.contactsView: "people" (the contact list), "designs" (the Design list) or
+// "p-<uuid>" (one pipeline). Someone who never picked one but chose the old Pipeline tab's view
+// keeps it: "list" was the Design list, "pipeline" was the board. Null = never picked, and the
+// hub's default fills in (the first pipeline with the CRM, else the Design list).
+function ssSavedHubView(holder) {
+  const p = holder && holder !== "none" && holder.prefs ? holder.prefs : null;
+  const v = p ? p.contactsView : null;
+  if (v === SS_HUB_PEOPLE || v === SS_HUB_DESIGNS || ssHubPipeId(v)) return v;
+  const old = ssSavedDesignsView(holder);
+  return old === "list" ? SS_HUB_DESIGNS : old === "pipeline" ? SS_HUB_PIPELINE : null;
 }
 
 // What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
@@ -2877,10 +2934,10 @@ function ssWarmThrottled(name) {
 // What each rail destination calls when it OPENS. Designer/Advanced are absent on purpose: they
 // open on REST plus the designer bundle, and submit-estimate is minutes away.
 const SS_NAV_WARM = {
-  designs: ["sync-design-status"],                      // REST list paints, then the status sync
-  contacts: ["sync-design-status"],
+  // The hub opens on a pipeline board for most CRM accounts (crm_pipelines_list, crm_deals_list),
+  // and its Design list paints from REST and then runs the status sync.
+  contacts: ["portal-settings", "sync-design-status"],
   conversations: ["portal-settings"],                   // crm_inbox
-  pipelines: ["portal-settings"],                       // crm_pipelines_list, crm_deals_list
   inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
   orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
   "build-schedule": ["portal-schedule"],
@@ -2897,9 +2954,9 @@ const SS_NAV_WARM = {
 // Settings rail items that open on something other than portal-settings.
 const SS_SETTINGS_WARM = { billing: ["portal-billing"], sms: ["portal-sms"] };
 function ssWarmNav(id, viewing) {
-  // View-as reads Pipeline/Contacts through operator-portal with no status sync, and Commissions
-  // renders a refusal card there.
-  const fns = viewing && (id === "designs" || id === "contacts") ? ["operator-portal"]
+  // View-as reads the hub's lists through operator-portal with no status sync (its pipelines go
+  // through portal-settings), and Commissions renders a refusal card there.
+  const fns = viewing && id === "contacts" ? ["operator-portal", "portal-settings"]
     : viewing && id === "commissions" ? []
     : (SS_NAV_WARM[id] || []);
   fns.forEach(ssWarmThrottled);
