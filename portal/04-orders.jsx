@@ -4448,7 +4448,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       {payOpen && ordersOn && (
         <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
-          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+{/* Scrolls inside itself (2026-10-12): with the card form plus the billing name, street and
+              ZIP (2026-10-09) the box is taller than a laptop screen, and the centred, fixed backdrop
+              clipped its foot, so the Charge button could not be reached. */}
+          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflowX: "hidden", overflowY: "auto", maxHeight: "calc(100vh - 40px)" }}>
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ fontSize: 15.5, fontWeight: 800 }}>{collect === "charge" ? "Take a payment" : "Record a payment"}</div>
               <button type="button" onClick={closePay} disabled={armed}
