@@ -58,6 +58,25 @@ async function setup(ctx: Row, w: World = {}, visible: string[] | null = null) {
 }
 
 const searchThreads = (token: string, body: unknown) => appRequest("POST", "/threads/search", token, body);
+/** A contact id per number, for worlds of many contacts. */
+const uuidOf = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+
+/** Every page of a search or a list, following the cursor: the ids in order, and how many pages it took. */
+async function allPages(env: ReturnType<typeof makeEnv>, page: (cursor: string | undefined) => Request) {
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    const { json } = await call(env, page(cursor));
+    expect(json.ok).toBe(true);
+    const rows = (json.calls ?? json.threads) as { id?: string; key?: string }[];
+    expect(rows.length).toBeLessThanOrEqual(50);
+    seen.push(...rows.map((r) => String(r.id ?? r.key)));
+    cursor = json.cursor;
+    pages++;
+  } while (cursor && pages < 20);
+  return { seen, pages };
+}
 const searchCalls = (token: string, body: unknown) => appRequest("POST", "/calls/search", token, body);
 const keys = (list: { key: string }[]) => list.map((t) => t.key);
 const ids = (list: { id: string }[]) => list.map((c) => c.id);
@@ -316,6 +335,43 @@ describe("POST /threads/search", () => {
     expect(pages).toBeGreaterThan(1);
   });
 
+  it("the scope comes before the limits: contacts this person can't see never take the places of ones they can", async () => {
+    // Someone limited to their own customers, at a busy business. 100 contacts called Jordan they
+    // can't see (all the name read takes), then the texts that say "jordan": 50 newer conversations
+    // they can't see, and 10 older ones they can. With the limit counted first, the 150 places
+    // went to the 150 they can't see, and the 10 were never found.
+    const hidden = Array.from({ length: 100 }, (_, i) => person(uuidOf(0xe000 + i), `Jordan ${i}`));
+    const texted = Array.from({ length: 60 }, (_, i) => person(uuidOf(0xf000 + i), `Customer ${i}`));
+    const sms = texted.map((p, i) => text(`h${i}`, { contact_id: p.id, body: `jordan said hi ${i}`, created_at: S(i + 1) }));
+    const theirs = texted.slice(50).map((p) => String(p.id));
+    const { token, env } = await setup(
+      callerCtx({ phone_level: "view", contacts_level: "own", own_contacts_only: true }),
+      { contacts: [...hidden, ...texted], sms }, theirs,
+    );
+    const { json } = await call(env, searchThreads(token, { q: "jordan", scope: "team" }));
+    expect(keys(json.threads)).toEqual(theirs);
+    // The name read was full, so older matches may be missing, and the answer says so.
+    expect(json.partial).toBe(true);
+  });
+
+  it("partial: true on every page when a read or a limit was full; a search that read every match says nothing more", async () => {
+    // 500 texts that say "barn" (all the text read takes) from 60 conversations.
+    const people = Array.from({ length: 60 }, (_, i) => person(uuidOf(0xa000 + i), `Pat ${i}`));
+    const sms = Array.from({ length: 500 }, (_, i) => text(`b${i}`, { contact_id: people[i % 60].id, body: `the barn ${i}`, created_at: S(i + 1) }));
+    const { token, env } = await setup(callerCtx({ phone_level: "view" }), { contacts: people, sms });
+    const first = await call(env, searchThreads(token, { q: "barn", scope: "team" }));
+    expect(first.json.threads).toHaveLength(50);
+    expect(first.json.partial).toBe(true);
+    const second = await call(env, searchThreads(token, { q: "barn", scope: "team", cursor: first.json.cursor }));
+    expect(second.json.threads).toHaveLength(10);
+    expect(second.json.partial).toBe(true);
+
+    const small = await setup(callerCtx({ phone_level: "view" }), world);
+    const { json } = await call(small.env, searchThreads(small.token, { q: "lean-to", scope: "team" }));
+    expect(json.threads.length).toBeGreaterThan(0);
+    expect(json).not.toHaveProperty("partial");
+  });
+
   it("never logs the term, a name, a number or a text, even when the database refuses the filter and quotes it back", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -462,6 +518,61 @@ describe("POST /calls/search", () => {
     expect(net.reads("phone_calls").at(-1)!.url.searchParams.get("started_at")).toBe(`lt.${S(50)}`);
   });
 
+  it("reads short of a page each but more than a page together: every call, over the pages, once (Team and My)", async () => {
+    // 30 calls found by name and 30 other calls found by what the caller said. No read is full,
+    // and together they are more than a page: until 2026-10-13 the page kept 50, sent no cursor,
+    // and the other 10 could never be reached.
+    const calls = [
+      ...Array.from({ length: 30 }, (_, i) => callRow(`n${i}`, { contact_id: CONTACT_1, crm_contacts: JORDAN, answered_by: USER_A, started_at: S(2 * i + 1) })),
+      ...Array.from({ length: 30 }, (_, i) => callRow(`t${i}`, {
+        from_e164: `+1555555${String(160 + i).padStart(4, "0")}`, status: "voicemail", rang_user_ids: [USER_A], started_at: S(2 * i + 2),
+        phone_voicemails: vm(`vt${i}`, "Jordan here, about the barn"),
+      })),
+    ];
+    const newestFirst = [...calls].sort((a, b) => (String(a.started_at) < String(b.started_at) ? 1 : -1)).map((r) => String(r.id));
+    for (const [level, scope] of [["view", "team"], ["own", "mine"]] as const) {
+      const { token, env } = await setup(callerCtx({ phone_level: level }), { calls });
+      const { seen, pages } = await allPages(env, (cursor) => searchCalls(token, { q: "jordan", scope, ...(cursor ? { cursor } : {}) }));
+      expect(seen, scope).toEqual(newestFirst);
+      expect(pages, scope).toBe(2);
+    }
+  });
+
+  it("My asks the database for MY calls, so a teammate's many calls to the same number don't push mine off the page", async () => {
+    // B called the customer 60 times, all newer than my 2 calls to them.
+    const TO = "+15555550188";
+    const out = (id: string, by: string, sec: number) =>
+      callRow(id, { direction: "out", from_e164: BUSINESS_NUMBER, to_e164: TO, placed_by: by, started_at: S(sec) });
+    const calls = [...Array.from({ length: 60 }, (_, i) => out(`b${i}`, USER_B, i + 1)), out("me1", USER_A, 100), out("me2", USER_A, 101)];
+    const { net, token, env } = await setup(callerCtx({ phone_level: "own" }), { calls });
+    const { json } = await call(env, searchCalls(token, { q: "555-555-0188", scope: "mine" }));
+    expect(ids(json.calls)).toEqual(["me1", "me2"]);
+    expect(json).not.toHaveProperty("cursor");
+    // Each way twice, as GET /calls reads My: the calls I took part in (one `or`; the number's has
+    // mine inside it), and the unanswered calls on customers I own.
+    const reads = net.reads("phone_calls");
+    const mine = `placed_by.eq.${USER_A},answered_by.eq.${USER_A},transferred_from.eq.${USER_A},rang_user_ids.cs.{${USER_A}}`;
+    const involved = reads.filter((r) => (r.url.searchParams.get("or") ?? "").includes(mine));
+    const owned = reads.filter((r) => r.url.searchParams.get("crm_contacts.owner_user_id") === `eq.${USER_A}`);
+    expect(involved).toHaveLength(3); // name, number, transcript
+    expect(owned).toHaveLength(3);
+    expect(reads).toHaveLength(6);
+    for (const r of reads) expect(r.url.searchParams.getAll("or").length).toBeLessThanOrEqual(1);
+    const byNumber = involved.find((r) => (r.url.searchParams.get("or") ?? "").includes("to_e164.like"))!;
+    expect(byNumber.url.searchParams.get("or")).toBe(
+      `(and(direction.eq.in,from_e164.like.*5555550188*,or(${mine})),and(direction.eq.out,to_e164.like.*5555550188*,or(${mine})))`,
+    );
+    for (const r of owned) {
+      expect(r.url.searchParams.get("status")).toBe("in.(missed,voicemail,ringing)");
+      expect(r.url.searchParams.get("select")).toContain("crm_contacts!inner(");
+    }
+    // Team: all 62, over two pages.
+    const view = await setup(callerCtx({ phone_level: "view" }), { calls });
+    const { seen } = await allPages(view.env, (cursor) => searchCalls(view.token, { q: "555-555-0188", scope: "team", ...(cursor ? { cursor } : {}) }));
+    expect(seen).toHaveLength(62);
+    expect(seen.slice(-2)).toEqual(["me1", "me2"]);
+  });
+
   it("refuses a short term and a bad scope like the thread search", async () => {
     const { token, env } = await setup(callerCtx({ phone_level: "view" }), world);
     expect((await call(env, searchCalls(token, { q: "x", scope: "team" }))).json.error).toEqual({ code: "bad_request", message: "Type at least 2 characters to search." });
@@ -535,6 +646,26 @@ describe("GET /calls?voicemail=1 (the Voicemail tab pages through every voicemai
     for (const r of net.reads("phone_calls").slice(before)) {
       expect(r.url.searchParams.get("select")).not.toContain("!inner(id,duration_s");
       expect(r.url.searchParams.has("phone_voicemails.deleted_at")).toBe(false);
+    }
+  });
+
+  it("My: two reads short of a page each but more than one together page through every voicemail, once", async () => {
+    // 40 voicemails that rang me, and 40 on customers I own that rang a teammate. Each read holds
+    // 40; together 80. Until 2026-10-13 the list stopped at 50 with no cursor.
+    const calls = [
+      ...Array.from({ length: 40 }, (_, i) => callRow(`r${i}`, { status: "voicemail", answered_by: null, phone_voicemails: vm(`vr${i}`), started_at: S(2 * i + 1) })),
+      ...Array.from({ length: 40 }, (_, i) => callRow(`o${i}`, {
+        status: "voicemail", answered_by: null, rang_user_ids: [USER_B], contact_id: CONTACT_1,
+        crm_contacts: { name: "Jordan", owner_user_id: USER_A }, phone_voicemails: vm(`vo${i}`), started_at: S(2 * i + 2),
+      })),
+    ];
+    const newestFirst = [...calls].sort((a, b) => (String(a.started_at) < String(b.started_at) ? 1 : -1)).map((r) => String(r.id));
+    const { token, env } = await setup(callerCtx({ phone_level: "own" }), { calls });
+    for (const path of ["/calls?voicemail=1", "/calls"]) {
+      const join = path.includes("?") ? "&" : "?";
+      const { seen, pages } = await allPages(env, (cursor) => appRequest("GET", `${path}${cursor ? `${join}cursor=${encodeURIComponent(cursor)}` : ""}`, token));
+      expect(seen, path).toEqual(newestFirst);
+      expect(pages, path).toBe(2);
     }
   });
 });

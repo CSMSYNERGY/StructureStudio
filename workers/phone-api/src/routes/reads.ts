@@ -198,6 +198,30 @@ export function isMineCall(userId: string, r: CallWithJoins): boolean {
   return callIsMine(userId, { ...r, contact_owner: contact?.owner_user_id ?? null }) || r.transferred_from === userId;
 }
 
+/** The statuses of a call nobody answered: on a contact with an owner, those are the owner's (section 7). */
+const UNANSWERED = ["missed", "voicemail", "ringing"];
+
+/** "Mine", the calls I took part in: placed, answered, handed on, or rung for (a PostgREST `or`). */
+const involvedOr = (me: string) => `placed_by.eq.${me},answered_by.eq.${me},transferred_from.eq.${me},rang_user_ids.cs.{${me}}`;
+
+const newestCallFirst = (x: CallWithJoins, y: CallWithJoins) => (x.started_at < y.started_at ? 1 : x.started_at > y.started_at ? -1 : 0);
+
+/**
+ * Several reads of one list, each newest first below the same cursor and PAGE long, as one page:
+ * each call once, newest first, at most PAGE. More follow when any read was full (it stopped
+ * before its older calls) OR when together they held more than a page (the rest were cut here).
+ * Then the cursor is the page's oldest call, and the next page reads every source below it again,
+ * so nothing is skipped. (Until 2026-10-13 only a full read set the cursor: two reads of 30
+ * different calls made a page of 50 with no cursor, and the other 10 could never be reached.)
+ */
+function mergeCallReads(lists: CallWithJoins[][]): { fetched: CallWithJoins[]; nextCursor: string | null } {
+  const byId = new Map<string, CallWithJoins>();
+  for (const r of lists.flat()) if (!byId.has(r.id)) byId.set(r.id, r);
+  const fetched = [...byId.values()].sort(newestCallFirst).slice(0, PAGE);
+  const more = lists.some((l) => l.length === PAGE) || byId.size > PAGE;
+  return { fetched, nextCursor: more && fetched.length ? fetched[fetched.length - 1].started_at : null };
+}
+
 export async function listCalls(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   const url = new URL(req.url);
@@ -218,29 +242,22 @@ export async function listCalls(env: Env, req: Request): Promise<Response> {
   };
 
   let fetched: CallWithJoins[];
-  let full: boolean;
+  let nextCursor: string | null;
   if (team) {
     fetched = (must(await base(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${vm}, ${REC_SELECT}`), "list team calls") as CallWithJoins[] | null) ?? [];
-    full = fetched.length === PAGE;
+    nextCursor = fetched.length === PAGE ? fetched[PAGE - 1].started_at : null;
   } else {
     // "Mine" is two sources: calls I placed, answered, handed on or was rung for; and missed
     // calls / voicemails on contacts I OWN, which ring whoever the route rings, not me.
     const [a, b] = await Promise.all([
-      base(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${vm}, ${REC_SELECT}`)
-        .or(`placed_by.eq.${me},answered_by.eq.${me},transferred_from.eq.${me},rang_user_ids.cs.{${me}}`),
+      base(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${vm}, ${REC_SELECT}`).or(involvedOr(me)),
       base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${vm}, ${REC_SELECT}`)
-        .eq("crm_contacts.owner_user_id", me).in("status", ["missed", "voicemail", "ringing"]),
+        .eq("crm_contacts.owner_user_id", me).in("status", UNANSWERED),
     ]);
     const ra = (must(a, "list my calls") as CallWithJoins[] | null) ?? [];
     const rb = (must(b, "list my customers' missed calls") as CallWithJoins[] | null) ?? [];
-    full = ra.length === PAGE || rb.length === PAGE;
-    const byId = new Map<string, CallWithJoins>();
-    for (const r of [...ra, ...rb]) byId.set(r.id, r);
-    fetched = [...byId.values()]
-      .sort((x, y) => (x.started_at < y.started_at ? 1 : x.started_at > y.started_at ? -1 : 0))
-      .slice(0, PAGE);
+    ({ fetched, nextCursor } = mergeCallReads([ra, rb]));
   }
-  const nextCursor = full && fetched.length ? fetched[fetched.length - 1].started_at : null;
 
   let rows = await scopeCalls(c, fetched);
   if (!team) rows = rows.filter((r) => isMineCall(me, r));
@@ -787,7 +804,8 @@ export const SEARCH_TEXTS = 500;
 /**
  * At most this many conversations are searched: contacts, and unknown numbers. One read's `in`
  * list (the inbox's INBOX_ID_CHUNK: about 37 characters an id, inside what the proxies and
- * PostgREST accept in a URL). Past it, the newest matches win.
+ * PostgREST accept in a URL). Counted after the scope (only conversations this person may see),
+ * and past it the newest matches win; the answer then says `partial: true`.
  */
 export const SEARCH_THREAD_CONTACTS = 150;
 export const SEARCH_THREAD_NUMBERS = 50;
@@ -898,9 +916,13 @@ function contactDigitsOrs(digits: string): string[] {
   return ors;
 }
 
-/** A text's or a call's customer number against the term's digits: only the customer's side. */
-function numberOrs(digits: string, from: string, to: string): string[] {
-  return [`and(direction.eq.in,${from}.like.*${digits}*)`, `and(direction.eq.out,${to}.like.*${digits}*)`];
+/**
+ * A text's or a call's customer number against the term's digits: only the customer's side.
+ * `also` (a PostgREST `or` list) must hold too: one `or` parameter carries both, never two.
+ */
+function numberOrs(digits: string, from: string, to: string, also: string | null = null): string[] {
+  const more = also ? `,or(${also})` : "";
+  return [`and(direction.eq.in,${from}.like.*${digits}*${more})`, `and(direction.eq.out,${to}.like.*${digits}*${more})`];
 }
 
 /**
@@ -910,8 +932,11 @@ function numberOrs(digits: string, from: string, to: string): string[] {
  * conversation, newest first by its newest text.
  *
  * Two steps. First the candidates: contacts whose name or number matches (SEARCH_CONTACTS) and the
- * newest SEARCH_TEXTS matching texts, capped at SEARCH_THREAD_CONTACTS contacts and
- * SEARCH_THREAD_NUMBERS unknown numbers, newest matches first, and narrowed by the contacts scope.
+ * newest SEARCH_TEXTS matching texts, narrowed by the contacts scope, then capped at
+ * SEARCH_THREAD_CONTACTS contacts and SEARCH_THREAD_NUMBERS unknown numbers, newest matches first.
+ * When a read or a cap was full, older matches may be missing, and every page says `partial: true`
+ * (an addition to the contract: the apps can say "Showing the newest matches"; older builds ignore
+ * it), so a cursor is never read as "this is everything".
  * Then listThreads' own walk over THOSE conversations' texts only: newest first below the
  * cursor, SCAN at a time, the "already shown on an earlier page" check, "mine", and the same
  * cursor rule (a full page continues after its last row; a full read that filtered down to a
@@ -939,15 +964,16 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
   const hits = (quiet(textRes, "search texts") as MsgRow[] | null) ?? [];
   const named = (quiet(contactRes, "search contacts") as { id: string }[] | null) ?? [];
 
+  // Every candidate once, in order: the contacts found by name or number, then the conversations
+  // of the matching texts, newest first.
   const contactIds: string[] = [];
   const numbers: string[] = [];
+  const candidate = new Set<string>();
   const add = (key: string) => {
-    if (key.startsWith("n:")) {
-      const n = key.slice(2);
-      if (n && !numbers.includes(n) && numbers.length < SEARCH_THREAD_NUMBERS) numbers.push(n);
-    } else if (!contactIds.includes(key) && contactIds.length < SEARCH_THREAD_CONTACTS) {
-      contactIds.push(key);
-    }
+    if (candidate.has(key)) return;
+    candidate.add(key);
+    if (!key.startsWith("n:")) contactIds.push(key);
+    else if (key.length > 2) numbers.push(key.slice(2));
   };
   for (const r of named) add(r.id);
   // Per conversation: its newest matching text (for the snippet), and whether a text's number matched.
@@ -959,10 +985,17 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
     if (s.digits && numberHas(customerNumber(m), s.digits)) numberHit.add(key);
     if (!bodyHit.has(key) && s.pattern.test(m.body ?? "")) bodyHit.set(key, m);
   }
+  // The scope first, the caps after it: a contact this person can't see never takes the place of
+  // one they can (someone limited to their own customers, at a busy business), and unknown numbers
+  // count only for those who may read them.
   const visible = await visibleContactIds(c, contactIds);
-  const ids = contactIds.filter((id) => visible.has(id));
-  const nums = mayReadUnknownNumbers(c.ctx) ? numbers : [];
-  if (!ids.length && !nums.length) return ok({ threads: [] });
+  const seenIds = contactIds.filter((id) => visible.has(id));
+  const readable = mayReadUnknownNumbers(c.ctx) ? numbers : [];
+  const ids = seenIds.slice(0, SEARCH_THREAD_CONTACTS);
+  const nums = readable.slice(0, SEARCH_THREAD_NUMBERS);
+  const partial = named.length === SEARCH_CONTACTS || hits.length === SEARCH_TEXTS
+    || seenIds.length > SEARCH_THREAD_CONTACTS || readable.length > SEARCH_THREAD_NUMBERS;
+  if (!ids.length && !nums.length) return ok({ threads: [], ...(partial ? { partial: true } : {}) });
   const wanted = new Set([...ids, ...nums.map((n) => `n:${n}`)]);
 
   // ── listThreads' walk, over the candidates' texts only ──
@@ -1041,8 +1074,8 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
   }
   const nextCursor = threads.length >= PAGE ? threads[threads.length - 1].last.at : boundary;
   // Counts only: never the term, a name, a number or a text.
-  console.log(`[phone-api] threads search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}, ${ids.length + nums.length} candidates, ${threads.length} rows`);
-  return ok({ threads, ...(nextCursor ? { cursor: nextCursor } : {}) });
+  console.log(`[phone-api] threads search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}, ${ids.length + nums.length} candidates${partial ? " (partial)" : ""}, ${threads.length} rows`);
+  return ok({ threads, ...(nextCursor ? { cursor: nextCursor } : {}), ...(partial ? { partial: true } : {}) });
 }
 
 /**
@@ -1050,51 +1083,71 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
  * by its contact's name, its customer number (a number-like term), or its voicemail's transcript.
  * Rows are GET /calls rows plus `match`, newest first by started_at, paged like GET /calls.
  *
- * Up to three reads, each newest first below the cursor and PAGE long, and merged the way
- * listCalls merges "mine"'s two (a page continues after its 50th row whenever any read was full,
- * so nothing a full read didn't reach is skipped): by name (an inner join on crm_contacts), by
- * number (the customer's side of the call only, so the business's own number matches nothing),
- * and by transcript (an inner join on phone_voicemails). Recording transcripts and summaries
- * are not searched: those are read only on request (GET /calls/:id/transcript).
- * Then scopeCalls and, for My, isMineCall, as listCalls.
+ * One read a way of matching, each newest first below the cursor and PAGE long: by name (an inner
+ * join on crm_contacts), by number (the customer's side of the call only, so the business's own
+ * number matches nothing), and by transcript (an inner join on phone_voicemails). Recording
+ * transcripts and summaries are not searched: those are read only on request (GET
+ * /calls/:id/transcript). My reads each way twice, as listCalls reads My, so the database finds MY
+ * calls and a page isn't spent on the team's: the calls I took part in, and the unanswered calls
+ * on customers I own. The reads merge as listCalls' do (mergeCallReads: a cursor whenever more may
+ * follow). Then scopeCalls and, for My, isMineCall, as listCalls.
  */
 export async function searchCalls(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   const s = await listSearchRequest(c, req);
   const me = c.userId;
-  const vm = s.voicemail ? VM_INNER : VM_SELECT;
+  // Contacts `none` sees no customer's call, so neither a name nor "my customers" can find one.
+  const customers = c.ctx.contacts_level !== "none";
 
-  // A deleted voicemail is no voicemail: never listed on the Voicemail tab, and its transcript
-  // (retention deletes the words with the audio) never searched.
-  const base = (select: string, vmOnly: boolean) => {
-    let q = c.admin.from("phone_calls").select(select).eq("client_id", c.ctx.client_id)
-      .order("started_at", { ascending: false }).limit(PAGE);
-    if (vmOnly) q = q.is("phone_voicemails.deleted_at", null);
+  // `contacts` inner when the read filters on the contact (a name, an owner). `voicemails` inner
+  // for the Voicemail tab and for the transcript: a deleted voicemail is no voicemail, never
+  // listed, and its transcript (retention deletes the words with the audio) never searched.
+  const read = (contactsInner: boolean, vmInner: boolean) => {
+    let q = c.admin.from("phone_calls")
+      .select(`${CALL_COLUMNS}, crm_contacts${contactsInner ? "!inner" : ""}(name, owner_user_id), ${vmInner ? VM_INNER : VM_SELECT}, ${REC_SELECT}`)
+      .eq("client_id", c.ctx.client_id).order("started_at", { ascending: false }).limit(PAGE);
+    if (vmInner) q = q.is("phone_voicemails.deleted_at", null);
     if (s.cursor) q = q.lt("started_at", s.cursor);
     return q;
   };
-  const reads = [
-    // Contacts `none` sees no customer's call, so a name can't find one.
-    c.ctx.contacts_level === "none"
-      ? noRows()
-      : base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${vm}, ${REC_SELECT}`, s.voicemail)
-        .ilike("crm_contacts.name", `*${s.term}*`),
-    s.digits
-      ? base(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${vm}, ${REC_SELECT}`, s.voicemail)
-        .or(numberOrs(s.digits, "from_e164", "to_e164").join(","))
-      : noRows(),
-    base(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_INNER}, ${REC_SELECT}`, true)
-      .ilike("phone_voicemails.transcript", `*${s.term}*`),
-  ];
-  const results = await Promise.all(reads);
-  const lists = results.map((r, i) => (quiet(r as never, ["search calls by name", "search calls by number", "search voicemail transcripts"][i]) as CallWithJoins[] | null) ?? []);
-  const full = lists.some((l) => l.length === PAGE);
-  const byId = new Map<string, CallWithJoins>();
-  for (const r of lists.flat()) if (!byId.has(r.id)) byId.set(r.id, r);
-  const fetched = [...byId.values()]
-    .sort((x, y) => (x.started_at < y.started_at ? 1 : x.started_at > y.started_at ? -1 : 0))
-    .slice(0, PAGE);
-  const nextCursor = full && fetched.length ? fetched[fetched.length - 1].started_at : null;
+  type Query = ReturnType<typeof read>;
+  /** One way of matching. `mine` (My's first read) is one more condition the call must meet. */
+  type Way = { op: string; contactsInner: boolean; vmInner: boolean; match: (q: Query, mine: string | null) => Query };
+  const ways: Way[] = [];
+  if (customers) {
+    ways.push({
+      op: "search calls by name", contactsInner: true, vmInner: s.voicemail,
+      match: (q, mine) => (mine ? q.or(mine) : q).ilike("crm_contacts.name", `*${s.term}*`),
+    });
+  }
+  if (s.digits) {
+    const digits = s.digits;
+    ways.push({
+      op: "search calls by number", contactsInner: false, vmInner: s.voicemail,
+      match: (q, mine) => q.or(numberOrs(digits, "from_e164", "to_e164", mine).join(",")),
+    });
+  }
+  ways.push({
+    op: "search voicemail transcripts", contactsInner: false, vmInner: true,
+    match: (q, mine) => (mine ? q.or(mine) : q).ilike("phone_voicemails.transcript", `*${s.term}*`),
+  });
+  const reads: { op: string; q: Query }[] = [];
+  for (const w of ways) {
+    if (s.team) {
+      reads.push({ op: w.op, q: w.match(read(w.contactsInner, w.vmInner), null) });
+      continue;
+    }
+    reads.push({ op: w.op, q: w.match(read(w.contactsInner, w.vmInner), involvedOr(me)) });
+    if (customers) {
+      reads.push({
+        op: `${w.op} (my customers)`,
+        q: w.match(read(true, w.vmInner), null).eq("crm_contacts.owner_user_id", me).in("status", UNANSWERED),
+      });
+    }
+  }
+  const results = await Promise.all(reads.map((r) => r.q));
+  const lists = results.map((r, i) => (quiet(r as never, reads[i].op) as CallWithJoins[] | null) ?? []);
+  const { fetched, nextCursor } = mergeCallReads(lists);
 
   let rows = await scopeCalls(c, fetched);
   if (!s.team) rows = rows.filter((r) => isMineCall(me, r));
@@ -1108,13 +1161,9 @@ export async function searchCalls(env: Env, req: Request): Promise<Response> {
     return { ...row, ...(match ? { match } : {}) };
   });
   // Counts only: never the term, a name, a number or a transcript.
-  console.log(`[phone-api] calls search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}${s.voicemail ? ", voicemail" : ""}, ${byId.size} read, ${calls.length} rows`);
+  const rowsRead = lists.reduce((n, l) => n + l.length, 0);
+  console.log(`[phone-api] calls search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}${s.voicemail ? ", voicemail" : ""}, ${reads.length} reads, ${rowsRead} read, ${calls.length} rows`);
   return ok({ calls, ...(nextCursor ? { cursor: nextCursor } : {}) });
-}
-
-/** A read with nothing to ask: no rows, no error. */
-function noRows() {
-  return Promise.resolve({ data: [] as never[], error: null });
 }
 
 // ── contacts (A-Z) ──────────────────────────────────────────────────────────────────
