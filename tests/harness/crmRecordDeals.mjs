@@ -333,7 +333,7 @@ try {
 
     // ── L ──
     await go("/portal/designs/pipeline");
-    const card = page.locator(`button[data-ss-deal="${DEALS()[2].id}"]`);
+    const card = page.locator(`[data-ss-deal="${DEALS()[2].id}"]`);
     await card.waitFor({ timeout: 20000 }).catch(() => {});
     const onBoard = ok("L0 the deluxe card is on the Shed Deals board", (await card.count()) === 1);
     if (onBoard) {
