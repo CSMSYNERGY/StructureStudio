@@ -22,6 +22,9 @@ import {
   closePlannedSub, ensureTwilioAccount, forgetTwilioAccount, maskSid, relationMissing, setTwilioAccountStatus,
   twilioAccountView, twilioClosePlan, type EnsureResult, type StatusChange,
 } from "../_shared/twilioProvision.ts";
+// 2026-10-12 (C55): create_client makes the new builder's sub-account when TWILIO_SUBACCOUNTS is
+// "on", without ever failing or holding up the create (twilioAtCreate.ts says how).
+import { provisionAtCreate } from "./twilioAtCreate.ts";
 // Card payments (workstream 1 phase 3): set_payments refuses a system this deployment has no
 // credentials for, and verify_payments asks the gateway one harmless question. cardpointe.ts is the
 // one CardPointe client and paymentSettings.ts reads the tenant's account; see their importer ledgers.
@@ -1069,7 +1072,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           console.error("setup checklist assign failed for", clientId, e instanceof Error ? e.message : String(e));
         }
 
-        return json({ ok: true, clientId, blank, cloned: clonedCounts, setupAssigned });
+        // ── The builder's own Twilio sub-account (2026-10-12, C55) ─────────
+        // Best-effort for the checklist's reason: the tenant exists and the answer is about to say
+        // so. Only with TWILIO_SUBACCOUNTS "on"; never throws, and the create waits at most
+        // AT_CREATE_WAIT_MS before a longer run carries on under waitUntil ("pending"). A run that
+        // does not finish is filed in app_errors, and the builder's first number or texting submit
+        // finishes it (ensureTwilioAccount resumes from the step it reached).
+        const twilio = await provisionAtCreate(sb, clientId, {
+          get: (k) => Deno.env.get(k),
+          actor: identity.via === "operator" ? { via: "operator", email: identity.email, userId: identity.userId } : { via: identity.via },
+          log: logEdgeError,
+        });
+
+        return json({
+          ok: true, clientId, blank, cloned: clonedCounts, setupAssigned,
+          twilio: twilio.outcome,
+          ...(twilio.reason ? { twilioReason: twilio.reason } : {}),
+          ...(twilio.code ? { twilioCode: twilio.step ? `${twilio.step}:${twilio.code}` : twilio.code } : {}),
+        });
       }
 
       // ── link a user login to a client (with a role) ────────────────────
