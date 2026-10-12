@@ -2,6 +2,10 @@
 // confirmed 09-29), which also stops Twilio's storage charge, then stamp deleted_at. The row
 // stays, so the call history still shows that a message was left.
 //
+// A voicemail's transcript (TRANSCRIBE=on) goes with it, in both places it is kept: Twilio's
+// copy (its Transcriptions under the recording, deleted first) and phone_voicemails.transcript
+// (cleared with the stamp). The privacy policy promises it is kept as long as the voicemail.
+//
 // Call recordings (release B2, ../recording.ts) the same way, each by its own business's
 // retention (client_settings.phone_recording_retention_days, 365 unless the owner chose 30, 90,
 // 180 or 730; phone_recordings_expired picks them). The transcript goes with the audio and the
@@ -14,7 +18,7 @@ import type { Env } from "../env";
 import { intVar } from "../env";
 import { adminClient, must } from "../db";
 import { logFault } from "../log";
-import { deleteRecording, twilioConfigured } from "../twilioRest";
+import { deleteRecording, deleteRecordingTranscriptions, twilioConfigured } from "../twilioRest";
 import { envForClient } from "../twilioAccount";
 
 const BATCH = 200;
@@ -61,8 +65,14 @@ export async function retention(env: Env, now = new Date()): Promise<{ deleted: 
   let failed = 0;
   for (const r of rows) {
     try {
-      if (r.recording_sid) await deleteRecording(await envForClient(env, admin, r.client_id), r.recording_sid);
-      const { error } = await admin.from("phone_voicemails").update({ deleted_at: new Date().toISOString() }).eq("id", r.id).is("deleted_at", null);
+      if (r.recording_sid) {
+        const acct = await envForClient(env, admin, r.client_id);
+        // Twilio's copy of the transcript first: it is listed through the recording.
+        await deleteRecordingTranscriptions(acct, r.recording_sid);
+        await deleteRecording(acct, r.recording_sid);
+      }
+      const { error } = await admin.from("phone_voicemails").update({ deleted_at: new Date().toISOString(), transcript: null })
+        .eq("id", r.id).is("deleted_at", null);
       if (error) throw new Error(error.message);
       deleted++;
     } catch (e) {

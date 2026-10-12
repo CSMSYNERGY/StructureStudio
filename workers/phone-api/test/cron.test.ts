@@ -214,6 +214,7 @@ describe("retention (daily)", () => {
       { id: "v2", recording_sid: RE(2), client_id: CLIENT },
       { id: "v3", recording_sid: RE(3), client_id: CLIENT },
     ]);
+    net.on("GET", /Recordings\/RE\w+\/Transcriptions\.json/, () => jsonRes({ transcriptions: [] }));
     net.on("DELETE", /Recordings\/RE0+1\.json$/, () => new Response(null, { status: 204 }));
     net.on("DELETE", /Recordings\/RE0+2\.json$/, () => jsonRes({ code: 20404 }, 404)); // already gone
     net.on("DELETE", /Recordings\/RE0+3\.json$/, () => jsonRes({ code: 20500 }, 500));
@@ -226,6 +227,48 @@ describe("retention (daily)", () => {
     expect(q.url.searchParams.get("deleted_at")).toBe("is.null");
     expect(net.writes("phone_voicemails", "PATCH").map((s) => filter(s, "id"))).toEqual(["v1", "v2"]);
     expect(net.writes("app_errors")[0].json.code).toBe("voicemail_retention_failed");
+  });
+
+  it("deletes the transcript with the voicemail: Twilio's copy before the recording, ours with the stamp", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv({ VOICEMAIL_RETENTION_DAYS: "365" });
+    installDenoShim(env);
+    const TR = (n: number) => "TR" + String(n).padStart(32, "0");
+    net.rest("GET", "phone_voicemails", () => [{ id: "v1", recording_sid: RE(1), client_id: CLIENT }]);
+    net.on("GET", /Recordings\/RE0+1\/Transcriptions\.json/, () => jsonRes({
+      transcriptions: [{ sid: TR(1), recording_sid: RE(1), transcription_text: "Call me back about the shed" }, { sid: TR(2), recording_sid: RE(1) }],
+    }));
+    net.on("DELETE", /Transcriptions\/TR0+1\.json$/, () => new Response(null, { status: 204 }));
+    net.on("DELETE", /Transcriptions\/TR0+2\.json$/, () => jsonRes({ code: 20404 }, 404)); // already gone
+    net.on("DELETE", /Recordings\/RE0+1\.json$/, () => new Response(null, { status: 204 }));
+    net.rest("PATCH", "phone_voicemails", () => []);
+    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 1, failed: 0 });
+    expect(net.to(/api\.twilio\.com/).map((s) => `${s.method} ${s.url.pathname.replace(/^.*\/Accounts\/[^/]+/, "")}`)).toEqual([
+      `GET /Recordings/${RE(1)}/Transcriptions.json`,
+      `DELETE /Transcriptions/${TR(1)}.json`,
+      `DELETE /Transcriptions/${TR(2)}.json`,
+      `DELETE /Recordings/${RE(1)}.json`,
+    ]);
+    const patch = net.writes("phone_voicemails", "PATCH")[0];
+    expect(patch.json).toEqual({ deleted_at: expect.any(String), transcript: null });
+    expect(patch.url.searchParams.get("deleted_at")).toBe("is.null");
+  });
+
+  it("a transcript Twilio won't delete keeps the recording and the row for tomorrow's run, and is never logged", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv({ VOICEMAIL_RETENTION_DAYS: "365" });
+    installDenoShim(env);
+    const TR1 = "TR" + "0".repeat(31) + "1";
+    net.rest("GET", "phone_voicemails", () => [{ id: "v1", recording_sid: RE(1), client_id: CLIENT }]);
+    net.on("GET", /Recordings\/RE0+1\/Transcriptions\.json/, () => jsonRes({ transcriptions: [{ sid: TR1, transcription_text: "Call me back about the shed" }] }));
+    net.on("DELETE", /Transcriptions\/TR0+1\.json$/, () => jsonRes({ code: 20500, message: "Call me back about the shed" }, 500));
+    net.rest("POST", "app_errors", () => []);
+    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 0, failed: 1 });
+    expect(net.to(/Recordings\/RE0+1\.json$/)).toEqual([]);
+    expect(net.writes("phone_voicemails")).toEqual([]);
+    const err = net.writes("app_errors")[0];
+    expect(err.json.code).toBe("voicemail_retention_failed");
+    expect(err.body).not.toContain("shed");
   });
 });
 

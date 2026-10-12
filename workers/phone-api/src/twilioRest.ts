@@ -173,6 +173,30 @@ export async function deleteRecording(env: Env, recordingSid: string): Promise<v
 }
 
 /**
+ * Delete Twilio's own copy of a voicemail's transcript (<Record transcribe>, env TRANSCRIBE):
+ * every Transcription under the recording. Twilio keeps that text in the account until it is
+ * deleted, and its docs don't say that deleting the recording takes it too, so retention calls
+ * this BEFORE deleteRecording (the list is reached through the recording). A recording Twilio
+ * no longer has (404) has nothing left to list; a transcription already gone counts as deleted.
+ * The listing carries the text: it is read for the sids and nothing else, never logged.
+ * One page of 50 is far more than a recording ever has. Returns how many were deleted.
+ */
+export async function deleteRecordingTranscriptions(env: Env, recordingSid: string): Promise<number> {
+  const res = await call(env, "list transcriptions", `/Recordings/${encodeURIComponent(recordingSid)}/Transcriptions.json?PageSize=50`);
+  if (res.status === 404) return 0;
+  if (!res.ok) throw new TwilioError("list transcriptions", res.status, await codeOf(res));
+  const body = (await res.json()) as { transcriptions?: { sid?: string }[] };
+  let deleted = 0;
+  for (const t of body.transcriptions ?? []) {
+    if (!t.sid) continue;
+    const del = await call(env, "delete transcription", `/Transcriptions/${encodeURIComponent(t.sid)}.json`, { method: "DELETE" });
+    if (del.status !== 204 && del.status !== 404) throw new TwilioError("delete transcription", del.status, await codeOf(del));
+    deleted++;
+  }
+  return deleted;
+}
+
+/**
  * The recording's audio as an MP3 stream. A Range header is passed through for seeking.
  * `channels` 2 asks for both channels of a dual-channel call recording (RequestedChannels=2):
  * the transcriber needs them apart. Without it Twilio mixes them to one, which is what playback

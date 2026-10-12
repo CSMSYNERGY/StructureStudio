@@ -332,13 +332,16 @@ describe("crons per account", () => {
       { id: "v3", recording_sid: RE(3), client_id: "broken" },
     ]);
     net.rpc("twilio_account_creds", (s) => (s.json.p_client_id === CLIENT ? [subRow()] : s.json.p_client_id === "broken" ? jsonRes({ code: "57014" }, 500) : []));
+    net.on("GET", /Recordings\/RE\w+\/Transcriptions\.json/, () => jsonRes({ transcriptions: [] }));
     net.on("DELETE", /Recordings\/RE/, () => new Response(null, { status: 204 }));
     net.rest("PATCH", "phone_voicemails", () => []);
     net.rest("POST", "app_errors", () => []);
     const out = await retention(env, new Date("2027-12-01T00:00:00Z"));
     expect(out).toEqual({ deleted: 2, failed: 1 });
-    expect(net.to(/Recordings\/RE/).map((s) => [s.url.pathname.split("/")[3], s.headers.get("authorization")])).toEqual([
-      [SUB, basic(SUB_KEY, SUB_SECRET)], [PARENT, basic(PARENT_KEY, "test-api-secret")],
+    // The voicemail's transcripts are looked for in the same account as its recording.
+    expect(net.to(/Recordings\/RE/).map((s) => [s.method, s.url.pathname.split("/")[3], s.headers.get("authorization")])).toEqual([
+      ["GET", SUB, basic(SUB_KEY, SUB_SECRET)], ["DELETE", SUB, basic(SUB_KEY, SUB_SECRET)],
+      ["GET", PARENT, basic(PARENT_KEY, "test-api-secret")], ["DELETE", PARENT, basic(PARENT_KEY, "test-api-secret")],
     ]);
   });
 
