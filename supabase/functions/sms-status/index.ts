@@ -2,7 +2,9 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
-import { validateTwilioSignature, hasSignatureKey } from "../_shared/twilioSms.ts";
+import { validateTwilioSignature, hasSignatureKey, smsPhoneKey } from "../_shared/twilioSms.ts";
+// Twilio's 21610 in a delivery status: recorded exactly as smsSend.ts records it at send time.
+import { recordTwilioOptOut, TWILIO_OPTED_OUT } from "../_shared/smsOptOut.ts";
 // Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
 import { edgeWebhookAccount, subaccountsOn, webhookTenantVerdict, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
@@ -10,7 +12,8 @@ import { edgeWebhookAccount, subaccountsOn, webhookTenantVerdict, type WebhookAc
 // and the reason the Messages feed can say "delivered" rather than only "we handed it over".
 //
 // Twilio fires this several times per message (queued → sent → delivered), so it must be
-// idempotent and cheap. It updates by provider_sid and does nothing else.
+// idempotent and cheap. It updates by provider_sid, and does one thing more only for a text
+// that failed with 21610 (optedOutByStatus, below).
 //
 // ⚠️ ALWAYS 200 ONCE AUTHENTICATED, including when the SID matches no row — a status for a
 // message we never recorded is not a failure worth a retry storm, and Twilio disables a
@@ -48,6 +51,17 @@ export function mapStatus(status: string, errorCode: string | null): Patch | nul
     default:
       return null;
   }
+}
+
+/**
+ * A text that failed because the customer opted out: Twilio error 21610 on a failed or
+ * undelivered status. Through a Messaging Service this is where a 21610 usually lands (the API
+ * took the text, then it failed), not at send time, so until 2026-10-13 the opt-out was only a
+ * failed text and the composer kept offering the number. Exported and pure for the tests.
+ */
+export function optedOutByStatus(patch: Patch | null): boolean {
+  return !!patch && (patch.status === "failed" || patch.status === "undelivered")
+    && patch.error_code === String(TWILIO_OPTED_OUT);
 }
 
 function ok() {
@@ -160,6 +174,31 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
       message: `delivery status could not be recorded: ${error.message}`,
       context: { status: patch.status },
     }).catch(() => {});
+  }
+
+  // ── 21610: the customer opted out by a route we did not see ──────────────────────────
+  // Recorded where the send path looks, the same write smsSend.ts makes when Twilio refuses at
+  // send time (_shared/smsOptOut.ts): sms_opt_outs on the number, and the contact's flag. The
+  // number and contact come from OUR row for this text, never from the callback, and on the same
+  // terms as the update above: a sub-account's callback only finds its own business's row.
+  if (optedOutByStatus(patch)) {
+    let find = admin.from("sms_messages").select("client_id, contact_id, direction, to_number").eq("provider_sid", sid);
+    if (account?.source === "sub") find = find.eq("client_id", account.clientId ?? "");
+    const { data: found, error: findErr } = await find.limit(1).maybeSingle();
+    const row = found as { client_id: string; contact_id: string | null; direction: string; to_number: string | null } | null;
+    const failed = findErr
+      ? `sms_messages: ${findErr.code ?? "read failed"}`
+      : row && row.direction === "out" && row.to_number
+      ? await recordTwilioOptOut(admin, row.client_id, smsPhoneKey(row.to_number), row.contact_id)
+      : null;
+    if (failed) {
+      // Names the table and the database's code only: never the number.
+      await logEdgeError({
+        fn: "sms-status", clientId: row?.client_id ?? null,
+        code: "sms_opt_out_record_failed",
+        message: `Twilio reported an opt-out (21610) that could not be recorded (${failed}); the next text to this number will be refused by Twilio again.`,
+      }).catch(() => {});
+    }
   }
   // No row matched is a normal, uninteresting outcome (a status for a message from before
   // this table existed, or one whose claim row failed). Not logged, still 200.
