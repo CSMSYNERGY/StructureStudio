@@ -1924,10 +1924,13 @@ const CRM_SECTIONS = [
   // ── THE RECIPROCAL EMBED. This pair IS Carolyn's "here is the contact, and the deal is
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
+  //
+  // ONE Deals card since 2026-10-12. Migration 301 added a second "Sales pipelines" card for the
+  // pipeline cards, and Carolyn: "I'm still confused about this deals and sales pipeline ... So
+  // this also has to be merged." Each design row now carries its card's status, stage and
+  // pipeline, and a deal with no design is a row here too (crmDealRows). A saved card order that
+  // still names "salesPipelines" is harmless: crmOrderSections skips keys this build doesn't draw.
   { key: "deals", title: "Deals", kinds: ["contact"], when: (c) => c.kind === "contact" },
-  // SALES PIPELINES (migration 301): the hand-moved boards, which hold people with no design at
-  // all (a manufacturer prospect). Separate from Deals above, which are this person's DESIGNS.
-  { key: "salesPipelines", title: "Sales pipelines", kinds: ["contact"], when: (c) => c.kind === "contact" },
   // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
   // you should see the deal. You should see the orders." Deals were already here; orders
   // are what say whether any of them turned into a sale. Contact-side only — a design's
@@ -2447,8 +2450,14 @@ const CRM_CHEVRON_CLIP = "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% -
 // ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
 // rather than filling the first one, because filling it would claim the building is in it.
 // A building that has never been scheduled is not "in the first stage".
-function CrmChevronRail({ stages, idx = null, tone, title = null }) {
+//
+// `only` lights the current chevron and nothing before it. A pipeline's stages are moved by
+// hand, back as well as forward ("Nurturing - Hot", then "Gone Cold Again"), so the stages to the
+// left of a deal's are not stages it has been through. Build and delivery do run in order and
+// keep the filled-in trail.
+function CrmChevronRail({ stages, idx = null, tone, title = null, only = false }) {
   const t = tone || CRM_RAIL_TONES.sales;
+  const past = (i) => !only && i < idx;
   return (
     <div style={{ display: "flex", gap: 2, flexWrap: "wrap", flex: "1 1 auto", minWidth: 0 }}>
       {stages.map((s, i) => (
@@ -2458,7 +2467,9 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
         // The dot version carried title={s.name} for exactly that reason and the first draft
         // of this rail dropped it, keeping only the status word.
         <div key={i}
-          title={`${s.name} — ${idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}`}
+          title={only
+            ? (idx != null && i === idx ? `${s.name} — the stage it is in` : s.name)
+            : `${s.name} — ${idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}`}
           style={{
             // ⚠️ NO minWidth HERE ON PURPOSE. `min-width: 0` would let a chevron shrink past
             // its longest word, and since clipPath crops rather than scrolls, the word would
@@ -2466,8 +2477,8 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
             // min-content floor: the rail wraps to another line instead of cropping. The
             // original CrmStageBar never set it either, so this is parity, not a new rule.
             flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
-            background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
-            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
+            background: idx == null ? CRM_RAIL_IDLE.bg : past(i) ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
+            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : past(i) ? t.on : CRM_RAIL_IDLE.fg,
             clipPath: CRM_CHEVRON_CLIP,
           }}>
           {s.name}
@@ -2488,22 +2499,32 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
 // so there it carries all three.
 //
 // The name is kept from the dot era so every caller and every grep still finds it.
+//
+// THE FIRST ROW'S LABEL IS THE DEAL'S PIPELINE NOW (Carolyn 2026-10-12: "Instead of this saying
+// sales ... I want this up here to say shed deals"), and a pipeline name is the builder's own
+// and can be long. A grid, so the label column is as wide as the widest label (capped, the rest
+// on hover) and every rail still starts at the same left edge and ends at the same right one.
 function CrmStageDots({ rows }) {
   const live = (rows || []).filter((r) => r && r.stages && r.stages.length);
   if (!live.length) return null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+    <div data-ss-stage-rows="" style={{ display: "grid", gridTemplateColumns: "minmax(58px, max-content) minmax(0, 1fr)", columnGap: 8, rowGap: 4, alignItems: "center", marginBottom: 12 }}>
       {live.map((r) => (
-        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 58, flexShrink: 0, fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
-          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]}
+        <React.Fragment key={r.key}>
+          <span data-ss-stage-label={r.key} title={r.label}
+            style={{ maxWidth: 170, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
+          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]} only={!!r.only}
             title={r.idx == null ? (r.emptyLabel || "Not started") : null} />
-        </div>
+        </React.Fragment>
       ))}
     </div>
   );
 }
 
+// The status-derived ladder above. Since 2026-10-12 it draws only when crm_record sent no
+// `pipeline` block: an account without the CRM (the free design record), a reader who may not
+// see contacts, or a server from before the pipeline bar. Everywhere else the bar is the deal's
+// own pipeline (crmPipeBarRow below).
 function CrmStageBar({ status }) {
   const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
   const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
@@ -2511,6 +2532,89 @@ function CrmStageBar({ status }) {
     <div style={{ display: "flex", marginBottom: 12 }}>
       <CrmChevronRail stages={CRM_STAGES} idx={idx} tone={CRM_RAIL_TONES.sales} />
     </div>
+  );
+}
+
+// ── THE DEAL'S PIPELINE ON THE RECORD (Carolyn, 2026-10-12) ─────────────────────────────────
+// `pipe` is crm_record's `pipeline` block: { pipelines: [{ id, name, lostReasons, stages }],
+// statuses: [{ id, name, color }], deals: [crm_deals rows] }, or undefined when the server did
+// not send one. Pure functions, so crmRecordPipeline_test can run them as they ship.
+//
+// What she asked for, and where each piece lives:
+//   * ONE "Deals" section. "I'm still confused about this deals and sales pipeline ... So this
+//     also has to be merged." The rows are this person's designs, each joined to its pipeline
+//     card by short code, plus any deal with no design (a lead added straight to a pipeline).
+//     crmDealRows.
+//   * The status ONCE, on the row's top line: "If you put the status ... up there, we don't need
+//     the status down here at all." crmPipeStatus. Read only: "the statuses are system-driven,
+//     100%".
+//   * Inside the opened deal, by "Open in designer": the stage, from THAT pipeline's stages only
+//     ("I don't like how big it is"), and moving it to another pipeline ("To move a pipeline, you
+//     can put that right here"). A deal is in one pipeline ("these cards can only be in one
+//     pipeline"), so a move is one crm_deal_move to the new pipeline's first open stage:
+//     crmPipeFirstOpen and crmPipeMoveTargets.
+//   * The top bar names the deal's pipeline and shows its own stages: "I want this up here to
+//     say shed deals with the stage that it's in." crmPipeBarRow.
+const crmPipeDealFor = (pipe, code) =>
+  (pipe && code ? (pipe.deals || []).find((d) => d.short_code === code) : null) || null;
+const crmPipeOf = (pipe, deal) =>
+  (pipe && deal ? (pipe.pipelines || []).find((p) => p.id === deal.pipeline_id) : null) || null;
+const crmPipeStatus = (pipe, deal) =>
+  (pipe && deal && deal.status_id ? (pipe.statuses || []).find((t) => t.id === deal.status_id) : null) || null;
+// The stage a deal lands in when it moves to `pipeline`: the first OPEN one, the way a new card
+// starts. A pipeline with no open stage falls back to its first won one; never a lost stage, which
+// needs a reason the reader has not given.
+function crmPipeFirstOpen(pipeline) {
+  const st = (pipeline && pipeline.stages) || [];
+  return st.find((s) => s.kind === "open") || st.find((s) => s.kind !== "lost") || null;
+}
+// The pipelines a deal can move to: every live one except its own, and only ones it could land in.
+const crmPipeMoveTargets = (pipe, deal) =>
+  ((pipe && pipe.pipelines) || []).filter((p) => (!deal || p.id !== deal.pipeline_id) && !!crmPipeFirstOpen(p));
+// The rows of the one Deals section, newest first. A design keeps its row whether or not it has
+// a pipeline card (inventory and very old designs may not); a card with no design here is a row
+// of its own, keyed by the card's id. `key` is also what picking the row stores.
+function crmDealRows(designs, pipe) {
+  const ds = designs || [];
+  const codes = new Set(ds.map((d) => d.short_code));
+  const rows = ds.map((d) => ({ key: d.short_code, design: d, deal: crmPipeDealFor(pipe, d.short_code), at: d.created_at }));
+  for (const deal of ((pipe && pipe.deals) || [])) {
+    if (deal.short_code && codes.has(deal.short_code)) continue;
+    rows.push({ key: deal.id, design: null, deal, at: deal.created_at });
+  }
+  return rows.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+}
+// The top bar's first row for the deal on screen: the pipeline's name in place of "Sales", its
+// own stages, the one the deal is in lit. Null when there is no deal or its pipeline is gone.
+function crmPipeBarRow(pipe, deal) {
+  const p = crmPipeOf(pipe, deal);
+  if (!p || !(p.stages || []).length) return null;
+  const i = p.stages.findIndex((s) => s.id === deal.stage_id);
+  return { key: "sales", label: p.name, stages: p.stages.map((s) => ({ name: s.name })), idx: i < 0 ? null : i,
+    only: true, emptyLabel: "Stage removed" };
+}
+// A deal's row after a move, painted before the server answers. The pipeline is the stage's.
+function crmPipeMoved(pipe, dealId, stage, lostReason) {
+  if (!pipe || !stage) return pipe;
+  const owner = (pipe.pipelines || []).find((p) => (p.stages || []).some((s) => s.id === stage.id));
+  return {
+    ...pipe,
+    deals: (pipe.deals || []).map((d) => (d.id !== dealId ? d : {
+      ...d, stage_id: stage.id, pipeline_id: owner ? owner.id : d.pipeline_id,
+      stage_entered_at: new Date().toISOString(), lost_reason: stage.kind === "lost" ? (lostReason || null) : null,
+    })),
+  };
+}
+// A read-only status pill. NOT SsStatusPill, which is the Pipeline board's control: on the record
+// a status is shown, never set.
+function CrmDealStatusPill({ status }) {
+  if (!status) return null;
+  const color = /^#[0-9A-Fa-f]{6}$/.test(status.color || "") ? status.color : "#64748B";
+  return (
+    <span data-ss-deal-status="" title="Set by the system as the deal moves along"
+      style={{ flexShrink: 0, alignSelf: "center", background: color + "1F", color, border: "1px solid " + color + "55",
+        borderRadius: 999, padding: "1px 9px", fontSize: 10.5, fontWeight: 800, lineHeight: "16px",
+        maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{status.name}</span>
   );
 }
 
@@ -2926,8 +3030,9 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
 // number) are NOT claimed — a skeleton that overstates the answer is the thing skeletons
 // exist to avoid, and this page's shape varies more by kind than any other.
 //
-// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. CrmStageBar renders unconditionally on a
-// deal, so a rail is certain there. On a CONTACT the rails appear only once a deal has been
+// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. A deal record almost always has one (its
+// pipeline card's stages, or CrmStageBar's ladder where there is no pipeline block; only a
+// design with no card at all has neither). On a CONTACT the rails appear only once a deal has been
 // picked, and nothing is picked on first paint (Carolyn 2026-09-02: "you have to have one of
 // these selected for anything to show up here") — so drawing one would promise a ladder that
 // never arrives. Blocks, not an idle CrmChevronRail: an idle rail carries the real stage
@@ -3408,6 +3513,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // hoist, so declaring them above would be a TDZ throw rather than a subtle bug.
   const [dealOpen, setDealOpen] = useState(null);
   const [dealBusy, setDealBusy] = useState(false);
+  // The Deals card's pipeline controls (2026-10-12): the lost-reason picker a move into a lost
+  // stage needs ({ deal, stage, reasons, key }), and "+ Add to a pipeline" while it is open (the
+  // pipeline id it will add to). Up here with the rest, above the early returns (React #310).
+  const [dealLost, setDealLost] = useState(null);
+  const [dealAdd, setDealAdd] = useState(null);
 
   // Optimistic, and deliberately the SAME action the Pipeline board's close-date control calls:
   // one write path means the board and the contact record cannot disagree about what a close
@@ -3468,6 +3578,20 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const activeDeal = activeCode
     ? ((data.designs || []).find((d) => d.short_code === activeCode) || null)
     : null;
+
+  // THE PIPELINE CARDS (crm_record's `pipeline` block, 2026-10-12): undefined from a server that
+  // doesn't send it, or for a reader who may not see contacts, and then the record is what it was.
+  const pipe = data.pipeline || null;
+  // A Deals row with no design is picked by its card's id (crmDealRows' key), never a short code,
+  // so activeCode stays null for it: every tab that files against a design still waits for one,
+  // and only the top bar follows the pick. Re-checked against this contact's own cards for the
+  // same reason activeCode is re-checked against knownCodes.
+  const pickedLead = kind === "contact" && pipe && selCode && !knownCodes.has(selCode)
+    ? (crmDealRows(data.designs, pipe).find((r) => !r.design && r.key === selCode) || {}).deal || null
+    : null;
+  // The card the top bar is about: a design record's own, or the picked row's.
+  const barDeal = kind === "design" ? crmPipeDealFor(pipe, recordId)
+    : activeCode ? crmPipeDealFor(pipe, activeCode) : pickedLead;
 
   // needsPick is derived and redundant, and that is the point: it puts the `kind ===
   // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
@@ -3863,6 +3987,70 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       .catch(() => { /* only a count */ });
   };
 
+  // ── A DEAL'S STAGE AND PIPELINE, FROM THE DEALS CARD (Carolyn 2026-10-12) ───────────────────
+  // The SAME action the Pipeline board's drag calls, so the board and the record cannot disagree
+  // about where a card is. Moving to another pipeline is a move to a stage IN it (crm_move_deal
+  // takes the pipeline from the stage), which is what keeps a deal in one pipeline at a time.
+  // Painted at once; a refusal reloads the record and says why under that deal. The status is
+  // never painted here: it is the system's, and the server's answer carries it.
+  const moveDeal = async (deal, stage, rowKey, lostReason) => {
+    if (!deal || !stage || stage.id === deal.stage_id) return;
+    setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeMoved(d.pipeline, deal.id, stage, lostReason) }));
+    try {
+      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null });
+      if (r && r.status_id) {
+        setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: { ...d.pipeline,
+          deals: (d.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, status_id: r.status_id } : x)) } }));
+      }
+    } catch (e2) {
+      await load();
+      setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That move did not save." });
+    }
+  };
+  // A stage from the deal's own pipeline. A lost stage asks for the reason first, as the board does.
+  const pickDealStage = (deal, stageId, rowKey) => {
+    const p = crmPipeOf(pipe, deal);
+    const stage = p ? (p.stages || []).find((s) => s.id === stageId) : null;
+    if (!stage) return;
+    if (stage.kind === "lost") { setDealLost({ deal, stage, reasons: p.lostReasons || [], key: rowKey }); return; }
+    moveDeal(deal, stage, rowKey);
+  };
+  // To another pipeline: it lands in that pipeline's first open stage, and the stage drop-down,
+  // which now lists the new pipeline's stages, picks any other.
+  const moveDealToPipeline = (deal, pipelineId, rowKey) => {
+    const target = crmPipeMoveTargets(pipe, deal).find((p) => p.id === pipelineId);
+    if (target) moveDeal(deal, crmPipeFirstOpen(target), rowKey);
+  };
+  // A card's own close date, for a deal with no design (a design's is the design's: saveDealClose).
+  const saveLeadClose = async (deal, value, rowKey) => {
+    const iso = value || null;
+    setDealBusy(true); setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: { ...d.pipeline,
+      deals: (d.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, expected_close_date: iso } : x)) } }));
+    try { await ssPipeCall("crm_deal_update", { id: deal.id, expectedCloseDate: iso || "" }); }
+    catch (e2) { await load(); setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That close date did not save." }); }
+    finally { setDealBusy(false); }
+  };
+  // "+ Add to a pipeline", kept from the Sales pipelines card it replaced: a new deal for this
+  // person (not one of their designs, which have their cards already), in that pipeline's first
+  // open stage. Reloaded rather than painted, because the new card's id comes from the server.
+  const addDealToPipeline = async () => {
+    const p = ((pipe && pipe.pipelines) || []).find((x) => x.id === dealAdd);
+    const stage = crmPipeFirstOpen(p);
+    if (!stage || !(data.contact && data.contact.id)) return;
+    setDealBusy(true); setOpErr(null);
+    try {
+      await ssPipeCall("crm_deal_create", { contactId: data.contact.id, stageId: stage.id });
+      setDealAdd(null);
+      await load();
+    } catch (e2) {
+      setOpErr({ where: "dealAdd", msg: e2.message || "That deal was not added." });
+    } finally {
+      setDealBusy(false);
+    }
+  };
+
   const renderSection = (key) => {
     if (key === "summary") {
       // Editing needs a REAL contact row. On an old design record predating the 130
@@ -3928,19 +4116,23 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         <div style={{ fontSize: 13, color: "#475569" }}>{sel.style || "—"} · {sel.size || "—"}</div>
       );
     }
-    if (key === "salesPipelines") {
-      return data.contact && data.contact.id
-        ? <SsContactDeals contactId={data.contact.id} canEdit={!!canEdit} />
-        : null;
-    }
     if (key === "deals") {
+      // ONE SECTION (Carolyn 2026-10-12, C34). The rows are this person's designs, each joined to
+      // its pipeline card, plus any card with no design; crmDealRows says how. Without a pipeline
+      // block from the server this is the designs list it always was.
+      const rows = crmDealRows(data.designs, pipe);
+      const pipes = (pipe && pipe.pipelines) || [];
+      // Compact, so the controls sit beside "Open in designer" inside the card: "I don't like how
+      // big it is ... this drop down can be in here."
+      const ctl = { border: "1px solid #CBD5E1", borderRadius: 6, padding: "4px 6px", fontSize: 12, fontWeight: 600,
+        fontFamily: "inherit", color: "#1E293B", background: "#FFF", maxWidth: 150, minWidth: 0, cursor: "pointer" };
       return (
         <div>
-          <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({(data.designs || []).length})</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({rows.length})</div>
           {/* Shown only until something is picked, so it stops nagging the moment it has
               been acted on. Without it the page is a contact whose stages, build, delivery
               and every write tab are all silently off with nothing saying why. */}
-          {kind === "contact" && !activeCode && (data.designs || []).length > 0 && (
+          {kind === "contact" && !activeCode && !pickedLead && rows.length > 0 && (
             <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>
               Pick a deal to see its stages, build and delivery.
             </div>
@@ -3948,7 +4140,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
               and the same warning: a button inside a button is invalid HTML and React will
               not render it. THE ROW SELECTS; THE CHEVRON EXPANDS. Both stay on this page.
-              The ● / ○ glyph is there because colour alone is not a state indicator.
+              The ● / ○ glyph is there because colour alone is not a state indicator. The
+              status pill sits INSIDE the row button as a plain span, so the row still has
+              exactly two buttons (crmContactDeal.mjs counts them).
 
               ⚠️ THERE IS DELIBERATELY NO "open this deal's own record" ARROW. Ahsan, 2026-09-20:
               "remove this own record arrow in there i want every thing in the contact page."
@@ -3958,86 +4152,159 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               Fix the gate; the arrow was the workaround, not the feature. The design record
               itself still exists and the Pipeline still opens it directly — it is only no
               longer somewhere a contact has to send you. */}
-          {(data.designs || []).map((d) => {
-            const sel = activeCode === d.short_code;
-            // `!!d.short_code` because dealOpen starts null: without it a row whose code is
-            // missing matches, renders EXPANDED on arrival, and its arrow cannot close it —
-            // clicking sets dealOpen back to null, which still matches.
-            const open = !!d.short_code && dealOpen === d.short_code;
-            const s = d.selections || {};
+          {rows.map((row) => {
+            const d = row.design;
+            const deal = row.deal;
+            const sel = d ? activeCode === d.short_code : !!(pickedLead && pickedLead.id === deal.id);
+            // `!!row.key` because dealOpen starts null: without it a row whose key is missing
+            // matches, renders EXPANDED on arrival, and its arrow cannot close it — clicking
+            // sets dealOpen back to null, which still matches.
+            const open = !!row.key && dealOpen === row.key;
+            const s = (d && d.selections) || {};
             const pc = s.paint_colors || s.paintColors || {};
             const colour = [pc.body, pc.trim].filter(Boolean).join(" / ") || s.paint || "—";
+            const inPipe = crmPipeOf(pipe, deal);
+            const targets = deal ? crmPipeMoveTargets(pipe, deal) : [];
+            const name = d ? ([s.style, s.size].filter(Boolean).join(" ") || d.short_code)
+              : (deal.title || (inPipe ? inPipe.name : "Deal"));
             const fieldRow = (label, node) => (
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
                 <div style={{ width: 96, flexShrink: 0, fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
                 <div style={{ minWidth: 0, fontSize: 12.5, color: "#334155" }}>{node}</div>
               </div>
             );
+            // Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
+            // change. A date input fires change once per keystroke with whatever its segments
+            // hold so far: typing the month "12" reports January first and the first digit of
+            // a year reports year 0002, so a change-save stored January (and the save disabled
+            // the box before the "2" could land). Keyed on the stored value so a save or a
+            // reload repaints it; Escape puts it back. A design's date is the design's
+            // (set_expected_close); a card with no design keeps its own (crm_deal_update).
+            const closeStored = String((d ? d.expected_close_date : deal.expected_close_date) || "").slice(0, 10);
+            const closeField = canEdit ? (
+              <input type="date" key={`${row.key}:${closeStored}`} defaultValue={closeStored} disabled={dealBusy}
+                onBlur={(e) => {
+                  if (e.target.value === closeStored) return;
+                  if (d) saveDealClose(d.short_code, e.target.value); else saveLeadClose(deal, e.target.value, row.key);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") { e.currentTarget.value = closeStored; e.currentTarget.blur(); }
+                }}
+                style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+            ) : (closeStored ? fmtDate(closeStored) : "—");
             return (
-              <div key={d.short_code} style={{ marginBottom: 5 }}>
+              <div key={row.key} data-ss-deal-row={row.key} style={{ marginBottom: 5 }}>
                 <div style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
                   border: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
                   borderRadius: open ? "6px 6px 0 0" : 6, overflow: "hidden" }}>
-                  <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                  <button onClick={() => setSelCode(sel ? null : row.key)} aria-pressed={sel}
                     title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
-                    style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
-                      padding: "7px 9px", cursor: "pointer" }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                      <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
-                      {[s.style, s.size].filter(Boolean).join(" ") || d.short_code}
+                    style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                      background: "transparent", border: "none", padding: "7px 9px", cursor: "pointer" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                        <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                        {name}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(row.at)}</div>
                     </div>
-                    <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                    {/* THE STATUS, ONCE, ON THE TOP LINE (C36). Carolyn, 2026-10-12, boxing the
+                        space right of the name: "If you put the status ... up there, we don't
+                        need the status down here at all." Shown, never set (C40). */}
+                    <CrmDealStatusPill status={crmPipeStatus(pipe, deal)} />
                   </button>
                   {/* ⚠️ A THIRD SIBLING, never a child of the row button. Same rule the two
                       buttons beside it already carry: a <button> inside a <button> is invalid
                       HTML and React will not render it, so an "expand" chevron nested in the
                       row is the one obvious way to build this and it does not work. */}
-                  <button onClick={() => setDealOpen(open ? null : d.short_code)} aria-expanded={open}
+                  <button onClick={() => setDealOpen(open ? null : row.key)} aria-expanded={open}
                     title={open ? "Hide this deal's details" : "Show this deal's details"}
                     style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
                       padding: "0 9px", fontSize: 12, color: "#94A3B8", cursor: "pointer" }}>{open ? "▾" : "▸"}</button>
                 </div>
                 {open && (
-                  <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
+                  <div data-ss-deal-panel={row.key} style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
-                    {/* Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
-                        change. A date input fires change once per keystroke with whatever its
-                        segments hold so far: typing the month "12" reports January first and the
-                        first digit of a year reports year 0002, so a change-save stored January
-                        (and the save disabled the box before the "2" could land). Keyed on the
-                        stored value so a save or a reload repaints it; Escape puts it back. */}
-                    {fieldRow("Expected close", canEdit ? (() => {
-                      const stored = String(d.expected_close_date || "").slice(0, 10);
-                      return (
-                        <input type="date" key={`${d.short_code}:${stored}`} defaultValue={stored} disabled={dealBusy}
-                          onBlur={(e) => { if (e.target.value !== stored) saveDealClose(d.short_code, e.target.value); }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
-                          }}
-                          style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
-                      );
-                    })() : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
-                    {fieldRow("Style", s.style || "—")}
-                    {fieldRow("Size", s.size || "—")}
-                    {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
-                    {fieldRow("Colour", colour)}
-                    {/* The SAME in-portal handler the record header uses. Deliberately NOT a
-                        link to the public ?id= page: signed-in staff browsing there fire
-                        capture-lead and draft saves and corrupt the very activity this record
-                        reports on. openInDesigner also clamps on the designer area, so a Crew
-                        Leader gets a refusal instead of a button that silently does nothing. */}
-                    {onOpenDesign && (
-                      <button style={{ ...S.btn(), marginTop: 7, padding: "5px 10px", fontSize: 12 }}
-                        onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
-                    )}
-                    {opErr && opErr.where === "deals" && opErr.code === d.short_code && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
+                    {fieldRow("Expected close", closeField)}
+                    {d ? (
+                      <>
+                        {fieldRow("Style", s.style || "—")}
+                        {fieldRow("Size", s.size || "—")}
+                        {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
+                        {fieldRow("Colour", colour)}
+                      </>
+                    ) : fieldRow("Value", deal.value_cents != null ? fmtMoneyWhole(deal.value_cents) : "—")}
+                    {deal && deal.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {deal.lost_reason}</div>}
+                    {/* "Open in designer" on the left and, at the bottom right where Carolyn
+                        bracketed it, the stage and the move (C37, C38). Wraps under itself in a
+                        narrow column rather than squeezing the controls. */}
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 6, marginTop: 7 }}>
+                      {/* The SAME in-portal handler the record header uses. Deliberately NOT a
+                          link to the public ?id= page: signed-in staff browsing there fire
+                          capture-lead and draft saves and corrupt the very activity this record
+                          reports on. openInDesigner also clamps on the designer area, so a Crew
+                          Leader gets a refusal instead of a button that silently does nothing. */}
+                      {d && onOpenDesign && (
+                        <button style={{ ...S.btn(), padding: "5px 10px", fontSize: 12, marginRight: "auto" }}
+                          onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
+                      )}
+                      {/* THIS pipeline's stages and nobody else's: "no list of every pipeline's
+                          stages" (C37). Read only for someone who can't edit contacts. */}
+                      {deal && inPipe && (
+                        <select aria-label="Stage" title={`Stage in ${inPipe.name}`} value={deal.stage_id || ""}
+                          disabled={!canEdit} onChange={(e) => pickDealStage(deal, e.target.value, row.key)}
+                          style={{ ...ctl, borderLeft: "4px solid " + (((inPipe.stages || []).find((x) => x.id === deal.stage_id) || {}).color || "#CBD5E1"),
+                            cursor: canEdit ? "pointer" : "default" }}>
+                          {!(inPipe.stages || []).some((x) => x.id === deal.stage_id) && <option value="">Pick a stage</option>}
+                          {(inPipe.stages || []).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                        </select>
+                      )}
+                      {/* Another pipeline (C38). The deal leaves this one: a deal is in exactly one
+                          pipeline (C41). It lands in the new pipeline's first open stage, and the
+                          stage drop-down beside it then lists that pipeline's stages. */}
+                      {deal && canEdit && targets.length > 0 && (
+                        <select aria-label="Move to another pipeline" value=""
+                          title={inPipe ? `Move out of ${inPipe.name} into another pipeline` : "Move into a pipeline"}
+                          onChange={(e) => { if (e.target.value) moveDealToPipeline(deal, e.target.value, row.key); }}
+                          style={ctl}>
+                          <option value="">{inPipe ? "Move to pipeline…" : "Put in a pipeline…"}</option>
+                          {targets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    {opErr && opErr.where === "deals" && opErr.code === row.key && <div style={{ ...S.err, marginTop: 7, marginBottom: 0 }}>{opErr.msg}</div>}
                   </div>
                 )}
               </div>
             );
           })}
-          {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
+          {rows.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No deals yet.</div>}
+          {/* "+ Add to a pipeline", from the Sales pipelines card this one replaced. */}
+          {kind === "contact" && canEdit && pipes.length > 0 && data.contact && data.contact.id && (
+            dealAdd ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                <select aria-label="Pipeline for the new deal" value={dealAdd} onChange={(e) => setDealAdd(e.target.value)}
+                  style={{ ...ctl, maxWidth: "none", flex: "1 1 140px" }}>
+                  {pipes.filter((p) => !!crmPipeFirstOpen(p)).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <button type="button" disabled={dealBusy} onClick={addDealToPipeline}
+                  style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12, opacity: dealBusy ? 0.6 : 1 }}>Add</button>
+                <button type="button" disabled={dealBusy} onClick={() => { setDealAdd(null); setOpErr(null); }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Cancel</button>
+                {opErr && opErr.where === "dealAdd" && <div style={{ ...S.err, flexBasis: "100%", marginBottom: 0 }}>{opErr.msg}</div>}
+              </div>
+            ) : (
+              <button type="button"
+                onClick={() => { const p = pipes.find((x) => !!crmPipeFirstOpen(x)); if (p) { setOpErr(null); setDealAdd(p.id); } }}
+                title="Start a new deal for this person in one of your pipelines"
+                style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, marginTop: 4, fontFamily: "inherit" }}>＋ Add to a pipeline</button>
+            )
+          )}
+          {dealLost && (
+            <SsLostReasonDialog reasons={dealLost.reasons} onCancel={() => setDealLost(null)}
+              onPick={(reason) => { const l = dealLost; setDealLost(null); moveDeal(l.deal, l.stage, l.key, reason); }} />
+          )}
         </div>
       );
     }
@@ -4354,15 +4621,24 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           </div>
         )}
       </div>
-      {kind === "design" && <CrmStageBar status={record.status} />}
+      {/* The old status ladder, only where there is no pipeline block (CrmStageBar says when). */}
+      {kind === "design" && !pipe && <CrmStageBar status={record.status} />}
       {(() => {
         // The design these rails are about: the record itself on a deal, the PICKED deal on
         // a contact. Null on a contact with nothing picked, which reads as "no invoice" and
         // hides Build/Delivery — correct, and the sales row is gone for the same reason.
         const railDesign = kind === "contact" ? activeDeal : record;
 
-        // SALES: on a contact only (the deal already has its chevron rail above), and only
-        // once a deal is PICKED.
+        // THE DEAL'S PIPELINE (C35, Carolyn 2026-10-12): "Instead of this saying sales ... I
+        // want this up here to say shed deals with the stage that it's in." The first row is
+        // named after the pipeline the picked deal is in and draws THAT pipeline's stages, the
+        // one it is in lit; picking a deal in another pipeline switches it. On a design record
+        // it is the design's own card. The hard-coded ladder below is only for a record with no
+        // pipeline block (CrmStageBar says when).
+        const pipeRow = pipe ? crmPipeBarRow(pipe, barDeal) : null;
+
+        // SALES (the old ladder): on a contact only (a design draws CrmStageBar above), and
+        // only once a deal is PICKED.
         //
         // ⚠️ THIS USED TO AUTO-PICK designs[0], "the newest deal", and that auto-pick IS the
         // bug. Carolyn, 2026-09-02, on a contact holding four quotes: "there's three, four
@@ -4410,7 +4686,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         const invoiced = crmHasInvoice(railDesign);
         return (
           <CrmStageDots rows={[
-            kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
+            pipeRow || (!pipe && kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null),
             data.build && invoiced ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
             data.delivery && invoiced ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
           ].filter(Boolean)} />
@@ -5600,95 +5876,6 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, refreshKe
       {dialog && dialog.lost && (
         <SsLostReasonDialog reasons={pipe ? pipe.lostReasons : []} onCancel={() => setDialog(null)}
           onPick={(reason) => { const { deal, stage } = dialog.lost; setDialog(null); moveDeal(deal, stage, reason); }} />
-      )}
-    </div>
-  );
-}
-
-// The contact record's sales-pipeline section: which pipeline and stage this person is in, moved
-// from a drop-down (the board's drag has no phone equivalent), and "+ Add to a pipeline".
-function SsContactDeals({ contactId, canEdit = false }) {
-  const [meta, setMeta] = useState(null);
-  const [deals, setDeals] = useState(null);
-  const [err, setErr] = useState(null);
-  const [adding, setAdding] = useState(false);
-  const [addStage, setAddStage] = useState("");
-  const [lost, setLost] = useState(null);
-  const load = useCallback(async () => {
-    try {
-      const [m, d] = await Promise.all([ssPipeCall("crm_pipelines_list"), ssPipeCall("crm_contact_deals", { contactId })]);
-      setMeta(m); setDeals(d.deals || []); setErr(null);
-    } catch (e) { setErr(e.message); setDeals((x) => x || []); }
-  }, [contactId]);
-  useEffect(() => { load(); }, [load]);
-  const pipes = (meta && meta.pipelines) || [];
-  const stageOf = (id) => { for (const p of pipes) { const s = p.stages.find((x) => x.id === id); if (s) return { pipe: p, stage: s }; } return null; };
-  const doMove = async (deal, stageId, reason) => {
-    try { await ssPipeCall("crm_deal_move", { id: deal.id, stageId, lostReason: reason || null }); load(); }
-    catch (e) { setErr(e.message); }
-  };
-  const doStatus = async (deal, statusId) => {
-    try { await ssPipeCall("crm_deal_set_status", { id: deal.id, statusId }); load(); }
-    catch (e) { setErr(e.message); }
-  };
-  const statuses = (meta && meta.statuses) || [];
-  if (deals === null) return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Loading…</div>;
-  return (
-    <div data-ss-contact-deals="">
-      {err && <div style={S.err}>{err}</div>}
-      {deals.length === 0 && !adding && <div style={{ fontSize: 12.5, color: "#94A3B8", marginBottom: 6 }}>Not in a sales pipeline.</div>}
-      {deals.map((d) => {
-        const at = stageOf(d.stage_id);
-        return (
-          <div key={d.id} style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>
-                {at ? at.pipe.name : "Pipeline"}
-                {d.design ? ` · Estimate ${d.design.estimateNumber ? "#" + d.design.estimateNumber : d.short_code}` : (d.title ? ` · ${d.title}` : "")}
-              </span>
-              {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800 }}>{fmtMoneyWhole(d.value_cents)}</span>}
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <SsStatusPill statuses={statuses} value={d.status_id} disabled={!canEdit} onChange={(id) => doStatus(d, id)} />
-            </div>
-            {/* Every pipeline's stages, so a card can move to ANOTHER pipeline from here
-                (Carolyn: "one card per design that you can choose to move to other pipelines"). */}
-            {at && (
-              <select disabled={!canEdit} value={d.stage_id} aria-label="Pipeline and stage"
-                onChange={(e) => { const hit = stageOf(e.target.value); if (!hit) return; if (hit.stage.kind === "lost") setLost({ deal: d, stage: hit.stage, reasons: hit.pipe.lostReasons }); else doMove(d, hit.stage.id); }}
-                style={{ ...S.input, marginTop: 6, padding: "5px 8px", borderLeft: "4px solid " + at.stage.color }}>
-                {pipes.map((p) => (
-                  <optgroup key={p.id} label={p.name}>
-                    {p.stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </optgroup>
-                ))}
-              </select>
-            )}
-            {d.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {d.lost_reason}</div>}
-          </div>
-        );
-      })}
-      {canEdit && !adding && pipes.length > 0 && (
-        <button type="button" onClick={() => { setAdding(true); const s = pipes[0].stages.find((x) => x.kind === "open"); setAddStage(s ? s.id : ""); }}
-          style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>＋ Add to a pipeline</button>
-      )}
-      {adding && (
-        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <select aria-label="Pipeline stage" value={addStage} onChange={(e) => setAddStage(e.target.value)} style={{ ...S.input, width: "auto", flex: "1 1 160px", padding: "5px 8px" }}>
-            {pipes.map((p) => (
-              <optgroup key={p.id} label={p.name}>
-                {p.stages.filter((s) => s.kind !== "lost").map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </optgroup>
-            ))}
-          </select>
-          <button type="button" disabled={!addStage} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 10px" }}
-            onClick={async () => { try { await ssPipeCall("crm_deal_create", { contactId, stageId: addStage }); setAdding(false); load(); } catch (e) { setErr(e.message); } }}>Add</button>
-          <button type="button" onClick={() => setAdding(false)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 10px" }}>Cancel</button>
-        </div>
-      )}
-      {lost && (
-        <SsLostReasonDialog reasons={lost.reasons} onCancel={() => setLost(null)}
-          onPick={(reason) => { const l = lost; setLost(null); doMove(l.deal, l.stage.id, reason); }} />
       )}
     </div>
   );

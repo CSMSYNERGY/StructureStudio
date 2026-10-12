@@ -8174,7 +8174,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // absent-vs-empty distinction three of them have a comment about: Promise.all rejects on
     // the first THROW, and none of these throws — a failed read comes back on `.error` and is
     // turned into `undefined` by the same line that always did it.
-    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut] = await Promise.all([
+    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut, pipeline] = await Promise.all([
       buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true, phone: phoneFeedScope(contact?.owner_user_id ?? null) }),
       // Focus = open activities, soonest first. This is the crm_activities_focus index.
       admin.from("crm_activities")
@@ -8430,6 +8430,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
         return { people, followers, team, ownerName };
       })(),
+
+      // ── EACH DEAL'S PIPELINE, STAGE AND STATUS (Carolyn, 2026-10-12) ─────────────────────
+      // "Instead of this saying sales ... I want this up here to say shed deals with the stage
+      // that it's in", and one Deals section where each deal shows its status and can change
+      // stage or move to another pipeline. So the record needs the pipeline cards (crm_deals) for
+      // this person's deals, and the pipelines and statuses that name them.
+      //
+      // Deals ride their CONTACT (GATES' sales-pipeline note), so this is read only for someone
+      // who may read the contact half: the same rule as crm_pipelines_list, which is contacts:view
+      // plus the CRM. Everyone else gets `undefined` and the record keeps its old stage ladder.
+      // A contact's deals are its own (contact_id) plus the cards of its designs, which can carry
+      // another contact_id after a merge. A design record's deal is its card, by short code.
+      //
+      // ADDED, NOT CHANGED: main's frontend reads crm_record and never looks at this key. Read
+      // only, and it never seeds pipelines (crm_pipelines_list does that the first time the board
+      // opens). undefined on any failed read, the absent-vs-empty rule the blocks above follow.
+      (async () => {
+        if (!mayReadContacts) return undefined;
+        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_reason, stage_entered_at, created_at";
+        const safeCodes = codes.filter((c) => /^[A-Za-z0-9_-]{1,40}$/.test(String(c)));
+        let dealsQ = admin.from("crm_deals").select(dealCols).eq("client_id", clientId).is("archived_at", null);
+        if (kind === "contact") {
+          dealsQ = dealsQ.or(safeCodes.length
+            ? `contact_id.eq.${contact.id},short_code.in.(${safeCodes.join(",")})`
+            : `contact_id.eq.${contact.id}`);
+        } else {
+          dealsQ = dealsQ.eq("short_code", designs[0].short_code);
+        }
+        const [pRes, sRes, tRes, dRes] = await Promise.all([
+          admin.from("crm_pipelines").select("id, name, position, lost_reasons")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          admin.from("crm_statuses").select("id, name, color, position")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          dealsQ.order("created_at", { ascending: false }).limit(100),
+        ]);
+        if (pRes.error || sRes.error || tRes.error || dRes.error) return undefined;
+        const stages = sRes.data ?? [];
+        return {
+          pipelines: (pRes.data ?? []).map((p: any) => ({
+            id: p.id, name: p.name, lostReasons: p.lost_reasons ?? [],
+            stages: stages.filter((s: any) => s.pipeline_id === p.id)
+              .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind })),
+          })),
+          statuses: (tRes.data ?? []).map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
+          deals: dRes.data ?? [],
+        };
+      })(),
     ]);
 
     // Unpacked after the wait, and `contact` is merged HERE rather than inside a branch —
@@ -8444,7 +8493,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline });
   }
 
   if (action === "crm_feed") {
