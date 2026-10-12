@@ -198,7 +198,7 @@ const BASE_ENV: Record<string, string> = {
 type Row = Record<string, any>;
 /** The tables create_client and a provisioning run touch, with one ordered log of both. */
 class Db {
-  configs = new Map<string, Row>([["junior-template", { client_id: "junior-template" }]]);
+  configs = new Map<string, Row>([["template-client", { client_id: "template-client" }]]);
   accounts = new Map<string, Row>();
   settings = new Map<string, Row>();
   holdings = new Map<string, string>();
