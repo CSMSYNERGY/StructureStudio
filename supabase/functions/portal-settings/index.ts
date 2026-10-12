@@ -223,8 +223,8 @@ import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/
 import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
-  isUuidLike, parseDealPatch, parseIdOrder, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder, parseStageSave,
-  parseStatusSave,
+  DESIGN_FEED_STAYS, isUuidLike, parseDealPatch, parseIdOrder, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder,
+  parseStageSave, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   stageSetRefusal, type StageKind as PipeStageKind,
 } from "../_shared/crmPipelines.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
@@ -508,8 +508,11 @@ const GATES: GateTable = {
   crm_pipeline_save:     { area: "settings_crm", level: "edit" },
   crm_stage_save:        { area: "settings_crm", level: "edit" },
   crm_stages_reorder:    { area: "settings_crm", level: "edit" },
-  // Card STATUSES (migration 302): giving one card a status is a customer-record write like a
-  // move (and is narrowed the same way); the status list itself is a Settings → Pipelines card.
+  // Card STATUSES (migration 302): the status list itself is a Settings → Pipelines card. Since
+  // 303 a card's status is SYSTEM-DRIVEN ONLY (Carolyn 2026-10-12: "it is not even possible for
+  // them to make the changes"), and crm_deal_set_status refuses every caller with a sentence. It
+  // keeps the write gate it had (and its CONTACT_ROW_SCOPE row) so a portal tab from before 303
+  // that still sends it is answered in words rather than with an unknown-action 404.
   crm_deal_set_status:   { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
@@ -9404,10 +9407,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return null;
   };
 
-  /** The tenant's live pipelines with their live stages, seeding the starter "Sales" once. */
+  /** The tenant's live pipelines with their live stages, seeding the statuses and Shed Deals once. */
   const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[] } | { dbError: unknown }> => {
     const read = () => admin.from("crm_pipelines")
-      .select("id, name, position, lost_reasons, seed_kind, feeds_designs, mirrors_statuses")
+      .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
     const readStatuses = () => admin.from("crm_statuses")
       .select("id, name, color, position, trigger_event")
@@ -9417,8 +9420,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (stErr) return { dbError: stErr };
     if (!pipes || !pipes.length) {
       // An account opening the board for the first time (every account that existed on
-      // 2026-10-11 got these from migration 302): the statuses, Quotes and Shed Deals. A write
-      // under a read gate, deliberately: it is idempotent per tenant and holds no person's data.
+      // 2026-10-11 got these from migration 302): the statuses and Shed Deals, which new designs
+      // land in (migration 303 retired Quotes and never seeds it again). A write under a read
+      // gate, deliberately: it is idempotent per tenant and holds no person's data.
       const seeded = await admin.rpc("crm_ensure_pipelines", { p_client_id: clientId });
       if (seeded.error) return { dbError: seeded.error };
       [{ data: pipes, error }, { data: statuses, error: stErr }] = await Promise.all([read(), readStatuses()]);
@@ -9427,17 +9431,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const ids = (pipes ?? []).map((p: any) => p.id);
     const { data: stages, error: sErr } = ids.length
-      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position, status_id")
+      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
           .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
           .order("position", { ascending: true })
       : { data: [], error: null };
     if (sErr) return { dbError: sErr };
     return {
       pipelines: (pipes ?? []).map((p: any) => ({
+        // feedsDesigns: new designs land in this one, in its first open stage (Shed Deals since 303).
+        // A stage carries no status (303): moving a card never changes its status.
         id: p.id, name: p.name, position: p.position, lostReasons: p.lost_reasons ?? [], seedKind: p.seed_kind ?? null,
-        feedsDesigns: p.feeds_designs === true, mirrorsStatuses: p.mirrors_statuses === true,
+        feedsDesigns: p.feeds_designs === true,
         stages: (stages ?? []).filter((s: any) => s.pipeline_id === p.id)
-          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position, statusId: s.status_id ?? null })),
+          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position })),
       })),
       statuses: (statuses ?? []).map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
     };
@@ -9627,6 +9633,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "crm_deal_move") {
+    // A stage change only: since migration 303 crm_move_deal never touches the card's status.
     const id = String(payload.id ?? "").toLowerCase();
     const stageId = String(payload.stageId ?? "").toLowerCase();
     if (!isUuidLike(id) || !isUuidLike(stageId)) return json({ error: "Pick the deal and the stage to move it to." }, 400);
@@ -9678,6 +9685,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ ok: true, id: made.id });
     }
     if (p.archive) {
+      // The pipeline new designs land in stays: without it a new design gets no card (C15).
+      const { data: feed, error: fErr } = await admin.from("crm_pipelines").select("feeds_designs")
+        .eq("client_id", clientId).eq("id", p.id).is("archived_at", null).maybeSingle();
+      if (fErr) return dbFail(req, clientId, "check that pipeline", fErr);
+      if (feed?.feeds_designs === true) return json({ error: DESIGN_FEED_STAYS }, 409);
       const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
         .eq("client_id", clientId).eq("pipeline_id", p.id).is("archived_at", null);
       if (cErr) return dbFail(req, clientId, "check that pipeline's deals", cErr);
@@ -9734,13 +9746,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { data: top } = await admin.from("crm_pipeline_stages").select("position")
         .eq("client_id", clientId).eq("pipeline_id", pipelineId!).is("archived_at", null)
         .order("position", { ascending: false }).limit(1).maybeSingle();
+      // No status_id: a stage never sets a status (migration 303; parseStageSave refuses a link).
       const { data: made, error } = await admin.from("crm_pipeline_stages").insert({
         client_id: clientId, pipeline_id: pipelineId, name: s.name, color: s.color ?? "#64748B",
         kind: s.kind ?? "open", position: (Number(top?.position) || 0) + 1024,
-        status_id: s.statusId ?? null,
       }).select("id").single();
-      if (String(error?.code) === "23505") return json({ error: "Another stage in this pipeline is already linked to that status." }, 409);
-      if (String(error?.code) === "23503") return json({ error: "That status no longer exists — refresh and try again." }, 404);
       if (error) return dbFail(req, clientId, "add that stage", error);
       return json({ ok: true, id: made.id });
     }
@@ -9748,11 +9758,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (s.name) patch.name = s.name;
     if (s.color) patch.color = s.color;
     if (s.kind) patch.kind = s.kind;
-    if (s.statusId !== undefined) patch.status_id = s.statusId;
     if (s.archive) patch.archived_at = new Date().toISOString();
     const { error } = await admin.from("crm_pipeline_stages").update(patch).eq("client_id", clientId).eq("id", s.id);
-    if (String(error?.code) === "23505") return json({ error: "Another stage in this pipeline is already linked to that status." }, 409);
-    if (String(error?.code) === "23503") return json({ error: "That status no longer exists — refresh and try again." }, 404);
     if (error) return dbFail(req, clientId, "save that stage", error);
     audit("crm_stage_save", 1, `stage=${s.id} archive=${s.archive}`).catch(() => {});
     return json({ ok: true, id: s.id });
@@ -9780,33 +9787,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // ── CARD STATUSES (migration 302) ─────────────────────────────────────────────────────
   // Carolyn 2026-10-11: a status on every card as a coloured pill; "each builder can then rename
   // them ... add others ... and they will set up when they get that stage such as when an
-  // estimate is accepted then it gets that stage", a drop-down like the GHL settings. The
-  // automatic half lives in the database (crm_design_event, fed by triggers on designs, payments
-  // and build_jobs); these are the hand-set half and the Settings → Pipelines editor.
+  // estimate is accepted then it gets that stage", a drop-down like the GHL settings.
+  // SYSTEM-DRIVEN ONLY since 303. Carolyn 2026-10-12: "those statuses are automatically set, like,
+  // it is not even possible for them to make the changes, it is system-driven, okay, the statuses
+  // are system-driven, 100%." The only writer of a card's status is the database (crm_design_event,
+  // fed by the designs, payments and build_jobs triggers, forward only). What is left here is the
+  // Settings → Pipelines editor: names, colours, order, and the event that sets each status.
   if (action === "crm_deal_set_status") {
-    const id = String(payload.id ?? "").toLowerCase();
-    const statusId = String(payload.statusId ?? "").toLowerCase();
-    if (!isUuidLike(id) || !isUuidLike(statusId)) return json({ error: "Pick the card and the status." }, 400);
-    const { data, error } = await admin.rpc("crm_set_deal_status", {
-      p_client_id: clientId, p_deal: id, p_status: statusId,
-      p_actor: isUuidLike(String(userId ?? "")) ? userId : null, p_forward_only: false,
-    });
-    if (error) {
-      if (/status not found/i.test(String(error.message ?? ""))) return json({ error: "That status no longer exists — refresh and try again." }, 404);
-      return pipeRefusal(error) ?? dbFail(req, clientId, "set that status", error);
-    }
-    return json({ ok: true, ...((data as Record<string, unknown>) ?? {}) });
+    // Refused for everyone, before anything is read: an owner can't set one either. Refused LOUDLY
+    // rather than ignored, so a tab from before 303 shows why the pill did not change.
+    return json({ error: STATUS_IS_SYSTEM_SET }, 409);
   }
 
   if (action === "crm_status_save") {
     const st = parseStatusSave((payload ?? {}) as Record<string, unknown>);
     if (!st.ok) return json({ error: st.error }, 400);
     const now = new Date().toISOString();
-    // The pipelines whose stages ARE the statuses (Quotes): a status added, renamed, recoloured
-    // or removed there is the same change to its stage.
-    const { data: mirrors } = await admin.from("crm_pipelines").select("id")
-      .eq("client_id", clientId).eq("mirrors_statuses", true).is("archived_at", null);
-    const mirrorIds = (mirrors ?? []).map((m: any) => m.id);
+    // A status is its own row and nothing else: 302's Quotes pipeline, whose stages mirrored the
+    // statuses, was retired by 303, and no stage links to a status any more.
     const dupe = (e: any) => String(e?.code) === "23505"
       ? json({ error: "Another status is already set by that. Each one can set only one status." }, 409) : null;
 
@@ -9818,15 +9816,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         trigger_event: st.triggerEvent ?? null, position: (Number(top?.position) || 0) + 1024,
       }).select("id").single();
       if (error) return dupe(error) ?? dbFail(req, clientId, "add that status", error);
-      for (const pid of mirrorIds) {
-        const { data: last } = await admin.from("crm_pipeline_stages").select("position")
-          .eq("client_id", clientId).eq("pipeline_id", pid).is("archived_at", null)
-          .order("position", { ascending: false }).limit(1).maybeSingle();
-        await admin.from("crm_pipeline_stages").insert({
-          client_id: clientId, pipeline_id: pid, name: st.name, color: st.color ?? "#64748B", kind: "open",
-          status_id: made.id, position: (Number(last?.position) || 0) + 1024,
-        });
-      }
       audit("crm_status_save", 1, `created=${made.id}`).catch(() => {});
       return json({ ok: true, id: made.id });
     }
@@ -9835,7 +9824,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
         .eq("client_id", clientId).eq("status_id", st.id).is("archived_at", null);
       if (cErr) return dbFail(req, clientId, "check that status's cards", cErr);
-      if ((count ?? 0) > 0) return json({ error: `${count} card${count === 1 ? " has" : "s have"} that status. Give ${count === 1 ? "it" : "them"} another status first.` }, 409);
+      // Nobody can give those cards another status by hand, so the answer is "rename it".
+      if ((count ?? 0) > 0) return json({ error: statusArchiveRefusal(count ?? 0) }, 409);
       const { count: left } = await admin.from("crm_statuses").select("id", { count: "exact", head: true })
         .eq("client_id", clientId).is("archived_at", null);
       if ((left ?? 0) <= 1) return json({ error: "Keep at least one status: every card needs one." }, 409);
@@ -9849,20 +9839,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", st.id).is("archived_at", null).select("id");
     if (error) return dupe(error) ?? dbFail(req, clientId, "save that status", error);
     if (!data || !data.length) return json({ error: "That status wasn't found." }, 404);
-    // Linked stages follow: a renamed/recoloured status renames its Quotes stage; a removed one
-    // removes the Quotes stage (empty, since no card has the status) and unlinks it elsewhere.
-    const stagePatch: Record<string, unknown> = { updated_at: now };
-    if (st.name) stagePatch.name = st.name;
-    if (st.color) stagePatch.color = st.color;
-    if (st.archive) stagePatch.archived_at = now;
-    if (mirrorIds.length && Object.keys(stagePatch).length > 1) {
-      await admin.from("crm_pipeline_stages").update(stagePatch)
-        .eq("client_id", clientId).eq("status_id", st.id).in("pipeline_id", mirrorIds).is("archived_at", null);
-    }
-    if (st.archive) {
-      await admin.from("crm_pipeline_stages").update({ status_id: null, updated_at: now })
-        .eq("client_id", clientId).eq("status_id", st.id).is("archived_at", null);
-    }
     audit("crm_status_save", 1, `status=${st.id} archive=${st.archive}`).catch(() => {});
     return json({ ok: true, id: st.id });
   }
@@ -9883,16 +9859,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .eq("client_id", clientId).eq("id", o.ids[i]);
       if (uErr) return dbFail(req, clientId, "reorder those statuses", uErr);
     }
-    // Quotes' stages follow the status order (the order is also what "forward only" means for
-    // automatic changes, so it matters beyond looks).
-    const { data: mirrors } = await admin.from("crm_pipelines").select("id")
-      .eq("client_id", clientId).eq("mirrors_statuses", true).is("archived_at", null);
-    for (const m of mirrors ?? []) {
-      for (let i = 0; i < o.ids.length; i++) {
-        await admin.from("crm_pipeline_stages").update({ position: (i + 1) * 1024 })
-          .eq("client_id", clientId).eq("pipeline_id", (m as any).id).eq("status_id", o.ids[i]).is("archived_at", null);
-      }
-    }
+    // The order is what "forward only" means for the automatic changes, so it matters beyond
+    // looks: an event never moves a card to a status earlier in this list.
     return json({ ok: true });
   }
 
