@@ -43,7 +43,7 @@ function fakePort() {
  * The phone block running in a fake tab at `href`. `connect` is the extension's chrome.runtime
  * .connect (absent: a browser or extension without it). Timers are held, not run, until `tick`.
  */
-function tab(opts: { search?: string; pinged?: boolean; connect?: boolean; visible?: boolean } = {}) {
+function tab(opts: { search?: string; pathname?: string; pinged?: boolean; connect?: boolean; visible?: boolean } = {}) {
   const sent: Msg[] = [];
   const ports: ReturnType<typeof fakePort>[] = [];
   // Held timers, with their delay: the ping's own 800 ms timeout goes through here too.
@@ -51,7 +51,7 @@ function tab(opts: { search?: string; pinged?: boolean; connect?: boolean; visib
   const pushed: string[] = [];
   const popped: unknown[] = [];
   const listeners: Record<string, Fn[]> = {};
-  const location = { href: "", pathname: "/portal/designs", search: opts.search ?? "" };
+  const location = { href: "", pathname: opts.pathname ?? "/portal/designs", search: opts.search ?? "" };
   const runtime: Record<string, unknown> = { lastError: undefined };
   runtime.sendMessage = (_id: string, m: Msg, cb: (r: unknown) => void) => {
     sent.push(m);
@@ -79,7 +79,11 @@ function tab(opts: { search?: string; pinged?: boolean; connect?: boolean; visib
         location.search = q ? `?${q}` : "";
       },
     },
-    dispatchEvent: (e: { type: string; state: unknown }) => popped.push(e),
+    // As the browser does: every popstate listener hears it (the shell's router, and the port's).
+    dispatchEvent: (e: { type: string; state: unknown }) => {
+      popped.push(e);
+      for (const f of listeners[`window:${e.type}`] ?? []) f(e);
+    },
     addEventListener: (type: string, f: Fn) => (listeners[`window:${type}`] ??= []).push(f),
   };
   const doc = {
@@ -95,11 +99,16 @@ function tab(opts: { search?: string; pinged?: boolean; connect?: boolean; visib
     }
   }
   const ssPagePath = (page: string, sub: string | null) => "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "") + (location.search || "");
+  // The router's reading of the address (01-core ssParsePath, without its old-name aliases).
+  const ssParsePath = () => {
+    const parts = location.pathname.split("/").filter(Boolean);
+    return parts[0] === "portal" ? { page: parts[1] || null, sub: parts[2] || null } : { page: null, sub: null };
+  };
   const h = new Function(
-    "window", "navigator", "ssIsBetaHost", "ssPagePath", "document", "PopStateEvent", "setTimeout", "clearTimeout",
+    "window", "navigator", "ssIsBetaHost", "ssPagePath", "ssParsePath", "document", "PopStateEvent", "setTimeout", "clearTimeout",
     `${PHONE_BLOCK}; return { ssPhoneNavTarget, ssPhoneRoutable, ssPhonePortOpen, ssPhonePortVisit };`,
   )(
-    win, { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/140" }, () => false, ssPagePath, doc, PopStateEvent,
+    win, { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/140" }, () => false, ssPagePath, ssParsePath, doc, PopStateEvent,
     (f: Fn, ms: number) => { timers.push({ f, ms }); return timers.length; }, () => {},
   ) as { ssPhoneNavTarget: (m: unknown) => unknown; ssPhoneRoutable: (s?: string) => boolean; ssPhonePortOpen: () => Promise<void>; ssPhonePortVisit: () => void };
   const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -146,6 +155,7 @@ Deno.test("on load the tab pings, opens ONE port named sss.portal, and says it i
   assertEquals(hello.visible, true);
   assertEquals(hello.routable, true);
   assert(typeof hello.seen_at === "number" && (hello.seen_at as number) > 0);
+  assertEquals([hello.page, hello.sub], ["designs", null], "the page it shows, as the router names it");
   // A visit while the port is open says so, and opens nothing more.
   t.h.ssPhonePortVisit();
   assertEquals(t.ports[0].posted.at(-1)?.type, "sss.seen");
@@ -170,6 +180,53 @@ Deno.test("sss.navigate routes this tab in place, the way Back does, and answers
   p.send({ type: "sss.navigate", id: 5, page: "https://evil.test", sub: null });
   assertEquals(p.posted.at(-1), { type: "sss.navigated", id: 5, ok: false, error: "bad_request" });
   assertEquals(t.pushed.length, 1);
+});
+
+Deno.test("the tab says which page it shows (so one already on the contact is picked first), and says it again after a navigate or Back", async () => {
+  const t = tab({ pathname: `/portal/contacts/c-${CONTACT}` });
+  await t.tick();
+  const p = t.ports[0];
+  assertEquals([p.posted[0].page, p.posted[0].sub], ["contacts", `c-${CONTACT}`]);
+  p.send({ type: "sss.welcome" });
+  p.send({ type: "sss.navigate", id: 1, page: "settings", sub: "phone" });
+  const seen = p.posted.filter((m) => m.type === "sss.seen").at(-1);
+  assertEquals([seen?.page, seen?.sub], ["settings", "phone"]);
+  assertEquals(p.posted.at(-1), { type: "sss.navigated", id: 1, ok: true });
+  // Back (the browser's own popstate) says so too.
+  t.location.pathname = "/portal/orders";
+  for (const f of t.listeners["window:popstate"] ?? []) f({ type: "popstate", state: null });
+  assertEquals([p.posted.at(-1)?.type, p.posted.at(-1)?.page, p.posted.at(-1)?.sub], ["sss.seen", "orders", null]);
+  // Anything that isn't a router slug is never said: the page is then unknown, not the address.
+  t.location.pathname = "/portal/contacts/c-1..%2Fadmin";
+  t.h.ssPhonePortVisit();
+  assertEquals([p.posted.at(-1)?.page, p.posted.at(-1)?.sub], [null, null]);
+});
+
+// ── 02-sales: the SMS tab's hand-off carries the contact's name ────────────────────────────
+Deno.test("the SMS tab's Text carries the contact's name, so the extension's Quick sends fill {first_name} (C51)", async () => {
+  const SALES = (await Deno.readTextFile(new URL("../../portal/02-sales.jsx", import.meta.url))).replace(/\r\n/g, "\n");
+  const routeText = slice(SALES, "const routeText = async () => {", "\n  };\n", "CrmRecord.routeText") + "\n  };";
+  const run = async (contact: Record<string, unknown>) => {
+    const sent: Msg[] = [];
+    const ui: unknown[] = [];
+    const f = new Function(
+      "setSmsHere", "phoneOn", "canCall", "ssIsPhoneBrowser", "setPhoneUi", "phoneMsg", "ssPhonePing", "ssPhoneSend", "ssPhoneRefusal", "userId", "clientId", "data",
+      `${routeText}; return routeText;`,
+    )(
+      () => {}, true, true, () => false, (u: unknown) => ui.push(u),
+      () => ({ to_e164: "+15555550142", contact_id: CONTACT, user_id: "u1", client_id: "demo-tenant" }),
+      async () => ({ id: EXT, reply: { ok: true, user_id: "u1", client_id: "demo-tenant" } }),
+      async (type: string, m: Msg) => { sent.push({ type, ...m }); return { installed: true, reply: { ok: true } }; },
+      () => "", "u1", "demo-tenant", { contact },
+    ) as () => Promise<void>;
+    await f();
+    return { sent, ui };
+  };
+  const named = await run({ id: CONTACT, name: "Test Customer", phone: "(555) 555-0142" });
+  assertEquals(named.sent, [{ type: "sss.text", to_e164: "+15555550142", contact_id: CONTACT, user_id: "u1", client_id: "demo-tenant", name: "Test Customer" }]);
+  assertEquals((named.ui.at(-1) as Msg).kind, "texting");
+  const unnamed = await run({ id: CONTACT, name: "", phone: "(555) 555-0142" });
+  assertEquals(unnamed.sent[0].name, null);
 });
 
 Deno.test("a tab in view-as refuses, and says routable:false up front", async () => {

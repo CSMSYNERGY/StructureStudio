@@ -1162,17 +1162,20 @@ async function ssPhoneSend(type, payload) {
 // for every click: "I'm already here? Why would I the first time want to go to a new tab?").
 // My Synergy Phone 0.1.4 keeps a list of the Structure Studio tabs open on this computer: each one
 // keeps ONE port open to it (chrome.runtime.connect, name "sss.portal"). Its "Open in Structure
-// Studio" asks the tab the person used last to show the page in place, through the router below,
-// and brings that tab forward; only when no tab answers does it open a new one. The protocol is
-// SPEC section 5 ("Open in Structure Studio") in the phone repo:
-//   page → extension  { type: "sss.hello" | "sss.seen", visible, seen_at, routable }
+// Studio" asks a tab on the address the person is using (beta or app), one already on that contact
+// first, then the one used last, to show the page in place through the router below, and brings
+// that tab forward; only when no tab answers does it open a new one. The protocol is SPEC section 5
+// ("Open in Structure Studio") in the phone repo:
+//   page → extension  { type: "sss.hello" | "sss.seen", visible, seen_at, routable, page, sub }
 //                     { type: "sss.navigated", id, ok, error? }
 //   extension → page  { type: "sss.welcome" }  (it keeps the list)
 //                     { type: "sss.navigate", id, page, sub }
 // An extension older than 0.1.4 has no listener: the port closes at once with no welcome, and this
 // tab asks again only when it comes back into view, at most once a minute. Chrome closes every port
 // when it stops the extension's idle service worker; a welcomed port reconnects a second later, so
-// the tab is never missing from the list for long. A tab in view-as (?view=) or the Projects
+// the tab is never missing from the list for long (a background tab Chrome has frozen reconnects
+// when it wakes). The cost: with a tab open, that worker is restarted about every 30 seconds
+// instead of idling. A tab in view-as (?view=) or the Projects
 // pop-out (?popout=1) says routable:false and refuses: the extension's contact belongs to the
 // person's own account, and routing that tab would drop the account being looked at.
 const SS_PHONE_PORT_RETRY_MS = 60000;
@@ -1212,11 +1215,24 @@ function ssPhoneShowHere(t) {
   return true;
 }
 
+// The page this tab shows, as the router names it (ssParsePath), so the extension can ask a tab
+// already on the contact first (C49, 2026-10-12: "especially one on this contact"). Slugs only, never
+// the address. Said on each hello and seen, and after Back, Forward or a navigate; a click inside
+// the app moves the page without saying so, which only makes this tab a less likely first pick (the
+// extension still asks it to show the page, and a tab already there just stays put).
+function ssPhonePageNow() {
+  try {
+    const t = typeof ssParsePath === "function" ? ssPhoneNavTarget(ssParsePath()) : null;
+    return t || { page: null, sub: null };
+  } catch (_e) { return { page: null, sub: null }; }
+}
+
 function ssPhonePortSay(type) {
   const p = ssPhonePort && ssPhonePort.port;
   if (!p) return;
+  const at = ssPhonePageNow();
   try {
-    p.postMessage({ type, visible: document.visibilityState === "visible", seen_at: ssPhoneSeenAt || null, routable: ssPhoneRoutable() });
+    p.postMessage({ type, visible: document.visibilityState === "visible", seen_at: ssPhoneSeenAt || null, routable: ssPhoneRoutable(), page: at.page, sub: at.sub });
   } catch (_e) { /* closed: the next visit opens another */ }
 }
 
@@ -1261,6 +1277,11 @@ function ssPhonePortVisit() {
   else void ssPhonePortOpen();
 }
 
+// Back, Forward, or a navigate from the extension (it goes through popstate too): say the new page.
+function ssPhonePortMoved() {
+  if (ssPhonePort) ssPhonePortSay("sss.seen");
+}
+
 // Started once, when the app loads in a browser tab (never in the tests that run this block
 // outside a browser, where there is no document).
 if (typeof document !== "undefined" && typeof window.addEventListener === "function") {
@@ -1269,6 +1290,7 @@ if (typeof document !== "undefined" && typeof window.addEventListener === "funct
   window.addEventListener("focus", ssPhonePortVisit);
   // Back from the back-forward cache: Chrome closed the port when the page went in.
   window.addEventListener("pageshow", (e) => { if (e.persisted) ssPhonePortVisit(); });
+  window.addEventListener("popstate", ssPhonePortMoved);
   setTimeout(() => { void ssPhonePortOpen(); }, 0);
 }
 
