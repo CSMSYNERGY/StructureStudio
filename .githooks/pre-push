@@ -7,7 +7,8 @@
 #   1. FRESHNESS — refuse to push a branch that is behind its remote. The rule
 #      (Carolyn, 2026-08-02): always `git pull --rebase origin beta` before pushing.
 #   1b. RELEASE-NOTE NUDGE (never blocks) — commits going to beta that change what builders
-#      see but carry no `Release-note:` trailer are named, with the one command that adds it.
+#      see but carry no `Release-note:` trailer, or one release-ci cannot read, are named, with
+#      the one command that adds it. (.githooks/commit-msg says the same when the commit is made.)
 #   2. CORRECTNESS — scripts/preflight.mjs (JSX no-undef and friends across all five
 #      source files, the CDN version lock, cache-buster lockstep, deno check).
 # Zero output means go. Emergency bypass: git push --no-verify — say so in the commit.

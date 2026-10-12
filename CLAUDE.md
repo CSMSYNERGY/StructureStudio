@@ -469,7 +469,7 @@ Rules that are easy to break and expensive to get wrong:
 
 `release_notes` (migration `045`) is the tenant-facing changelog behind the What's New tab (now the Support page). **The words are always written by a person** (rule rewritten 2026-10-09): in the commit's `Release-note:` trailer, or by a hand INSERT for work that has no commit. `release-ci` (`supabase/functions/release-ci`) copies a trailer **word for word** when its commit lands on beta; nothing in the codebase generates, summarises or rewrites an entry, and nothing ever should. A trailer it cannot use as written is refused, never "fixed".
 
-**The trailer**, in the commit message's FINAL paragraph — the same block as `Co-Authored-By` (git only reads trailers from the last paragraph, and every line there must be `Key: value`):
+**The trailer**, in the commit message's FINAL paragraph — the same block as `Co-Authored-By` (git only reads trailers from the last paragraph, and every line there must be `Key: value`). release-ci also reads a `Release-note:` paragraph sitting just above the `Co-Authored-By` one, as long as only trailer paragraphs follow it (2026-10-13: 15 of the 35 notes written since 09-22 were in that shape and had been read as no note):
 
 ```
 Release-note: feature: Estimates can now carry a second contact     (or "fix: …"; one line, 10-120 characters, no URL)
@@ -479,7 +479,7 @@ Projects: 3f2a9c1e                                                  (optional: a
 Co-Authored-By: …
 ```
 
-or `Release-note: none` when nothing a builder sees changed. Forgot it? `git commit --allow-empty -m "Release note" --trailer "Release-note: fix: …"` before you push; `.githooks/pre-push` names user-facing commits that lack one and never blocks. The parser and the holds are `_shared/releaseTrailer.ts`.
+or `Release-note: none` when nothing a builder sees changed. Forgot it? `git commit --allow-empty -m "Release note" --trailer "Release-note: fix: …"` before you push; `.githooks/commit-msg` says so the moment you commit (with the `git commit --amend --no-edit --trailer …` that fixes it), and `.githooks/pre-push` names user-facing commits that lack one or carry one release-ci would refuse; neither ever blocks. The parser and the holds are `_shared/releaseTrailer.ts`.
 
 ⛔ **Never put a builder's name, slug or anything about pricing in a trailer: this repository is PUBLIC**, and a trailer is public the moment it is pushed. release-ci holds a note that names a builder (`held_names_builder`, never echoing which) or mentions money (`held_commercial`) in its title, detail or section, so it does not reach What's New, but it cannot take the words back out of git history. The public run summary shows both as one `held`: which hold applied would tell any reader that a word in a public trailer is a customer's name. A held or refused note is published only by a person: a corrected empty commit, or a hand INSERT.
 

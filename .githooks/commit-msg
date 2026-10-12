@@ -1,0 +1,25 @@
+#!/bin/sh
+# Release-note reminder at commit time. Wired by the same one-time setup as pre-push:
+#   git config core.hooksPath .githooks
+#
+# What's New (Support > New Features / Bug Fixes) is written by people, in the commit's
+# `Release-note:` trailer (CLAUDE.md, "What's New changelog"), and release-ci copies it when the
+# commit lands on beta. pre-push names the commits that lack one, but by then the change is often
+# several commits back. This says it the moment the commit is made, while the change is in front
+# of you, with the one command that adds the words to the commit just made:
+#     git commit --amend --no-edit --trailer "Release-note: fix: <words>"
+# It also names a Release-note that release-ci would refuse or never see.
+#
+# It NEVER blocks: whatever the script prints or however it fails, this exits 0. It says nothing
+# for a commit that touches nothing a builder sees (scripts/release-note-nudge.mjs isUserFacing),
+# for a merge, or when node or the script is missing.
+[ -n "$1" ] || exit 0
+command -v node >/dev/null 2>&1 || exit 0
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -f "$top/scripts/release-note-nudge.mjs" ] || exit 0
+# A merge's message is git's own; the push-time nudge skips merges too.
+git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
+# Git runs this hook from the top of the work tree and passes the message file relative to it, so
+# "$1" is handed on as it came. No cd: that would break a relative path in a linked worktree.
+node "$top/scripts/release-note-nudge.mjs" --commit-msg "$1" || true
+exit 0
