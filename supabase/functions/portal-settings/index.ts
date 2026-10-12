@@ -10056,6 +10056,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       message: `The tenant's Twilio account could not be resolved: ${(e as Error)?.message ?? "unknown"}` }).catch(() => {});
     return filedHere(json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502));
   };
+  // The builder's own account, made or FINISHED before a number is looked for (2026-10-12, C55).
+  // A builder now gets their sub-account when they are created (admin-catalog twilioAtCreate.ts),
+  // and a run that does not finish there leaves the row 'failed' or 'provisioning'. tenantTwilio
+  // refuses any sub that is not active, and the Phone tab buys only a number its search found, so
+  // without this the search would refuse for good and the builder could never reach
+  // phone_buy_number, the step that finishes the run. ensureTwilioAccount as the purchase runs it
+  // (never the operator path): an active, finished sub or a builder on the parent is one read, and
+  // off is no read at all. The answers are phone_buy_number's (which keeps its own copy inline).
+  // null = go on; otherwise the answer to return.
+  const ensureTenantAccount = async (): Promise<Response | null> => {
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (prov.ok) return null;
+    if (prov.reason === "not_configured") {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_not_configured", severity: "info",
+        message: `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}` }).catch(() => {});
+      return phoneUnavailable(ensureRefusalSentence(prov));
+    }
+    if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+    if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+    if (prov.reason === "manual") return json({ error: ensureRefusalSentence(prov), code: `twilio_manual_${prov.code}` }, 409);
+    logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+      message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+      context: { step: prov.step, code: prov.code } }).catch(() => {});
+    return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+  };
 
   // The tenant's numbers: EVERY live sms_numbers row, OLDEST first (migration 266, per-person
   // numbers; plan D6's one number per builder is lifted to MAX_NUMBERS). The first is the number
@@ -10980,6 +11005,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "phone_search_numbers") {
     const refused = await phoneRolloutGate();
     if (refused) return refused;
+    // A sub-account left unfinished (at builder creation, say) is finished here, or the search
+    // would refuse for good (ensureTenantAccount says why).
+    const notReady = await ensureTenantAccount();
+    if (notReady) return notReady;
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
     const tw = await tenantTwilio();
     if (!tw.ok) return tenantTwilioRefused(tw.error);

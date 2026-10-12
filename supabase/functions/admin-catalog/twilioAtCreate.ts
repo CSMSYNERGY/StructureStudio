@@ -2,8 +2,14 @@
 // "when a new subaccount is created in Structure Studio, the Twilio subaccount is also created
 // automatically"). admin-catalog create_client calls provisionAtCreate once the tenant exists.
 // Before this, a sub was made only at the builder's first number purchase (portal-settings
-// phone_buy_number) or first texting submit (portal-sms advance); both still run
-// ensureTwilioAccount, so anything this leaves unfinished is finished there.
+// phone_buy_number) or first texting submit (portal-sms advance).
+//
+// WHAT FINISHES A RUN THIS LEAVES UNFINISHED. The row it leaves is a sub at 'failed' or
+// 'provisioning', and resolveTwilioAccount refuses every sub that is not active ("still being set
+// up"), so only something that runs ensureTwilioAccount first gets the builder out: the number
+// search on the Phone tab and on the Text Messaging tab (portal-settings phone_search_numbers,
+// portal-sms search_numbers: the Phone tab can only buy a number its search found), the purchase,
+// a texting submit, or the console card's Create. Each resumes from the step the run reached.
 //
 // WHEN: only with TWILIO_SUBACCOUNTS "on" (provisioningOn). Off and "manual" answer "skipped" and
 // nothing is read or written: off is today, and "manual" means only the console's Create makes a
@@ -18,17 +24,19 @@
 // requests). A run still going then is handed to EdgeRuntime.waitUntil and the create answers
 // "pending"; the console's Twilio account card shows where it got to. A worker killed under it
 // leaves the row at the step it reached, and the next ensureTwilioAccount resumes from there once
-// its lock has run out.
+// its lock has run out. While the lock is held, delete_client refuses (a run could otherwise make
+// the sub at Twilio after the delete had looked and found none).
 //
 // RECORDS, as the console's Create does: an admin_audit row when the sub is made or the run is
 // refused ("twilio_account_provision", note "at=create_client", the SID MASKED; a builder kept on
 // the parent and a run another one is already doing get none), and an app_errors row for a run
 // that did not finish (codes only: never a secret, never a Twilio message).
 //
-// NOT ON THE MONEY GRANT. The console's Create needs can_bill; this does not. With the switch "on"
-// the builder's own first purchase or texting submit makes the same sub with no operator at all, so
+// NOT ON THE MONEY GRANT, ON PURPOSE (admin-catalog's can_bill block names this exception). The
+// console's Create needs can_bill; create_client needs can_write. With the switch "on" the builder's
+// own number search, purchase or texting submit makes the same sub with no operator at all, so
 // gating it here would only move the moment, and a sub-account costs nothing until a number is
-// bought in it.
+// bought in it (which needs the money grant wherever it happens).
 
 import { provisioningOn, subaccountsMode, type EnvGet } from "../_shared/twilioAccount.ts";
 import { ensureTwilioAccount, maskSid, type EnsureOpts, type EnsureResult } from "../_shared/twilioProvision.ts";
@@ -78,6 +86,9 @@ async function audit(admin: any, clientId: string, actor: AtCreateDeps["actor"],
   } catch (_e) { /* best-effort: the outcome is also in the response and on the console card */ }
 }
 
+/** The app_errors rows' last words: what finishes a run left unfinished (see the header). */
+const FINISHED_BY = "the builder's number search, a purchase, a texting submit or the console card's Create finishes it";
+
 /** What a finished run means for the create, with its audit row and its app_errors row. */
 // deno-lint-ignore no-explicit-any
 async function settle(admin: any, clientId: string, r: EnsureResult, deps: AtCreateDeps): Promise<AtCreateResult> {
@@ -88,8 +99,10 @@ async function settle(admin: any, clientId: string, r: EnsureResult, deps: AtCre
   }
   // Stays on the parent by rule (a pin, our internal account, something already held there).
   if (r.ok) return { outcome: "skipped", reason: r.reason };
-  // Another run holds the lock: the sub is being made right now.
-  if (r.reason === "busy") return { outcome: "pending", reason: "busy" };
+  // Another run held the lock from the start: the sub is being made right now. A lock lost MID-run
+  // (code lock_lost: the row suspended, closed or deleted under it) is not that: Twilio may already
+  // hold a sub nobody records, so it is filed below like any other run that did not finish.
+  if (r.reason === "busy" && r.code !== "lock_lost") return { outcome: "pending", reason: "busy" };
   await audit(admin, clientId, deps.actor, `refused ${r.reason} step=${r.step ?? "-"} code=${r.code}`);
   const notConfigured = r.reason === "not_configured";
   await deps.log({
@@ -98,7 +111,9 @@ async function settle(admin: any, clientId: string, r: EnsureResult, deps: AtCre
     severity: notConfigured ? "info" : "error",
     message: notConfigured
       ? `Making the new builder's Twilio account needs ${(r.missing ?? []).join(", ")}${r.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}`
-      : `The new builder's Twilio account was not finished at creation (${r.reason}, stopped at ${r.step ?? "start"}, ${r.code}); their first number or texting submit tries again`,
+      : r.code === "lock_lost"
+      ? `The new builder's Twilio account run lost its lock at ${r.step ?? "start"} (the row was suspended, closed or deleted under it); look in Twilio for a sub-account named for this client id that no row records`
+      : `The new builder's Twilio account was not finished at creation (${r.reason}, stopped at ${r.step ?? "start"}, ${r.code}); ${FINISHED_BY}`,
     context: { at: "create_client", reason: r.reason, step: r.step, code: r.code },
   }).catch(() => {});
   return { outcome: "failed", reason: r.reason, step: r.step, code: r.code };
@@ -123,7 +138,7 @@ export async function provisionAtCreate(admin: any, clientId: string, deps: AtCr
         // ensureTwilioAccount answers rather than throws; one that throws anyway is filed and survived.
         await deps.log({
           fn: "admin-catalog", clientId, code: "twilio_provision_failed", severity: "error",
-          message: "The new builder's Twilio account was not finished at creation (an unexpected error); their first number or texting submit tries again",
+          message: `The new builder's Twilio account was not finished at creation (an unexpected error); ${FINISHED_BY}`,
           context: { at: "create_client", reason: "error", step: null, code: "threw" },
         }).catch(() => {});
         return { outcome: "failed", reason: "error", step: null, code: "threw" };

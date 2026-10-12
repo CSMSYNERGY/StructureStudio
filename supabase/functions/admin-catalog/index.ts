@@ -495,6 +495,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio (its
     // numbers and registrations are billed to our parent account), and closing one releases its
     // numbers for good. Both on the money grant; suspending (reversible) needs can_write only.
+    // ONE DELIBERATE EXCEPTION (2026-10-12, C55): create_client (can_write) makes the new builder's
+    // sub too, with TWILIO_SUBACCOUNTS "on" only (twilioAtCreate.ts). An empty sub costs nothing,
+    // and with the switch "on" the builder's own number search or purchase makes the same sub with
+    // no operator at all; buying a number in it needs the money grant wherever that happens.
     if ((String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill) {
       return json({ error: "This operator account cannot create or close a builder's phone account." }, 403);
     }
@@ -1076,8 +1080,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Best-effort for the checklist's reason: the tenant exists and the answer is about to say
         // so. Only with TWILIO_SUBACCOUNTS "on"; never throws, and the create waits at most
         // AT_CREATE_WAIT_MS before a longer run carries on under waitUntil ("pending"). A run that
-        // does not finish is filed in app_errors, and the builder's first number or texting submit
-        // finishes it (ensureTwilioAccount resumes from the step it reached).
+        // does not finish is filed in app_errors, and the builder's next number search (Phone or
+        // Text Messaging tab), a purchase, a texting submit or the console card's Create finishes it
+        // (ensureTwilioAccount resumes from the step it reached). Not on the money grant: see the
+        // can_bill block above.
         const twilio = await provisionAtCreate(sb, clientId, {
           get: (k) => Deno.env.get(k),
           actor: identity.via === "operator" ? { via: "operator", email: identity.email, userId: identity.userId } : { via: identity.via },
@@ -2222,7 +2228,6 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // first wipe (review M2), so a refused or missing twilio_account_forget never leaves a
         // half-deleted tenant. A parent pin, or no row (or no table: 292 not applied), closes nothing.
         const twGet = (k: string) => Deno.env.get(k);
-        const twPlan = await twilioClosePlan(sb, clientId, { get: twGet });
         // Its own audit row (a masked SID only), like the gateway's below.
         const twilioAudit = async (outcome: string, sid: string | null) => {
           const row = {
@@ -2233,6 +2238,20 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           };
           try { await sb.from("admin_audit").insert(row); } catch (_e) { /* best-effort: the outcome is also in the response */ }
         };
+        // A provisioning run holding its lock (create_client's, carrying on under waitUntil, or a
+        // builder's number search or purchase) could make the sub at Twilio AFTER the plan below had
+        // looked and found none, leaving a live sub that no row records (2026-10-12, C55). So the
+        // delete waits until the run lets go. A read that fails is left to the plan, which reads the
+        // same row and says why.
+        const twLock = await sb.from("twilio_accounts").select("provision_lock_until").eq("client_id", clientId).maybeSingle();
+        if (!twLock?.error && Date.parse(String(twLock?.data?.provision_lock_until ?? "")) > Date.now()) {
+          await twilioAudit("refused busy code=provisioning", null);
+          return json({
+            error: "This builder's phone account is still being set up. Try again in a few minutes. Nothing was deleted.",
+            twilio: { reason: "busy", code: "provisioning" },
+          }, 409);
+        }
+        const twPlan = await twilioClosePlan(sb, clientId, { get: twGet });
         if (!twPlan.ok) {
           await twilioAudit(`refused ${twPlan.reason} code=${twPlan.code}`, null);
           return json({

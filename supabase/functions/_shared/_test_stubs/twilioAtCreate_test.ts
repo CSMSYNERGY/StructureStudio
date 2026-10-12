@@ -9,12 +9,18 @@
 //     the import map's supabase stub routing every table and rpc into a fake, globalThis.fetch a fake
 //     Twilio, no --allow-net), on the ADMIN_PASSWORD path: the create answers 200 whatever happens at
 //     Twilio, the sub is made only with the switch "on", only AFTER the tenant exists, with the parent's
-//     credentials and the client id as its name, and the audit row carries a MASKED SID.
+//     credentials and the client id as its name, and the audit row carries a MASKED SID;
+//   * the dead end a run left unfinished would make (review of 2026-10-13): create_client with Twilio
+//     refusing leaves the sub 'failed', and then the SHIPPED portal-settings phone_search_numbers and
+//     portal-sms search_numbers handlers, on the same fake database and Twilio, finish the sub and
+//     answer numbers found IN it (before, the Phone tab's search refused "still being set up" for
+//     good, and it is the only way to a number the Phone tab can buy); delete_client waits while a
+//     provisioning run holds its lock.
 // Tenants, SIDs and secrets are made up (the repo is public).
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { stubDb, stubRpc } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import { loadAdminCatalog } from "./deleteClientHarness.ts";
 import { AT_CREATE_WAIT_MS, provisionAtCreate, type AtCreateDeps } from "../../admin-catalog/twilioAtCreate.ts";
 import type { EnsureOpts, EnsureResult } from "../twilioProvision.ts";
@@ -114,7 +120,7 @@ Deno.test("at create: a run Twilio stopped is \"failed\", filed at error with th
   const r = await provisionAtCreate(h.admin, NEW, h.deps());
   assertEquals(r, { outcome: "failed", reason: "failed", step: "api_key", code: "20003" });
   assertEquals([h.logs[0].code, h.logs[0].severity], ["twilio_provision_failed", "error"]);
-  assert(/stopped at api_key, 20003\); their first number or texting submit tries again$/.test(h.logs[0].message), h.logs[0].message);
+  assert(/stopped at api_key, 20003\); the builder's number search, a purchase, a texting submit or the console card's Create finishes it$/.test(h.logs[0].message), h.logs[0].message);
   assertEquals(h.audits.map((a) => a.note), ["via=password at=create_client refused failed step=api_key code=20003"]);
 });
 
@@ -200,6 +206,8 @@ class Db {
   audits: Row[] = [];
   errors: Row[] = [];
   setupRows: Row[] = [];
+  /** client_users: the new builder's owner, once a portal request is made as them. */
+  users: Row[] = [];
   /** twilio_accounts reads throw (a client that blew up mid-run). */
   throwOnAccounts = false;
   constructor(readonly log: string[]) {}
@@ -213,6 +221,7 @@ class Db {
       if (table === "twilio_accounts") return [...db.accounts.values()];
       if (table === "client_settings") return [...db.settings.values()];
       if (table === "client_configs") return [...db.configs.values()];
+      if (table === "client_users") return db.users;
       if (table === "setup_template_items") return [{ id: "t1", active: true, title: "Add your logo", detail: null, link_page: null, section: null, image_url: null }];
       return [];
     };
@@ -322,6 +331,13 @@ class Twilio {
       }
       const subToken = auth === `Basic ${btoa(`${this.sub?.sid}:${this.sub?.token}`)}`;
       const subKey = auth === `Basic ${btoa(`${this.key?.sid}:${this.key?.secret}`)}`;
+      // The number search, answered only to the sub's own credentials inside the sub (a parent key
+      // cannot reach a sub's resources, and a search on the parent is not the builder's).
+      const avail = /^\/2010-04-01\/Accounts\/(AC\w+)\/AvailablePhoneNumbers\/US\/Local\.json$/.exec(p);
+      if (avail && method === "GET") {
+        if (avail[1] !== this.sub?.sid || !(subToken || subKey)) return j({ code: 20003 }, 401);
+        return j({ available_phone_numbers: [{ phone_number: "+18165550101", friendly_name: "(816) 555-0101", locality: null, region: "MO" }] });
+      }
       if (/\/Applications\.json$/.test(p)) {
         if (method !== "GET") return j({ sid: this.id("AP") }, 201);
         return subToken || subKey ? j({ applications: [] }) : j({ code: 20003 }, 401);
@@ -431,7 +447,7 @@ Deno.test("create_client: Twilio refusing the sub still creates the builder (200
   assertEquals([r.body.ok, r.body.twilio, r.body.twilioReason, r.body.twilioCode], [true, "failed", "failed", "account:20003"]);
   const row = db.accounts.get(NEW)!;
   assertEquals([row.status, row.provision_step, row.last_error, row.provision_lock_until], ["failed", "account", "account:20003", null],
-    "recorded where it stopped, the lock released: the first number or texting submit resumes from here");
+    "recorded where it stopped, the lock released: the builder's number search resumes from here (tests below)");
   assertEquals([db.errors.length, db.errors[0].code, db.errors[0].severity], [1, "twilio_provision_failed", "error"]);
   assertEquals(db.errors[0].context, { at: "create_client", reason: "failed", step: "account", code: "20003" });
   assert(!JSON.stringify(db.errors).includes("Authenticate"), "never Twilio's message");
@@ -471,6 +487,185 @@ Deno.test("create_client: a refused create (the id is taken) never reaches Twili
   assert(!log.some((l) => l.endsWith(" twilio_accounts")));
 });
 
+// ── The dead end, closed: a run left unfinished is finished by the builder's number search ──────
+// Before this, a sub left 'failed' (or 'provisioning') at creation made resolveTwilioAccount refuse
+// every Phone-tab search ("still being set up"), and the Phone tab can only buy a number its search
+// found, so the builder never reached phone_buy_number, the one step that resumed the run.
+async function loadHandler(rel: string): Promise<(req: Request) => Promise<Response>> {
+  const realServe = Deno.serve;
+  let handler: ((req: Request) => Promise<Response>) | null = null;
+  (Deno as any).serve = (h: (req: Request) => Promise<Response>) => {
+    handler = h;
+    return { finished: Promise.resolve() };
+  };
+  try {
+    // Computed specifier, as deleteClientHarness explains.
+    await import(new URL(rel, import.meta.url).href);
+  } finally {
+    (Deno as any).serve = realServe;
+  }
+  if (!handler) throw new Error(`${rel} did not hand Deno.serve a handler`);
+  return handler;
+}
+const SETTINGS = await loadHandler("../../portal-settings/index.ts");
+const SMS = await loadHandler("../../portal-sms/index.ts");
+const OWNER_ID = "00000000-0000-4000-8000-0000000000c7";
+/** The builder's own request, as the new builder's owner, with the Phone tab's self-serve open. */
+async function asBuilder(handler: (req: Request) => Promise<Response>, fn: string, db: Db, tw: Twilio, body: Record<string, unknown>) {
+  const all: Record<string, string> = { ...BASE_ENV, SUPABASE_ANON_KEY: "anon-test", TWILIO_SUBACCOUNTS: "on", PHONE_SELF_SERVE: "on" };
+  const prior = Object.fromEntries(Object.keys(all).map((k) => [k, Deno.env.get(k)]));
+  for (const [k, v] of Object.entries(all)) Deno.env.set(k, v);
+  if (!db.users.length) db.users.push({ user_id: OWNER_ID, client_id: NEW, role: "owner", title: "owner", access: null });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = tw.fetch as typeof fetch;
+  stubAuth.user = { id: OWNER_ID, email: "owner@example.test" };
+  stubAuth.error = null;
+  stubDb.from = (t: string) => db.from(t);
+  stubRpc.rpc = (name: string, a?: any) => db.rpc(name, a ?? {});
+  try {
+    const res = await handler(new Request(`https://project.example.test/functions/v1/${fn}`, {
+      method: "POST",
+      headers: { authorization: "Bearer harness", "content-type": "application/json", "user-agent": "harness/1.0" },
+      body: JSON.stringify(body),
+    }));
+    const raw = await res.text();
+    return { status: res.status, body: JSON.parse(raw), raw };
+  } finally {
+    globalThis.fetch = realFetch;
+    stubDb.from = null;
+    stubRpc.rpc = null;
+    stubAuth.user = null;
+    for (const [k, v] of Object.entries(prior)) { if (v === undefined) Deno.env.delete(k); else Deno.env.set(k, v); }
+  }
+}
+/** A builder created while Twilio refused the sub: the row is left 'failed' at 'account'. */
+async function createdUnfinished() {
+  const log: string[] = [];
+  const db = new Db(log), tw = new Twilio(log);
+  tw.refuseCreate = true;
+  const made = await create(db, tw, { TWILIO_SUBACCOUNTS: "on" });
+  assertEquals([made.status, made.body.twilio], [200, "failed"], made.raw);
+  assertEquals([db.accounts.get(NEW)!.kind, db.accounts.get(NEW)!.status], ["sub", "failed"]);
+  assertEquals(db.errors.map((e) => e.code), ["twilio_provision_failed"], "the creation's own row");
+  tw.refuseCreate = false;
+  tw.calls = [];
+  db.errors = [];
+  log.length = 0;
+  return { log, db, tw };
+}
+const searched = (tw: Twilio) => tw.calls.filter((c) => c.url.pathname.endsWith("/AvailablePhoneNumbers/US/Local.json"));
+
+Deno.test("Phone tab: a sub left unfinished at creation is FINISHED by the number search, which then searches inside it", async () => {
+  const { log, db, tw } = await createdUnfinished();
+  const r = await asBuilder(SETTINGS, "portal-settings", db, tw, { action: "phone_search_numbers", areaCode: "816" });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals(r.body.numbers, [{ e164: "+18165550101", locality: null, region: "MO" }]);
+  const row = db.accounts.get(NEW)!;
+  assertEquals([row.kind, row.status, row.provision_step, row.account_sid, row.provision_lock_until], ["sub", "active", "done", tw.sub!.sid, null]);
+  // The run resumed from 'account' (made it with the parent's token), and only then was a number looked for.
+  const made = log.indexOf("tw POST api.twilio.com/2010-04-01/Accounts.json");
+  const search = log.findIndex((l) => l.includes("/AvailablePhoneNumbers/"));
+  assert(made >= 0 && search > made, `the order was:\n${log.join("\n")}`);
+  const q = searched(tw);
+  assertEquals(q.length, 1);
+  assertEquals(q[0].url.pathname, `/2010-04-01/Accounts/${tw.sub!.sid}/AvailablePhoneNumbers/US/Local.json`, "inside the builder's own sub");
+  assertEquals(q[0].auth, `Basic ${btoa(`${tw.key!.sid}:${tw.key!.secret}`)}`, "with the sub's own key, never the parent's");
+  assertEquals(db.errors, [], "nothing filed: it worked");
+  assert(!r.raw.includes(tw.sub!.sid) && !r.raw.includes(tw.key!.secret), "no SID or secret in the answer");
+});
+
+Deno.test("Text Messaging tab: search_numbers finishes an unfinished sub the same way", async () => {
+  const { db, tw } = await createdUnfinished();
+  const r = await asBuilder(SMS, "portal-sms", db, tw, { action: "search_numbers", areaCode: "816" });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals(r.body.numbers.map((n: any) => n.phoneNumber), ["+18165550101"]);
+  assertEquals([db.accounts.get(NEW)!.status, db.accounts.get(NEW)!.provision_step], ["active", "done"]);
+  assertEquals(searched(tw)[0]?.url.pathname, `/2010-04-01/Accounts/${tw.sub!.sid}/AvailablePhoneNumbers/US/Local.json`);
+});
+
+Deno.test("Phone tab: an active, finished sub searches with no provisioning call at all", async () => {
+  const log: string[] = [];
+  const db = new Db(log), tw = new Twilio(log);
+  assertEquals((await create(db, tw, { TWILIO_SUBACCOUNTS: "on" })).body.twilio, "created");
+  tw.calls = [];
+  const r = await asBuilder(SETTINGS, "portal-settings", db, tw, { action: "phone_search_numbers", areaCode: "816" });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals(tw.calls.map((c) => `${c.method} ${c.url.pathname}`), [`GET /2010-04-01/Accounts/${tw.sub!.sid}/AvailablePhoneNumbers/US/Local.json`]);
+});
+
+Deno.test("Phone tab: while the creation's run still holds its lock the search says so (409) and asks Twilio nothing", async () => {
+  const { db, tw } = await createdUnfinished();
+  db.accounts.get(NEW)!.provision_lock_until = new Date(Date.now() + 60_000).toISOString();
+  const r = await asBuilder(SETTINGS, "portal-settings", db, tw, { action: "phone_search_numbers", areaCode: "816" });
+  assertEquals(r.status, 409, r.raw);
+  assert(/being set up right now/.test(r.body.error), r.body.error);
+  assertEquals(tw.calls, []);
+});
+
+Deno.test("Phone tab: a resume Twilio refuses again is filed once and says to try again (502), never Twilio's words", async () => {
+  const { db, tw } = await createdUnfinished();
+  tw.refuseCreate = true;
+  const r = await asBuilder(SETTINGS, "portal-settings", db, tw, { action: "phone_search_numbers", areaCode: "816" });
+  assertEquals(r.status, 502, r.raw);
+  assert(/Couldn't set up your phone account just now/.test(r.body.error), r.body.error);
+  assert(!r.raw.includes("Authenticate"));
+  const filed = db.errors.filter((e) => e.code === "twilio_provision_failed");
+  assertEquals(filed.length, 1, JSON.stringify(db.errors));
+  assertEquals(searched(tw), [], "no search while the account is not ready");
+});
+
+// ── delete_client while a provisioning run holds its lock ─────────────────────────────────────
+async function deleteNew(db: Db, tw: Twilio) {
+  const all: Record<string, string> = { ...BASE_ENV, TWILIO_SUBACCOUNTS: "on" };
+  const prior = Object.fromEntries(Object.keys(all).map((k) => [k, Deno.env.get(k)]));
+  for (const [k, v] of Object.entries(all)) Deno.env.set(k, v);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = tw.fetch as typeof fetch;
+  stubDb.from = (t: string) => db.from(t);
+  stubRpc.rpc = (fn: string, a?: any) => db.rpc(fn, a ?? {});
+  try {
+    const res = await HANDLER(new Request("http://localhost/functions/v1/admin-catalog", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": "203.0.113.12" },
+      body: JSON.stringify({ adminPassword: ADMIN_PASSWORD, action: "delete_client", clientId: NEW, confirmClientId: NEW }),
+    }));
+    const raw = await res.text();
+    return { status: res.status, body: JSON.parse(raw), raw };
+  } finally {
+    globalThis.fetch = realFetch;
+    stubDb.from = null;
+    stubRpc.rpc = null;
+    for (const [k, v] of Object.entries(prior)) { if (v === undefined) Deno.env.delete(k); else Deno.env.set(k, v); }
+  }
+}
+
+Deno.test("delete_client: refused (409, nothing deleted) while a provisioning run holds the lock; nothing asked of Twilio", async () => {
+  const log: string[] = [];
+  const db = new Db(log), tw = new Twilio(log);
+  db.configs.set(NEW, { client_id: NEW });
+  db.accounts.set(NEW, {
+    client_id: NEW, kind: "sub", status: "provisioning", account_sid: null, provision_step: "account",
+    provision_lock_until: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const r = await deleteNew(db, tw);
+  assertEquals(r.status, 409, r.raw);
+  assertEquals(r.body.error, "This builder's phone account is still being set up. Try again in a few minutes. Nothing was deleted.");
+  assertEquals(r.body.twilio, { reason: "busy", code: "provisioning" });
+  assert(db.configs.has(NEW) && db.accounts.has(NEW), "nothing deleted");
+  assert(!log.some((l) => l.startsWith("db delete")), `a delete ran:\n${log.join("\n")}`);
+  assertEquals(tw.calls, []);
+  assert(db.audits.some((a) => a.action === "delete_client" && a.note === "via=password twilio refused busy code=provisioning"), JSON.stringify(db.audits));
+});
+
+Deno.test("at create: a lock lost MID-run is filed (a sub may exist that no row records); one held from the start is \"pending\"", async () => {
+  const h = harness(ON, () => Promise.resolve({ ok: false, reason: "busy", status: 409, step: "auth_token", code: "lock_lost" }));
+  const r = await provisionAtCreate(h.admin, NEW, h.deps());
+  assertEquals(r, { outcome: "failed", reason: "busy", step: "auth_token", code: "lock_lost" });
+  assertEquals([h.logs.length, h.logs[0].code, h.logs[0].severity], [1, "twilio_provision_failed", "error"]);
+  assert(/lost its lock at auth_token .* look in Twilio for a sub-account named for this client id/.test(h.logs[0].message), h.logs[0].message);
+  assertEquals(h.audits.map((a) => a.note), ["via=password at=create_client refused busy step=auth_token code=lock_lost"]);
+});
+
 // ── Source: where it sits ────────────────────────────────────────────────────────────────────
 const SRC = (await Deno.readTextFile(new URL("../../admin-catalog/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
 const AT = (await Deno.readTextFile(new URL("../../admin-catalog/twilioAtCreate.ts", import.meta.url))).replace(/\r\n/g, "\n");
@@ -484,4 +679,37 @@ Deno.test("source: create_client provisions after the checklist, before its answ
   const gate = AT.indexOf("if (!provisioningOn(deps.get))");
   const run = AT.indexOf("await ensure(admin, clientId, { get: deps.get, operator: true })");
   assert(gate > 0 && run > gate, "only the switch \"on\" reaches the console's options (which run whatever the switch says)");
+});
+
+Deno.test("source: the money grant covers the console's Create and Close, and names create_client as its one deliberate exception", () => {
+  const i = SRC.indexOf("// Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio");
+  const block = SRC.slice(i, SRC.indexOf("\n    }\n", i));
+  assert(i > 0, "the can_bill block moved");
+  assert(block.includes('(String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill'));
+  assert(!/"create_client"[^\n]*canBill/.test(block), "create_client stays on can_write (decided 2026-10-13: an empty sub costs nothing)");
+  assert(block.includes("ONE DELIBERATE EXCEPTION (2026-10-12, C55): create_client (can_write) makes the new builder's"), "the exception is written down where the rule is");
+});
+
+const PS = (await Deno.readTextFile(new URL("../../portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+const PSMS = (await Deno.readTextFile(new URL("../../portal-sms/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+Deno.test("source: both number searches make or finish the account first, as the builder (never the operator path)", () => {
+  const helper = PS.slice(PS.indexOf("const ensureTenantAccount = async (): Promise<Response | null> => {"), PS.indexOf("\n  };\n", PS.indexOf("const ensureTenantAccount")));
+  assert(helper.includes("const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });"));
+  assert(!helper.includes("operator"), "the builder's path: the switch decides, never the console's options");
+  const search = PS.slice(PS.indexOf('if (action === "phone_search_numbers") {'), PS.indexOf('if (action === "phone_enable_number") {'));
+  const gate = search.indexOf("const refused = await phoneRolloutGate();");
+  const ensure = search.indexOf("const notReady = await ensureTenantAccount();");
+  const resolve = search.indexOf("const tw = await tenantTwilio();");
+  assert(gate >= 0 && ensure > gate && resolve > ensure, "rollout gate, then the account, then the account it resolves to");
+  const sms = PSMS.slice(PSMS.indexOf('case "search_numbers": {'), PSMS.indexOf('case "buy_number": {'));
+  const smsEnsure = sms.indexOf("const notReady = await ensureAccount();");
+  assert(smsEnsure > 0 && sms.indexOf("await tenantCreds()") > smsEnsure, "portal-sms: the account before the search's credentials");
+});
+
+Deno.test("source: delete_client checks the provisioning lock before it plans anything at Twilio", () => {
+  const del = SRC.slice(SRC.indexOf('case "delete_client": {'));
+  const lock = del.indexOf('sb.from("twilio_accounts").select("provision_lock_until")');
+  const plan = del.indexOf("await twilioClosePlan(sb, clientId, { get: twGet })");
+  const firstWipe = del.indexOf("await wipe(");
+  assert(lock > 0 && plan > lock && firstWipe > plan, "the lock read sits before the plan, and both before any wipe");
 });

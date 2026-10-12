@@ -1003,6 +1003,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "search_numbers": {
+        // 2026-10-12 (C55): the builder's own account is made or FINISHED before a number is looked
+        // for, as buy_number does. A sub left 'failed' or 'provisioning' (at builder creation, say:
+        // admin-catalog twilioAtCreate.ts) makes tenantCreds refuse, so the search would otherwise
+        // refuse for good. An active, finished sub is one read; off, none.
+        const notReady = await ensureAccount();
+        if (notReady) return notReady;
         if (!trustHubConfigured()) return json({ error: "Text messaging is not switched on yet." }, 503);
         const results = await searchAvailableNumbers({
           areaCode: String(p.areaCode ?? "").replace(/\D/g, "").slice(0, 3) || undefined,
