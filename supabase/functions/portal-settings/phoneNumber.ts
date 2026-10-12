@@ -238,11 +238,8 @@ export function pickedNumber(raw: unknown): string | null {
   return /^\+1[2-9]\d{2}[2-9]\d{6}$/.test(s) ? s : null;
 }
 
-/** Search input: a three-digit area code, or nothing. */
-export function areaCodeOf(raw: unknown): string | null {
-  const d = String(raw ?? "").replace(/\D/g, "");
-  return /^[2-9]\d{2}$/.test(d) ? d : null;
-}
+// The search input (an area code, or the area code and up to three more digits) is read by
+// _shared/numberSearch.ts numberSearchOf, which portal-sms's search shares (2026-10-12).
 
 // ── The calling-only purchase ────────────────────────────────────────────────────────────
 

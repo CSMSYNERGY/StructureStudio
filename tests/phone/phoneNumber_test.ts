@@ -12,7 +12,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  applyNumberVoice, areaCodeOf, buyCallingNumber, callingOnlyNumberRow, DEFAULT_PHONE_API_BASE, fallbackUrlOf, findNumberSid, numberActionForSwitch,
+  applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, DEFAULT_PHONE_API_BASE, fallbackUrlOf, findNumberSid, numberActionForSwitch,
   numberHoldKey, numberSmsConfig, numberVoiceConfig, numberVoicemailConfig, pickedNumber, pickOrphan, smsInboundUrl, strictEncode,
   SWITCH_WARNINGS, subVoicemailUrlOf, switchCalling, voiceEnv, type Bought, type HoldResult,
 } from "../../supabase/functions/portal-settings/phoneNumber.ts";
@@ -282,14 +282,11 @@ Deno.test("the calling-only row: not registered for texting (165's word), no mes
   assertEquals((callingOnlyNumberRow("demo-tenant", { sid: PN, phoneNumber: "+15555550104" }, SUB) as Record<string, unknown>).twilio_account_sid, SUB);
 });
 
-Deno.test("only a US number from the search, and a three-digit area code, get through", () => {
+// The search box itself (an area code, or the area code and up to three more digits) is
+// _shared/numberSearch.ts, tested in numberSearch.test.ts and wired in numberSearch_test.ts.
+Deno.test("only a US number from the search gets through", () => {
   assertEquals(pickedNumber("+15555550105"), "+15555550105");
   for (const bad of ["5555550105", "+1555555010", "+445555550105", "+11555550105", "", null]) assertEquals(pickedNumber(bad), null, String(bad));
-  assertEquals(areaCodeOf("816"), "816");
-  assertEquals(areaCodeOf(" (816) "), "816");
-  assertEquals(areaCodeOf("116"), null);
-  assertEquals(areaCodeOf("8165"), null);
-  assertEquals(areaCodeOf(undefined), null);
 });
 
 // ── the handlers' wiring (index.ts) ────────────────────────────────────────────────────────
