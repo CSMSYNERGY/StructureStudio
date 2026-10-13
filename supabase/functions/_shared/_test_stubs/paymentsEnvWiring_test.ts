@@ -294,6 +294,15 @@ Deno.test("1. pay_options hands each page the tokenizer of the builder's OWN sys
   assertEquals(live.status, 200, live.text);
   assertEquals(live.body.tokenizer.origin, "https://live.example.invalid");
   for (const k of ["cardUrl", "achUrl", "swipeUrl"]) assert(String(live.body.tokenizer[k]).startsWith("https://live.example.invalid/itoke/ajax-tokenizer.html?"), `${k}: ${live.body.tokenizer[k]}`);
+  // The reader's frame is the SWIPE rail, never the card URL with swipeonly tacked on: the card
+  // rail's numeric-only filter throws away the reader's letters and Shift keys (2026-10-13).
+  const swipe = new URL(String(live.body.tokenizer.swipeUrl)).searchParams;
+  for (const p of ["swipeonly", "autofocus", "invalidinputevent", "sendcardtypingevent"]) assertEquals(swipe.get(p), "true", `swipeUrl ${p}: ${live.body.tokenizer.swipeUrl}`);
+  for (const p of ["cardnumbernumericonly", "formatinput", "useexpiry", "useexpiryfield", "usecvv", "invalidcreditcardevent", "invalidexpiryevent", "invalidcvvevent"]) {
+    assert(!swipe.has(p), `swipeUrl carries ${p}: ${live.body.tokenizer.swipeUrl}`);
+  }
+  assert(new URL(String(live.body.tokenizer.cardUrl)).searchParams.get("cardnumbernumericonly") === "true", "the KEYED card frame keeps numeric-only");
+  assert(Number(live.body.tokenizer.swipeHeight) > 0 && Number(live.body.tokenizer.swipeHeight) < Number(live.body.tokenizer.cardHeight), `swipeHeight ${live.body.tokenizer.swipeHeight}`);
   const test = await payments({ action: "pay_options", orderId: "o-1" }, { settings: UAT_ON }, { live: true });
   assertEquals(test.body.tokenizer.origin, "https://uat.example.invalid");
   assert(String(test.body.tokenizer.cardUrl).startsWith("https://uat.example.invalid/itoke/"), test.body.tokenizer.cardUrl);

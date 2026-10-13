@@ -187,7 +187,9 @@ const lastOf = (fn, action) => callsOf(fn, action).slice(-1)[0] || {};
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 /** Post a token from INSIDE the tokenizer iframe, the way CardPointe's own page does, so the
- *  listener's origin and source checks both pass. `swipe` picks the swipe-only frame. */
+ *  listener's origin and source checks both pass. `swipe` picks the swipe-only frame. With
+ *  enhancedresponse the real iframe names the entry on every token ("swipe" for a reader's blob,
+ *  "manual" for typed digits), and the portal refuses a "manual" token in Swipe mode (2026-10-13). */
 async function postToken(swipe = false) {
   S.minted += 1;
   const tok = `94139487802${String(S.minted).padStart(5, "0")}`;
@@ -199,7 +201,7 @@ async function postToken(swipe = false) {
     return null;
   })();
   if (!frame) return null;
-  await frame.evaluate((t) => window.parent.postMessage(JSON.stringify({ message: t, token: t, expiry: "203212", errorCode: "0" }), "*"), tok);
+  await frame.evaluate(([t, entry]) => window.parent.postMessage(JSON.stringify({ message: t, token: t, expiry: "203212", errorCode: "0", errorMessage: "", entry }), "*"), [tok, swipe ? "swipe" : "manual"]);
   return tok;
 }
 const attrs = (l) => l.evaluate((el) => ({ ac: el.getAttribute("autocomplete"), mode: el.getAttribute("inputmode"), type: el.type, value: el.value, max: el.maxLength }));

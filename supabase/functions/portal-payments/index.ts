@@ -411,11 +411,14 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         cardUrl: cpTokenizerUrl(currentMerchant, "card"),
         // Unused by the current modal; kept for a portal tab still running the old build.
         achUrl: cpTokenizerUrl(currentMerchant, "ach"),
-        // swipeonly is a SEPARATE url: the reader is a USB keyboard, and letting it share
-        // the keyed-entry frame would mean a swipe could also be typed by hand.
-        swipeUrl: cpTokenizerUrl(currentMerchant, "card") + "&swipeonly=true",
+        // The reader's own frame, with its own parameter set (2026-10-13): it was the card URL
+        // plus "&swipeonly=true", whose numeric-only and CVV settings threw away the reader's
+        // letters and Shift keys. cpTokenizerUrl's docblock has the whole story.
+        swipeUrl: cpTokenizerUrl(currentMerchant, "swipe"),
         cardHeight: cpTokenizerHeight("card"),
         achHeight: cpTokenizerHeight("ach"),
+        // Read only by a portal that knows it; an older one sizes the swipe frame by cardHeight.
+        swipeHeight: cpTokenizerHeight("swipe"),
       },
     });
   }
