@@ -2552,7 +2552,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
       // Height off floor for wall-mounted items, and shows the master default where the tenant
       // has not overridden it.
-      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced"),
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced, palette_group"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
@@ -2614,7 +2614,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           heightOffFloorIn: off != null ? Number(off) : null,
           // Out of the customer's palette until priced (171, 278): the Options card starts its rate
           // blank instead of 0 and does not save a blank one, so a Save for something else cannot offer it free.
-          hiddenUntilPriced: !!t.hidden_until_priced };
+          hiddenUntilPriced: !!t.hidden_until_priced,
+          // Which Options tab prices it (Carolyn 2026-10-12: the door RO belongs on Doors, the
+          // window RO on Windows). Same column that places the designer's palette button, so
+          // the two can never disagree. Older master rows carry no group: Interior.
+          paletteGroup: t.palette_group || "interior" };
       });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
