@@ -36,6 +36,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { launch, reporter, shotsDir, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
+// Where the callback really sends the owner, read off qbo-oauth-callback itself: its /portal
+// address until production serves the root addresses, which the host 301s to /settings/quickbooks
+// with the query kept. Landing there drives that hop too.
+const CALLBACK_SRC = readFileSync(new URL("../../supabase/functions/qbo-oauth-callback/index.ts", import.meta.url), "utf8");
+const LANDING = (/Location: `https:\/\/\$\{safeHost\}(\/[^?`]*)\?/.exec(CALLBACK_SRC) || [])[1];
+if (!LANDING) throw new Error("qboReconnect: the callback's landing address was not found in qbo-oauth-callback/index.ts");
+
 const CLIENT = "harness-qbo";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const EXP = 4102444800;
@@ -114,10 +121,11 @@ async function open(query, { retry = null, elsewhere = 0 } = {}) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
-  await serveAppRoutes(page, PORTAL_HTML);
+  // What _redirects does: every app address is portal.html, and an old /portal one 301s. An older
+  // artifact (SS_PORTAL_ARTIFACT) gets the host as it was then, which served /portal/* directly.
+  await serveAppRoutes(page, PORTAL_HTML, { legacy: !!ARTIFACT });
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
-  await page.goto(`${BASE}/settings/quickbooks${query}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}${LANDING}${query}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   return { page, ctx, calls, logged, pageErrors };
 }
@@ -135,6 +143,7 @@ try {
     ok("A: a company switch says the old mappings were cleared", await waitText(S.page, SAYS.companyChanged));
     ok("A: and not the plain connected banner", !(await S.page.evaluate(() => document.body.innerText)).includes(SAYS.connected));
     ok("A: the landing params are stripped from the address bar", new URL(S.page.url()).search === "", S.page.url());
+    ok(`A: the callback's landing (${LANDING}) ends at /settings/quickbooks`, new URL(S.page.url()).pathname === "/settings/quickbooks", S.page.url());
     ok("A: the connection card names the new company", await waitText(S.page, "Connected to Harness Books B"));
     await S.page.screenshot({ path: join(SHOTS, "company-changed.png") }).catch(() => {});
     clean(S, "A");

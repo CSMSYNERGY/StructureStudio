@@ -32,10 +32,22 @@
 # /portal and /portal/* answer with a 301 to the root form now (_redirects), but they keep
 # their rule: a redirect carries no page, and if that 301 is ever rolled back the old
 # addresses serve the app again and must not be frameable.
+#
+# Cache-Control: no-store, so a rollback IS clean (2026-10-13). A browser keeps a 301 that
+# says nothing about caching, and then jumps from its own cache to the root address without
+# asking the host again (seen in real Chrome against the asset worker: the second and third
+# requests never reached it). Roll the redirects back, or get one mapping wrong, and every
+# browser that once followed a /portal link would keep landing on a root address that no longer
+# exists, until its cache was cleared. no-store makes the host answer every /portal request
+# itself. These paths serve nothing but redirects now, so nothing else is affected. Keep it at
+# least until production has served the 301s without trouble for a few weeks;
+# scripts/redirects.test.mjs fails if it goes missing.
 /portal
   X-Frame-Options: DENY
+  Cache-Control: no-store
 /portal/*
   X-Frame-Options: DENY
+  Cache-Control: no-store
 # Every app page at its root address, one pair per page, the same list as _redirects
 # (scripts/redirects.test.mjs fails when the two disagree).
 # >>> app pages (one pair per page, mirrors _redirects)

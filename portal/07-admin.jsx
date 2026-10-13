@@ -400,7 +400,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                                       project serves both hosts, so a password set there works on beta
                                       too. Said out loud because a beta operator WILL notice. */}
                                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>
-                                    The link opens app.structurestudiosuite.com/login — a password set there works everywhere, including beta.
+                                    The link opens app.structurestudiosuite.com — a password set there works everywhere, including beta.
                                   </div>
                                 </div>
                               )}

@@ -30,15 +30,20 @@ const ALLOWED_HOSTS = new Set([
 ]);
 const DEFAULT_HOST = "app.structurestudiosuite.com";
 
-// The portal's QuickBooks settings page. /settings/quickbooks since 2026-10-13 (it was
-// /portal/settings/quickbooks; the app's addresses lost their /portal segment). The Intuit
-// redirect URI is THIS function's URL, not this page, so Intuit needs no change for it.
+// The portal's QuickBooks settings page, at its /portal address ON PURPOSE. The app's addresses
+// lost their /portal segment on 2026-10-13 (the page itself is /settings/quickbooks now), but an
+// edge deploy goes live for PRODUCTION at once, and production serves the old _redirects until
+// main is promoted (there /settings/… is the 404 page: the connection would save and the owner
+// would read "Page not found"). /portal/settings/quickbooks?… works on both hosts: the old one
+// serves the app at it, the new one 301s it to /settings/quickbooks?… with the query kept. Flip
+// it once production serves the root-address _redirects (CLAUDE.md, "App addresses"). The Intuit
+// redirect URI is THIS function's URL, not this page, so Intuit needs no change either way.
 function land(host: string, params: Record<string, string>): Response {
   const safeHost = ALLOWED_HOSTS.has(host) ? host : DEFAULT_HOST;
   const qs = new URLSearchParams(params);
   return new Response(null, {
     status: 302,
-    headers: { Location: `https://${safeHost}/settings/quickbooks?${qs}` },
+    headers: { Location: `https://${safeHost}/portal/settings/quickbooks?${qs}` },
   });
 }
 

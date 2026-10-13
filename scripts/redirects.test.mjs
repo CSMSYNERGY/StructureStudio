@@ -84,6 +84,12 @@ test("every page the router knows is served the app at /<slug> and /<slug>/…",
     const paths = slug === R.SS_LOGIN_SLUG ? [`/${slug}`] : [`/${slug}`, `/${slug}/`, `/${slug}/x`, `/${slug}/x/y`];
     for (const p of paths) assert.ok(isApp(resolveRequest(REDIRECTS, p)), `${p} is not served the app`);
   }
+  // /login has no sub-pages and so no /login/* rule; its trailing-slash spelling (typed, or pasted
+  // from somewhere that added one) 301s to it in one hop, query kept, instead of a 404.
+  assert.equal(resolveRequest(REDIRECTS, "/login/").status, 301, "/login/ must be a 301");
+  const slash = followRequest(REDIRECTS, "/login/?view=acme-sheds");
+  assert.deepEqual(slash.hops, ["/login?view=acme-sheds"], "/login/ must 301 to /login");
+  assert.ok(isApp(slash.final), "/login/ does not end on the app");
 });
 
 test("no rule serves the app for a slug the router does not know, and there is no catch-all", () => {
@@ -220,14 +226,83 @@ test("_headers gives every app address X-Frame-Options: DENY exactly once; the d
   for (const p of ["/", "/index.html"]) assert.equal(headersFor(HEADERS, p).headers["x-frame-options"], undefined, `${p} must stay frameable (tenant embeds)`);
 });
 
-// ── 6. Every address the product hands out lands on the app WITHOUT a hop ────────────────
-test("the addresses the product hands out are root addresses the app answers directly", () => {
+// ── 5b. The old /portal 301s are never cached by a browser ───────────────────────────────
+// A 301 with no Cache-Control is kept by the browser, which then jumps to the root address from
+// its own cache. If the redirects were ever rolled back (or one mapping were wrong), those
+// browsers would keep landing on an address that no longer exists. no-store keeps every /portal
+// request going to the host. See the note above the /portal rules in _headers.
+test("every old /portal address is answered Cache-Control: no-store, and only those", () => {
+  const legacy = ["/portal", "/portal/", "/portal/admin", "/portal/admin/clients", "/portal/orders/o-1", ...ROUTES.map(legacyOf)];
+  for (const p of legacy) {
+    assert.equal(resolveRequest(REDIRECTS, p).kind, "redirect", `${p} is no longer a redirect: re-think the no-store below`);
+    assert.equal(headersFor(HEADERS, p).headers["cache-control"], "no-store", `${p}: the 301 must carry Cache-Control: no-store`);
+  }
+  // The app's own addresses, the file they all serve, and the designer keep the host's default.
+  for (const p of ["/portal.html", "/login", "/login/", "/contacts", "/settings/colors", "/console", "/", "/index.html", "/admin"]) {
+    assert.equal(headersFor(HEADERS, p).headers["cache-control"], undefined, `${p} must not be no-store`);
+  }
+});
+
+// ── 6. Every address the product hands out lands on the app ──────────────────────────────
+// Two kinds, because they reach people on two different schedules.
+//
+// SHIPPED WITH THESE RULES: the page or bundle that hands the address out deploys in the same push
+// as _redirects, so it only ever meets these rules. Those are root addresses, answered directly.
+//
+// SHIPPED AHEAD OF THESE RULES: an edge function goes live for PRODUCTION the moment it deploys,
+// and Forgot password names the production host even from beta, while production keeps the old
+// _redirects until main is promoted. Those addresses must work on BOTH hosts. The old one serves
+// the app only at /portal[/…]; these rules 301 that to the root form in one hop. So they stay
+// /portal until production serves these rules (and, for the two auth landings, /login is on the
+// Supabase Auth redirect allow-list). The flip then moves them into the first list.
+//
+// Production's _redirects before the promotion (main, 2026-10-13), rules only:
+const OLD_HOST = parseRedirects([
+  "/            /index.html    200",
+  "/portal      /portal.html   200",
+  "/portal/     /portal        301",
+  "/admin       /admin.html    200",
+  "/admin/      /admin         301",
+  "/my-quotes   /my-quotes.html  200",
+  "/my-quotes/  /my-quotes       301",
+  "/portal/*    /portal.html   200",
+].join("\n"));
+const ORDER_ID = "11111111-2222-4333-8444-555555555555";
+
+test("addresses handed out ahead of these rules work on production's old host AND on these rules", () => {
+  const sources = [
+    // [file, regex whose group 1 is the full URL or path the product sends people to, what it is, extra paths]
+    ["supabase/functions/_shared/authPortalUrl.ts", /AUTH_PORTAL_URL = "(https:\/\/[^"]+)"/, "auth email landing (invites, resets)"],
+    ["portal/01-core.jsx", /redirectTo: "(https:\/\/[^"]+)"/, "Forgot password landing"],
+    ["supabase/functions/_shared/customerPortalUrl.ts", /const base = `https:\/\/\$\{hostFor\(req\)\}(\/[^`]*)`/, "Invoice to approve email", [`/o-${ORDER_ID}`]],
+    ["supabase/functions/qbo-oauth-callback/index.ts", /Location: `https:\/\/\$\{safeHost\}(\/[^?`]*)\?/, "QuickBooks connect landing"],
+  ];
+  const found = {};
+  for (const [file, re, what, extra = []] of sources) {
+    const m = re.exec(read(file));
+    assert.ok(m, `${file}: the ${what} was not found — re-point this test`);
+    found[what] = m[1];
+    const base = new URL(m[1], "https://app.structurestudiosuite.com").pathname;
+    for (const path of [base, ...extra.map((x) => base + x)]) {
+      const old = resolveRequest(OLD_HOST, path);
+      assert.ok(isApp(old), `${file}: the ${what} sends people to ${path}, which production answers with ${old.kind} ${old.location || old.asset} until main is promoted — keep it on /portal until then`);
+      const q = "?connected=1&view=acme-sheds";
+      const end = followRequest(REDIRECTS, path + q);
+      assert.ok(isApp(end.final), `${file}: the ${what} (${path}) does not end on the app under these rules`);
+      assert.ok(end.hops.length <= 1, `${file}: the ${what} (${path}) takes ${end.hops.length} hops: ${end.hops.join(" -> ")}`);
+      const landed = new URL(end.hops[0] || path + q, "https://x.invalid");
+      assert.equal(landed.search, q, `${file}: the ${what} loses its query on the way`);
+      assert.deepEqual(parse(landed.pathname), parse(path), `${file}: the ${what} lands on a different page than ${path} means`);
+    }
+  }
+  // The two auth landings are one destination (one allow-list entry): the server's emails and the
+  // login form's Forgot password must name the same URL.
+  assert.equal(found["Forgot password landing"], found["auth email landing (invites, resets)"], "AUTH_PORTAL_URL and Forgot password's redirectTo name different addresses");
+});
+
+test("addresses shipped with these rules are root addresses the app answers directly", () => {
   const sources = [
     // [file, regex whose group 1 is the path the product sends people to, what it is]
-    ["supabase/functions/_shared/authPortalUrl.ts", /AUTH_PORTAL_URL = "https:\/\/[^/"]+(\/[^"]*)"/, "auth email landing"],
-    ["supabase/functions/_shared/customerPortalUrl.ts", /`https:\/\/\$\{hostFor\(req\)\}(\/orders)`/, "Invoice to approve email"],
-    ["supabase/functions/qbo-oauth-callback/index.ts", /Location: `https:\/\/\$\{safeHost\}(\/[^?`]*)\?/, "QuickBooks connect landing"],
-    ["portal/01-core.jsx", /redirectTo: "https:\/\/[^/"]+(\/[^"]*)"/, "Forgot password landing"],
     ["StructureStudio.jsx", /window\.location\.replace\("(\/[^"]*)" \+ window\.location\.search/, "designer's bare-root redirect"],
     ["structure-studio.component.js", /window\.location\.replace\("(\/[^"]*)" \+ window\.location\.search/, "designer's bare-root redirect"],
     ["404.html", /<a class="btn" href="([^"]*)"/, "404 page button"],

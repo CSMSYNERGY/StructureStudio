@@ -508,7 +508,7 @@ async function connect(db: FakeDb, cid: string, realm: string) {
   )));
   assertEquals(res.status, 302);
   const loc = new URL(res.headers.get("Location")!);
-  assertEquals(loc.pathname, "/settings/quickbooks");
+  assertEquals(loc.pathname, "/portal/settings/quickbooks");
   return { landed: Object.fromEntries(loc.searchParams), w };
 }
 

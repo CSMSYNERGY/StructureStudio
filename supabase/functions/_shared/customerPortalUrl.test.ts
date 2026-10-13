@@ -23,13 +23,13 @@ Deno.test("myQuotesUrl: a beta origin stays on beta; anything else falls back to
 });
 
 Deno.test("portalOrderUrl: the order deep link, on the same host rule as the customer link", () => {
-  assertEq(portalOrderUrl(ORDER), `https://app.structurestudiosuite.com/orders/o-${ORDER}`);
-  assertEq(portalOrderUrl(ORDER, withOrigin("https://beta.structurestudiosuite.com")), `https://beta.structurestudiosuite.com/orders/o-${ORDER}`);
-  assertEq(portalOrderUrl(ORDER, withOrigin("https://evil.example")), `https://app.structurestudiosuite.com/orders/o-${ORDER}`);
+  assertEq(portalOrderUrl(ORDER), `https://app.structurestudiosuite.com/portal/orders/o-${ORDER}`);
+  assertEq(portalOrderUrl(ORDER, withOrigin("https://beta.structurestudiosuite.com")), `https://beta.structurestudiosuite.com/portal/orders/o-${ORDER}`);
+  assertEq(portalOrderUrl(ORDER, withOrigin("https://evil.example")), `https://app.structurestudiosuite.com/portal/orders/o-${ORDER}`);
 });
 
 Deno.test("portalOrderUrl: no order id, or anything that is not a UUID, lands on the Orders list", () => {
-  const list = "https://app.structurestudiosuite.com/orders";
+  const list = "https://app.structurestudiosuite.com/portal/orders";
   assertEq(portalOrderUrl(null), list);
   assertEq(portalOrderUrl(undefined), list);
   assertEq(portalOrderUrl(""), list);

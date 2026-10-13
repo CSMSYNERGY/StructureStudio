@@ -94,7 +94,7 @@ New tenants land on a billing gate until they subscribe; tenants predating the g
 
 ## Supabase Auth settings
 
-Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://app.structurestudiosuite.com`, with `https://app.structurestudiosuite.com/login` on the redirect allow-list so password-recovery emails land there (`/portal` until 2026-10-13; keep it listed while links already sent are alive — the host 301s it to `/login`). Keep the legacy structurestudio.app entries while already-sent links are alive.
+Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://app.structurestudiosuite.com`, with `https://app.structurestudiosuite.com/portal` on the redirect allow-list so password-recovery emails land there (the host 301s it to `/login`, the app's bare address since 2026-10-13, and the browser keeps the link's fragment). The auth emails keep naming `/portal` until production serves the root addresses; when they flip to `/login`, add that to the allow-list first and keep `/portal` listed while links already sent are alive (CLAUDE.md, "App addresses"). Keep the legacy structurestudio.app entries while already-sent links are alive.
 
 ⛔ **Never run `supabase config push`.** It is declarative and `supabase/config.toml` deliberately has no `[auth]` section — pushing it would reset `site_url` to localhost, de-allow-list the real redirect, and clear custom SMTP. Make auth changes in the dashboard.
 

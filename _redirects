@@ -38,7 +38,10 @@
 #
 # /login is the bare app address (the old bare /portal): the sign-in form, or for someone
 # signed in their landing page. /console is the Admin page, because /admin stays admin.html.
+# /login has no sub-pages, so no /login/* rule; its trailing-slash spelling 301s to it, the way
+# /admin/ and /my-quotes/ do (every other page answers /<slug>/ through its /<slug>/* rule).
 /login                         /portal.html   200
+/login/                        /login         301
 /designer                      /portal.html   200
 /advanced                      /portal.html   200
 /contacts                      /portal.html   200

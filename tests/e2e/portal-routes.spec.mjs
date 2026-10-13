@@ -134,7 +134,8 @@ test.describe("portal routes", () => {
 
   // EVERY OLD /portal ADDRESS ANSWERS 301 WITH ITS ROOT FORM, the query string kept. Asked of the
   // host directly (no redirect followed, no page rendered), so one request per route: these are
-  // the links in emails already sent, in the phone apps and in bookmarks.
+  // the links in emails already sent, in the phone apps and in bookmarks. Each 301 must also say
+  // Cache-Control: no-store (_headers), or browsers keep it and a rollback strands them.
   test("every route's old /portal address is a permanent redirect to it, query kept", async () => {
     const legacy = (route) => (route.startsWith("/console") ? "/portal/admin" + route.slice("/console".length) : "/portal" + route);
     const pairs = [...ROUTES.map((r) => [legacy(r), r]),
@@ -145,8 +146,14 @@ test.describe("portal routes", () => {
         expect(res.status(), `${from + q} status`).toBe(301);
         const loc = new URL(res.headers()["location"] || "", "https://x.invalid");
         expect(loc.pathname + loc.search, `${from + q} location`).toBe(to + q);
+        expect(res.headers()["cache-control"] || "", `${from + q} cache-control`).toContain("no-store");
       }
     }
+    // /login has no sub-pages; its trailing-slash spelling is a 301 to it, not the 404 page.
+    const slash = await page.request.get("/login/?view=e2e-test", { maxRedirects: 0 });
+    expect(slash.status(), "/login/ status").toBe(301);
+    const at = new URL(slash.headers()["location"] || "", "https://x.invalid");
+    expect(at.pathname + at.search, "/login/ location").toBe("/login?view=e2e-test");
   });
 
   // And the redirect lands: the old address of a page and of a Settings hub open the app at the

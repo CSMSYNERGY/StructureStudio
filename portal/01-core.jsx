@@ -607,8 +607,9 @@ const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
 const SS_PAGE_SLUGS = { admin: "console" };
 // The bare app address, the old bare /portal: the sign-in form for someone signed out, and for
 // someone signed in their own landing page (the shell rewrites it to that page's address). It
-// is where the auth emails land (AUTH_PORTAL_URL) and where the designer sends a bare product
-// root, so it carries the email link's #access_token / ?code= through untouched.
+// is where the auth emails end up (AUTH_PORTAL_URL and Forgot password still name /portal until
+// production serves these addresses; the host 301s that here) and where the designer sends a
+// bare product root, so it carries the email link's #access_token / ?code= through untouched.
 const SS_LOGIN_SLUG = "login";
 
 // ── THE CONTACTS HUB'S ADDRESSES (Carolyn 2026-10-12) ───────────────────────────────────────
@@ -2244,11 +2245,19 @@ function LoginView({ onRecoverySent, notice }) {
     // honours only allow-listed redirects and silently substitutes Site URL otherwise,
     // so a reset started on beta (or localhost) used to produce a link that bounced to
     // the apex root — see AUTH_PORTAL_URL in supabase/functions/_shared/authPortalUrl.ts, which
-    // names the same address (the root /login since 2026-10-13; /portal before, still redirected).
-    // Safe because beta and production share one Supabase project: the password set
-    // here works on beta immediately.
+    // names the same address. Safe because beta and production share one Supabase project:
+    // the password set here works on beta immediately.
+    //
+    // STILL /portal, NOT /login, ON PURPOSE (2026-10-13). This names the PRODUCTION host, so it
+    // has to work on whatever production serves. Until main is promoted onto the root-address
+    // _redirects, production has no /login rule (that address is its 404 page, and the reset
+    // token is lost there). /portal works on both: the old host serves the app at it, the new
+    // one 301s it to /login and the browser keeps the #access_token fragment (a ?code= rides
+    // the 301's query). Flip it to /login together with AUTH_PORTAL_URL only once production
+    // serves these rules AND /login is on the Supabase Auth redirect allow-list
+    // (CLAUDE.md, "App addresses"; scripts/redirects.test.mjs checks it works on both hosts).
     const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: "https://app.structurestudiosuite.com/login",
+      redirectTo: "https://app.structurestudiosuite.com/portal",
     });
     setBusy(false);
     if (err) setError(err.message);
