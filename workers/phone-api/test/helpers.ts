@@ -566,3 +566,20 @@ export function attr(xml: string, tag: string, name: string): string | null {
   const m = new RegExp(`<${tag}\\b[^>]*\\s${name}="([^"]*)"`).exec(xml);
   return m ? m[1].replace(/&amp;/g, "&") : null;
 }
+
+// ── Transcript consent (migration 307, src/aiConsent.ts) ────────────────────────────
+
+/** One person's yes to transcripts, as phone_user_settings holds it. */
+export const allowed = (userId: string, version = 1) => ({ user_id: userId, ai_transcripts: "allowed", ai_transcripts_version: version, ai_transcripts_at: "2026-10-13T12:00:00Z" });
+
+/**
+ * The three reads behind "everyone on the call allowed it" (src/aiConsent.ts consentedCalls):
+ * each call's team (phone_calls), its transfers (phone_call_events) and their answers
+ * (phone_user_settings), each honouring the Worker's filters.
+ */
+export function serveConsent(net: FakeNet, o: { calls: Record<string, unknown>[]; events?: EventFixture[]; consent: Record<string, unknown>[] }): FakeNet {
+  net.rest("GET", "phone_calls", pgTable(o.calls));
+  net.rest("GET", "phone_call_events", eventRows(o.events ?? []));
+  net.rest("GET", "phone_user_settings", pgTable(o.consent));
+  return net;
+}

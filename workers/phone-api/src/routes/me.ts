@@ -4,6 +4,7 @@
 
 import type { Ctx, Env } from "../env";
 import { WORKER_VERSION } from "../env";
+import { AI_CONSENT_COLUMNS, AI_CONSENT_MAX_VERSION, consentOut, type AiConsentRow } from "../aiConsent";
 import { requireCaller, requireLogin, type Caller } from "../context";
 import { adminClient, callerContext, must } from "../db";
 import { ApiError, ok, readJson, UUID_RE } from "../http";
@@ -175,6 +176,39 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
     }
   }
   return ok({ settings: settingsOut(saved) });
+}
+
+// ── POST /settings/me/ai-transcripts ────────────────────────────────────────────────
+
+const AI_CHOICE_REFUSED = "Choose Allow or Don't allow.";
+const AI_VERSION_REFUSED = "That notice version isn't one we know.";
+
+/**
+ * Your answer to the apps' transcripts notice (migration 307, ../aiConsent.ts): `choice`
+ * "allowed" or "declined", and `version`, the notice you answered (the apps' AI_NOTICE_VERSION).
+ * Saved with the time, so it follows you to every device; the minute tick reads it before it
+ * sends any call you were on to Workers AI or Claude, so "declined" stops every call not yet
+ * sent. Its own route (not POST /settings/me) so /settings/me never depends on migration 307.
+ * → { ai_consent: {choice, version, at} }, the /token shape.
+ */
+export async function aiTranscriptsMe(env: Env, req: Request): Promise<Response> {
+  const c = await requireCaller(env, req, { needOn: false });
+  const body = await readJson(req);
+  const choice = body.choice;
+  if (choice !== "allowed" && choice !== "declined") throw new ApiError("bad_request", AI_CHOICE_REFUSED);
+  const version = body.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1 || version > AI_CONSENT_MAX_VERSION) {
+    throw new ApiError("bad_request", AI_VERSION_REFUSED);
+  }
+  const nowIso = new Date().toISOString();
+  const saved = must(
+    await c.admin.from("phone_user_settings").upsert({
+      user_id: c.userId, client_id: c.ctx.client_id, updated_at: nowIso,
+      ai_transcripts: choice, ai_transcripts_version: version, ai_transcripts_at: nowIso,
+    }, { onConflict: "user_id" }).select(AI_CONSENT_COLUMNS).single(),
+    "save transcript consent",
+  ) as AiConsentRow | null;
+  return ok({ ai_consent: consentOut(saved) });
 }
 
 // ── POST /devices ───────────────────────────────────────────────────────────────────

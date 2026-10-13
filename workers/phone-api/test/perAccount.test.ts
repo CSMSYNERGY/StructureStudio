@@ -29,7 +29,8 @@ import { recordingBackstop } from "../src/recording";
 import { updateCall } from "../src/twilioRest";
 import { CRON_PERIOD_MS, cronAccounts, envForClient, webhookEnv, type WebhookAccount } from "../src/twilioAccount";
 import {
-  Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, appRequest, call, callerCtx, filter, jsonRes, makeEnv, routeInfo,
+  Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, allowed, appRequest, call, callerCtx, filter, jsonRes, makeEnv, routeInfo,
+  serveConsent,
 } from "./helpers";
 
 const PARENT = "AC" + "0".repeat(32);
@@ -454,8 +455,10 @@ describe("crons per account", () => {
   it("transcription fetches each call's audio from its business's account", async () => {
     const net = new FakeNet().install();
     const REC_SID = "RE" + "0".repeat(31) + "9";
-    net.rpc("phone_recordings_claim", () => [{ id: "r1", call_id: "c1", client_id: CLIENT, recording_sid: REC_SID, duration_s: 60, channel_map: { 0: "customer", 1: "team" }, attempts: 1 }]);
+    const CALL = "00000000-0000-4000-8000-0000000ca009";
+    net.rpc("phone_recordings_claim", () => [{ id: "r1", call_id: CALL, client_id: CLIENT, recording_sid: REC_SID, duration_s: 60, channel_map: { 0: "customer", 1: "team" }, attempts: 1 }]);
     net.rest("GET", "client_settings", () => [{ client_id: CLIENT, phone_transcribe_calls: true }]);
+    serveConsent(net, { calls: [{ id: CALL, placed_by: USER_A, answered_by: null, transferred_from: null }], consent: [allowed(USER_A)] });
     net.rpc("twilio_account_creds", () => [subRow()]);
     net.on("GET", (u) => u.pathname.endsWith(`/Recordings/${REC_SID}.mp3`), () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }));
     net.rest("PATCH", "phone_call_recordings", () => [{ id: "r1" }]);

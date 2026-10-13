@@ -7,6 +7,9 @@ import { businessNumbersOf, callerContext, type Admin } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
 
+/** The read of the person's settings, not the one of their transcripts answer (test/aiConsent.test.ts). */
+const settingsRead = (net: FakeNet) => net.reads("phone_user_settings").find((r) => !String(r.url.searchParams.get("select")).includes("ai_transcripts"))!;
+
 function decode(jwt: string) {
   const [h, p, s] = jwt.split(".");
   return { header: b64urlDecodeJson(h), payload: b64urlDecodeJson<any>(p), signed: `${h}.${p}`, sig: s };
@@ -308,8 +311,8 @@ describe("POST /token", () => {
     const s = await setup(undefined, [{ dnd: true, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: USER_C }]);
     const { json } = await call(s.env, await req(s.auth));
     expect(json.settings).toEqual({ dnd: true, forward_to_cell: null, dnd_cover_user_id: USER_C, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("dnd_cover_user_id");
-    expect(filter(s.net.reads("phone_user_settings")[0], "user_id")).toBe(USER_A);
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("dnd_cover_user_id");
+    expect(filter(settingsRead(s.net), "user_id")).toBe(USER_A);
     const none = await setup(undefined, []);
     expect((await call(none.env, await req(none.auth))).json.settings).toEqual({ dnd: false, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
   });
@@ -321,7 +324,7 @@ describe("POST /token", () => {
     const s = await setup(undefined, [{ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: hours, ring_hours_tz: "America/Denver" }]);
     const { json } = await call(s.env, await req(s.auth));
     expect(json.settings).toMatchObject({ ring_hours: hours, ring_hours_tz: "America/Denver" });
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("ring_hours_tz");
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("ring_hours_tz");
     // Anything but an object (a database fault, say) reads as always.
     const odd = await setup(undefined, [{ dnd: false, ring_hours: [["08:00", "17:00"]], ring_hours_tz: null }]);
     expect((await call(odd.env, await req(odd.auth))).json.settings).toMatchObject({ ring_hours: null, ring_hours_tz: null });
@@ -335,7 +338,7 @@ describe("POST /token", () => {
     const { json, text } = await call(s.env, await req(s.auth));
     expect(json.settings.greeting).toEqual({ set: true, updated_at: "2026-10-05T15:01:00Z" });
     expect(text).not.toContain(SID);
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("greeting_recording_sid");
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("greeting_recording_sid");
     // A time with no recording is not a greeting.
     const stray = await setup(undefined, [{ dnd: false, greeting_recording_sid: null, greeting_updated_at: "2026-10-05T15:01:00Z" }]);
     expect((await call(stray.env, await req(stray.auth))).json.settings.greeting).toEqual({ set: false, updated_at: null });

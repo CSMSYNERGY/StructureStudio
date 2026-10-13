@@ -32,7 +32,7 @@ import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listContacts, listThreads, search, searchCalls, searchThreads, team } from "./routes/reads";
-import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
+import { aiTranscriptsMe, devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushEmail, pushText } from "./routes/push";
 import { clearGreeting, myGreetingAudio, recordGreeting } from "./routes/greeting";
@@ -188,6 +188,8 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   // Your own settings for the portal's "Your calls" card (the apps read them from /token, and
   // here again to see a greeting they just recorded).
   { method: "GET", re: /^\/settings\/me$/, h: (r, env) => mySettings(env, r) },
+  // Your answer to the apps' transcripts notice (migration 307, ../aiConsent.ts).
+  { method: "POST", re: /^\/settings\/me\/ai-transcripts$/, h: (r, env) => aiTranscriptsMe(env, r) },
   // Your own voicemail greeting (routes/greeting.ts): ring to record it, hear it, drop it.
   { method: "POST", re: /^\/settings\/me\/greeting\/record$/, h: (r, env, ec) => recordGreeting(env, ec, r) },
   { method: "GET", re: /^\/settings\/me\/greeting\/audio$/, h: (r, env) => myGreetingAudio(env, r) },

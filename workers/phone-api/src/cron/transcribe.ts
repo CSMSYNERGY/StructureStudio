@@ -6,17 +6,21 @@
 //      5 minutes, FOR UPDATE SKIP LOCKED, attempts + 1, so overlapping ticks never take the
 //      same one and a tick that dies leaves its rows to come back when the lease runs out.
 //   2. Per row: the business still wants transcripts (read now: it may have turned them off
-//      since the call); the audio from Twilio by its SID, both channels apart
-//      (RequestedChannels=2); Workers AI @cf/deepgram/nova-3, multichannel; lines labelled
-//      "Customer:" / "Team:" from the row's channel_map; stored with its utterances and what it
-//      cost (an estimate); then the summary is due.
+//      since the call), and EVERY team member on the call has allowed it in the phone app
+//      (../aiConsent.ts, migration 307: App Store guideline 5.1.2(i)'s permission before sharing
+//      with third-party AI; nobody known, a no, or no answer yet = not sent, settled "off" for
+//      good); the audio from Twilio by its SID, both channels apart (RequestedChannels=2);
+//      Workers AI @cf/deepgram/nova-3, multichannel; lines labelled "Customer:" / "Team:" from
+//      the row's channel_map; stored with its utterances and what it cost (an estimate); then
+//      the summary is due.
 //   3. A failure backs off 1, 5, 15, 60 minutes and gives up (failed) after MAX_ATTEMPTS. A
 //      recording Twilio no longer has fails at once.
-//   4. Summaries: each recording whose summary is due gets one POST to the phone-call-summary
-//      edge function (Claude; ANTHROPIC_API_KEY lives in Supabase secrets only). The function
-//      claims the row itself (phone_recording_summary_claim), so asking twice never asks Claude
-//      twice. Still pending 2 minutes later: asked again. Still not written a day after the
-//      recording: given up.
+//   4. Summaries: each recording whose summary is due, while everyone on its call still allows
+//      it (asked again: a no since the transcript stops the summary), gets one POST to the
+//      phone-call-summary edge function (Claude; ANTHROPIC_API_KEY lives in Supabase secrets
+//      only). The function claims the row itself (phone_recording_summary_claim), so asking
+//      twice never asks Claude twice. Still pending 2 minutes later: asked again. Still not
+//      written a day after the recording: given up.
 // Not a bare waitUntil after the callback, on purpose: a transcript is minutes of work against
 // two outside services, and the queue is what survives a fault, a deploy or a dead isolate.
 //
@@ -25,6 +29,7 @@
 // database's), never anything a caller said. A mark on the call says only how many characters.
 
 import type { Env } from "../env";
+import { consentedCalls } from "../aiConsent";
 import { addCallEvent, must, type Admin } from "../db";
 import { logFault } from "../log";
 import { callTranscribeOn, CHANNEL_MAP } from "../recording";
@@ -185,6 +190,7 @@ export interface TranscribeRun {
   reason?: "switched_off" | "not_configured";
   claimed: number;
   done: number;
+  /** Not sent: the business has transcripts off, or someone on the call hasn't allowed it. */
   off: number;
   retried: number;
   failed: number;
@@ -220,7 +226,12 @@ export async function runTranscriptions(env: Env, admin: Admin, now = new Date()
       "read transcript settings",
     ) as { client_id: string; phone_transcribe_calls?: boolean }[] | null) ?? [];
     const wants = new Map(settings.map((s) => [s.client_id, s.phone_transcribe_calls !== false]));
-    for (const row of rows) run[await transcribeOne(env, admin, row, wants.get(row.client_id) === true, now)]++;
+    // And each call's team allowed it (../aiConsent.ts), read now: a no since the call counts. A
+    // failed read throws here too, and nothing is sent this tick.
+    const consented = await consentedCalls(admin, rows.map((r) => r.call_id));
+    for (const row of rows) {
+      run[await transcribeOne(env, admin, row, wants.get(row.client_id) === true && consented.has(row.call_id), now)]++;
+    }
   }
   run.summaries = await requestDueSummaries(env, admin, now);
   return run;
@@ -335,15 +346,18 @@ export async function requestCallSummary(env: Env, recordingId: string): Promise
 /**
  * The summaries due now: one request each, at the same time. Each is first moved 2 minutes on
  * (a conditional write on the time it had), so two overlapping ticks never both ask. A summary
- * still not written a day after its recording ended is given up as failed.
+ * still not written a day after its recording ended is given up as failed. One whose call has
+ * someone on it who no longer allows it (../aiConsent.ts) is never asked for: settled "off".
  */
 async function requestDueSummaries(env: Env, admin: Admin, now: Date): Promise<number> {
   const due = (must(
-    await admin.from("phone_call_recordings").select("id, client_id, summary_next_at, completed_at")
+    await admin.from("phone_call_recordings").select("id, call_id, client_id, summary_next_at, completed_at")
       .eq("transcript_status", "done").in("summary_status", ["pending", "working"]).is("deleted_at", null)
       .lte("summary_next_at", now.toISOString()).order("summary_next_at", { ascending: true }).limit(SUMMARY_BATCH),
     "read summaries due",
-  ) as { id: string; client_id: string; summary_next_at: string; completed_at: string | null }[] | null) ?? [];
+  ) as { id: string; call_id: string; client_id: string; summary_next_at: string; completed_at: string | null }[] | null) ?? [];
+  // A failed read throws: no summary is asked for this tick.
+  const consented = due.length ? await consentedCalls(admin, due.map((r) => r.call_id)) : new Set<string>();
   const asks: string[] = [];
   for (const r of due) {
     const ended = Date.parse(r.completed_at ?? "");
@@ -351,6 +365,11 @@ async function requestDueSummaries(env: Env, admin: Admin, now: Date): Promise<n
       await admin.from("phone_call_recordings").update({ summary_status: "failed", summary_next_at: null, lease_until: null, last_error: "The summary was not written within a day." })
         .eq("id", r.id).in("summary_status", ["pending", "working"]);
       await logFault({ code: "call_summary_gave_up", clientId: r.client_id, message: "A call summary was not written within a day; given up.", context: { recording: r.id } });
+      continue;
+    }
+    if (!consented.has(r.call_id)) {
+      await admin.from("phone_call_recordings").update({ summary_status: "off", summary_next_at: null, lease_until: null })
+        .eq("id", r.id).in("summary_status", ["pending", "working"]);
       continue;
     }
     const { data } = await admin.from("phone_call_recordings")
