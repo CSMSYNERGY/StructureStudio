@@ -5,8 +5,13 @@
 //
 //   A  Settings → Pipelines: the Statuses card says the system sets a status and nobody changes one
 //      by hand; each status keeps its "Set automatically when" drop-down (a status no event sets
-//      reads "Nothing yet", never "set by hand"); the Pipelines card names no stage→status link,
+//      reads "No event", never "set by hand"); the Pipelines card names no stage→status link,
 //      and Shed Deals carries the "new designs" badge.
+//      Since 2026-10-13 the copy is true to that: no "add your own", and a status with no event
+//      says "No event yet, so no card will get this status." (Appt Set, as seeded). A new status
+//      needs its event: with every event taken the card says so and offers no Add; once one is
+//      freed, Add stays off until a name AND an event are picked, and sends both (A7-A12; against
+//      the build before, A7-A12 fail).
 //   B  the stage editor (Edit stages on Shed Deals): every stage keeps name, colour, kind, order
 //      and remove (C16), and there is no "Linked status" drop-down; the help says a move never
 //      changes a status and new designs land in the first open stage; Shed Deals (the pipeline new
@@ -44,6 +49,8 @@ const STATUSES = [
   ["Accepted", "#16A34A", "estimate_accepted"], ["Invoiced", "#14B8A6", "invoiced"], ["Payment Received", "#84CC16", "paid_in_full"],
   ["Scheduling", "#F59E0B", "build_scheduled"], ["Delivered", "#0F766E", "delivered"],
 ].map(([name, color, triggerEvent], i) => ({ id: U(100 + i), name, color, position: (i + 1) * 1024, triggerEvent }));
+// What crm_pipelines_list answers, changed by crm_status_save the way the server changes it.
+const live = STATUSES.map((s) => ({ ...s }));
 const SHED_STAGES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "Nurturing - Warm", "Nurturing - Hot", "Gone Cold Again"]
   .map((name, i) => ({ id: U(200 + i), name, color: "#64748B", kind: "open", position: (i + 1) * 1024 }));
 const PIPELINES = [
@@ -88,7 +95,17 @@ const handler = async (route) => {
       return json(route, { ok: true, clientId: CLIENT, role: "owner", access: null, prefs: null, configured: false, invoiceInGhl: false,
         ghlInvoicingAllowed: false, ssQuoteNext: 1042, ssInvoiceNext: 2001, ssTaxRate: 6.5, ssTaxLabel: "Sales tax", businessAddress: {}, branding: {}, emailReady: true });
     case "crm_pipelines_list":
-      return json(route, { ok: true, pipelines: PIPELINES, statuses: STATUSES, team: [], canManage: true, canWrite: true, ownOnly: false, me: USER.id });
+      return json(route, { ok: true, pipelines: PIPELINES, statuses: live, team: [], canManage: true, canWrite: true, ownOnly: false, me: USER.id });
+    case "crm_status_save": {
+      if (!body.id) {
+        live.push({ id: U(150 + live.length), name: body.name, color: "#64748B", position: (live.length + 1) * 1024, triggerEvent: body.triggerEvent || null });
+        return json(route, { ok: true, id: U(150 + live.length - 1) });
+      }
+      const t = live.find((s) => s.id === body.id);
+      if (t && body.triggerEvent !== undefined) t.triggerEvent = body.triggerEvent || null;
+      if (t && body.name) t.name = body.name;
+      return json(route, { ok: true, id: body.id });
+    }
     case "crm_stage_save": return json(route, { ok: true, id: body.id || U(399) });
     default: return json(route, { ok: true });
   }
@@ -127,10 +144,60 @@ try {
   ok("A3 nothing says a status can be set by hand", !/set by hand\)|can still change a status by hand|by hand, or automatically/i.test(text));
   const triggers = await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").evaluateAll((els) =>
     els.map((e) => e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : null));
-  ok("A4 every status keeps its 'Set automatically when'; Appt Set reads 'Nothing yet'", triggers.length === 8 && triggers[1] === "Nothing yet" && triggers[0] === "A design is submitted", JSON.stringify(triggers));
+  ok("A4 every status keeps its 'Set automatically when'; Appt Set reads 'No event'", triggers.length === 8 && triggers[1] === "No event" && triggers[0] === "A design is submitted", JSON.stringify(triggers));
   ok("A5 the Pipelines card names no stage→status link, nor Quotes", !/link stages to statuses|Link a stage/i.test(text) && !/\bQuotes\b/.test(text));
   ok("A6 Shed Deals carries the 'new designs' badge", await page.evaluate(() =>
     [...document.querySelectorAll("span")].some((s) => /^Shed Deals/.test((s.innerText || "").trim()) && /new designs/.test(s.innerText || ""))));
+
+  // ── A7-A12: the copy is true, and a new status needs its event (2026-10-13) ──
+  const NO_EVENT = "No event yet, so no card will get this status.";
+  const statusCard = async () => page.evaluate(() => {
+    const c = document.querySelector("[data-ss-pipeline-settings]");
+    const rows = [...c.querySelectorAll("input[aria-label='Status name']")].map((inp) => {
+      const row = inp.parentElement;
+      const hint = row.querySelector("[data-ss-status-no-event]");
+      return { name: inp.value, hint: hint ? hint.innerText.trim() : null };
+    });
+    const add = c.querySelector("[data-ss-status-add]");
+    const none = c.querySelector("[data-ss-status-add-none]");
+    const sel = add ? add.querySelector("select") : null;
+    const btn = add ? [...add.querySelectorAll("button")].find((b) => b.textContent.trim() === "Add status") : null;
+    return { text: c.innerText, rows, add: !!add, none: none ? none.innerText.trim() : null,
+      events: sel ? [...sel.options].map((o) => o.value) : null, addDisabled: btn ? btn.disabled : null };
+  });
+  let sc = await statusCard();
+  ok("A7 the card no longer says 'add your own', and says a new status needs an event of its own",
+    !/add your own/i.test(sc.text) && /a new status needs an event of its own/.test(sc.text) && !/Nothing yet/.test(sc.text), sc.text.slice(0, 600));
+  ok("A8 the status no event sets (Appt Set) says no card will get it, and only that one",
+    JSON.stringify(sc.rows.filter((r) => r.hint).map((r) => [r.name, r.hint])) === JSON.stringify([["Appt Set", NO_EVENT]]), JSON.stringify(sc.rows));
+  ok("A9 with every event taken there is no Add: the card says why instead",
+    !sc.add && !!sc.none && /Every event already sets a status, so a new one would never reach a card/.test(sc.none), JSON.stringify({ add: sc.add, none: sc.none }));
+  await page.locator("[data-ss-pipeline-settings]").screenshot({ path: join(shots, "statuses-all-events-taken.png") });
+  // Free an event: Delivered set to No event.
+  await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").nth(7).selectOption("");
+  await page.waitForTimeout(900);
+  const freed = sent.filter((b) => b.action === "crm_status_save").pop();
+  sc = await statusCard();
+  ok("A10 a status set to No event is saved so, then says no card will get it, and its event is offered for a new status",
+    !!freed && freed.id === STATUSES[7].id && freed.triggerEvent === "" && sc.rows[7].hint === NO_EVENT && sc.add
+      && JSON.stringify(sc.events) === JSON.stringify(["", "delivered"]), JSON.stringify({ freed, rows: sc.rows.map((r) => r.hint), events: sc.events }));
+  // Each step reports rather than throws when its control is missing (the build before has none).
+  await page.locator("[data-ss-status-add] input[aria-label='New status name']").fill("Ready for pickup", { timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(150);
+  const offWithoutEvent = (await statusCard()).addDisabled;
+  await page.locator("[data-ss-status-add] select").selectOption("delivered", { timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(150);
+  const onWithEvent = (await statusCard()).addDisabled === false;
+  ok("A11 Add stays off with a name and no event, and comes on once the event is picked", offWithoutEvent === true && onWithEvent, JSON.stringify({ offWithoutEvent, onWithEvent }));
+  await page.locator("[data-ss-status-add] button", { hasText: "Add status" }).click({ timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(900);
+  const made = sent.filter((b) => b.action === "crm_status_save").pop();
+  sc = await statusCard();
+  const newRow = sc.rows.find((r) => r.name === "Ready for pickup");
+  ok("A12 Add sends the name AND its event, and the new status shows with no hint",
+    !!made && !made.id && made.name === "Ready for pickup" && made.triggerEvent === "delivered" && !!newRow && newRow.hint === null && !sc.add && !!sc.none,
+    JSON.stringify({ made, newRow }));
+  await page.locator("[data-ss-pipeline-settings]").screenshot({ path: join(shots, "statuses-after-add.png") });
 
   // ── B ──
   await page.locator("button", { hasText: "Edit stages" }).first().click();

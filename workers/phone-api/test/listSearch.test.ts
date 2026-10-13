@@ -13,7 +13,7 @@ import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B,
   appRequest, call, callerCtx, jsonRes, makeEnv, pgTable,
 } from "./helpers";
-import { listSearchDigits, snippetAround, termPattern } from "../src/routes/reads";
+import { listSearchDigits, listSearchTerm, snippetAround, termPattern } from "../src/routes/reads";
 
 type Row = Record<string, unknown>;
 const T = (min: number) => new Date(Date.UTC(2026, 9, 12, 15, 0) - min * 60_000).toISOString();
@@ -83,7 +83,33 @@ const ids = (list: { id: string }[]) => list.map((c) => c.id);
 
 // ── The term ─────────────────────────────────────────────────────────────────────────────────
 
+/** Terms the Worker and phone-core must decide alike (the parity test below runs every one). */
+const TERM_CASES: string[] = [
+  "+1", "+1 ", "(8", "#5", "$5", "a+", "?!", "👍👍", "a", "", "   ", "#", "ab", "__", "..", "'@", "--",
+  "  shed   porch ", "+1 816", "(816)", "(816) 555-01", "O'Neil", "José", "a@b", "lean),to*(", "lean-to, 12x24!", "  *  ,( ",
+  "x\u00a0y", "\u00a0\u00a0z", "e\u0301", "日本", "١٢", "\t\nab\r\n", "😀a", "a😀", "😀ab",
+  // Long ones: the apps cut to 60 BEFORE cleaning, so what lies past the cut never counts.
+  "!".repeat(60) + "ab", "a".repeat(59) + "\u{1D400}", "a".repeat(80), " ".repeat(10) + "ab" + "!".repeat(70), "b" + "!".repeat(58) + "cd",
+];
+const TOO_SHORT = "Type at least 2 characters to search.";
+
 describe("the term", () => {
+  it("is phone-core's term: cut to 60 as the apps send it, then cleaned, and under 2 characters either way is refused", () => {
+    // What the apps hold back without asking (phone-core listSearchTerm, 2026-10-13).
+    for (const q of ["+1", "+1 ", "(8", "#5", "$5", "a+", "?!", "👍👍", "a", "", "   ", "  *  ,( "]) expect(listSearchTerm(q), q).toBeNull();
+    expect(listSearchTerm(42)).toBeNull();
+    expect(listSearchTerm(undefined)).toBeNull();
+    expect(listSearchTerm("  shed   porch ")).toBe("shed porch");
+    expect(listSearchTerm("+1 816")).toBe("1 816");
+    expect(listSearchTerm("lean),to*(")).toBe("lean to");
+    // Cut BEFORE it is cleaned, as the apps cut it. Cleaning the whole body first took the first
+    // (the apps send only its first 60 characters, which clean to nothing) and searched the second
+    // with half of its last character left on the end.
+    expect(listSearchTerm("!".repeat(60) + "ab")).toBeNull();
+    expect(listSearchTerm("a".repeat(59) + "\u{1D400}")).toBe("a".repeat(59));
+  });
+
+
   it("is a number to match by only when it is digits and what people type around them, 3 digits or more (phone-core's rule)", () => {
     expect(listSearchDigits("(555) 555-01")).toBe("55555501");
     expect(listSearchDigits("+1 555 555")).toBe("1555555");
@@ -115,14 +141,30 @@ describe("the term", () => {
   });
 });
 
-// The client half (the phone repo's packages/phone-core) must read numbers the same way: run with
-// PHONE_CORE_DIR pointing at a checkout's packages/phone-core, as test/identity.test.ts does.
+// The client half (the phone repo's packages/phone-core) must read terms and numbers the same way:
+// run with PHONE_CORE_DIR pointing at a checkout's packages/phone-core, as test/identity.test.ts does.
 const coreDir = process.env.PHONE_CORE_DIR;
-describe.skipIf(!coreDir || !existsSync(join(coreDir, "src", "listSearch.ts")))("parity with @sss/phone-core listSearchDigits", () => {
+describe.skipIf(!coreDir || !existsSync(join(coreDir, "src", "listSearch.ts")))("parity with @sss/phone-core list search", () => {
   it("agrees on what is a number and which digits it is", async () => {
     const core = await import(/* @vite-ignore */ pathToFileURL(join(coreDir!, "src", "listSearch.ts")).href);
     const cases = ["(555) 555-01", "555-555", "5555550100", "+1 555 555", "1.555.555.0100", "  555  ", "55", "Bob 555", "lean-to", "555 555 x", "(((", "+", "12345678901234567890"];
     for (const q of cases) expect(listSearchDigits(q), q).toBe(core.listSearchDigits(core.listSearchTerm(q) ?? q));
+  });
+
+  // The term itself (2026-10-13): phone-core holds back what its listSearchCleaned leaves under 2
+  // characters ("+1", "(8", "#5", "$5", "a+", "?!") and never asks. The Worker must refuse exactly
+  // those, take every term the apps send, and search the same text the apps count on.
+  it("refuses exactly the terms the apps hold back, and searches what they send, cleaned the same way", async () => {
+    const core = await import(/* @vite-ignore */ pathToFileURL(join(coreDir!, "src", "listSearch.ts")).href);
+    for (const q of TERM_CASES) {
+      const sent = core.listSearchTerm(q);
+      const mine = listSearchTerm(q);
+      expect(mine === null, `refused? ${JSON.stringify(q)}`).toBe(sent === null);
+      if (sent === null) continue;
+      expect(mine, JSON.stringify(q)).toBe(core.listSearchCleaned(sent));
+      // The apps send `sent`, not what was typed: the Worker reads that the same way.
+      expect(listSearchTerm(sent), `sent ${JSON.stringify(sent)}`).toBe(mine);
+    }
   });
 });
 
@@ -266,6 +308,10 @@ describe("POST /threads/search", () => {
       [{ q: 42, scope: "team" }, "Type at least 2 characters to search."],
       [{ q: "a", scope: "team" }, "Type at least 2 characters to search."],
       [{ q: "  *  ,( ", scope: "team" }, "Type at least 2 characters to search."],
+      // The terms the apps hold back without asking (phone-core listSearchTerm) are refused here too.
+      ...["+1", "(8", "#5", "$5", "a+", "?!"].map((q): [unknown, string] => [{ q, scope: "team" }, TOO_SHORT]),
+      // And past the 60 the apps send, nothing counts: this one's first 60 characters clean to nothing.
+      [{ q: "!".repeat(60) + "ab", scope: "team" }, TOO_SHORT],
       [{ q: "lean", scope: "everyone" }, "Search My or Team."],
       [{ q: "lean", scope: "team", cursor: "yesterday" }, "That page marker isn't valid."],
       [{ q: "lean", scope: "team", cursor: 12 }, "That page marker isn't valid."],

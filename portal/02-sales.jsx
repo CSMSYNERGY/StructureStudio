@@ -3841,9 +3841,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     ? ((data.designs || []).find((d) => d.short_code === activeCode) || null)
     : null;
 
-  // THE PIPELINE CARDS (crm_record's `pipeline` block, 2026-10-12): undefined from a server that
-  // doesn't send it, or for a reader who may not see contacts, and then the record is what it was.
+  // THE PIPELINE CARDS (crm_record's `pipeline` block, 2026-10-12): undefined for a reader who may
+  // not see contacts (a design record without the CRM, or a designs-only role), and then the design
+  // record is what it was.
   const pipe = data.pipeline || null;
+  // THE READ FAILED (2026-10-13): crm_record says so with pipelineError. A contact's record with no
+  // block counts too, because a contact reader always gets one when the read works. Then the record
+  // says it couldn't load the deal's pipeline and draws NO ladder: the old hard-coded SALES ladder
+  // there would be a guess about this deal dressed up as an answer.
+  const pipeFailed = !pipe && (!!data.pipelineError || kind === "contact");
   // A Deals row with no design is picked by its card's id (crmDealRows' key), never a short code,
   // so activeCode stays null for it: every tab that files against a design still waits for one,
   // and only the top bar follows the pick. Re-checked against this contact's own cards for the
@@ -4893,8 +4899,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           </div>
         )}
       </div>
-      {/* The old status ladder, only where there is no pipeline block (CrmStageBar says when). */}
-      {kind === "design" && !pipe && <CrmStageBar status={record.status} />}
+      {/* The old status ladder, only where there is no pipeline block (CrmStageBar says when), and
+          never in place of a pipeline that failed to load. */}
+      {kind === "design" && !pipe && !pipeFailed && <CrmStageBar status={record.status} />}
+      {pipeFailed && (kind === "design" || activeDeal) && (
+        <div data-ss-pipe-error="" role="status" style={{ fontSize: 12.5, fontWeight: 600, color: "#B45309", background: "#FFFBEB",
+          border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+          Couldn't load this deal's pipeline. Refresh to try again.
+        </div>
+      )}
       {(() => {
         // The design these rails are about: the record itself on a deal, the PICKED deal on
         // a contact. Null on a contact with nothing picked, which reads as "no invoice" and
@@ -4905,23 +4918,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         // want this up here to say shed deals with the stage that it's in." The first row is
         // named after the pipeline the picked deal is in and draws THAT pipeline's stages, the
         // one it is in lit; picking a deal in another pipeline switches it. On a design record
-        // it is the design's own card. The hard-coded ladder below is only for a record with no
-        // pipeline block (CrmStageBar says when).
-        const pipeRow = pipe ? crmPipeBarRow(pipe, barDeal) : null;
-
-        // SALES (the old ladder): on a contact only (a design draws CrmStageBar above), and
-        // only once a deal is PICKED.
+        // it is the design's own card. The status ladder above (CrmStageBar) is only for a design
+        // record with no pipeline block that didn't fail to load (pipeFailed).
         //
-        // ⚠️ THIS USED TO AUTO-PICK designs[0], "the newest deal", and that auto-pick IS the
-        // bug. Carolyn, 2026-09-02, on a contact holding four quotes: "there's three, four
-        // quotes in here. Which one the heck is it when I'm in a contact? ... what is it
-        // displaying up here? ... this should not show up here, unless one of these is
-        // selected, so you know which one you're seeing." A ladder drawn for a deal the
-        // reader did not choose and cannot identify is worse than no ladder: it looks like
-        // an answer. Defaulting to the newest would be the same bug with a nicer comment.
-        const salesIdx = activeDeal
-          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(activeDeal.status)] || "new")))
-          : null;
+        // ON A CONTACT THE ROW IS ONLY EVER THE PICKED DEAL'S PIPELINE. It used to fall back to
+        // the hard-coded SALES ladder when there was no pipeline block, and since every contact
+        // reader gets one, that fallback only ever drew when the read FAILED: a ladder that
+        // looked like an answer. pipeFailed says so above instead (2026-10-13). Nothing is
+        // auto-picked either (Carolyn, 2026-09-02: "this should not show up here, unless one of
+        // these is selected, so you know which one you're seeing").
+        const pipeRow = pipe ? crmPipeBarRow(pipe, barDeal) : null;
 
         // Scope build/delivery to the picked deal. crm_record computes both over EVERY code
         // this contact owns, so without this the rails would mix four buildings into one
@@ -4958,7 +4964,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         const invoiced = crmHasInvoice(railDesign);
         return (
           <CrmStageDots rows={[
-            pipeRow || (!pipe && kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null),
+            pipeRow,
             data.build && invoiced ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
             data.delivery && invoiced ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
           ].filter(Boolean)} />
@@ -6231,7 +6237,12 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
             {meta.canManage && !viewing && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
             {meta.canManage && !viewing && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
             {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
-            {!embedded && <button type="button" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>}
+            {/* REFRESH ON EVERY BOARD (2026-10-13). It used to show only when not embedded, and the
+                board is only ever drawn embedded now (a Contacts hub tab), so there was no way to
+                reload the cards short of reloading the page ("Refresh does nothing"). One press
+                reloads the pipelines (the hub's tab row follows through onPipelines) and this
+                board's cards. */}
+            <button type="button" data-ss-board-refresh="" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
           </div>
   );
   const count = deals ? (q || owner !== "all" || statusF.ids.length ? `${shown.length} of ${deals.length}` : deals.length) : null;
@@ -6420,6 +6431,8 @@ function PipelineSettings({ viewing = false }) {
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [newName, setNewName] = useState("");
+  // The event a new status is set by. Required: a status no event sets never reaches a card.
+  const [newEvent, setNewEvent] = useState("");
   const [editing, setEditing] = useState(null);   // pipeline object | "new"
   const load = useCallback(async () => {
     try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
@@ -6438,14 +6451,26 @@ function PipelineSettings({ viewing = false }) {
   };
   const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
   const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
+  // A NEW STATUS NEEDS ITS EVENT (2026-10-13). Statuses are the system's, so a status no event sets
+  // is one no card can ever get (Appt Set, as seeded). Adding one asks for the event that sets it,
+  // from the events no other status has (one status per event, crm_statuses' unique index); with
+  // none free, the card says so instead of offering a status that would sit unused.
+  const freeEvents = SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null));
+  const addEvent = freeEvents.some(([k]) => k === newEvent) ? newEvent : "";
+  const canAdd = !busy && !!newName.trim() && !!addEvent;
+  const add = () => run(async () => {
+    await ssPipeCall("crm_status_save", { name: newName.trim(), triggerEvent: addEvent });
+    setNewName(""); setNewEvent("");
+  });
   return (
     <>
       <div style={S.card} data-ss-pipeline-settings="">
         <div style={S.h2}>Statuses</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Every card on every pipeline shows its status as a coloured pill, and the system sets it: pick what sets
-          each one under <b>Set automatically when</b>. A status only ever moves forward in this order, and nobody
-          changes one by hand. Rename them, recolour them, put them in order and add your own.
+          Every card on every pipeline shows its status as a coloured pill, and the system sets it: each status
+          is set automatically when its event happens (<b>Set automatically when</b>). A status only ever moves
+          forward in this order, and nobody changes one by hand. You can rename them, recolour them and put them
+          in order. A status with no event never reaches a card, so a new status needs an event of its own.
         </p>
         {err && <div style={S.err}>{err}</div>}
         <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 10 }}>
@@ -6463,7 +6488,7 @@ function PipelineSettings({ viewing = false }) {
                 Set automatically when
                 <select aria-label="Set automatically when" disabled={!can || busy} value={t.triggerEvent || ""}
                   onChange={(e) => save(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
-                  <option value="">Nothing yet</option>
+                  <option value="">No event</option>
                   {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
                 </select>
               </label>
@@ -6472,17 +6497,32 @@ function PipelineSettings({ viewing = false }) {
               {can && <button type="button" title="Remove status" disabled={busy}
                 onClick={() => { if (window.confirm(`Remove the “${t.name}” status? Only a status no card has can be removed.`)) save(t, { archive: true }); }}
                 style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>}
+              {!t.triggerEvent && (
+                <div data-ss-status-no-event="" style={{ flexBasis: "100%", fontSize: 11.5, fontWeight: 600, color: "#B45309", paddingLeft: 40 }}>
+                  No event yet, so no card will get this status.
+                </div>
+              )}
             </div>
           ))}
         </div>
-        {can && (
-          <div style={{ display: "flex", gap: 6 }}>
-            <input style={{ ...S.input, flex: 1 }} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)} placeholder="New status name"
-              onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { e.preventDefault(); run(async () => { await ssPipeCall("crm_status_save", { name: newName.trim() }); setNewName(""); }); } }} />
-            <button type="button" disabled={busy || !newName.trim()} style={S.btn(ACCENT, "#FFF")}
-              onClick={() => run(async () => { await ssPipeCall("crm_status_save", { name: newName.trim() }); setNewName(""); })}>Add status</button>
+        {can && (freeEvents.length > 0 ? (
+          <div data-ss-status-add="" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <input style={{ ...S.input, flex: "1 1 160px", minWidth: 140 }} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)}
+              placeholder="New status name" aria-label="New status name"
+              onKeyDown={(e) => { if (e.key === "Enter" && canAdd) { e.preventDefault(); add(); } }} />
+            <select aria-label="New status is set automatically when" value={addEvent} onChange={(e) => setNewEvent(e.target.value)}
+              style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "6px 8px" }}>
+              <option value="">Set automatically when…</option>
+              {freeEvents.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <button type="button" disabled={!canAdd} style={S.btn(ACCENT, "#FFF")} onClick={add}>Add status</button>
           </div>
-        )}
+        ) : (
+          <p data-ss-status-add-none="" style={{ fontSize: 12, color: "#64748B", margin: 0, lineHeight: 1.5 }}>
+            Every event already sets a status, so a new one would never reach a card. Rename a status instead, or
+            free an event by setting a status to <b>No event</b>.
+          </p>
+        ))}
       </div>
       <div style={S.card}>
         <div style={S.h2}>Pipelines</div>

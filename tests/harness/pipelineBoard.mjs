@@ -14,6 +14,10 @@
 //      ever calls crm_deal_set_status. A click on the pill opens the customer like the rest of the
 //      card; the expected close date (now in the pill's row) still opens from the card on its own.
 //   L. The Design list keeps the page's ordinary 1240px width.
+//   Q. Refresh (2026-10-13): the board inside the Contacts hub has a visible "↻ Refresh", and a press
+//      asks for the pipelines and the cards again and draws what came back (a card added since).
+//      Against the build before, Q1 fails: the button showed only on a board that wasn't embedded,
+//      and the hub's board always is ("Refresh does nothing").
 //
 // (The old board failing W and F is how this was checked: with SS_PORTAL_ARTIFACT set to the
 // previous build, W finds the inner `overflow-x: auto` scroller and the 1240px cap, and F finds no
@@ -90,7 +94,8 @@ const ARTIFACT = process.env.SS_PORTAL_ARTIFACT ? readFileSync(process.env.SS_PO
 const { browser, ctx: unused } = await launch({ width: 1440, height: 1000 });
 await unused.close();
 
-async function open(path, viewport) {
+// `world.deals`, when set, is what crm_deals_list answers instead of DEALS (Q changes it mid-run).
+async function open(path, viewport, world = {}) {
   const calls = [];
   const moves = [];
   const ctx = await browser.newContext({ viewport, serviceWorkers: "block" });
@@ -127,7 +132,7 @@ async function open(path, viewport) {
       if (body.action === "crm_pipelines_list") {
         return json(route, { ok: true, pipelines: [PIPE], statuses: STATUSES, team: TEAM, canManage: true, canWrite: true, ownOnly: false, me: USER.id });
       }
-      if (body.action === "crm_deals_list") return json(route, { ok: true, deals: DEALS, capped: false });
+      if (body.action === "crm_deals_list") return json(route, { ok: true, deals: world.deals || DEALS, capped: false });
       if (body.action === "crm_deal_move") {
         const d = DEALS.find((x) => x.id === body.id);
         return json(route, { ok: true, moved: true, stage_entered_at: new Date().toISOString(), kind: "open", status_id: d ? d.status_id : null });
@@ -308,6 +313,36 @@ try {
     await page.waitForTimeout(600);
     const path = await page.evaluate(() => location.pathname);
     ok("R6 a click on the pill opens the customer", /\/contacts\/c-/.test(path), path);
+    await ctx.close();
+  }
+
+  // ── Q ── Refresh on the hub's board
+  {
+    const world = {};
+    const { ctx, page, errors, calls } = await open("/contacts", { width: 1440, height: 1000 }, world);
+    await boardReady(page);
+    const count = (a) => calls.filter((x) => x === a).length;
+    const btn = page.locator("[data-ss-contacts-hub] [data-ss-sales-pipelines] [data-ss-board-refresh]");
+    const shown = (await btn.count()) === 1 && (await btn.isVisible());
+    ok("Q1 the board inside the Contacts hub has a visible Refresh", shown, `count ${await btn.count()}`);
+    if (shown) {
+      const before = { deals: count("crm_deals_list"), pipes: count("crm_pipelines_list") };
+      // A card added since the board loaded (someone else's new lead).
+      const NEW = { ...DEALS[0], id: uuid(499), short_code: null, title: "Lead", stage_id: PIPE.stages[0].id,
+        contact: { ...DEALS[0].contact, id: uuid(599), name: "Quinn Fresh", email: "quinn@example.test" }, design: null };
+      world.deals = [...DEALS, NEW];
+      await btn.click();
+      await page.waitForFunction((id) => !!document.querySelector(`[data-ss-deal="${id}"]`), NEW.id, { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(300);
+      const after = { deals: count("crm_deals_list"), pipes: count("crm_pipelines_list") };
+      ok("Q2 a press asks for this board's cards again, and for the pipelines", after.deals === before.deals + 1 && after.pipes === before.pipes + 1,
+        JSON.stringify({ before, after }));
+      const fresh = await page.locator(`[data-ss-deal="${NEW.id}"]`).count();
+      ok("Q3 and draws what came back: the new card is on the board, with every card it had", fresh === 1 && (await page.locator("[data-ss-deal]").count()) === DEALS.length + 1
+        && (await page.locator(`[data-ss-stage="${PIPE.stages[0].id}"] [data-ss-deal="${NEW.id}"]`).count()) === 1, `new ${fresh}`);
+      await page.screenshot({ path: join(shots, `${PREFIX}refresh.png`) });
+    }
+    ok("Q4 no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 

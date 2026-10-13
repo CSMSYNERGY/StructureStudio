@@ -3282,10 +3282,26 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   // contactsView is the choice. designsView rides along for the build of the portal that still has
   // a separate Pipeline tab (production until the next promotion, same prefs): the Design list is
   // its "list" and a pipeline its "pipeline", and Contacts clears it there (null drops the key).
+  //
+  // The whitelist check again (see saveAddr): "Saved." only when the prefs the server answers with
+  // open the Contacts tab on the pick, read the way the shell reads them (ssSavedHubView). A build
+  // that drops contactsView still answers ok; then the pick goes back to what the server holds, so
+  // the line above says where Contacts really opens, and the message says the choice didn't stick.
+  const hubKey = (v) => (ssHubPipeId(v) ? "p-" + ssHubPipeId(v) : (v || null));
   const save = async (next) => {
     setVal(next); setBusy(true); setMsg(null);
     const mirror = next === SS_HUB_DESIGNS ? "list" : (ssHubPipeId(next) ? "pipeline" : null);
-    try { await commit({ contactsView: next, designsView: mirror }); setMsg({ ok: "Saved." }); }
+    try {
+      const back = await commit({ contactsView: next, designsView: mirror });
+      const kept = ssSavedHubView({ prefs: back });
+      if (hubKey(kept) !== hubKey(next)) {
+        prefsWant.current = { ...prefsWant.current, contactsView: (back && back.contactsView) || null, designsView: (back && back.designsView) || null };
+        setVal(kept);
+        setMsg({ err: "Saved, but this server build didn't keep that choice, so the Contacts tab still opens as the line above says. Tell CSM Synergy." });
+      } else {
+        setMsg({ ok: "Saved." });
+      }
+    }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };

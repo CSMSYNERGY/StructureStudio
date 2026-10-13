@@ -27,7 +27,9 @@
 //      record's Back returns to the board it came from (the second pipeline, not the first).
 //   K. My Profile: "How the Contacts tab opens" offers Contacts, Design list and every pipeline,
 //      says the first pipeline applies, and a press saves contactsView (and designsView for the
-//      older build) through save_prefs.
+//      older build) through save_prefs, and says "Saved." only when the answer keeps the choice: a
+//      server build that drops contactsView gets a plain error line, and the card goes back to
+//      what that server holds (K6-K8, 2026-10-13; against the build before, K6-K8 fail).
 //   L. The entitlement call fails: the Design list, no hang.
 //   M. "＋ Pipeline" on a board: the new pipeline joins the end of the row and opens.
 //
@@ -158,9 +160,15 @@ async function open(S, path) {
         case "crm_record":
           return json(route, { ok: true, kind: body.kind, clientId: OWN, contact: CONTACT, designs: [DESIGN], orders: [], feed: [], focus: [], team: [],
             people: [], followers: [], sms: { ready: false, from: null, optedOut: false, consented: false }, build: [], stages: [], delivery: [], repairs: [], isDesign: body.kind === "design" });
-        case "save_prefs":
+        case "save_prefs": {
           saves.push(body.prefs);
-          return json(route, { ok: true, prefs: body.prefs });
+          // S.oldServer: a build from before contactsView (production's), which keeps designsView
+          // alone and still answers ok.
+          if (!S.oldServer) return json(route, { ok: true, prefs: body.prefs });
+          const p = body.prefs || {};
+          const kept = (p.designsView === "list" || p.designsView === "pipeline") ? { designsView: p.designsView } : null;
+          return json(route, { ok: true, prefs: kept });
+        }
         default: return json(route, { ok: true });
       }
     }
@@ -423,8 +431,30 @@ try {
     const last = saves[saves.length - 1] || {};
     ok("K3 a press saves contactsView, with designsView for the older build", last.contactsView === "designs" && last.designsView === "list", JSON.stringify(last));
     ok("K4 and the card says so", /opens on the Design list \(your choice\)/.test(after.note), after.note);
+    const said = await page.locator("[data-ss-view-default]").locator("xpath=..").innerText().catch(() => "");
+    ok("K4b and says Saved., because the server kept it", /(^|\n)Saved\.(\n|$)/.test(said) && !/didn't keep/.test(said), said.slice(-300));
     await page.locator("[data-ss-view-default]").locator("xpath=..").screenshot({ path: join(shots, "U1-myprofile-contacts-default.png") }).catch(() => {});
     ok("K5 no page errors", errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+
+  // ── K6-K8: a server build that drops contactsView ──
+  {
+    const { ctx, page, errors, saves } = await open({ crm: true, n: 3, oldServer: true }, "/settings/myprofile");
+    await page.waitForFunction(() => /your first pipeline/.test((document.querySelector("[data-ss-view-default]") || {}).textContent || ""), null, { timeout: 20000 }).catch(() => {});
+    await page.locator('[data-ss-view-pick="people"]').click();
+    await page.waitForTimeout(800);
+    const card = await page.locator("[data-ss-view-default]").locator("xpath=..").innerText().catch(() => "");
+    const note = ((await page.locator("[data-ss-view-default]").textContent().catch(() => "")) || "").trim();
+    const pressed = await page.locator('[data-ss-view-pick="people"]').getAttribute("aria-pressed").catch(() => null);
+    ok("K6 the save went out with contactsView people", (saves[saves.length - 1] || {}).contactsView === "people", JSON.stringify(saves));
+    ok("K7 a server that drops it gets an error line, not Saved.",
+      card.includes("Saved, but this server build didn't keep that choice, so the Contacts tab still opens as the line above says. Tell CSM Synergy.")
+        && !/(^|\n)Saved\.(\n|$)/.test(card), card.slice(-400));
+    ok("K8 and the card goes back to what that server holds: nothing picked, the first pipeline, Contacts not lit",
+      /You haven't picked one, so the Contacts tab opens on Shed Deals, your first pipeline\./.test(note) && pressed === "false", JSON.stringify({ note, pressed }));
+    await page.locator("[data-ss-view-default]").locator("xpath=..").screenshot({ path: join(shots, "U1-myprofile-old-server.png") }).catch(() => {});
+    ok("K9 no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 

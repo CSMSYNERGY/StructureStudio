@@ -651,7 +651,7 @@ describe("retention (daily): each business's own days", () => {
     net.rest("POST", "app_errors", () => []);
     const now = new Date("2026-10-04T09:00:00Z");
     const { recordingRetention } = await import("../src/cron/retention");
-    expect(await recordingRetention(env, now)).toEqual({ deleted: 3, failed: 1 });
+    expect(await recordingRetention(env, now)).toEqual({ deleted: 3, failed: 1, parent: 0 });
     expect(net.rpcCalls("phone_recordings_expired")[0].json).toEqual({ p_now: now.toISOString(), p_limit: 200 });
     const patches = net.writes("phone_call_recordings", "PATCH");
     expect(patches.map((s) => filter(s, "id"))).toEqual(["r1", "r2", "r4"]);

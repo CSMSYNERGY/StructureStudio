@@ -242,3 +242,13 @@ Deno.test("the board reads its view from ssBoardViewOf and keeps every change wi
   assert(!/const \[(query|owner|statusFilter), set\w+\] = useState/.test(BOARD), "the search or a filter is plain component state again, lost when a card is opened");
   assert(!/sessionStorage|localStorage\.setItem\(\s*["'`]ss_board/.test(BOARD), "the view must stay in memory (a search is a customer's name)");
 });
+
+// 4. REFRESH ON THE HUB'S BOARD (2026-10-13). The board only ever draws embedded now (a Contacts hub
+// tab), and its Refresh used to show only when it wasn't, so a hub pipeline tab had no way to
+// reload its cards short of reloading the page. tests/harness/pipelineBoard.mjs presses it.
+Deno.test("the board's Refresh shows on the hub's tabs and reloads both the pipelines and the cards", () => {
+  const m = /<button[^>]*data-ss-board-refresh=""[^>]*onClick=\{\(\) => \{ loadMeta\(\); loadDeals\(\); \}\}[^>]*>↻ Refresh<\/button>/.exec(BOARD);
+  assert(m, "the board has no Refresh that reloads the pipelines and the cards");
+  const before = BOARD.slice(Math.max(0, m!.index - 40), m!.index);
+  assert(!/!embedded && $/.test(before) && !/!hosted && $/.test(before), "Refresh is hidden on the hub's board again");
+});

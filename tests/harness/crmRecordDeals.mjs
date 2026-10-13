@@ -15,7 +15,10 @@
 //      stage drop-down then lists the new pipeline's stages and the bar names it
 //   H. a lost stage asks for the reason first and sends it
 //   I. a design record (d-...) draws its card's pipeline too
-//   J. a server without the pipeline block: the record is what it was (designs, SALES ladder)
+//   J. the pipeline read failed (pipelineError, or a contact with no block): the designs are still
+//      the rows, and a picked deal (or a design record) says "Couldn't load this deal's pipeline.
+//      Refresh to try again." with NO ladder at all, never the old SALES one (2026-10-13). Against
+//      the build before, J3, J5 and J6 fail: it drew the Qualified / Proposal Made ladder instead.
 //   K. someone who can't edit contacts sees the stage, can't change it, and has no move or add
 //   L. a card clicked on the Pipeline board opens the record ON that deal, the bar on its pipeline;
 //      a lead card too, with the lead picked, its write tabs open and a note filed on the customer
@@ -105,7 +108,7 @@ const shot = (page, name) => page.screenshot({ path: join(shots, `U3-${name}.png
 const EDIT_ACCESS = { designer: "edit", designs: "edit", contacts: "edit" };
 const VIEW_ACCESS = { designer: "edit", designs: "edit", contacts: "view" };
 
-async function scenario(browser, { withPipeline = true, access = EDIT_ACCESS }) {
+async function scenario(browser, { withPipeline = true, pipelineError = false, access = EDIT_ACCESS }) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
@@ -151,6 +154,7 @@ async function scenario(browser, { withPipeline = true, access = EDIT_ACCESS }) 
           orders: [], feed: [], focus: [], team: [], people: [], followers: [],
           sms: { ready: false, from: null, optedOut: false, consented: false },
           build: [], stages: [], delivery: [], repairs: [], pipeline,
+          ...(pipelineError ? { pipelineError: true } : {}),
         });
       }
       case "crm_deal_move": {
@@ -480,18 +484,43 @@ try {
     await ctx.close();
   }
 
-  // ════ J: a server without the pipeline block ════
-  {
-    const { ctx, page, pageErrors, go } = await scenario(browser, { withPipeline: false });
+  // ════ J: the pipeline read failed ════
+  const PIPE_ERR = "Couldn't load this deal's pipeline. Refresh to try again.";
+  const OLD_LADDER = /Qualified|Demo Scheduled|Proposal Made|Contract Signed/;
+  const pipeErr = (page) => page.evaluate(() => [...document.querySelectorAll("[data-ss-pipe-error]")].map((e) => e.innerText.trim()));
+  for (const [label, opts] of [["crm_record says pipelineError", { withPipeline: false, pipelineError: true }],
+    ["a contact's record with no pipeline block", { withPipeline: false }]]) {
+    const { ctx, page, pageErrors, go } = await scenario(browser, opts);
     await go(`/contacts/c-${CONTACT_ID}`);
     await page.waitForFunction(() => !!document.querySelector("[data-ss-deal-row]"), null, { timeout: 30000 }).catch(() => {});
     const keys = await page.evaluate(() => [...document.querySelectorAll("[data-ss-deal-row]")].map((r) => r.getAttribute("data-ss-deal-row")));
-    ok("J1 the designs are still the Deals rows", JSON.stringify(keys) === JSON.stringify(DESIGNS.map((d) => d.short_code)), JSON.stringify(keys));
-    ok("J2 no status pills or pipeline controls", (await page.locator("[data-ss-deal-status]").count()) === 0);
+    const first = opts.pipelineError;
+    if (first) {
+      ok("J1 the designs are still the Deals rows", JSON.stringify(keys) === JSON.stringify(DESIGNS.map((d) => d.short_code)), JSON.stringify(keys));
+      ok("J2 no status pills or pipeline controls", (await page.locator("[data-ss-deal-status]").count()) === 0);
+      ok("J2b nothing picked: no error line yet, and no bar", (await pipeErr(page)).length === 0 && (await barRow(page)) === null);
+    }
     await clickRow(page, D_LOFT.short_code);
-    const old = await barRow(page);
-    ok("J3 the old SALES ladder, as before", old && old.label === "Sales" && old.stages.includes("Proposal Made"), JSON.stringify(old));
-    ok("J4 no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
+    const bar = await barRow(page);
+    const errs = await pipeErr(page);
+    const text = await page.evaluate(() => document.body.innerText);
+    ok(`${first ? "J3" : "J5"} ${label}: a picked deal says it couldn't load the pipeline, and draws no ladder (never the old SALES one)`,
+      bar === null && errs.length === 1 && errs[0] === PIPE_ERR && !OLD_LADDER.test(text), JSON.stringify({ bar, errs, old: (text.match(OLD_LADDER) || [null])[0] }));
+    if (first) await shot(page, "pipeline-read-failed");
+    ok(`${first ? "J4" : "J5b"} no uncaught page errors`, pageErrors.length === 0, pageErrors.join(" | "));
+    await ctx.close();
+  }
+  {
+    // A design record whose pipeline read failed: the same line, and not the status ladder either.
+    const { ctx, page, pageErrors, go } = await scenario(browser, { withPipeline: false, pipelineError: true });
+    await go(`/designs/d-${D_UTIL.short_code}`);
+    await page.waitForFunction(() => document.body.innerText.includes("Open in designer"), null, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    const errs = await pipeErr(page);
+    const text = await page.evaluate(() => document.body.innerText);
+    ok("J6 a design record whose pipeline read failed says so, with no ladder", errs.length === 1 && errs[0] === PIPE_ERR && !OLD_LADDER.test(text) && (await barRow(page)) === null,
+      JSON.stringify({ errs, old: (text.match(OLD_LADDER) || [null])[0] }));
+    ok("J7 no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
     await ctx.close();
   }
 } finally {

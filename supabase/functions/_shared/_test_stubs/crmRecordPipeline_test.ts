@@ -194,6 +194,36 @@ Deno.test("one Deals card: the Sales pipelines card and its component are gone",
   assert(!RECORD.includes('key === "salesPipelines"'));
 });
 
+// ── A FAILED PIPELINE READ (2026-10-13): said, never papered over with the old ladder ─────────
+// Before, crm_record left `pipeline` out on a failed read exactly as it does for a reader with no
+// contacts access, and the record drew the hard-coded SALES ladder for the picked deal: a guess
+// that looked like an answer. Now the server says pipelineError and the record says it couldn't
+// load the deal's pipeline.
+Deno.test("a failed pipeline read: crm_record says pipelineError, and the record shows the error, never the old ladder", () => {
+  const branch = slice(SETTINGS, 'if (action === "crm_record") {', 'if (action === "crm_feed") {', "the crm_record branch");
+  assert(/if \(pRes\.error \|\| sRes\.error \|\| tRes\.error \|\| dRes\.error\) return null;/.test(branch),
+    "a failed read must answer null (failed), not undefined (no block for this reader)");
+  assert(branch.includes("const pipelineError = pipeline === null ? true : undefined;"), "crm_record must flag a failed read");
+  assert(/return json\(\{[^}]*\bpipeline: pipeline \?\? undefined, pipelineError \}\);/.test(branch),
+    "crm_record must leave the block out on a failure and say pipelineError");
+
+  // The record's rule, run as it ships.
+  const line = /const pipeFailed = ([^;]+);/.exec(RECORD);
+  assert(line, "CrmRecord no longer derives pipeFailed");
+  const failed = new Function("pipe", "data", "kind", `return ${line![1]};`) as Fn;
+  const PIPE_BLOCK = { pipelines: [], statuses: [], deals: [] };
+  assertEquals(failed(null, { pipelineError: true }, "contact"), true, "the server said it failed");
+  assertEquals(failed(null, { pipelineError: true }, "design"), true, "a design record's read failed too");
+  assertEquals(failed(null, {}, "contact"), true, "a contact reader always gets a block, so none means it failed");
+  assertEquals(failed(null, {}, "design"), false, "a design record without the CRM keeps its status ladder");
+  assertEquals(failed(PIPE_BLOCK, {}, "contact"), false);
+  assertEquals(failed(PIPE_BLOCK, { pipelineError: true }, "design"), false, "a block that arrived is used");
+
+  assert(RECORD.includes("Couldn't load this deal's pipeline. Refresh to try again."), "the record must say the read failed");
+  assert(/kind === "design" && !pipe && !pipeFailed && <CrmStageBar/.test(RECORD), "the status ladder must not stand in for a failed read");
+  assert(!/label: "Sales", stages: CRM_STAGES/.test(RECORD), "the hard-coded SALES ladder must never be drawn for a deal");
+});
+
 Deno.test("crm_record sends the pipeline block only to a contact reader, read only", () => {
   const branch = slice(SETTINGS, 'if (action === "crm_record") {', 'if (action === "crm_feed") {', "the crm_record branch");
   assert(branch.includes("if (!mayReadContacts) return undefined;"), "the pipeline read must follow the contact gate");
