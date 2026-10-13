@@ -388,5 +388,6 @@ Pseudonymous is not anonymous. Anyone who can query the database can line a repo
 
 - Stop everything for a tenant at once: `update public.client_settings set phone_status = 'off' where client_id = '<id>';`
 - Previous Worker version: `npx wrangler rollback` from this directory.
+- The search function (migration 305): a Worker from before it never calls it, so rolling the Worker back is always safe. Dropping it (305's REVERSE) is safe only AFTER the Worker is rolled back; the other way round every search and the keypad's contact search fail.
 - Stop email alerts only (texts keep theirs): `drop trigger if exists phone_push_email on public.email_inbound;` (267's ROLLBACK has the rest).
 - If the Worker is down, callers still reach voicemail through the number's fallback Bin.
