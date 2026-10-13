@@ -17,12 +17,13 @@
 
 import type { Ctx, Env } from "../env";
 import { mintAccessToken, pushCredentialFor, pushCredentialSecretFor, type BuildType, type Platform } from "../accessToken";
-import { adminClient, callerContext } from "../db";
+import { adminClient, callerContext, type RecordingSettings } from "../db";
 import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
-import { armedFor } from "../recording";
+import { armedFor, callTranscribeOn } from "../recording";
+import { transcribeOn } from "../voicemail";
 import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { greetingOut } from "./me";
@@ -32,6 +33,16 @@ import { callerTwilioEnv } from "../twilioAccount";
 export const TOKEN_TTL = 3600;
 /** The setup test only needs long enough to run Twilio's preflight. */
 export const PREFLIGHT_TTL = 600;
+
+/**
+ * /token `transcripts`: whether this business's recorded calls are transcribed and summarised
+ * (Workers AI, then Claude) and whether its voicemails are transcribed (Twilio), right now. The
+ * same three facts the minute tick reads before it transcribes (cron/transcribe.ts): the call was
+ * recorded (armedFor), the business wants transcripts, and the rail is on.
+ */
+export function transcriptsFor(env: Env, s: RecordingSettings): { calls: boolean; voicemail: boolean } {
+  return { calls: armedFor(env, s) && s.transcribe && callTranscribeOn(env), voicemail: transcribeOn(env) };
+}
 
 /** true = alive, false = Auth says the session is gone, null = could not tell. */
 async function sessionAlive(env: Env, token: string): Promise<boolean | null> {
@@ -179,6 +190,14 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     // Worker's CALL_RECORDING rail together (../recording.ts armedFor), so the apps can say
     // "Calls are recorded" in settings. A single call's own state is GET /calls `recording`.
     recording: { on: armedFor(env, ctx.recording) },
+    // Which outside services turn this business's audio into text right now (2026-10-13), so the
+    // apps can say so before they show a transcript or summary (App Store guideline 5.1.2(i): the
+    // in-app third-party AI notice). `calls`: its recorded calls go to Cloudflare Workers AI for a
+    // transcript and on to Anthropic's Claude for a summary: recorded (above), the owner left
+    // transcripts on, and the CALL_TRANSCRIBE rail is on. `voicemail`: Twilio transcribes its
+    // voicemails (the TRANSCRIBE rail, every business). An older Worker sends no `transcripts`:
+    // the apps then can't tell, and keep transcripts hidden.
+    transcripts: transcriptsFor(env, ctx.recording),
     // What this Worker can do that older ones could not, so an app shows a button only when
     // the server behind it has the endpoint. handoff: moving a live call to the person's
     // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and

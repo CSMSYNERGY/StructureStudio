@@ -265,6 +265,34 @@ describe("POST /token", () => {
     expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
   });
 
+  // App Store guideline 5.1.2(i): the apps tell the person which outside AI services make the
+  // transcripts and summaries before showing any, and need to know whether this business has them.
+  it("says whether this business's calls are transcribed (recorded, the owner's transcripts switch, CALL_TRANSCRIBE) and its voicemails (TRANSCRIBE)", async () => {
+    const on = { on: true, notice: true, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const all = { CALL_RECORDING: "on", CALL_TRANSCRIBE: "on", TRANSCRIBE: "on" };
+    const s = await setup(callerCtx({ recording: on }));
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: true, voicemail: true });
+    // Each rail alone turns its half off.
+    expect((await call(makeEnv({ ...all, CALL_TRANSCRIBE: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    expect((await call(makeEnv({ ...all, TRANSCRIBE: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: true, voicemail: false });
+    // Nothing recorded, nothing to transcribe: the rail off, or the owner's recording switch off.
+    expect((await call(makeEnv({ ...all, CALL_RECORDING: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, on: false } }));
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    // The owner turned transcripts off and left recording on.
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, transcribe: false } }));
+    const off = (await call(makeEnv(all), await req(s.auth))).json;
+    expect(off.recording).toEqual({ on: true });
+    expect(off.transcripts).toEqual({ calls: false, voicemail: true });
+    // A database before 263 has no recording block: nothing is recorded, so no call transcripts.
+    s.net.rpc("phone_caller_context", () => callerCtx());
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    // Unset rails read off.
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: on }));
+    expect((await call(makeEnv(), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: false });
+  });
+
   it("says this Worker serves list search (features.list_search), on every platform", async () => {
     const s = await setup();
     for (const platform of ["chrome", "android", "ios"]) {
