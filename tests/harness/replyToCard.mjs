@@ -44,13 +44,17 @@
 // A5 (the old wording), K0, K8, K10, K10b, the four K9 and G1 (there are no choices to press;
 // K1–K7 are not run when K0 finds none). Against a build whose commit() doesn't record what the
 // server kept (the first cut of reply copies), K10 and K10b fail: the card showed copies on after
-// a failed save while the server held no key, and the next save put it back.
+// a failed save while the server held no key, and the next save put it back. K10's "another
+// card" is My Profile's "How the Contacts tab opens" picker (2026-10-13: it replaced the List /
+// Pipeline board toggle K10 used to press), and the stub keeps contactsView by the server's own
+// rule (_shared/savePrefs.ts cleanContactsView), so that card's save lands as it would live.
 //
 // Fixtures are obviously fake (example.test, a made-up tenant), per the public-repo rule.
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
 import { cleanReplyAddress } from "../../supabase/functions/_shared/repReplyTo.ts";
+import { cleanContactsView } from "../../supabase/functions/_shared/savePrefs.ts";
 
 const CLIENT = "acme-sheds";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -73,12 +77,17 @@ const H = { "access-control-allow-origin": "*", "access-control-expose-headers":
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 
 /** save_prefs as portal-settings answers it: the whitelist, the reply address through the real
- *  cleanReplyAddress, replyCopy only when exactly true. `server: "old"` drops the reply address
- *  (and the switch) the way a build without either key did; `server: "noCopy"` keeps the address
- *  and drops the switch, the way the builds before 2026-10-07 do. */
+ *  cleanReplyAddress, replyCopy only when exactly true, the Contacts default through the real
+ *  cleanContactsView. `server: "old"` drops the reply address (and the switch) the way a build
+ *  without either key did; `server: "noCopy"` keeps the address and drops the switch, the way the
+ *  builds before 2026-10-07 do. Neither knows contactsView. */
 function savePrefs(raw, server) {
   const clean = {};
   if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+  if (server === "new") {
+    const view = cleanContactsView(raw.contactsView);
+    if (view) clean.contactsView = view;
+  }
   if (server !== "old") {
     const addr = cleanReplyAddress(raw.replyToEmail);
     if (addr) clean.replyToEmail = addr;
@@ -276,7 +285,7 @@ try {
       let last = (sv[sv.length - 1] || {}).prefs || {};
       ok("K3 \"StructureStudio and my inbox\" posts save_prefs once with replyCopy:true",
         sv.length === 1 && last.replyCopy === true, JSON.stringify(sv));
-      ok("K4 carrying the address, the Pipeline default and the signature along",
+      ok("K4 carrying the address, the old Pipeline default and the signature along",
         last.replyToEmail === GOOD && last.designsView === "pipeline" && last.emailSignature === "Sam\nAcme Sheds", JSON.stringify(last));
       t = await cardText(s.page);
       ok("K5 and the screen says Saved., with the inbox choice shown",
@@ -312,8 +321,9 @@ try {
   }
 
   // ── K10. A failed save goes back to what the server holds NOW ───────────────────────────────
-  // Copies on. "StructureStudio only" is pressed and that save hangs; meanwhile the Pipeline
-  // default is changed, and that save (carrying replyCopy:false) lands, so the server holds no key.
+  // Copies on. "StructureStudio only" is pressed and that save hangs; meanwhile the Contacts tab's
+  // default is changed (Design list), and that save (carrying replyCopy:false) lands, so the server
+  // holds no key.
   // Then the first save fails. The card must show "StructureStudio only", the truth, and the next
   // save must carry false; going back to the seeded "on" would show copies no email gets.
   {
@@ -321,21 +331,21 @@ try {
     const started = (await pressed(s.page, "on")) === "true";
     await tap(choice(s.page, "off"));
     await s.page.waitForTimeout(150);
-    await tap(s.page.locator("button", { hasText: /^List$/ }).first());
+    const otherCard = await tap(s.page.locator('[data-ss-view-pick="designs"]').first());
     await s.page.waitForTimeout(2200);
     let sv = saves(s);
     const second = (sv[1] || {}).prefs || {};
     const held = savePrefs(second, "new");
     const t = await cardText(s.page);
     ok("K10 a failed save goes back to what the server last kept, even when another card's save changed it",
-      started && sv.length === 2 && second.replyCopy === false && !("replyCopy" in held)
+      started && otherCard && sv.length === 2 && second.contactsView === "designs" && second.replyCopy === false && !("replyCopy" in held)
         && (await pressed(s.page, "off")) === "true" && (await pressed(s.page, "on")) === "false" && t.includes(ONLY_HERE) && !SAVED_LINE.test(t),
-      JSON.stringify({ started, saves: sv.map((c) => c.prefs && c.prefs.replyCopy), on: await pressed(s.page, "on"), tail: t.slice(-300) }));
-    await tap(s.page.locator("button", { hasText: /^Pipeline board$/ }).first());
+      JSON.stringify({ started, otherCard, saves: sv.map((c) => c.prefs && c.prefs.replyCopy), on: await pressed(s.page, "on"), tail: t.slice(-300) }));
+    await tap(s.page.locator('[data-ss-view-pick="people"]').first());
     await s.page.waitForTimeout(600);
     sv = saves(s);
     ok("K10b and the next save from any card carries what the screen shows",
-      sv.length === 3 && ((sv[2] || {}).prefs || {}).replyCopy === false, JSON.stringify(sv.map((c) => c.prefs && c.prefs.replyCopy)));
+      sv.length === 3 && ((sv[2] || {}).prefs || {}).replyCopy === false && ((sv[2] || {}).prefs || {}).contactsView === "people", JSON.stringify(sv.map((c) => c.prefs && c.prefs.replyCopy)));
     await s.ctx.close();
   }
 
