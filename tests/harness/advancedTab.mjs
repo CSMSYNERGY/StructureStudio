@@ -14,19 +14,19 @@
 //      the draft spec under the new key — in that order (hidden straight after it is made, review
 //      2026-09-29), and nothing else is written. A saved building switches start point without
 //      asking; a changed one asks first.
-//   A2 OUR ACCOUNT, cold deep link to /portal/advanced with the entitlement held back 1.5 s. It
-//      ENDS on the Advanced page, and the address bar never left /portal/advanced while waiting.
+//   A2 OUR ACCOUNT, cold deep link to /advanced with the entitlement held back 1.5 s. It
+//      ENDS on the Advanced page, and the address bar never left /advanced while waiting.
 //   B  AN EXEMPT BUILDER (every grantable feature, view_3d included, but not internal), cold deep
 //      link, entitlement held back. No Advanced item is ever drawn, the page is never drawn, the
-//      topbar never says Advanced, and it ends on /portal/designer with the Designer mounted.
+//      topbar never says Advanced, and it ends on /designer with the Designer mounted.
 //   B2 A NEVER-PAID BUILDER behind the billing gate: same refusal, no item.
 //   M  A BUILDER WHO TURNED ADVANCED MODE ON (2026-10-05: entitlement.advancedMode, from
 //      client_settings.advanced_mode): the item under Designer, and the page opens with its 3D.
-//   M2 The same builder with it OFF, cold /portal/advanced: no item, no page, ends on the Designer.
+//   M2 The same builder with it OFF, cold /advanced: no item, no page, ends on the Designer.
 //      (tests/harness/advancedModeSwitch.mjs drives the Settings switch itself.)
 //   C  AN OPERATOR viewing our account (?view=), clicked: the item appears once the viewed
 //      entitlement answers, the page opens, and Save carries targetClientId for the viewed tenant.
-//   C2 The same operator's COLD /portal/advanced?view=<ours>: their own entitlement answers first
+//   C2 The same operator's COLD /advanced?view=<ours>: their own entitlement answers first
 //      (not internal) and ?view= arms later, so the route is refused for a moment — it must still
 //      END on the Advanced page.
 //   C3 The same operator viewing another builder: no item.
@@ -39,13 +39,13 @@
 //      go to OUR account — none to the builder they landed on.
 //   F  STALE VIEW-AS ANSWER. From our account straight to another builder whose answer is slow:
 //      the item and the page never appear for that builder while its answer is out.
-//   G  BILLING FAILS. A cold /portal/advanced whose billing call errors ends on the Designer after
+//   G  BILLING FAILS. A cold /advanced whose billing call errors ends on the Designer after
 //      the hold's limit (shortened for the harness) — for our account and another builder — and the
 //      topbar never names Advanced for the builder without it.
 //   H  A MID-WIDTH WINDOW (1100 px, where the dock is on but two wrapping columns would not fit):
 //      the 3D sits BESIDE the form, and scrolled down, the form is still what is under the mouse.
 //   I  A TEAM MEMBER of our account (Designer access, not owner/admin): no item, and a cold
-//      /portal/advanced ends on the Designer instead of a page that can only say no.
+//      /advanced ends on the Designer instead of a page that can only say no.
 //   J  UNSAVED WORK AND ACCOUNT SWITCHES. An operator with a changed building is asked before Exit
 //      or a switch throws it away (No keeps them there); after Save, Exit does not ask.
 //   Review fixes, 2026-09-29 (second round):
@@ -64,7 +64,7 @@
 //      the next Save with one call.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine except the
-// three.js module GETs to esm.sh, which the 3D needs). /portal/<page> is answered with
+// three.js module GETs to esm.sh, which the 3D needs). /<page> is answered with
 // portal.html's own bytes, as production's _redirects does. Service worker blocked.
 //
 //   python -m http.server 8144 --bind 127.0.0.1 --directory <repo root>
@@ -74,7 +74,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -135,7 +135,7 @@ async function open(S, path) {
     window.__advSeen = { nav: false, page: false, checking: false, title: false };
     window.__paths = [];
     const scan = () => {
-      if (document.querySelector('.ss-nav a[href^="/portal/advanced"]:not(.ss-back)')) window.__advSeen.nav = true;
+      if (document.querySelector('.ss-nav a[href^="/advanced"]:not(.ss-back)')) window.__advSeen.nav = true;
       const t = document.body ? document.body.innerText : "";
       if (t.includes("Every shape control on one building")) window.__advSeen.page = true;
       if (t.includes("Checking your account")) window.__advSeen.checking = true;
@@ -220,7 +220,7 @@ async function open(S, path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
@@ -290,18 +290,18 @@ const aim = (page, pos, target) => page.evaluate(({ pos, target }) => {
 try {
   // ── A: our own account, clicked ──────────────────────────────────────────────────────────
   {
-    const { ctx, page, calls, errors } = await open({ own: OURS, entFor: () => ent("internal") }, "/portal/designs");
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 20000 }).catch(() => {});
+    const { ctx, page, calls, errors } = await open({ own: OURS, entFor: () => ent("internal") }, "/designs");
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 20000 }).catch(() => {});
     const order = await navOrder(page);
-    const iD = order.indexOf("/portal/designer"), iA = order.indexOf("/portal/advanced");
+    const iD = order.indexOf("/designer"), iA = order.indexOf("/advanced");
     ok("A: the Advanced item is drawn for our own account", iA >= 0, order.join(" "));
     ok("A: …directly under Designer", iD >= 0 && iA === iD + 1, `designer #${iD}, advanced #${iA}`);
-    ok("A: …with its layers glyph", await page.locator('.ss-nav a[href^="/portal/advanced"] svg').count() === 1);
+    ok("A: …with its layers glyph", await page.locator('.ss-nav a[href^="/advanced"] svg').count() === 1);
     await page.locator("aside.ss-side").screenshot({ path: join(SHOTS, "advpage-sidebar.png") });
 
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+    await page.locator('.ss-nav a[href^="/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
-    ok("A: clicking it opens the Advanced page at /portal/advanced", (await here(page)) === "/portal/advanced", await here(page));
+    ok("A: clicking it opens the Advanced page at /advanced", (await here(page)) === "/advanced", await here(page));
     ok("A: the topbar names the page", (await page.locator(".ss-topbar .ttl").innerText()).startsWith("Advanced"));
     await advPanel(page);
     const m0 = await measure(page);
@@ -363,10 +363,10 @@ try {
     await page.screenshot({ path: join(SHOTS, "advpage-page-leanto.png"), fullPage: true });
 
     // Kept mounted: another page and back keeps the building.
-    await page.locator('.ss-nav a[href^="/portal/contacts"]').click();
+    await page.locator('.ss-nav a[href^="/contacts"]').click();
     await settle(page, 800);
     ok("A: another page hides it", !(await page.getByText("Every shape control on one building").first().isVisible()));
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+    await page.locator('.ss-nav a[href^="/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 20000 });
     ok("A: coming back finds the same building (lean-to 8, 16 x 24)", (await lean.inputValue()) === "8" && (await w.inputValue()) === "16" && (await l.inputValue()) === "24",
       `${await lean.inputValue()} / ${await w.inputValue()} x ${await l.inputValue()}`);
@@ -447,15 +447,15 @@ try {
     await ctx.close();
   }
 
-  // ── A2: our own account, COLD /portal/advanced, entitlement held back ──────────────────────
+  // ── A2: our own account, COLD /advanced, entitlement held back ──────────────────────
   {
-    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), billingDelayMs: 1500 }, "/portal/advanced");
+    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), billingDelayMs: 1500 }, "/advanced");
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await advPanel(page).catch(() => {});
     await settle(page, 1200);
     const s = await seen(page);
-    ok("A2: a cold /portal/advanced ENDS on the Advanced page", (await here(page)) === "/portal/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), await here(page));
-    ok("A2: …after saying it was checking, not bouncing", s.checking && !s.paths.includes("/portal/designer"), s.paths.join(" → "));
+    ok("A2: a cold /advanced ENDS on the Advanced page", (await here(page)) === "/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), await here(page));
+    ok("A2: …after saying it was checking, not bouncing", s.checking && !s.paths.includes("/designer"), s.paths.join(" → "));
     ok("A2: …with the 3D up", await page.evaluate(() => !!(window.__ss3dPanel && window.__ss3dPanel.renderer.domElement.closest('[data-ss-adv="view"]'))));
     await aim(page, [20, 12, 24], [0, 3.5, 0]).catch(() => {});
     await settle(page, 400);
@@ -466,13 +466,13 @@ try {
 
   // ── B / B2: builders without it ─────────────────────────────────────────────────────────
   for (const [tag, e] of [["B (exempt)", ent("exempt")], ["B2 (never paid, locked)", ent("never_paid", { exempt: false, state: "never_paid", locked: true, granted: [], features: {} })]]) {
-    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/portal/advanced");
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/advanced");
     await settle(page, 3500);
     const s = await seen(page);
     ok(`${tag}: the Advanced item is never drawn`, !s.nav);
     ok(`${tag}: the Advanced page is never drawn`, !s.page);
     ok(`${tag}: the topbar never names Advanced, not even while the route is held`, !s.title);
-    ok(`${tag}: a cold /portal/advanced ends on /portal/designer`, (await here(page)) === "/portal/designer", s.paths.join(" → "));
+    ok(`${tag}: a cold /advanced ends on /designer`, (await here(page)) === "/designer", s.paths.join(" → "));
     if (!e.locked) {
       await page.locator(".ss-designer-host").waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
       ok(`${tag}: …with the Designer actually mounted and showing (not a blank page)`, await page.locator(".ss-designer-host").isVisible());
@@ -489,14 +489,14 @@ try {
   // advancedMode (client_settings.advanced_mode, turned on in Settings → Designer).
   {
     const e = ent("active", { advancedMode: true });
-    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e }, "/portal/designs");
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 20000 }).catch(() => {});
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e }, "/designs");
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 20000 }).catch(() => {});
     const order = await navOrder(page);
     ok("M: a builder with Advanced mode ON gets the item, directly under Designer",
-      order.indexOf("/portal/advanced") > 0 && order.indexOf("/portal/advanced") === order.indexOf("/portal/designer") + 1, order.join(" "));
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+      order.indexOf("/advanced") > 0 && order.indexOf("/advanced") === order.indexOf("/designer") + 1, order.join(" "));
+    await page.locator('.ss-nav a[href^="/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
-    ok("M: …and the page opens at /portal/advanced", (await here(page)) === "/portal/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), await here(page));
+    ok("M: …and the page opens at /advanced", (await here(page)) === "/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), await here(page));
     await advPanel(page).catch(() => {});
     ok("M: …with its 3D mounted beside the form", await page.evaluate(() => !!(window.__ss3dPanel && window.__ss3dPanel.renderer.domElement.closest('[data-ss-adv="view"]'))));
     await page.locator("aside.ss-side").screenshot({ path: join(SHOTS, "advpage-sidebar-builder-switched-on.png") });
@@ -506,12 +506,12 @@ try {
   }
   {
     const e = ent("active", { advancedMode: false });
-    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/portal/advanced");
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/advanced");
     await settle(page, 3500);
     const s = await seen(page);
     ok("M2: a builder with Advanced mode OFF: the item is never drawn", !s.nav);
     ok("M2: …the page is never drawn", !s.page);
-    ok("M2: …and a cold /portal/advanced ends on /portal/designer", (await here(page)) === "/portal/designer", s.paths.join(" → "));
+    ok("M2: …and a cold /advanced ends on /designer", (await here(page)) === "/designer", s.paths.join(" → "));
     ok("M2: nothing was written", writes(calls).length === 0);
     ok("M2: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
@@ -520,14 +520,14 @@ try {
   // ── C: an operator viewing our account ─────────────────────────────────────────────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, calls, errors } = await open({ own: OPS, operator: true, entFor }, `/portal/designs?view=${OURS}`);
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 }).catch(() => {});
+    const { ctx, page, calls, errors } = await open({ own: OPS, operator: true, entFor }, `/designs?view=${OURS}`);
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 30000 }).catch(() => {});
     const order = await navOrder(page);
-    ok("C: viewing our account, the item is there, under Designer", order.indexOf("/portal/advanced") === order.indexOf("/portal/designer") + 1 && order.indexOf("/portal/advanced") > 0, order.join(" "));
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+    ok("C: viewing our account, the item is there, under Designer", order.indexOf("/advanced") === order.indexOf("/designer") + 1 && order.indexOf("/advanced") > 0, order.join(" "));
+    await page.locator('.ss-nav a[href^="/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await advPanel(page);
-    ok("C: the page opens, with the 3D, and keeps ?view=", (await page.evaluate(() => location.pathname + location.search)) === `/portal/advanced?view=${OURS}`);
+    ok("C: the page opens, with the 3D, and keeps ?view=", (await page.evaluate(() => location.pathname + location.search)) === `/advanced?view=${OURS}`);
     await page.getByLabel("New style name").fill("Viewed Style");
     await page.getByRole("button", { name: "Save as a new style" }).click();
     await page.waitForFunction(() => { const m = document.querySelector('[data-ss-adv="msg"]'); return m && m.innerText.length > 0; }, null, { timeout: 60000 });
@@ -538,17 +538,17 @@ try {
   }
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/portal/advanced?view=${OURS}`);
+    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/advanced?view=${OURS}`);
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await settle(page, 1500);
     const s = await seen(page);
-    ok("C2: an operator's cold /portal/advanced?view=<ours> ends on the Advanced page", (await here(page)) === "/portal/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), s.paths.join(" → "));
+    ok("C2: an operator's cold /advanced?view=<ours> ends on the Advanced page", (await here(page)) === "/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), s.paths.join(" → "));
     ok("C2: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/portal/designs?view=${OTHER}`);
+    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/designs?view=${OTHER}`);
     await settle(page, 3000);
     const s = await seen(page);
     ok("C3: viewing another builder, no Advanced item", !s.nav);
@@ -557,7 +557,7 @@ try {
   }
   // ── D: phone width ────────────────────────────────────────────────────────────────────
   {
-    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), viewport: { width: 390, height: 844 } }, "/portal/advanced");
+    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), viewport: { width: 390, height: 844 } }, "/advanced");
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await settle(page, 1200);
     const wide = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
@@ -590,11 +590,11 @@ try {
   // ── E: the save race — Back into another builder while create_style is out ────────────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, calls, errors } = await open({ own: OPS, operator: true, entFor, createDelayMs: 2500 }, `/portal/advanced?view=${OURS}`);
+    const { ctx, page, calls, errors } = await open({ own: OPS, operator: true, entFor, createDelayMs: 2500 }, `/advanced?view=${OURS}`);
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await settle(page, 1000);
     // History: another builder's Pipeline, then this page again — so Back lands in that builder.
-    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/contacts?view=" + o); history.pushState({}, "", "/portal/advanced?view=" + u); }, [OTHER, OURS]);
+    await page.evaluate(([o, u]) => { history.pushState({}, "", "/contacts?view=" + o); history.pushState({}, "", "/advanced?view=" + u); }, [OTHER, OURS]);
     const from = calls.length;
     const eAsked = [];
     page.on("dialog", (d) => { eAsked.push(d.message()); d.accept(); });
@@ -608,7 +608,7 @@ try {
     const landed = await page.evaluate(() => location.pathname + location.search);
     ok("E: Back into another builder mid-save asks first — a save still going is unsaved work (review ADV-3)",
       eAsked.length === 1 && eAsked[0] === "Opening another account will discard the building you haven't saved on the Advanced page. Continue?", JSON.stringify(eAsked));
-    ok("E: …and on Yes, Back really did land in the other builder mid-save", /^\/portal\/contacts(\/[^?]*)?\?view=/.test(landed) && landed.endsWith(`?view=${OTHER}`), landed);
+    ok("E: …and on Yes, Back really did land in the other builder mid-save", /^\/contacts(\/[^?]*)?\?view=/.test(landed) && landed.endsWith(`?view=${OTHER}`), landed);
     ok("E: create, hide and shape ALL went to our account — none to the builder on screen",
       W.length === 3 && W.every((c) => c.body.targetClientId === OURS), W.map((c) => `${c.action}:${c.body.targetClientId}`).join(" "));
     ok("E: …in the order create → hide → shape, on the style that was made",
@@ -625,42 +625,42 @@ try {
   // ── F: straight from our account to another builder whose answer is slow ──────────────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor, billingDelayMs: (t) => (t === OTHER ? 2500 : 0) }, `/portal/designs?view=${OURS}`);
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 });
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor, billingDelayMs: (t) => (t === OTHER ? 2500 : 0) }, `/designs?view=${OURS}`);
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 30000 });
+    await page.locator('.ss-nav a[href^="/advanced"]').click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
-    await page.locator('.ss-nav a[href^="/portal/contacts"]').click();
+    await page.locator('.ss-nav a[href^="/contacts"]').click();
     await settle(page, 500);
-    await page.evaluate(([o, u]) => { history.pushState({}, "", "/portal/contacts?view=" + o); history.pushState({}, "", "/portal/contacts?view=" + u); }, [OTHER, OURS]);
+    await page.evaluate(([o, u]) => { history.pushState({}, "", "/contacts?view=" + o); history.pushState({}, "", "/contacts?view=" + u); }, [OTHER, OURS]);
     await page.evaluate(() => history.back());
     const samples = [];
     for (let k = 0; k < 14; k++) {
       await settle(page, 250);
-      samples.push(await page.evaluate(() => ({ url: location.pathname + location.search, nav: !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), hosts: document.querySelectorAll('[data-ss-adv="bar"]').length })));
+      samples.push(await page.evaluate(() => ({ url: location.pathname + location.search, nav: !!document.querySelector('.ss-nav a[href^="/advanced"]'), hosts: document.querySelectorAll('[data-ss-adv="bar"]').length })));
     }
     const there = samples.filter((s) => s.url.endsWith(`view=${OTHER}`));
     const bad = there.filter((s) => s.nav || s.hosts > 0);
     ok("F: in the other builder, the item and the page never appear — not even while its answer is out",
       there.length === samples.length && bad.length === 0, `${there.length}/${samples.length} samples there; bad: ${JSON.stringify(bad.slice(0, 2))}`);
     await page.evaluate(() => history.forward());
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 20000 }).catch(() => {});
-    ok("F: back in our account, it is there again", await page.locator('.ss-nav a[href^="/portal/advanced"]').count() === 1);
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 20000 }).catch(() => {});
+    ok("F: back in our account, it is there again", await page.locator('.ss-nav a[href^="/advanced"]').count() === 1);
     ok("F: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 
   // ── G: the billing call fails — the hold has a limit ─────────────────────────────────────
   for (const [tag, own, e] of [["G (our account)", OURS, ent("internal")], ["G2 (another builder)", OTHER, ent("exempt")]]) {
-    const { ctx, page, errors } = await open({ own, entFor: () => e, billingFail: () => true, holdMs: 2500 }, "/portal/advanced");
+    const { ctx, page, errors } = await open({ own, entFor: () => e, billingFail: () => true, holdMs: 2500 }, "/advanced");
     await settle(page, 1000);
     const mid = { path: await here(page), body: await page.locator(".ss-body").innerText(), title: (await page.locator(".ss-topbar .ttl").innerText()).trim() };
     ok(`${tag}: while held, the page says it is checking and the topbar does not name Advanced`,
-      mid.path === "/portal/advanced" && mid.body.includes("Checking your account") && !/^Advanced/.test(mid.title), JSON.stringify({ path: mid.path, title: mid.title.slice(0, 40) }));
-    await page.waitForFunction(() => location.pathname === "/portal/designer", null, { timeout: 15000 }).catch(() => {});
+      mid.path === "/advanced" && mid.body.includes("Checking your account") && !/^Advanced/.test(mid.title), JSON.stringify({ path: mid.path, title: mid.title.slice(0, 40) }));
+    await page.waitForFunction(() => location.pathname === "/designer", null, { timeout: 15000 }).catch(() => {});
     await page.locator(".ss-designer-host").waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
     const s = await seen(page);
     ok(`${tag}: a failed billing call ends on the Designer after the hold's limit (not "Checking…" for ever)`,
-      (await here(page)) === "/portal/designer" && await page.locator(".ss-designer-host").isVisible() && !(await page.locator(".ss-body").innerText()).includes("Checking your account"), s.paths.join(" → "));
+      (await here(page)) === "/designer" && await page.locator(".ss-designer-host").isVisible() && !(await page.locator(".ss-body").innerText()).includes("Checking your account"), s.paths.join(" → "));
     ok(`${tag}: no item, no page, and the topbar never said Advanced`, !s.nav && !s.page && !s.title, JSON.stringify(s));
     ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
     if (tag.startsWith("G2")) await page.screenshot({ path: join(SHOTS, "advpage-billing-failed-other.png") });
@@ -669,7 +669,7 @@ try {
 
   // ── H: 1100 px — the dock is on, but two wrapping columns would not fit ─────────────────────
   {
-    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), viewport: { width: 1100, height: 800 } }, "/portal/advanced");
+    const { ctx, page, errors } = await open({ own: OURS, entFor: () => ent("internal"), viewport: { width: 1100, height: 800 } }, "/advanced");
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await advPanel(page);
     await settle(page, 1200);
@@ -708,13 +708,13 @@ try {
 
   // ── I: a team member of our own account ─────────────────────────────────────────────────
   {
-    const { ctx, page, calls, errors } = await open({ own: OURS, role: "user", access: { designer: "edit", designs: "view" }, entFor: () => ent("internal"), billingDelayMs: 800, holdMs: 3000 }, "/portal/advanced");
-    await page.waitForFunction(() => location.pathname === "/portal/designer", null, { timeout: 15000 }).catch(() => {});
+    const { ctx, page, calls, errors } = await open({ own: OURS, role: "user", access: { designer: "edit", designs: "view" }, entFor: () => ent("internal"), billingDelayMs: 800, holdMs: 3000 }, "/advanced");
+    await page.waitForFunction(() => location.pathname === "/designer", null, { timeout: 15000 }).catch(() => {});
     await settle(page, 1500);
     const s = await seen(page);
-    ok("I: a team member (Designer access, not owner/admin) has the Designer item", await page.locator('.ss-nav a[href^="/portal/designer"]').count() === 1);
+    ok("I: a team member (Designer access, not owner/admin) has the Designer item", await page.locator('.ss-nav a[href^="/designer"]').count() === 1);
     ok("I: …but no Advanced item, and the page is never drawn", !s.nav && !s.page, JSON.stringify(s));
-    ok("I: a cold /portal/advanced ends on /portal/designer", (await here(page)) === "/portal/designer", s.paths.join(" → "));
+    ok("I: a cold /advanced ends on /designer", (await here(page)) === "/designer", s.paths.join(" → "));
     ok("I: nothing was written", writes(calls).length === 0);
     ok("I: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
@@ -723,7 +723,7 @@ try {
   // ── J: unsaved work and account switches ───────────────────────────────────────────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/portal/advanced?view=${OURS}`);
+    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, `/advanced?view=${OURS}`);
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await settle(page, 1000);
     const dialogs = [];
@@ -735,12 +735,12 @@ try {
     const where = () => page.evaluate(() => location.pathname + location.search);
     ok("J: Exit with a changed building asks first, naming the Advanced page",
       dialogs[0] === "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?", String(dialogs[0]));
-    ok("J: …and No keeps you in the account with the building", (await where()) === `/portal/advanced?view=${OURS}` && (await leanBox(page).inputValue()) === "6", await where());
+    ok("J: …and No keeps you in the account with the building", (await where()) === `/advanced?view=${OURS}` && (await leanBox(page).inputValue()) === "6", await where());
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Builder" }).click();
     await settle(page, 600);
     ok("J: switching account asks too, naming the Advanced page", !!dialogs[1] && dialogs[1].startsWith("Opening another account will discard") && dialogs[1].includes("the building you haven't saved on the Advanced page"), String(dialogs[1]));
-    ok("J: …and No keeps you there", (await where()) === `/portal/advanced?view=${OURS}`, await where());
+    ok("J: …and No keeps you there", (await where()) === `/advanced?view=${OURS}`, await where());
     await page.getByLabel("New style name").fill("J Style");
     await page.getByRole("button", { name: "Save as a new style" }).click();
     await page.waitForFunction(() => /Saved as/.test((document.querySelector('[data-ss-adv="msg"]') || {}).innerText || ""), null, { timeout: 60000 });
@@ -748,7 +748,7 @@ try {
     const n = dialogs.length;
     await page.locator(".ss-topbar button", { hasText: "Exit" }).click();
     await settle(page, 1000);
-    ok("J: after Save, Exit does not ask (nothing unsaved) and leaves", dialogs.length === n && (await here(page)) === "/portal/accounts", `${dialogs.length - n} new dialogs; at ${await here(page)}`);
+    ok("J: after Save, Exit does not ask (nothing unsaved) and leaves", dialogs.length === n && (await here(page)) === "/accounts", `${dialogs.length - n} new dialogs; at ${await here(page)}`);
     ok("J: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
@@ -756,20 +756,20 @@ try {
   // ── K: Back / Forward across a view-as switch with a changed building (review ADV-3) ───────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, "/portal/designer");
+    const { ctx, page, errors } = await open({ own: OPS, operator: true, entFor }, "/designer");
     const dialogs = [];
     let answer = true;
     page.on("dialog", (d) => { dialogs.push(d.message()); if (answer) d.accept(); else d.dismiss(); });
     const where = () => page.evaluate(() => location.pathname + location.search);
     // Somewhere in the Contacts hub, on this builder (the hub puts the address on the view it shows).
-    const inHub = (url, tenant) => /^\/portal\/contacts(\/[^?]*)?\?view=/.test(url) && url.endsWith(`?view=${tenant}`);
+    const inHub = (url, tenant) => /^\/contacts(\/[^?]*)?\?view=/.test(url) && url.endsWith(`?view=${tenant}`);
     await settle(page, 1500);
-    await page.locator('.ss-nav a[href^="/portal/contacts"]').first().click();
+    await page.locator('.ss-nav a[href^="/contacts"]').first().click();
     await settle(page, 800);
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Internal" }).click();
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 });
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 30000 });
+    await page.locator('.ss-nav a[href^="/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await leanWidth(page, "6");
     await settle(page, 400);
@@ -783,7 +783,7 @@ try {
     ok("K: Back out of the viewed account with a changed building asks first, in Exit's words",
       dialogs.length === n0 + 1 && dialogs[n0] === "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?", JSON.stringify(dialogs.slice(n0)));
     ok("K: …and No keeps the account and puts the address back", inHub(await where(), OURS), await where());
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
+    await page.locator('.ss-nav a[href^="/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 20000 });
     ok("K: …with the building still there (lean-to 6)", (await leanBox(page).inputValue()) === "6", await leanBox(page).inputValue());
     await page.screenshot({ path: join(SHOTS, "advpage-back-said-no.png") });
@@ -792,7 +792,7 @@ try {
     await settle(page, 800);
     await page.goBack();
     await settle(page, 1500);
-    ok("K: asked again, Yes leaves the account", dialogs.length === n0 + 2 && (await where()) === "/portal/designer", `${await where()}; ${JSON.stringify(dialogs.slice(n0))}`);
+    ok("K: asked again, Yes leaves the account", dialogs.length === n0 + 2 && (await where()) === "/designer", `${await where()}; ${JSON.stringify(dialogs.slice(n0))}`);
     ok("K: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
@@ -801,9 +801,9 @@ try {
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
     // A long entitlement hold (review 2026-09-29): under load the default 8 s could run out, the cold
-    // /portal/advanced fell back to the Designer, and the account switch then asked to discard a design.
+    // /advanced fell back to the Designer, and the account switch then asked to discard a design.
     const S = { own: OPS, operator: true, entFor, failOnce: { set_style_active: 1 }, holdMs: 60000 };
-    const { ctx, page, calls, errors } = await open(S, `/portal/advanced?view=${OURS}`);
+    const { ctx, page, calls, errors } = await open(S, `/advanced?view=${OURS}`);
     const dialogs = [];
     page.on("dialog", (d) => { dialogs.push(d.message()); d.accept(); });
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
@@ -828,8 +828,8 @@ try {
     await settle(page, 1500);
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Internal" }).click();
-    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 });
-    await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 30000 });
+    await page.locator('.ss-nav a[href^="/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
     await settle(page, 600);
     msg = await page.locator('[data-ss-adv="msg"]').innerText().catch(() => "(no message)");

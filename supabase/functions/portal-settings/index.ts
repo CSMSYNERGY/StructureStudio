@@ -15473,7 +15473,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
 
         // The order this invoice belongs to, for the caller to navigate to. The portal's
-        // order deep link is /portal/orders/o-<orders.id>, keyed on the UUID and not on
+        // order deep link is /orders/o-<orders.id>, keyed on the UUID and not on
         // order_no, so the id is what has to travel back. Best-effort by contract: an invoice
         // that went out is not undone by our failing to say where it landed, so every caller
         // treats a null orderId as "no link", never as an error.

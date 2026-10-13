@@ -122,7 +122,7 @@ async function scenario(browser, { name, server = "new", exposure = null }) {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate(() => { history.pushState({}, "", "/portal/settings/cladding"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await page.evaluate(() => { history.pushState({}, "", "/settings/cladding"); window.dispatchEvent(new PopStateEvent("popstate")); });
   await page.waitForFunction(() => document.body.innerText.includes("Deluxe Gable") && document.body.innerText.includes("Shown as"), null, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(500);
   return { ctx, page, calls, state };

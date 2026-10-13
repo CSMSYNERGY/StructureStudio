@@ -55,7 +55,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -129,7 +129,7 @@ async function open(path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   return { ctx, page, errors };
@@ -165,7 +165,7 @@ const shot = async (page, name) => page.screenshot({ path: join(SHOTS, name), fu
 const railCur = (page) => page.evaluate(() => { const b = document.querySelector(".ss-adv .ssd-rail .ssd-step.is-current"); return b ? b.getAttribute("aria-label") : ""; });
 
 try {
-  const { ctx, page, errors } = await open("/portal/advanced");
+  const { ctx, page, errors } = await open("/advanced");
   await page.waitForSelector('[data-ss-adv="sections"]', { timeout: 60000 });
   await page.waitForTimeout(600);
 
@@ -767,7 +767,7 @@ try {
   // Ahsan: "re design the designer settings tab similar to what we have done with advance tab". It
   // used to keep every field at once in the amber grid (and this check asserted exactly that).
   {
-    const { ctx: c2, page: p2, errors: e2 } = await open("/portal/settings/designer");
+    const { ctx: c2, page: p2, errors: e2 } = await open("/settings/designer");
     await p2.waitForFunction(() => document.body.innerText.includes("3D Style Calibration"), null, { timeout: 60000 });
     const before = await p2.evaluate(() => ({
       tiles: [...document.querySelectorAll('.ss-cal [data-ss-cal="styles"] [data-ss-style]')].map((t) => t.getAttribute("aria-label")),

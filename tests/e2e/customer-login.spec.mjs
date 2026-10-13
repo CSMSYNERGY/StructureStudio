@@ -1118,7 +1118,8 @@ test("the account panel fits a 390px phone", async ({ page }) => {
 // supabase.co request is answered here (the recipe from the 2026-09-09 portal checks). The shell
 // needs client_users (else "No business linked"), portal-billing and portal-settings status;
 // portal-settings dispatches on `action`, REST GETs on the table name. Routes load as
-// /portal.html + pushState, which works on a static server with no _redirects and on beta.
+// /portal.html + pushState of the root address, which works on a static server with no
+// _redirects and on beta.
 const PORTAL_USER = { id: "00000000-0000-4000-8000-0000000000e2", aud: "authenticated", role: "authenticated", email: "portal-e2e@example.invalid", app_metadata: {}, user_metadata: {}, created_at: "2026-09-15T00:00:00Z" };
 const PORTAL_STATUS = { ok: true, clientId: CLIENT, role: "owner", operatorMode: false, businessName: "Test Barns", branding: { companyName: "Test Barns" }, invoiceInGhl: false };
 
@@ -1203,7 +1204,7 @@ test("portal Orders: a customer's Accept waits as Invoice to approve; Approve is
     },
   }, { orders: [f.order] });
   page.on("dialog", (d) => d.accept());   // send_invoice's "Create invoice for …?" confirm
-  await openPortal(page, "/portal/orders");
+  await openPortal(page, "/orders");
 
   await expect(page.getByText("customer accepted — approve to issue")).toBeVisible();          // the tile
   await expect(page.getByRole("button", { name: "Invoice to approve", exact: true })).toBeVisible();   // the chip
@@ -1251,7 +1252,7 @@ test("portal Orders: with the invoice out, the customer link and the sign-on-pho
     order_paperwork: { body: { ok: true, business: { name: "Test Barns" }, colors: [], cladding: [],
       invoice: { issued_by: "structurestudio", invoice_number: "SSI-2001", invoice_pdf_url: "https://jzeamjbhdrsbygdnphbm.supabase.co/storage/v1/object/public/documents/SSI-2001.pdf" } } },
   }, { orders: [f.order] });
-  await openPortal(page, "/portal/orders");
+  await openPortal(page, "/orders");
   await page.locator("tbody").getByText("#1050").click();
   await expect(page.getByText(/Invoice SSI-2001 sent/)).toBeVisible();
   const origin = await page.evaluate(() => location.origin);
@@ -1275,7 +1276,7 @@ test("portal Settings: Customer login code shows the saved choice, saves on its 
       return refuse ? { status: 400, body: { error: "The customer login code can be sent by text or by email." } } : { body: { ok: true } };
     },
   });
-  await openPortal(page, "/portal/settings/connection");
+  await openPortal(page, "/settings/connection");
   const group = page.getByRole("group", { name: "Customer login code" });
   await expect(group).toHaveAttribute("data-ss-login-default", "email");
   await expect(group.getByRole("button", { name: "Email" })).toHaveAttribute("aria-pressed", "true");
@@ -1299,7 +1300,7 @@ test("portal Settings: Customer login code shows the saved choice, saves on its 
 
 test("portal Settings: a status without the login-code key reads as Text", async ({ page }) => {
   await stubPortal(page);
-  await openPortal(page, "/portal/settings/connection");
+  await openPortal(page, "/settings/connection");
   await expect(page.getByRole("group", { name: "Customer login code" })).toHaveAttribute("data-ss-login-default", "sms");
 });
 
@@ -1309,7 +1310,7 @@ test("portal email wording: {total} is marked not recommended on the Estimate wo
     email_status: { body: { platformReady: true, domainStatus: "verified", domain: "testbarns.example", fromName: "Test Barns", fromLocal: "info",
       fromAddress: "info@testbarns.example", verifiedAt: "2026-09-01T00:00:00Z", active: true, dnsRecords: [], recentSends: [], templateCopy: {} } },
   });
-  await openPortal(page, "/portal/settings/email");
+  await openPortal(page, "/settings/email");
   const hint = page.locator('[data-token-hint="total"]');
   const kind = (name) => page.getByRole("button", { name, exact: true });
   await expect(kind("Estimate")).toBeVisible();
@@ -1335,7 +1336,7 @@ test("portal Designs: a quote row's Copy link opens the designer on that quote",
       contact: { name: "Pat Tester", phone: PHONE_SHOWN, email: "pat@example.com" }, contact_id: null, sel_style: "utility", sel_size: "10x12",
       ghl_estimate_number: null, image_url: null, inventory_unit_id: null, ss_quote_number: "JB-1050", ss_quote_pdf_url: null, total_cents: 900000, expected_close_date: null }],
   });
-  await openPortal(page, "/portal/designs/list");
+  await openPortal(page, "/contacts/designs");
   await page.getByRole("button", { name: "More actions for Pat Tester" }).click();
   await page.getByText("Copy link", { exact: true }).click();
   const origin = await page.evaluate(() => location.origin);

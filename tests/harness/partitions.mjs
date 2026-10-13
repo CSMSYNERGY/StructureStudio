@@ -504,7 +504,7 @@ async function portalRun(browser, ok, shots, allErrors) {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/interior"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await page.evaluate(() => { history.pushState({}, "", "/settings/interior"); window.dispatchEvent(new PopStateEvent("popstate")); });
     await page.waitForFunction(() => !!document.querySelector('[data-ss-lp-item="partitionWall"]'), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
     const row = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();

@@ -30,12 +30,15 @@ const ALLOWED_HOSTS = new Set([
 ]);
 const DEFAULT_HOST = "app.structurestudiosuite.com";
 
+// The portal's QuickBooks settings page. /settings/quickbooks since 2026-10-13 (it was
+// /portal/settings/quickbooks; the app's addresses lost their /portal segment). The Intuit
+// redirect URI is THIS function's URL, not this page, so Intuit needs no change for it.
 function land(host: string, params: Record<string, string>): Response {
   const safeHost = ALLOWED_HOSTS.has(host) ? host : DEFAULT_HOST;
   const qs = new URLSearchParams(params);
   return new Response(null, {
     status: 302,
-    headers: { Location: `https://${safeHost}/portal/settings/quickbooks?${qs}` },
+    headers: { Location: `https://${safeHost}/settings/quickbooks?${qs}` },
   });
 }
 

@@ -51,7 +51,7 @@ function tab(opts: { search?: string; pathname?: string; pinged?: boolean; conne
   const pushed: string[] = [];
   const popped: unknown[] = [];
   const listeners: Record<string, Fn[]> = {};
-  const location = { href: "", pathname: opts.pathname ?? "/portal/designs", search: opts.search ?? "" };
+  const location = { href: "", pathname: opts.pathname ?? "/designs", search: opts.search ?? "" };
   const runtime: Record<string, unknown> = { lastError: undefined };
   runtime.sendMessage = (_id: string, m: Msg, cb: (r: unknown) => void) => {
     sent.push(m);
@@ -105,11 +105,14 @@ function tab(opts: { search?: string; pathname?: string; pinged?: boolean; conne
       this.state = init.state;
     }
   }
-  const ssPagePath = (page: string, sub: string | null) => "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "") + (location.search || "");
-  // The router's reading of the address (01-core ssParsePath, without its old-name aliases).
+  // The app's addresses are /<page>[/<sub>] (no /portal since 2026-10-13).
+  const ssPagePath = (page: string, sub: string | null) => (page ? "/" + page : "/login") + (page && sub ? "/" + sub : "") + (location.search || "");
+  // The router's reading of the address (01-core ssParsePath, without its old-name aliases): the
+  // root shape, and the old /portal one it still reads.
   const ssParsePath = () => {
     const parts = location.pathname.split("/").filter(Boolean);
-    return parts[0] === "portal" ? { page: parts[1] || null, sub: parts[2] || null } : { page: null, sub: null };
+    if (parts[0] === "portal") return { page: parts[1] || null, sub: parts[2] || null };
+    return parts[0] && parts[0] !== "login" ? { page: parts[0], sub: parts[1] || null } : { page: null, sub: null };
   };
   const h = new Function(
     "window", "navigator", "ssIsBetaHost", "ssPagePath", "ssParsePath", "document", "PopStateEvent", "setTimeout", "clearTimeout",
@@ -175,7 +178,7 @@ Deno.test("sss.navigate routes this tab in place, the way Back does, and answers
   const p = t.ports[0];
   p.send({ type: "sss.welcome", version: "0.1.4" });
   p.send({ type: "sss.navigate", id: 3, page: "contacts", sub: `c-${CONTACT}` });
-  assertEquals(t.pushed, [`/portal/contacts/c-${CONTACT}`]);
+  assertEquals(t.pushed, [`/contacts/c-${CONTACT}`]);
   assertEquals(t.popped.length, 1);
   assertEquals((t.popped[0] as { type: string }).type, "popstate");
   assertEquals(p.posted.at(-1), { type: "sss.navigated", id: 3, ok: true });
@@ -190,7 +193,7 @@ Deno.test("sss.navigate routes this tab in place, the way Back does, and answers
 });
 
 Deno.test("the tab says which page it shows (so one already on the contact is picked first), and says it again after a navigate or Back", async () => {
-  const t = tab({ pathname: `/portal/contacts/c-${CONTACT}` });
+  const t = tab({ pathname: `/contacts/c-${CONTACT}` });
   await t.tick();
   const p = t.ports[0];
   assertEquals([p.posted[0].page, p.posted[0].sub], ["contacts", `c-${CONTACT}`]);
@@ -200,11 +203,11 @@ Deno.test("the tab says which page it shows (so one already on the contact is pi
   assertEquals([seen?.page, seen?.sub], ["settings", "phone"]);
   assertEquals(p.posted.at(-1), { type: "sss.navigated", id: 1, ok: true });
   // Back (the browser's own popstate) says so too.
-  t.location.pathname = "/portal/orders";
+  t.location.pathname = "/orders";
   for (const f of t.listeners["window:popstate"] ?? []) f({ type: "popstate", state: null });
   assertEquals([p.posted.at(-1)?.type, p.posted.at(-1)?.page, p.posted.at(-1)?.sub], ["sss.seen", "orders", null]);
   // Anything that isn't a router slug is never said: the page is then unknown, not the address.
-  t.location.pathname = "/portal/contacts/c-1..%2Fadmin";
+  t.location.pathname = "/contacts/c-1..%2Fadmin";
   t.h.ssPhonePortVisit();
   assertEquals([p.posted.at(-1)?.page, p.posted.at(-1)?.sub], [null, null]);
 });
@@ -217,7 +220,7 @@ Deno.test("the tab says which page it shows (so one already on the contact is pi
 Deno.test("the shell's navigate() says the page it moved to, for a push and for a replace (C49)", async () => {
   const SHELL = (await Deno.readTextFile(new URL("../../portal/12-shell.jsx", import.meta.url))).replace(/\r\n/g, "\n");
   const NAV = slice(SHELL, "const navigate = useCallback(", "}, []);", "the shell's navigate()");
-  const t = tab({ pathname: "/portal/contacts/designs" });
+  const t = tab({ pathname: "/contacts/designs" });
   await t.tick();
   const p = t.ports[0];
   p.send({ type: "sss.welcome" });
@@ -226,7 +229,7 @@ Deno.test("the shell's navigate() says the page it moved to, for a push and for 
     `${NAV}}, []); return navigate;`,
   )(
     (f: unknown) => f, { current: null }, () => {}, () => {}, () => {},
-    (page: string, sub: string | null) => "/portal/" + page + (sub ? "/" + sub : ""),
+    (page: string, sub: string | null) => "/" + page + (sub ? "/" + sub : ""),
     (page: string, sub: string | null) => ({ page, sub }), t.win, t.h.ssPhonePortMoved,
   ) as (page: string, sub?: string | null, replace?: boolean, rec?: unknown) => void;
   const before = p.posted.length;
@@ -243,10 +246,10 @@ Deno.test("the shell's navigate() says the page it moved to, for a push and for 
   const nav2 = new Function(
     "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window", "ssPhonePortMoved",
     `${NAV}}, []); return navigate;`,
-  )((f: unknown) => f, { current: null }, () => {}, () => {}, () => {}, (page: string) => "/portal/" + page,
+  )((f: unknown) => f, { current: null }, () => {}, () => {}, () => {}, (page: string) => "/" + page,
     (page: string, sub: string | null) => ({ page, sub }), none.win, none.h.ssPhonePortMoved) as (page: string) => void;
   nav2("orders");
-  assertEquals([none.pushed, none.ports.length], [["/portal/orders"], 0]);
+  assertEquals([none.pushed, none.ports.length], [["/orders"], 0]);
 });
 
 // ── 02-sales: the SMS tab's hand-off carries the contact's name ────────────────────────────

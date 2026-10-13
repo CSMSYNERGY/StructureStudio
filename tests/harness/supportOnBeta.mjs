@@ -24,7 +24,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -87,9 +87,9 @@ async function supportPage(label, sub, width = 1280) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "text/javascript", body: ARTIFACT }));
-  await page.goto(`${BASE}/portal/support/${sub}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/support/${sub}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   await page.getByText("Support", { exact: true }).first().waitFor({ timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(600);

@@ -29,7 +29,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF, shotsDir, collectErrors } from "./lib.mjs";
+import { launch, reporter, BASE, REF, shotsDir, collectErrors, serveAppRoutes } from "./lib.mjs";
 
 const OWN = "acme-sheds";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -139,7 +139,7 @@ async function open(path, viewport) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   const booted = await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 })
@@ -196,7 +196,7 @@ const cardCount = (page) => page.evaluate(() => {
 try {
   // ── W ── width, at the three desktop sizes and a phone
   for (const [w, h] of [[1280, 900], [1440, 900], [1920, 1080], [390, 844]]) {
-    const { ctx, page, errors } = await open("/portal/designs/pipeline", { width: w, height: h });
+    const { ctx, page, errors } = await open("/designs/pipeline", { width: w, height: h });
     await boardReady(page);
     const m = await measure(page);
     const tag = `W${w}`;
@@ -222,7 +222,7 @@ try {
 
   // ── F ── the status filter, and R ── read-only statuses, at 1440
   {
-    const { ctx, page, errors, calls, moves } = await open("/portal/designs/pipeline", { width: 1440, height: 1000 });
+    const { ctx, page, errors, calls, moves } = await open("/designs/pipeline", { width: 1440, height: 1000 });
     await boardReady(page);
     const all = await visibleStatuses(page);
     // The control sits beside the search, before Owner.
@@ -313,7 +313,7 @@ try {
 
   // ── The Design list keeps the page's ordinary width ──
   {
-    const { ctx, page } = await open("/portal/designs/list", { width: 1920, height: 1000 });
+    const { ctx, page } = await open("/designs/list", { width: 1920, height: 1000 });
     await page.waitForFunction(() => document.querySelector('[data-ss-designs-view="list"]'), null, { timeout: 20000 }).catch(() => {});
     const max = await page.evaluate(() => getComputedStyle(document.querySelector(".ss-inner")).maxWidth);
     ok("L1 the Design list keeps the 1240px cap", max === "1240px", max);

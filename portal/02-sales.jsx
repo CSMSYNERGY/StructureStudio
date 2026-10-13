@@ -26,7 +26,7 @@
 // old Pipeline tab's choice) when they made one, else the first pipeline with the CRM, else the
 // Design list (C14: "we need to keep the list view for those not using the CRM"). A view the
 // person cannot open is never shown: a Crew Leader holding designs:view and no contacts gets the
-// Design list and nothing else. Every view has its own address (/portal/contacts/<sub>, see
+// Design list and nothing else. Every view has its own address (/contacts/<sub>, see
 // SS_HUB_* in 01-core), and the hub keeps the address on the view it shows.
 const SS_HUB_MAX_PIPES = 5;
 
@@ -37,7 +37,7 @@ const ssHubPipes = (ps) => (Array.isArray(ps) ? ps : [])
   .map((p) => ({ id: String(p.id).toLowerCase(), name: String(p.name || "Pipeline") }));
 
 // Which view the hub shows. Pure, so it is tested without a browser (contactsHub_test.ts).
-//   sub        the address's sub under /portal/contacts (null, a SS_HUB_* value, "p-<uuid>", junk)
+//   sub        the address's sub under /contacts (null, a SS_HUB_* value, "p-<uuid>", junk)
 //   saved      ssSavedHubView: the person's own pick, or null
 //   reach      { people, designs }: ssHubCan's answers for this person
 //   crm        the built-in CRM is on; crmKnown: the answer has landed (own portal), so "off" is real
@@ -277,7 +277,7 @@ function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
 
 // The hub. The shell builds the three views it cannot (they need its routing, phone and access
 // wiring) and hands them in as elements; the boards are built here.
-//   sub          the address's sub under /portal/contacts (records never reach here)
+//   sub          the address's sub under /contacts (records never reach here)
 //   onRoute(sub, replace)              moves the address (navigate("contacts", sub, replace))
 //   onOpenRecord(code, contactId, fromSub)  opens a card's customer or design, Back to `fromSub`
 function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
@@ -287,12 +287,12 @@ function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked
   let remembered = null;
   try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
   const r = ssHubResolve({ sub, saved, reach, crm: !!crmUnlocked, crmKnown, pipelines, remembered });
-  // Keep the address on the view that shows (a bare /portal/contacts, "the board", or a view this
+  // Keep the address on the view that shows (a bare /contacts, "the board", or a view this
   // person cannot open), without a history entry, so a refresh or a copied link lands right back.
   useEffect(() => {
     if (r.canon && r.canon !== (sub || null)) onRoute(r.canon, true);
   }, [r.canon, sub]);
-  // The board last looked at, for "the board" (/portal/contacts/pipeline and every old Pipeline
+  // The board last looked at, for "the board" (/contacts/pipeline and every old Pipeline
   // address).
   useEffect(() => {
     if (r.view !== "pipe" || !r.pipeId) return;
@@ -1826,7 +1826,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 // or a call from them nobody picked up). Replying is what clears it, so there is no read/unread
 // state to keep.
 //
-// The filter lives in the URL (/portal/conversations/email|texts|calls), so the browser's Back
+// The filter lives in the URL (/conversations/email|texts|calls), so the browser's Back
 // from a record lands on the same filter. Mine/Everyone is remembered for the tab's session.
 //
 // Texts and Calls are offered the way the record's History chips are (CRM_CHIPS `when`): Texts
@@ -4690,7 +4690,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       }
       const os = data.orders;
       // No link out yet: Orders is its own tab with its own row-click detail, and there is
-      // no /portal/orders/<id> route to deep-link to. Showing the order number, what it was
+      // no /orders/<id> route to deep-link to. Showing the order number, what it was
       // for and where it stands answers her question ("have they bought anything, and is it
       // paid") without inventing a route that would then need its own back button.
       return (
@@ -4699,7 +4699,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             const d = (data.designs || []).find((x) => x.short_code === o.short_code);
             const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
             // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
-            // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
+            // could not link anywhere -- "there is no /orders/<id> route to deep-link
             // to" -- which was true until the order detail got its own URL in this change.
             // SELECTING AN ORDER AND SELECTING ITS DEAL ARE THE SAME SELECTION, which is
             // why selCode holds a SHORT CODE and not an order id. Carolyn asked for "a deal,
@@ -5346,7 +5346,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     Dashboard (09-shell) and is not in scope in this part — calling it here
                     would throw on click. The route is real, so an anchor is both correct
                     and survives someone reorganising the shell. */}
-                <a href="/portal/orders"
+                <a href={ssPagePath("orders", null)}
                   style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8, display: "inline-block", textDecoration: "none" }}>
                   Open Orders
                 </a>
@@ -5599,7 +5599,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 //
 // NOT the Pipeline tab. That board (DesignsTable above) is DERIVED from designs.status and cannot
 // be dragged; this one is the "local crm_stages table" its comment called the next increment.
-// Different data, different tab: /portal/pipelines[/<pipeline id>].
+// Different data, different tab: /pipelines[/<pipeline id>].
 //
 // A DEAL HAS NO OWNER (Carolyn 2026-09-04: "we do not ever assign deals. We only assign contacts
 // and followers"). A card shows its CONTACT's owner, and the server returns only the deals whose

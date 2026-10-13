@@ -180,7 +180,7 @@ const tabBtn = (page, label) => page.locator("button").filter({ hasText: new Reg
 const actions = (s, a) => s.calls.filter((c) => c.action === a);
 
 async function openRecordTab(s, label) {
-  await s.go(`/portal/contacts/c-${CONTACT_ID}`);
+  await s.go(`/contacts/c-${CONTACT_ID}`);
   await s.page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).catch(() => {});
   await s.page.waitForTimeout(300);
   // Pick the deal: the Email and SMS tabs file against one.

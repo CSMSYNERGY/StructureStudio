@@ -42,7 +42,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
+import { launch, reporter, BASE, REF, shotsDir, serveAppRoutes, legacyAppPath } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -147,10 +147,11 @@ async function open(label, S, path) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // An older artifact (the "before" runs) reads /portal addresses only: it gets the host as it was.
+  await serveAppRoutes(page, PORTAL_HTML, { legacy: !!S.artifact });
   if (S.artifact) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: S.artifact }));
 
-  await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}${S.artifact ? legacyAppPath(path) : path}`, { waitUntil: "domcontentloaded" });
   const booted = await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 })
     .then(() => true, () => false);
   await page.waitForTimeout(1500);
@@ -159,9 +160,11 @@ async function open(label, S, path) {
 
 // ── R/E: a rep's Contacts list and a customer's record ─────────────────────────────────────
 async function repView(label, accessMap, artifact = null, role = "user") {
-  const r = await open(label, { role, access: accessMap, artifact }, "/portal/contacts/people");
+  const r = await open(label, { role, access: accessMap, artifact }, "/contacts/people");
   const out = { label, booted: r.booted };
-  out.navContacts = await r.page.locator('a[href="/portal/contacts"]').count() > 0;
+  // An older artifact (the "before" runs) still writes /portal addresses.
+  const at = (p) => (artifact ? legacyAppPath(p) : p);
+  out.navContacts = await r.page.locator(`a[href="${at("/contacts")}"]`).count() > 0;
   out.path = await r.page.evaluate(() => location.pathname);
   out.listRendered = await r.page.waitForFunction(() => /Jordan Example/.test(document.body.innerText), null, { timeout: 15000 }).then(() => true, () => false);
   out.note = await r.page.evaluate(() => {
@@ -170,7 +173,7 @@ async function repView(label, accessMap, artifact = null, role = "user") {
   });
   await r.page.screenshot({ path: join(shots, `${label}-list.png`), fullPage: true });
   // The record, the way a row's name opens it.
-  await r.page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/portal/contacts/c-${CONTACT_ID}`);
+  await r.page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, at(`/contacts/c-${CONTACT_ID}`));
   out.recordRendered = await r.page.waitForFunction(() => /Call about the door/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
   await r.page.waitForTimeout(600);
   // Pick the deal first: a contact's write tabs wait for one (needsPick), and that hint comes
@@ -218,7 +221,7 @@ async function teamView(label, { role, title, myAccessMap, width = 1280, artifac
     meta: access.accessMetadata(), isInternal: false, canManageTeam: true,
     myAccess: role === "owner" ? access.effectiveAccess("owner", "owner", null) : myAccessMap,
   });
-  const r = await open(label, S, "/portal/settings/team");
+  const r = await open(label, S, "/settings/team");
   const out = { label, booted: r.booted };
   out.listed = await r.page.waitForFunction(() => /Rory Rep/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
   if (out.listed) {

@@ -68,7 +68,7 @@
 //      The stub checks every save with the REAL parseRoute / parseNumberLabel / parseAssignee /
 //      pickNumber. Nothing is bought, connected or texted anywhere.
 //   W. Who reaches Your calls: a sales rep (phone 'own', no settings area: the real title preset)
-//      gets Settings with exactly Phone and My Profile, and the card, at /portal/settings/phone
+//      gets Settings with exactly Phone and My Profile, and the card, at /settings/phone
 //      (the apps' "Change in Structure Studio" link); and an older Worker, which answers GET
 //      /settings/me with 405 (it routes only POST there), hides the card instead of showing a fault.
 //
@@ -549,7 +549,7 @@ const tick = (loc) => loc.check({ timeout: 5000 }).then(() => true, () => false)
 // The action-bar tab by its exact label.
 const tabBtn = (page, label) => page.locator("button").filter({ hasText: new RegExp(`^${label}$`) }).first();
 async function openContact(s) {
-  await s.go(`/portal/contacts/c-${CONTACT_ID}`);
+  await s.go(`/contacts/c-${CONTACT_ID}`);
   await s.page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 });
   await s.page.waitForTimeout(400);
 }
@@ -657,7 +657,7 @@ try {
     }
 
     // J. Call on the contact LIST.
-    await s.go("/portal/contacts/people");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     const listRendered = ok("J0 the contact list rendered a Call button on the row", (await rowCall.count()) === 1);
@@ -749,7 +749,7 @@ try {
           && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
       await s.page.screenshot({ path: join(shots, "E-view-as-disabled.png") });
     }
-    await s.go("/portal/contacts/people");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("E8 the list's Call is greyed in view-as with the record's hint", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())
@@ -771,7 +771,7 @@ try {
     ok("Q11 with calling off, a recorded call shows its summary but no Play recording or Show transcript",
       (await s.page.locator("[data-ss-call-summary]").count()) === 1
         && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
-    await s.go("/portal/contacts/people");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("F5 the list's Call is greyed and says calling is off, like the record", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())
@@ -782,11 +782,11 @@ try {
   // ── G. Settings → Phone ──────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "G" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     const body = await s.page.locator('[data-ss-phone-settings]').innerText().catch(() => "");
     const rendered = ok("G0 the Phone tab rendered the owner's setup", (await s.page.locator('[data-ss-phone-settings="team"]').count()) === 1, body.slice(0, 80));
-    ok("G1 the Settings rail lists Phone", (await s.page.locator('.ss-set-nav a[href*="/portal/settings/phone"]').count()) === 1);
+    ok("G1 the Settings rail lists Phone", (await s.page.locator('.ss-set-nav a[href*="/settings/phone"]').count()) === 1);
     if (rendered) {
       ok("G2 it shows the builder's number from the texting setup", (await s.page.locator("[data-ss-phone-number]").innerText()) === "(555) 555-0199");
       ok("G3 and the switch state", (await s.page.locator('[data-ss-phone-status="on"]').count()) === 1);
@@ -851,7 +851,7 @@ try {
     // back on with their own wording.
     const s = await scenario(browser, { name: "P", recordingRow: {
       phone_record_calls: false, phone_recording_updated_at: "2026-10-05T12:00:00Z", phone_recording_updated_by: USER.id } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     const rendered = ok("P0 the Phone tab has a Call recording card, off as the owner left it", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1
@@ -908,7 +908,7 @@ try {
   {
     // Not the owner (an admin with phone edit, or an operator in view-as): read-only.
     const s = await scenario(browser, { name: "P-admin", canChangeRecording: false, recordingRow: { phone_record_calls: true, phone_recording_retention_days: 180 } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator('[data-ss-phone-recording="on"]');
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     const inputs = card.locator("input, select");
@@ -925,7 +925,7 @@ try {
     // Migration 287: a business no owner has saved is ON by default. With the server recording,
     // the card says calls are recorded, and that it is the default rather than who changed it.
     const s = await scenario(browser, { name: "P-default-on", recordingRow: { phone_record_calls: true } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator('[data-ss-phone-recording="on"]');
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     const text = await card.innerText().catch(() => "");
@@ -951,7 +951,7 @@ try {
   {
     // Between 287 and the rail (SETUP.md 7d steps 1-4): on by default, but nothing records yet.
     const s = await scenario(browser, { name: "P-default-waiting", recordingRow: { phone_record_calls: true }, recordingServerOn: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator('[data-ss-phone-recording="on"]');
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     const text = await card.innerText().catch(() => "");
@@ -967,7 +967,7 @@ try {
     // The CALL_TRANSCRIBE rail on (not the case today): the standard sentence says "and
     // transcribed", and the "haven't started" note is gone.
     const s = await scenario(browser, { name: "P-transcribing", recordingRow: { phone_record_calls: true }, transcribeServerOn: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     ok("P18 with the transcripts rail on the placeholder becomes \"... and transcribed\" and the note is hidden",
@@ -979,7 +979,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "P-before-263", recordingRow: null });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     ok("P13 before migration 263 the card says call recording isn't available, and offers nothing",
       (await s.page.locator('[data-ss-phone-recording="unavailable"]').count()) === 1 && (await s.page.locator("[data-ss-phone-recording-save]").count()) === 0);
@@ -989,7 +989,7 @@ try {
     // The server's switch is off (the Worker's CALL_RECORDING rail): the owner can still choose,
     // but the card never says calls are recorded, and the save says when it starts.
     const s = await scenario(browser, { name: "P-not-started", recordingServerOn: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     ok("P14 with the server's switch off the card says recording hasn't started on this account",
@@ -1009,7 +1009,7 @@ try {
   // ── L. Settings → Phone with NO number: the calling-only purchase (stubbed) ──────────────
   {
     const s = await scenario(browser, { name: "L", noNumber: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-buy]", { timeout: 15000 }).catch(() => {});
     const offered = ok("L3 an owner with no number is offered 'Get a number for calls'", (await s.page.locator("[data-ss-phone-buy]").count()) === 1);
     if (offered) {
@@ -1066,7 +1066,7 @@ try {
   // ── M. The rollout, on the Phone tab (SSB-1), and a switch-off whose move failed (SSB-2) ──
   {
     const s = await scenario(browser, { name: "M1", phoneStatus: "off", rolloutOpen: false, noNumber: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     const rendered = ok("M1 the Phone tab rendered for an owner the rollout does not include", (await s.page.locator('[data-ss-phone-settings="team"]').count()) === 1);
     if (rendered) {
@@ -1080,7 +1080,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "M5", phoneStatus: "off", rolloutOpen: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     ok("M5 a number not connected shows no Connect button for an owner the rollout does not include",
       (await s.page.locator("[data-ss-phone-connect-card]").count()) === 1 && (await s.page.locator("[data-ss-phone-connect]").count()) === 0);
@@ -1090,7 +1090,7 @@ try {
     // Calling is on, the number is connected, and the move to voicemail fails when it is turned off.
     const s = await scenario(browser, { name: "M6", moveFails: true,
       numberOverride: { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: true, callingOnly: false } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-switch]", { timeout: 15000 }).catch(() => {});
     await tap(s.page.locator("[data-ss-phone-switch]"));
     await s.page.waitForSelector("[data-ss-phone-stuck]", { timeout: 8000 }).catch(() => {});
@@ -1111,7 +1111,7 @@ try {
   // ── N. Caller ID on the Phone tab (plan §14, phase 6; STUBS, nothing reaches Twilio) ────────
   {
     const s = await scenario(browser, { name: "N1", trustOperator: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     const card = s.page.locator("[data-ss-phone-callerid]");
     const shown = ok("N1 the Caller ID card is on the team screen, under the number", (await card.count()) === 1);
@@ -1147,7 +1147,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "N9", trustOperator: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     const text = await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => "");
     ok("N9 a builder's owner sees where it stands, and no buttons", /Not registered/.test(text)
@@ -1159,7 +1159,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "N11", trustOperator: true, trustAvailable: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     ok("N11 before migration 255 the card says it isn't available, with no buttons",
       /isn.t available on this account yet/.test(await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => ""))
@@ -1179,7 +1179,7 @@ try {
       optInDisclosureUrl: "https://demo.example.test/opt-in", compliance: { checkedAt: null, checks: [] },
     };
     const s = await scenario(browser, { name: "O", smsStatus });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
     const offered = ok("O1 at 'pick your number' with a calling-only number, the tab offers to use it", (await s.page.locator("[data-ss-sms-adopt]").count()) === 1
       && /\+15555550199/.test(await s.page.locator("[data-ss-sms-adopt]").innerText()));
@@ -1200,7 +1200,7 @@ try {
     // accepts it in number_pending and active), offered as a finish.
     for (const st of ["number_pending", "active"]) {
       const s2 = await scenario(browser, { name: `O5-${st}`, smsStatus: { ...smsStatus, status: st } });
-      await s2.go("/portal/settings/sms");
+      await s2.go("/settings/sms");
       await s2.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
       const card = s2.page.locator('[data-ss-sms-adopt="finish"]');
       const offered2 = ok(`O5 at ${st} with a calling-only number still on the account, the tab offers to FINISH connecting it`,
@@ -1223,7 +1223,7 @@ try {
     // three more digits, the same as Settings -> Phone.
     {
       const s3 = await scenario(browser, { name: "O7", smsStatus: { ...smsStatus, numbers: [] } });
-      await s3.go("/portal/settings/sms");
+      await s3.go("/settings/sms");
       await s3.page.waitForSelector("[data-ss-sms-areacode]", { timeout: 15000 }).catch(() => {});
       const box = s3.page.locator("[data-ss-sms-areacode]");
       if (ok("O7 with nothing to adopt, 'Choose your number' offers the search", (await box.count()) === 1)) {
@@ -1248,8 +1248,8 @@ try {
   // ── H. The Calls page ────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "H" });
-    ok("H1 the rail has a Calls item", (await s.page.locator('.ss-ws-nav a[href$="/portal/calls"]').count()) === 1);
-    await s.go("/portal/calls");
+    ok("H1 the rail has a Calls item", (await s.page.locator('.ss-ws-nav a[href$="/calls"]').count()) === 1);
+    await s.go("/calls");
     await s.page.waitForSelector("[data-ss-calls-report] table", { timeout: 15000 }).catch(() => {});
     const mine = s.calls.filter((c) => c.action === "phone_calls_report").pop();
     ok("H2 My calls is the default", !!mine && mine.scope === "mine" && mine.days === 30, JSON.stringify(mine));
@@ -1307,7 +1307,7 @@ try {
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null };
     const team = TEAM.map((t) => (t.userId === REP ? { ...t, ringHours: WEEKDAYS, ringHoursTz: "America/Chicago" } : { ...t, ringHours: null, ringHoursTz: null }));
     const s = await scenario(browser, { name: "R", my, team, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
     const card = s.page.locator("[data-ss-phone-my-hours]");
     const radio = (label) => card.locator("label", { hasText: label }).locator("input");
@@ -1376,7 +1376,7 @@ try {
   {
     // A Worker that keeps covers but not hours: the card has no hours section.
     const s = await scenario(browser, { name: "R9", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-cover]", { timeout: 15000 }).catch(() => {});
     ok("R9 a Worker that doesn't keep hours: the cover shows, 'When my phone rings' doesn't",
       (await s.page.locator("[data-ss-phone-cover]").count()) === 1 && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 0);
@@ -1388,7 +1388,7 @@ try {
   {
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
     const s = await scenario(browser, { name: "V", my, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-greeting]", { timeout: 15000 }).catch(() => {});
     const sec = s.page.locator("[data-ss-phone-greeting]");
     const said = () => sec.innerText().catch(() => "");
@@ -1443,7 +1443,7 @@ try {
     const RILEY = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: REP, textingStatus: "pending_registration",
       voiceReady: false, callingOnly: true, main: false, callerId: CID, route: null, suggestedMembers: [REP] };
     const s = await scenario(browser, { name: "X", numbers: [MAIN, RILEY], textingActive: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-number-list]", { timeout: 15000 }).catch(() => {});
     const rows = await s.page.locator("[data-ss-phone-number-row]").allInnerTexts();
     ok("X1 two numbers are listed, each with its name and whose it is",
@@ -1514,7 +1514,7 @@ try {
     // A sales rep whose own number it is: "Your number", the one their calls show.
     const RILEY_OWN = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: USER.id };
     const s = await scenario(browser, { name: "X9", role: "user", access: PRESETS.sales_rep, numbers: [{ id: "00000000-0000-4000-8000-00000000a001", e164: "+15555550199", label: null, assignedUserId: null }, RILEY_OWN] });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="own"]', { timeout: 15000 }).catch(() => {});
     const card = await s.page.locator('[data-ss-phone-numbers]').first().innerText().catch(() => "");
     ok("X9 a sales rep with their own number is shown it as \"Your number\"", /Your number/.test(card) && /\(555\) 555-0198/.test(card) && /Riley cell/.test(card), card);
@@ -1525,30 +1525,30 @@ try {
   // ── W. Who reaches Your calls ─────────────────────────────────────────────────────────────
   {
     // A sales rep: phone 'own' and no settings area at all (the real preset). The apps' "Change in
-    // Structure Studio" button opens /portal/settings/phone; before Phone joined SETTINGS_AREAS
+    // Structure Studio" button opens /settings/phone; before Phone joined SETTINGS_AREAS
     // that clamped them to Designs, with no Settings anywhere.
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
     const s = await scenario(browser, { name: "W", role: "user", access: PRESETS.sales_rep, my, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
     const path = await s.page.evaluate(() => location.pathname);
     const rail = await s.page.evaluate(() => [...document.querySelectorAll(".ss-side.ss-side-settings .ss-nav a")]
-      .map((a) => new URL(a.href).pathname).filter((p) => p.startsWith("/portal/settings/")));
-    ok("W1 a sales rep's /portal/settings/phone stays put (not their fallback page)", path === "/portal/settings/phone", path);
-    ok("W2 their Settings rail is exactly Phone and My Profile", JSON.stringify(rail) === JSON.stringify(["/portal/settings/phone", "/portal/settings/myprofile"]), JSON.stringify(rail));
+      .map((a) => new URL(a.href).pathname).filter((p) => p.startsWith("/settings/")));
+    ok("W1 a sales rep's /settings/phone stays put (not their fallback page)", path === "/settings/phone", path);
+    ok("W2 their Settings rail is exactly Phone and My Profile", JSON.stringify(rail) === JSON.stringify(["/settings/phone", "/settings/myprofile"]), JSON.stringify(rail));
     ok("W3 the Phone tab is their own view, with Your calls: who covers, their hours and their greeting",
       (await s.page.locator('[data-ss-phone-settings="own"]').count()) === 1 && (await s.page.locator("[data-ss-phone-cover]").count()) === 1
         && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 1 && (await s.page.locator("[data-ss-phone-greeting]").count()) === 1);
     await s.page.screenshot({ path: join(shots, "W-sales-rep-your-calls.png"), fullPage: true });
-    await s.go("/portal/settings");
-    ok("W4 a bare /portal/settings is Settings for them too, landing on Phone", (await s.page.evaluate(() => location.pathname)).startsWith("/portal/settings")
+    await s.go("/settings");
+    ok("W4 a bare /settings is Settings for them too, landing on Phone", (await s.page.evaluate(() => location.pathname)).startsWith("/settings")
       && (await s.page.locator("[data-ss-phone-yours]").count()) === 1, await s.page.evaluate(() => location.pathname));
     await s.ctx.close();
   }
   {
     // A Worker from before 264: GET /settings/me is 405 "That method isn't allowed here."
     const s = await scenario(browser, { name: "W5", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null }, oldWorker: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     await s.page.waitForTimeout(800);
     const body = await s.page.innerText("body").catch(() => "");

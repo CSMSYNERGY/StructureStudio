@@ -44,7 +44,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, shotsDir, collectErrors, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, shotsDir, collectErrors, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES } from "./gableProbe.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -157,8 +157,8 @@ async function open(S, path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -174,7 +174,7 @@ const go = (page, pathname) => page.evaluate((p) => {
   dispatchEvent(new PopStateEvent("popstate", { state: {} }));
 }, pathname);
 const navOrder = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-ws-nav .ss-nav a")].map((a) => new URL(a.href).pathname));
-const advItem = (page) => page.locator('.ss-nav a[href^="/portal/advanced"]:not(.ss-back)');
+const advItem = (page) => page.locator('.ss-nav a[href^="/advanced"]:not(.ss-back)');
 const sw = (page) => page.getByRole("switch", { name: "Advanced mode", exact: true });
 // Null when there is no switch at all (an older artifact), so a missing card fails its checks
 // instead of stalling the run on a locator timeout.
@@ -186,11 +186,11 @@ const saves = (calls) => calls.filter((c) => c.fn === "portal-settings" && c.act
 const statusReads = (calls, after) => calls.filter((c) => c.fn === "portal-billing" && c.action === "status" && c.at >= after);
 const itemUnderDesigner = async (page) => {
   const o = await navOrder(page);
-  return o.indexOf("/portal/advanced") > 0 && o.indexOf("/portal/advanced") === o.indexOf("/portal/designer") + 1;
+  return o.indexOf("/advanced") > 0 && o.indexOf("/advanced") === o.indexOf("/designer") + 1;
 };
 // Settings → Designer, with whichever 3D answer it draws given time to draw.
 async function settingsDesigner(page) {
-  await go(page, "/portal/settings/designer");
+  await go(page, "/settings/designer");
   await page.waitForFunction(() => document.body.innerText.includes("Give each building style its own 3D look"), null, { timeout: 30000 }).catch(() => {});
   await page.waitForFunction(() => {
     const t = document.body.innerText;
@@ -211,7 +211,7 @@ try {
   {
     let adv = false;
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv }), onSave: (_t, body) => { adv = body.enabled === true; return null; } };
-    const { ctx, page, calls, errors } = await open(S, "/portal/designs");
+    const { ctx, page, calls, errors } = await open(S, "/designs");
     await settingsDesigner(page);
     ok(`A${TAG}: Settings → Designer has the Advanced mode card`, (await card(page).count()) === 1);
     ok(`A${TAG}: …above the 3D card`, await cardAbove3d(page));
@@ -221,7 +221,7 @@ try {
     await card(page).screenshot({ path: join(SHOTS, `A-card-off${TAG}.png`) }).catch(() => {});
     await page.evaluate(() => { window.__harnessSamePage = "still here"; });
     await press(page);
-    const sent = await waitFor(page, () => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null);
+    const sent = await waitFor(page, () => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null);
     const s1 = saves(calls);
     ok(`A${TAG}: pressing it sends save_advanced_mode {enabled: true} for their own account`,
       s1.length === 1 && s1[0].body.enabled === true && s1[0].body.targetClientId === null, JSON.stringify(s1.map((c) => c.body)));
@@ -237,14 +237,14 @@ try {
     ok(`A${TAG}: "Open Advanced" is offered`, (await openBtn.count()) === 1);
     if (await openBtn.count()) {
       await openBtn.click();
-      const opened = await waitFor(page, () => location.pathname === "/portal/advanced" && document.body.innerText.includes("Every shape control on one building"), null, 60000);
+      const opened = await waitFor(page, () => location.pathname === "/advanced" && document.body.innerText.includes("Every shape control on one building"), null, 60000);
       ok(`A${TAG}: …and opens the Advanced page`, opened, await page.evaluate(() => location.pathname));
       await page.screenshot({ path: join(SHOTS, `A-advanced-page${TAG}.png`) });
     }
     // Turn it off again.
     await settingsDesigner(page);
     await press(page);
-    const gone = await waitFor(page, () => !document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null);
+    const gone = await waitFor(page, () => !document.querySelector('.ss-nav a[href^="/advanced"]'), null);
     const s2 = saves(calls);
     ok(`A${TAG}: turning it off sends {enabled: false}`, s2.length === 2 && s2[1].body.enabled === false, JSON.stringify(s2.map((c) => c.body)));
     ok(`A${TAG}: …and the item goes away, without a reload`, gone && (await page.evaluate(() => window.__harnessSamePage)) === "still here");
@@ -256,7 +256,7 @@ try {
   // ── B: no 3D ────────────────────────────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: false, has3d: false }) };
-    const { ctx, page, calls, errors } = await open(S, "/portal/designs");
+    const { ctx, page, calls, errors } = await open(S, "/designs");
     await settingsDesigner(page);
     ok(`B${TAG}: without 3D the card is there`, (await card(page).count()) === 1);
     ok(`B${TAG}: …the switch is off and greyed`, (await checked(page)) === "false" && (await swEnabled(page)) === false);
@@ -273,7 +273,7 @@ try {
   // ── C: a team member ────────────────────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, role: "user", access: { designer: "edit", designs: "edit", settings_structures: "edit" }, statusFor: () => statusAnswer({ adv: false }) };
-    const { ctx, page, errors } = await open(S, "/portal/designs");
+    const { ctx, page, errors } = await open(S, "/designs");
     await settingsDesigner(page);
     ok(`C${TAG}: a team member reaches Settings → Designer`, await page.getByText("Give each building style its own 3D look").count() === 1);
     ok(`C${TAG}: …and gets no Advanced mode card`, (await card(page).count()) === 0);
@@ -284,7 +284,7 @@ try {
   // ── D: our own account ──────────────────────────────────────────────────────────────────
   {
     const S = { own: OURS, statusFor: () => statusAnswer({ internal: true, adv: false }) };
-    const { ctx, page, calls, errors } = await open(S, "/portal/designs");
+    const { ctx, page, calls, errors } = await open(S, "/designs");
     await settingsDesigner(page);
     ok(`D${TAG}: our own account: the switch is on and locked`, (await card(page).count()) === 1
       && (await checked(page)) === "true" && (await swEnabled(page)) === false);
@@ -307,14 +307,14 @@ try {
       statusFor: (target) => (target === BUILDER ? statusAnswer({ adv }) : statusAnswer({ adv: true })),
       onSave: (target, body) => { if (target === BUILDER) adv = body.enabled === true; return null; },
     };
-    const { ctx, page, calls, errors } = await open(S, `/portal/designs?view=${BUILDER}`);
+    const { ctx, page, calls, errors } = await open(S, `/designs?view=${BUILDER}`);
     await page.waitForFunction(() => /Viewing|Exit/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {});
     await settingsDesigner(page);
     ok(`E${TAG}: viewing a builder without it: the card says off`, (await card(page).count()) === 1 && (await checked(page)) === "false");
     ok(`E${TAG}: …and there is no Advanced item (the operator's own "on" does not leak in)`, (await advItem(page).count()) === 0);
     await page.evaluate(() => { window.__harnessSamePage = "still here"; });
     await press(page);
-    const appeared = await waitFor(page, () => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null);
+    const appeared = await waitFor(page, () => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null);
     const s = saves(calls);
     ok(`E${TAG}: the save is for the BUILDER`, s.length === 1 && s[0].body.targetClientId === BUILDER && s[0].body.enabled === true, JSON.stringify(s.map((c) => c.body)));
     const after = s.length ? statusReads(calls, s[0].at) : [];
@@ -329,7 +329,7 @@ try {
   // ── F: a refused save ───────────────────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: false }), onSave: () => ({ status: 500, body: { error: "Couldn't turn Advanced mode on. Please try again." } }) };
-    const { ctx, page, calls } = await open(S, "/portal/designs");
+    const { ctx, page, calls } = await open(S, "/designs");
     await settingsDesigner(page);
     await press(page);
     const shown = await waitFor(page, () => !!document.querySelector('[data-ss-adv-mode] [role="alert"]'), null);
@@ -346,7 +346,7 @@ try {
   // ── G: a server that predates advancedMode ────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: "absent" }) };
-    const { ctx, page, errors } = await open(S, "/portal/designs");
+    const { ctx, page, errors } = await open(S, "/designs");
     await settingsDesigner(page);
     ok(`G${TAG}: no advancedMode from the server: no card`, (await card(page).count()) === 0);
     ok(`G${TAG}: …and the 3D card is still there`, await page.getByText("3D Style Calibration").count() >= 1);
@@ -357,7 +357,7 @@ try {
   // ── H: unsaved work on the Advanced page ──────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: true }), dialogAnswer: false };
-    const { ctx, page, calls, errors, dialogs } = await open(S, "/portal/advanced");
+    const { ctx, page, calls, errors, dialogs } = await open(S, "/advanced");
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await settle(page, 1000);
     // A change: a lean-to, 6 ft wide (advancedTab.mjs's leanWidth).
@@ -377,7 +377,7 @@ try {
     ok(`H${TAG}: turning Advanced off with unsaved work asks first`,
       dialogs[0] === "Turning Advanced off will discard the building you haven't saved on the Advanced page. Continue?", String(dialogs[0]));
     ok(`H${TAG}: …No sends nothing and keeps it on`, saves(calls).length === 0 && (await checked(page)) === "true" && (await advItem(page).count()) === 1);
-    await go(page, "/portal/advanced");
+    await go(page, "/advanced");
     await settle(page, 600);
     ok(`H${TAG}: …and the building is still there`, (await page.getByLabel("Lean-to 1 width (ft)", { exact: true }).inputValue({ timeout: 10000 }).catch(() => "")) === "6");
     ok(`H${TAG}: no page errors`, errors.length === 0, errors.join(" | "));

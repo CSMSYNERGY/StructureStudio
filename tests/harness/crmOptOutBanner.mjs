@@ -115,7 +115,7 @@ async function scenario(browser, name, sms) {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/portal/contacts/c-${CONTACT_ID}`);
+  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/contacts/c-${CONTACT_ID}`);
   await page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(300);
   // Pick the deal, then the SMS tab.

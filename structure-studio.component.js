@@ -38575,7 +38575,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setViewingVersion(null);
                 // Drop the design (and version) from the URL, but KEEP ?client=. A bare pathname threw
                 // the tenant away too, so on a ?client= link (the one onboarding hands out) the next
-                // reload had no tenant and no design and was sent to /portal, the business login.
+                // reload had no tenant and no design and was sent to /login, the business login.
                 // Same shape as resetGate and signOutCustomer.
                 if (!embedded) {
                   const p = new URLSearchParams(window.location.search);
@@ -38806,22 +38806,24 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
     // Bare product root: no tenant link (?client= / subdomain) and no design code.
     // This isn't any tenant's page — it's where business owners land, so send
     // them to the portal; they copy their customer design link from the dashboard.
+    // The portal's bare address is /login since 2026-10-13 (it was /portal, which the
+    // host still 301s there — going straight to /login saves the hop).
     if (!clientId && !designShortCode) {
       if (embedded) {
         // An embedded mount must never navigate the host page — redirecting to
-        // /portal.html from inside the portal would loop. Show the error screen.
+        // /login from inside the portal would loop. Show the error screen.
         setState({ status: "error", clientId: "", message: "No client id was supplied to the embedded designer." });
         return;
       }
       // Carry the query AND hash across. Supabase delivers auth-email outcomes in the
       // URL — `#access_token=…&type=invite|recovery` (implicit), `?code=…` (PKCE), or
-      // `#error=…&error_code=otp_expired` — and a bare replace("/portal") DESTROYS them,
+      // `#error=…&error_code=otp_expired` — and a bare replace("/login") DESTROYS them,
       // so the portal booted with a clean URL, found no session, and showed a login form
       // instead of the set-password screen. That is the "invite/reset link just takes me
       // to login" bug (Carolyn, 2026-07-28). It reaches this page at all whenever the
       // link's redirect_to is not in Supabase's allow-list, because Supabase then falls
       // back to Site URL (the apex root). portal.html already handles all three shapes.
-      window.location.replace("/portal" + window.location.search + window.location.hash);
+      window.location.replace("/login" + window.location.search + window.location.hash);
       return;
     }
     let cancelled = false;

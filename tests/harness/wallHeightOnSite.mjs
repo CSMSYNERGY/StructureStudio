@@ -265,7 +265,7 @@ async function portalRun(browser) {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/options"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await page.evaluate(() => { history.pushState({}, "", "/settings/options"); window.dispatchEvent(new PopStateEvent("popstate")); });
     await page.waitForFunction(() => document.body.innerText.includes("Wall Height Upgrades") && document.body.innerText.includes("Deluxe"), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
     const text = () => page.locator("body").innerText({ timeout: 3000 }).catch(() => "");

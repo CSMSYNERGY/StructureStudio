@@ -229,7 +229,7 @@ const go = async (path) => {
   await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, path);
 };
 const openRecord = async (code) => {
-  await go(`/portal/designs/d-${code}`);
+  await go(`/designs/d-${code}`);
   await page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).catch(() => {});
 };
 // Polls a Node-side condition (the call logs live here, not in the page).
@@ -386,7 +386,7 @@ try {
 
   // G
   S.lookupEnabled = false;
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -398,7 +398,7 @@ try {
 
   // O
   S.configured = false;
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -410,7 +410,7 @@ try {
 
   // Q
   S.lookupPriceCents = 10;
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -440,7 +440,7 @@ try {
   S.lookupPriceCents = null;
 
   // R
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -460,7 +460,7 @@ try {
   ok("R: and charges nothing it didn't name: no success line", !(await cardText()).includes("Verified:"));
 
   // Again on a freshly opened card (still unpriced, as a stale one is), this time saying yes.
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(SS);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -487,7 +487,7 @@ try {
 
   // H
   resetCalls();
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(GHL);
   await page.waitForTimeout(2000);
@@ -497,7 +497,7 @@ try {
   ok("H: no tax read for it", !restReads.some((u) => u.includes("estimate_lines")) && actionCalls("tax_settings").length === 0, restReads.join(" | "));
 
   // I
-  await go("/portal/designs");
+  await go("/designs");
   await page.waitForTimeout(500);
   await openRecord(ACC);
   await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
@@ -514,7 +514,7 @@ try {
     tax_rate: 0.081, tax_amount: 729, tax_jurisdiction: "Bibb County, GA", tax_source: "avalara" }];
   S.sendInvoiceReply = { ok: true, sent: true, invoiceNumber: "SSI-2001", issuedBy: "structurestudio",
     taxCheck: { status: "differs", verifiedRatePct: 8.35, agreedRatePct: 8.1, jurisdiction: "Bibb County, GA" } };
-  await go("/portal/orders");
+  await go("/orders");
   await waitText("#1050", 20000);
   await page.locator("tbody").getByText("#1050").first().click();
   ok("J: order document basis line", await waitText("Verified for Bibb County, GA on Sep 17, 2026", 20000));
@@ -530,7 +530,7 @@ try {
   resetCalls();
   S.orders = [];
   S.sendInvoiceReply = { ok: true, sent: true, invoiceNumber: "SSI-2002", issuedBy: "structurestudio", taxCheck: { status: "failed", failure: "timeout" } };
-  await go("/portal/designs/list");
+  await go("/designs/list");
   await waitText("SST-1040", 20000);
   const accRow = page.locator("tr", { hasText: "SST-1040" }).first();
   await accRow.getByRole("button", { name: "More actions" }).click();

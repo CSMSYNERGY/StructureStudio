@@ -4457,7 +4457,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
           <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 16, maxWidth: 680 }}>
             On file: <b>{addrLine(data.businessAddress) || "no business address yet"}</b>
             {(data.locations || []).length > 0 && <> &middot; locations: {data.locations.map((l) => l.name + (l.city ? " (" + l.city + ")" : "")).join(", ")}</>}
-            {" "}&middot; <a href="/portal/settings/company" style={{ color: "#1B7895" }}>Company</a> &middot; <a href="/portal/settings/locations" style={{ color: "#1B7895" }}>Locations</a>
+            {" "}&middot; <a href={ssPagePath("settings", "company")} style={{ color: "#1B7895" }}>Company</a> &middot; <a href={ssPagePath("settings", "locations")} style={{ color: "#1B7895" }}>Locations</a>
           </div>
 
           <div style={{ ...S.lbl, marginBottom: 6 }}>How the fee is worked out</div>

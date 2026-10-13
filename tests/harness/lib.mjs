@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
+import { parseRedirects, resolveRequest } from "../../scripts/hostRules.mjs";
 
 export { bypassGate, showOptTab, revealTool };
 // Vents are ONE "Vent" button since 2026-09-16: it arms the only vent at once, or opens "Choose a vent",
@@ -227,6 +228,47 @@ export async function buildingRect(page) {
     if (!svg) return null;
     const r = [...svg.querySelectorAll("rect")].find((el) => el.getAttribute("stroke") === "#1E293B");
     return { x: +r.getAttribute("x"), y: +r.getAttribute("y"), w: +r.getAttribute("width"), h: +r.getAttribute("height") };
+  });
+}
+
+// THE HOST'S ROUTING, ON A PLAIN STATIC SERVER (2026-10-13). `python -m http.server` ignores
+// _redirects, so on it only /portal.html opens the app. This answers the way the host does, from
+// the same file (scripts/hostRules.mjs reads it): every address _redirects rewrites to an app page
+// gets that page (`html` stands in for portal.html when given, e.g. a test's own copy), and every
+// address it redirects is sent to the same Location, so a harness can open the app at its real
+// root address (/contacts, /settings/colors, /console) and prove an old /portal one still lands.
+// Anything with no rule (assets, /portal.html itself) is left to the server. Local origins only.
+// `target` is a page or a browser context.
+//
+// { legacy: true } is the host as it was BEFORE 2026-10-13 (only /portal and /portal/* are the
+// app), for a harness's "before" run on an older portal.app.compiled.js, which reads /portal
+// addresses only; open it at legacyAppPath(path).
+const HOST_RULES = parseRedirects(readFileSync(new URL("../../_redirects", import.meta.url), "utf8"));
+const LEGACY_HOST_RULES = parseRedirects("/portal /portal.html 200\n/portal/* /portal.html 200\n");
+export const legacyAppPath = (path) => "/portal" + String(path).replace(/^\/console(?=[/?#]|$)/, "/admin");
+export async function serveAppRoutes(target, html = null, { legacy = false } = {}) {
+  const rules = legacy ? LEGACY_HOST_RULES : HOST_RULES;
+  const local = (u) => /^https?:\/\/(127\.0\.0\.1|(?:[a-z0-9-]+\.)*localhost)(:\d+)?\//.test(u.href);
+  const answer = (u) => {
+    if (!local(u)) return null;
+    const r = resolveRequest(rules, u.pathname + u.search);
+    return r.kind === "asset" ? null : r;
+  };
+  await target.route((u) => answer(u) !== null, async (route) => {
+    const req = route.request();
+    const r = answer(new URL(req.url()));
+    if (!r) return route.fallback();
+    if (r.kind === "redirect") {
+      // A navigation that Chrome follows from a FULFILLED 301 is not routed again (the follow-up
+      // goes straight to the static server, which 404s it), so a page is sent on with
+      // location.replace instead: a new navigation to the same Location, the #fragment kept as a
+      // browser keeps it across a redirect, and no extra history entry. Other requests get the 301.
+      if (!req.isNavigationRequest()) return route.fulfill({ status: r.status, headers: { location: r.location }, body: "" });
+      return route.fulfill({ status: 200, contentType: "text/html",
+        body: `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(r.location)} + location.hash)</script>` });
+    }
+    const body = r.asset === "/portal.html" && html != null ? html : readFileSync(new URL("../.." + r.asset, import.meta.url), "utf8");
+    return route.fulfill({ status: 200, contentType: "text/html", body });
   });
 }
 

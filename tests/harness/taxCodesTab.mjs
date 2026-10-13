@@ -598,12 +598,12 @@ try {
     copyM === "Your estimates can't go out until you switch to StructureStudio paperwork. Save your rate here first (0 counts), then make the switch on CRM Connection.", copyM);
   const link = block().getByRole("link", { name: "make the switch on CRM Connection" });
   const href = await link.getAttribute("href").catch(() => null);
-  ok("M: the link is CRM Connection's address and keeps the query string", href === "/portal/settings/connection?harness=keep", String(href));
+  ok("M: the link is CRM Connection's address and keeps the query string", href === "/settings/connection?harness=keep", String(href));
   await page.evaluate(() => { window.__ssSameDoc = true; });
   await link.click().catch(() => {});
   ok("M: it opens CRM Connection", await waitText("Save Estimate & Invoice Settings"));
   ok("M: …in the same document (no reload) at the real address",
-    (await page.evaluate(() => window.__ssSameDoc === true)) && new URL(page.url()).pathname === "/portal/settings/connection", page.url());
+    (await page.evaluate(() => window.__ssSameDoc === true)) && new URL(page.url()).pathname === "/settings/connection", page.url());
 
   // ── N: codes off, kept, and back on ──
   const storedN = [

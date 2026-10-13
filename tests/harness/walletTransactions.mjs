@@ -35,7 +35,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, shotsDir, BASE, REF } from "./lib.mjs";
+import { launch, reporter, shotsDir, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -159,8 +159,8 @@ async function open(label, { width = 1400, height = 1000, legacyBackend = false 
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
-  await page.goto(`${BASE}/portal/settings/wallet`, { waitUntil: "domcontentloaded" });
+  await serveAppRoutes(page, PORTAL_HTML);
+  await page.goto(`${BASE}/settings/wallet`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForSelector('[data-wallet-tx="card"]', { timeout: 20000 });
   return { label, page, ctx, billing, pageErrors };

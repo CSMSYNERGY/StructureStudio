@@ -20,4 +20,14 @@
 // (structurestudio.app is being sunset behind a redirect). Until the Supabase
 // allow-list contains this URL, Supabase substitutes Site URL — i.e. the old
 // behavior — so deploying this ahead of the allow-list change is safe.
-export const AUTH_PORTAL_URL = "https://app.structurestudiosuite.com/portal";
+//
+// /login since 2026-10-13, not /portal: the app's addresses lost their /portal segment
+// (Carolyn 2026-10-12, "let's remove portal from anywhere"). /login is the portal's bare
+// address, the sign-in form, and portal/12-shell.jsx reads the email link's outcome off it
+// exactly as it did off /portal. Links already sent to /portal keep working: the host
+// 301s /portal to /login and the fragment (#access_token=…) survives the redirect.
+// ⚠️ ADD https://app.structurestudiosuite.com/login TO THE SUPABASE AUTH REDIRECT
+// ALLOW-LIST BEFORE DEPLOYING THIS. Without it Supabase falls back to Site URL (the
+// apex root): the designer there forwards the fragment to /login, so a link still
+// works, but through an extra hop that only lasts while that forwarding does.
+export const AUTH_PORTAL_URL = "https://app.structurestudiosuite.com/login";

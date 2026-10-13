@@ -18,7 +18,7 @@
 //   E. any other failure shows the server's own sentence and no status
 //   F. a member without Branding (a Team-only grant) sees Company but no Payments tab, and
 //      payments_status is never called; a member granted Branding:view sees the card
-//   G. /portal/settings/payments opens straight on the card
+//   G. /settings/payments opens straight on the card
 //   H. the request copy tells the builder how to ask for a change (Feedback → Request a Feature,
 //      Support → My Requests)
 //
@@ -34,9 +34,9 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
-// A deep link like /portal/settings/payments is portal.html on the real hosts (`_redirects`); a plain
+// A deep link like /settings/payments is portal.html on the real hosts (`_redirects`); a plain
 // static server 404s it, so the harness serves the page there itself (myProfileRoute.mjs's way).
 const PORTAL_HTML = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "portal.html"), "utf8");
 
@@ -117,7 +117,7 @@ const handler = async (route) => {
 };
 await page.route(`**/${REF}.supabase.co/**`, handler);
 await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+await serveAppRoutes(page, PORTAL_HTML);
 if (process.env.SS_PORTAL_ARTIFACT) {
   const src = readFileSync(process.env.SS_PORTAL_ARTIFACT, "utf8");
   await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: src }));
@@ -228,8 +228,8 @@ try {
   ok("F: a member granted Branding:view reaches the card", await boot({ role: "user", access: { settings_branding: "view" } }) && await openPayments() && await waitStatus());
 
   // ── G ──
-  await boot({}, "/portal/settings/payments");
-  ok("G: /portal/settings/payments opens on the card", await card().waitFor({ timeout: 10000 }).then(() => true, () => false));
+  await boot({}, "/settings/payments");
+  ok("G: /settings/payments opens on the card", await card().waitFor({ timeout: 10000 }).then(() => true, () => false));
   ok("G: …with the Payments tab current", (await page.locator('button[aria-current="page"]', { hasText: "Payments" }).count()) === 1);
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));

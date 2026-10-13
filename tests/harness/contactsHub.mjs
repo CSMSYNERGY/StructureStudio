@@ -7,7 +7,7 @@
 // returns to the exact board. Replaces pipelineDefaultView.mjs, whose List | Pipeline toggle and
 // "How the Pipeline tab opens" card this replaced; its scenarios carry on here.
 //
-//   A. CRM, nothing saved: /portal/contacts opens on the FIRST pipeline, the address follows, one
+//   A. CRM, nothing saved: /contacts opens on the FIRST pipeline, the address follows, one
 //      sidebar item (no Pipeline), no pipeline <select>, the board's own controls still there.
 //   B. 3 pipelines at 1280 and 1920: every one is a tab, in one line, no scroll bar anywhere.
 //   C. 8 pipelines at 1280 and 1920: four tabs, the fifth is the drop-down wearing the fifth's name;
@@ -19,15 +19,20 @@
 //      render records that the Design list was NEVER drawn before the board.
 //   H. A saved pick wins: contactsView "designs", contactsView "p-<second>", and the old Pipeline
 //      tab's designsView "list" (the Design list).
-//   I. Old addresses: /portal/designs/list, /portal/pipelines/<id>, /portal/designs land in the
-//      hub, and the address bar is rewritten to the hub's.
-//   J. A card opens its customer at /portal/contacts/c-…, the sidebar stays on Contacts, and the
+//   I. Old addresses: /designs/list, /pipelines/<id>, /designs land in the
+//      hub, and the address bar is rewritten to the hub's. The same from their OLD /portal
+//      addresses (/portal/designs/list, /portal/contacts/p-…): the host's 301 (served here from
+//      _redirects by serveAppRoutes), then the hub. And /portal.html itself heals to the root form.
+//   J. A card opens its customer at /contacts/c-…, the sidebar stays on Contacts, and the
 //      record's Back returns to the board it came from (the second pipeline, not the first).
 //   K. My Profile: "How the Contacts tab opens" offers Contacts, Design list and every pipeline,
 //      says the first pipeline applies, and a press saves contactsView (and designsView for the
 //      older build) through save_prefs.
 //   L. The entitlement call fails: the Design list, no hang.
 //   M. "＋ Pipeline" on a board: the new pipeline joins the end of the row and opens.
+//
+// Every address is the ROOT one (no /portal since 2026-10-13); serveAppRoutes answers them from
+// _redirects the way the host does, since a plain static server ignores that file.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/contactsHub.mjs             (exit 0 = every check held)
@@ -40,7 +45,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF, shotsDir, collectErrors } from "./lib.mjs";
+import { launch, reporter, BASE, REF, shotsDir, collectErrors, serveAppRoutes } from "./lib.mjs";
 
 const OWN = "acme-sheds";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -163,7 +168,7 @@ async function open(S, path) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   const booted = await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 })
@@ -213,10 +218,10 @@ const shot = (page, name) => page.screenshot({ path: join(shots, name) });
 try {
   // ── A + B: 3 pipelines, 1280 and 1920 ──
   for (const width of [1280, 1920]) {
-    const { ctx, page, errors } = await open({ crm: true, n: 3, width }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 3, width }, "/contacts");
     const r = await settled(page, "pipe");
     if (width === 1280) {
-      ok("A1 CRM, nothing saved: Contacts opens on the FIRST pipeline, and the address says so", r.view === "pipe" && r.path === `/portal/contacts/p-${pipeId(0)}` && r.active[0] === "Shed Deals", JSON.stringify(r));
+      ok("A1 CRM, nothing saved: Contacts opens on the FIRST pipeline, and the address says so", r.view === "pipe" && r.path === `/contacts/p-${pipeId(0)}` && r.active[0] === "Shed Deals", JSON.stringify(r));
       ok("A2 the row reads Contacts, Design list, then each pipeline in order", JSON.stringify(r.tabs) === JSON.stringify(["Contacts", "Design list", "Shed Deals", "Manufacturer Outreach", "Sold"]), r.tabs.join(" | "));
       ok("A3 one sidebar item: Contacts, no Pipeline", r.nav.includes("Contacts") && !r.nav.includes("Pipeline") && r.activeNav.join() === "Contacts", r.nav.join(", "));
       ok("A4 no pipeline drop-down picker; the board's own controls are still there", !r.select && r.controls.length === 3, `select ${r.select}; ${r.controls.join(", ")}`);
@@ -229,20 +234,20 @@ try {
     if (width === 1280) {
       await page.locator('[data-ss-hub-tab="designs"]').click();
       const d = await settled(page, "designs");
-      ok("B3 one click on Design list shows the Design list at /portal/contacts/designs", d.view === "designs" && d.designsList && d.path === "/portal/contacts/designs", JSON.stringify({ view: d.view, path: d.path }));
+      ok("B3 one click on Design list shows the Design list at /contacts/designs", d.view === "designs" && d.designsList && d.path === "/contacts/designs", JSON.stringify({ view: d.view, path: d.path }));
       await page.locator('[data-ss-hub-tab="people"]').click();
       const p = await settled(page, "people");
-      ok("B4 one click on Contacts shows the contact list at /portal/contacts/people", p.view === "people" && p.path === "/portal/contacts/people", JSON.stringify({ view: p.view, path: p.path }));
+      ok("B4 one click on Contacts shows the contact list at /contacts/people", p.view === "people" && p.path === "/contacts/people", JSON.stringify({ view: p.view, path: p.path }));
       await page.goBack();
       const back = await settled(page, "designs");
-      ok("B5 the browser's Back walks between the tabs", back.view === "designs" && back.path === "/portal/contacts/designs", JSON.stringify({ view: back.view, path: back.path }));
+      ok("B5 the browser's Back walks between the tabs", back.view === "designs" && back.path === "/contacts/designs", JSON.stringify({ view: back.view, path: back.path }));
     }
     await ctx.close();
   }
 
   // ── C: 8 pipelines, 1280 and 1920 ──
   for (const width of [1280, 1920]) {
-    const { ctx, page, errors } = await open({ crm: true, n: 8, width }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 8, width }, "/contacts");
     const r = await settled(page, "pipe");
     ok(`C1 ${width}: eight pipelines: four tabs, and the fifth is the drop-down wearing the fifth's name`,
       JSON.stringify(r.tabs) === JSON.stringify(["Contacts", "Design list", ...NAMES.slice(0, 5)]) && r.more && r.more.startsWith(NAMES[4]) && r.oneLine,
@@ -257,7 +262,7 @@ try {
     await page.locator("[data-ss-hub-menu] a", { hasText: NAMES[6] }).click();
     const s = await settled(page, "pipe");
     ok(`C4 ${width}: picking the seventh opens it, and the fifth tab now wears its name`,
-      s.path === `/portal/contacts/p-${pipeId(6)}` && s.more && s.more.startsWith(NAMES[6]) && s.active.includes(NAMES[6]) && s.oneLine,
+      s.path === `/contacts/p-${pipeId(6)}` && s.more && s.more.startsWith(NAMES[6]) && s.active.includes(NAMES[6]) && s.oneLine,
       `${s.path} / more: ${s.more} / active: ${s.active}`);
     await shot(page, `U1-${width}-8pipes-seventh-open.png`);
     ok(`C5 ${width}: no page errors`, errors.length === 0, errors.join(" | "));
@@ -266,7 +271,7 @@ try {
 
   // ── D: narrow ──
   {
-    const { ctx, page, errors } = await open({ crm: true, n: 8, width: 1000 }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 8, width: 1000 }, "/contacts");
     const r = await settled(page, "pipe");
     const inlinePipes = r.tabs.length - 2 - 1;   // minus Contacts, Design list and the drop-down's own
     ok("D1 a narrow window folds more into the drop-down, still one line", inlinePipes < 4 && r.more && r.oneLine, `${r.tabs.join(" | ")} / more: ${r.more}`);
@@ -278,7 +283,7 @@ try {
   {
     // A phone: the rail is icons, and everything that does not fit goes in the drop-down. The row
     // may wrap as a last resort; it never scrolls, and neither does the page.
-    const { ctx, page, errors } = await open({ crm: true, n: 8, width: 400, height: 800 }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 8, width: 400, height: 800 }, "/contacts");
     const r = await settled(page, "pipe");
     ok("D4 at 400px: the drop-down holds the rest, and nothing scrolls sideways", !!r.more && r.rowScroll <= 0 && r.pageScroll <= 0,
       `${r.tabs.join(" | ")} / more: ${r.more} / row ${r.rowScroll}, page ${r.pageScroll}`);
@@ -289,9 +294,9 @@ try {
 
   // ── E: no CRM ──
   {
-    const { ctx, page, errors } = await open({ crm: false, n: 3 }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: false, n: 3 }, "/contacts");
     const r = await settled(page, "designs");
-    ok("E1 no CRM: Contacts opens on the Design list (C14)", r.view === "designs" && r.designsList && r.path === "/portal/contacts/designs", JSON.stringify(r));
+    ok("E1 no CRM: Contacts opens on the Design list (C14)", r.view === "designs" && r.designsList && r.path === "/contacts/designs", JSON.stringify(r));
     ok("E2 Contacts and Pipeline stay, padlocked, to sell the CRM", JSON.stringify(r.tabs) === JSON.stringify(["🔒Contacts", "Design list", "🔒Pipeline"]), r.tabs.join(" | "));
     ok("E3 the Design list was the only thing drawn", JSON.stringify(r.views) === JSON.stringify(["designs"]), r.views.join(" → "));
     await shot(page, "U1-1280-no-crm.png");
@@ -304,14 +309,14 @@ try {
 
   // ── F: a designs-only role ──
   {
-    const { ctx, page, errors } = await open({ crm: true, n: 3, role: "user", access: CREW_LEADER }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 3, role: "user", access: CREW_LEADER }, "/contacts");
     const r = await settled(page, "designs");
-    ok("F1 a Crew Leader (designs only) lands on the Design list", r.view === "designs" && r.path === "/portal/contacts/designs", JSON.stringify(r));
+    ok("F1 a Crew Leader (designs only) lands on the Design list", r.view === "designs" && r.path === "/contacts/designs", JSON.stringify(r));
     ok("F2 and is shown nothing else: no Contacts tab, no boards", JSON.stringify(r.tabs) === JSON.stringify(["Design list"]), r.tabs.join(" | "));
     ok("F3 the sidebar still calls it Contacts", r.nav.includes("Contacts") && !r.nav.includes("Pipeline"), r.nav.join(", "));
-    await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/portal/contacts/p-${pipeId(0)}`);
+    await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/contacts/p-${pipeId(0)}`);
     const t = await settled(page, "designs");
-    ok("F4 a typed board address puts them back on the Design list", t.view === "designs" && t.path === "/portal/contacts/designs", JSON.stringify({ view: t.view, path: t.path }));
+    ok("F4 a typed board address puts them back on the Design list", t.view === "designs" && t.path === "/contacts/designs", JSON.stringify({ view: t.view, path: t.path }));
     ok("F5 no page errors", errors.length === 0, errors.join(" | "));
     await shot(page, "U1-1280-crew-leader.png");
     await ctx.close();
@@ -319,9 +324,9 @@ try {
 
   // ── G: the CRM answer held ──
   {
-    const { ctx, page, errors } = await open({ crm: true, n: 3, billingDelayMs: 1500 }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 3, billingDelayMs: 1500 }, "/contacts");
     const r = await settled(page, "pipe", 20000);
-    ok("G1 with the CRM answer held, the board still arrives", r.view === "pipe" && r.path === `/portal/contacts/p-${pipeId(0)}`, JSON.stringify(r));
+    ok("G1 with the CRM answer held, the board still arrives", r.view === "pipe" && r.path === `/contacts/p-${pipeId(0)}`, JSON.stringify(r));
     ok("G2 the MutationObserver never saw the Design list (or anything but the wait) before the board",
       !r.views.includes("designs") && r.views[r.views.length - 1] === "pipe", r.views.join(" → "));
     ok("G3 no page errors", errors.length === 0, errors.join(" | "));
@@ -330,12 +335,12 @@ try {
 
   // ── H: saved picks ──
   for (const [label, prefs, view, path] of [
-    ["contactsView \"designs\"", { contactsView: "designs" }, "designs", "/portal/contacts/designs"],
-    ["contactsView of the second pipeline", { contactsView: `p-${pipeId(1)}` }, "pipe", `/portal/contacts/p-${pipeId(1)}`],
-    ["the old Pipeline tab's designsView \"list\"", { designsView: "list" }, "designs", "/portal/contacts/designs"],
-    ["contactsView \"people\"", { contactsView: "people" }, "people", "/portal/contacts/people"],
+    ["contactsView \"designs\"", { contactsView: "designs" }, "designs", "/contacts/designs"],
+    ["contactsView of the second pipeline", { contactsView: `p-${pipeId(1)}` }, "pipe", `/contacts/p-${pipeId(1)}`],
+    ["the old Pipeline tab's designsView \"list\"", { designsView: "list" }, "designs", "/contacts/designs"],
+    ["contactsView \"people\"", { contactsView: "people" }, "people", "/contacts/people"],
   ]) {
-    const { ctx, page } = await open({ crm: true, n: 3, prefs }, "/portal/contacts");
+    const { ctx, page } = await open({ crm: true, n: 3, prefs }, "/contacts");
     const r = await settled(page, view);
     ok(`H a saved pick wins: ${label}`, r.view === view && r.path === path && JSON.stringify(r.views) === JSON.stringify([view]), JSON.stringify({ view: r.view, path: r.path, views: r.views }));
     await ctx.close();
@@ -343,11 +348,16 @@ try {
 
   // ── I: old addresses ──
   for (const [from, view, path] of [
-    ["/portal/designs/list", "designs", "/portal/contacts/designs"],
-    [`/portal/pipelines/${pipeId(2)}`, "pipe", `/portal/contacts/p-${pipeId(2)}`],
-    ["/portal/designs", "pipe", `/portal/contacts/p-${pipeId(0)}`],
-    ["/portal/designs/pipeline", "pipe", `/portal/contacts/p-${pipeId(0)}`],
-    ["/portal/leads", "pipe", `/portal/contacts/p-${pipeId(0)}`],
+    ["/designs/list", "designs", "/contacts/designs"],
+    [`/pipelines/${pipeId(2)}`, "pipe", `/contacts/p-${pipeId(2)}`],
+    ["/designs", "pipe", `/contacts/p-${pipeId(0)}`],
+    ["/designs/pipeline", "pipe", `/contacts/p-${pipeId(0)}`],
+    ["/leads", "pipe", `/contacts/p-${pipeId(0)}`],
+    // The OLD /portal addresses: links already sent, bookmarks, the phone apps.
+    ["/portal/designs/list", "designs", "/contacts/designs"],
+    [`/portal/contacts/p-${pipeId(1)}`, "pipe", `/contacts/p-${pipeId(1)}`],
+    ["/portal/contacts", "pipe", `/contacts/p-${pipeId(0)}`],
+    ["/portal/leads", "pipe", `/contacts/p-${pipeId(0)}`],
   ]) {
     const { ctx, page, errors } = await open({ crm: true, n: 3 }, from);
     const r = await settled(page, view);
@@ -355,9 +365,26 @@ try {
     await ctx.close();
   }
 
+  // An old /portal address keeps its query through the host's 301, and /portal.html itself (the
+  // file, which no rule redirects) is rewritten in the address bar to the root form.
+  {
+    const { ctx, page, errors } = await open({ crm: true, n: 3 }, "/portal/contacts/designs?tab=keep");
+    const r = await settled(page, "designs");
+    const search = await page.evaluate(() => location.search);
+    ok("I the query string rides through the 301", r.path === "/contacts/designs" && search === "?tab=keep" && errors.length === 0, JSON.stringify({ path: r.path, search, errors }));
+    await shot(page, "PP-legacy-portal-address-healed.png");
+    await ctx.close();
+  }
+  {
+    const { ctx, page, errors } = await open({ crm: true, n: 3 }, "/portal.html");
+    const r = await settled(page, "pipe");
+    ok("I /portal.html opens the app and the address becomes the root form", r.path === `/contacts/p-${pipeId(0)}` && errors.length === 0, JSON.stringify({ path: r.path, errors }));
+    await ctx.close();
+  }
+
   // ── J: a card opens its customer inside Contacts; Back returns to that board ──
   {
-    const { ctx, page, errors } = await open({ crm: true, n: 3 }, `/portal/contacts/p-${pipeId(1)}`);
+    const { ctx, page, errors } = await open({ crm: true, n: 3 }, `/contacts/p-${pipeId(1)}`);
     await settled(page, "pipe");
     await page.waitForFunction(() => document.querySelector("[data-ss-deal]"), null, { timeout: 15000 }).catch(() => {});
     await page.locator("[data-ss-deal]").first().click();
@@ -368,19 +395,19 @@ try {
       activeNav: [...document.querySelectorAll(".ss-ws-nav .ss-nav a.active")].map((a) => a.textContent.trim()),
       summary: document.body.innerText.includes("SUMMARY"),
     }));
-    ok("J1 a card opens its customer at /portal/contacts/c-…", rec.path === `/portal/contacts/c-${CONTACT_ID}` && rec.summary, JSON.stringify(rec));
+    ok("J1 a card opens its customer at /contacts/c-…", rec.path === `/contacts/c-${CONTACT_ID}` && rec.summary, JSON.stringify(rec));
     ok("J2 and the sidebar stays on Contacts (C22)", rec.activeNav.join() === "Contacts", rec.activeNav.join());
     await shot(page, "U1-1280-record-inside-contacts.png");
     await page.getByRole("button", { name: "Back", exact: true }).first().click();
     const r = await settled(page, "pipe");
-    ok("J3 the record's Back returns to the board it came from — the second pipeline, not the first", r.path === `/portal/contacts/p-${pipeId(1)}` && r.active.includes(NAMES[1]), JSON.stringify({ path: r.path, active: r.active }));
+    ok("J3 the record's Back returns to the board it came from — the second pipeline, not the first", r.path === `/contacts/p-${pipeId(1)}` && r.active.includes(NAMES[1]), JSON.stringify({ path: r.path, active: r.active }));
     ok("J4 no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 
   // ── K: My Profile ──
   {
-    const { ctx, page, errors, saves } = await open({ crm: true, n: 3 }, "/portal/settings/myprofile");
+    const { ctx, page, errors, saves } = await open({ crm: true, n: 3 }, "/settings/myprofile");
     await page.waitForFunction(() => document.body.innerText.includes("How the Contacts tab opens"), null, { timeout: 20000 }).catch(() => {});
     await page.waitForFunction(() => /your first pipeline/.test((document.querySelector("[data-ss-view-default]") || {}).textContent || ""), null, { timeout: 10000 }).catch(() => {});
     const read = () => page.evaluate(() => ({
@@ -404,7 +431,7 @@ try {
   // ── M: "＋ Pipeline" makes a tab of its own and opens on it ──
   {
     const S = { crm: true, n: 3 };
-    const { ctx, page, errors } = await open(S, `/portal/contacts/p-${pipeId(1)}`);
+    const { ctx, page, errors } = await open(S, `/contacts/p-${pipeId(1)}`);
     await settled(page, "pipe");
     await page.getByRole("button", { name: "＋ Pipeline", exact: true }).click();
     await page.getByPlaceholder("Dealer recruiting").fill(NAMES[3]);
@@ -412,14 +439,14 @@ try {
     await page.waitForFunction((id) => location.pathname.endsWith(id), `p-${pipeId(3)}`, { timeout: 15000 }).catch(() => {});
     const r = await settled(page, "pipe");
     ok("M1 a pipeline made with ＋ Pipeline joins the row at the end, and opens", r.tabs[r.tabs.length - 1] === NAMES[3]
-      && r.active.includes(NAMES[3]) && r.path === `/portal/contacts/p-${pipeId(3)}`, `${r.tabs.join(" | ")} / ${r.path}`);
+      && r.active.includes(NAMES[3]) && r.path === `/contacts/p-${pipeId(3)}`, `${r.tabs.join(" | ")} / ${r.path}`);
     ok("M2 no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 
   // ── L: the entitlement call fails ──
   {
-    const { ctx, page, errors } = await open({ crm: true, n: 3, billingFail: true }, "/portal/contacts");
+    const { ctx, page, errors } = await open({ crm: true, n: 3, billingFail: true }, "/contacts");
     const r = await settled(page, "designs", 12000);
     ok("L1 a failed entitlement call ends the wait on the Design list (no hang)", r.view === "designs", JSON.stringify({ view: r.view, path: r.path }));
     ok("L2 no page errors we own", errors.filter((e) => !/500|Failed to load/.test(e)).length === 0, errors.join(" | "));

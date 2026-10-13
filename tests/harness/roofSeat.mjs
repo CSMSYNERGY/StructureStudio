@@ -39,7 +39,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SHOTS = shotsDir("roofSeat");
@@ -426,9 +426,9 @@ async function partSettings(browser) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   try {
-    await page.goto(`${BASE}/portal/settings/designer`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${BASE}/settings/designer`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && document.body.innerText.includes("3D Style Calibration"), null, { timeout: 60000 });
 
     // f, A LEAN-TO ON THE LEFT (review, 2026-10-07): the wall dimension stands inside the building there, and

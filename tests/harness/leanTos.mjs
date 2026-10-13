@@ -61,7 +61,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -416,7 +416,7 @@ async function openPortal(path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   return { c, page, errors, calls };
@@ -448,7 +448,7 @@ const aimDock = (page, dir, at) => page.evaluate(({ dir, at }) => {
 const list = (page) => page.evaluate(() => { const M = window.__ss3dPanel && window.__ss3dPanel.model; return M && M.leanTos ? JSON.parse(JSON.stringify(M.leanTos)) : null; });
 
 if (want("U")) {
-  const { c, page, errors, calls } = await openPortal("/portal/advanced");
+  const { c, page, errors, calls } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await page.locator('[data-ss-adv-sec="leanto"]').click();
@@ -602,7 +602,7 @@ const dockMembers = (page, tag) => page.evaluate((tag) => {
 }, tag);
 const singleCount = "(M) => { let n = 0; M.root.traverse((o) => { if (o.isMesh && o.userData && o.userData.ssLeanTo === true) n++; }); return n > 0 && !M.leanTos; }";
 if (want("C")) {
-  const { c, page, errors } = await openPortal("/portal/advanced");
+  const { c, page, errors } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     page.on("dialog", (d) => d.accept());
@@ -819,7 +819,7 @@ if (want("J")) {
 
   // J5: the Advanced page says it on both cards; a drop changed by 3 in turns the words into a near-miss with
   // the number, on both.
-  const { c, page, errors } = await openPortal("/portal/advanced");
+  const { c, page, errors } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await page.locator('[data-ss-adv-sec="leanto"]').click();
@@ -997,7 +997,7 @@ if (want("M")) {
   } catch (e) { ok("M4: ran", false, e && e.stack); }
 
   // M5: the Advanced page.
-  const { c, page, errors, calls } = await openPortal("/portal/advanced");
+  const { c, page, errors, calls } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     // A projecting porch across the front, 8 ft deep, its roof hung at 7' 6" at 1 in 12 (which leaves 6 ft under its beam).

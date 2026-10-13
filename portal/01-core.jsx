@@ -106,7 +106,7 @@ function ssLogError(source, message, code, context, severity) {
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: ssResolvedClientId || params.get("client") || null,
         // Fragment stripped, never the query string. A password-reset/invite landing is
-        // `/portal#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
+        // `/login#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
         // the END of _getSessionFromURL — so a boot_component_missing row, a window.onerror or an
         // unhandledrejection firing first put the account's email, sub and a truncated token in
         // this column. `?view=` MUST survive: it is what tells triage a row was written inside an
@@ -566,9 +566,17 @@ const TAB_META = {
 };
 
 // ── Path routing ─────────────────────────────────────────────────────────────
-// Every page has its own URL: /portal/<page>[/<sub>]. Carolyn, 2026-07-29: "Let's say
+// Every page has its own URL: /<page>[/<sub>]. Carolyn, 2026-07-29: "Let's say
 // I'm right here, and I go and refresh the page — it goes back to designs." / "Every page
 // doesn't have its own link. We should, shouldn't we? That's the problem."
+//
+// NO /portal IN THE ADDRESS (Carolyn 2026-10-12): "It's app.structurestudiosuite.com forward
+// slash advance. Like, so let's remove portal from anywhere." From 2026-07-29 to then every page
+// lived under /portal/<page>. Those addresses are in emails, bookmarks, the phone apps and browser
+// history, so they keep working twice over: the host answers /portal and /portal/* with a 301 to
+// the root form (_redirects), and ssParsePath below still reads the old shape, so a /portal
+// address the host never redirected (a local static server, a tab opened before the redirect
+// shipped) routes anyway and is rewritten in place (ssHealAddress, below the router).
 //
 // TAB_META above is the ONE registry — a page is routable because it has an entry, so
 // there is no second list to keep in sync. `sub` is the Settings/Admin sub-tab.
@@ -576,9 +584,12 @@ const TAB_META = {
 // Everything is same-document pushState. No anchors, no location.assign: the designer and
 // the admin console are keep-mounted, and a real navigation would throw their state away.
 //
-// `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
-// static server ignores _redirects, so deep links only work on beta/production — locally
-// the app still runs, it just always boots at /portal.html.
+// `_redirects` needs one `/<slug> /portal.html 200` and one `/<slug>/* /portal.html 200` rule
+// per page for these to survive a cold load, deliberately NOT a root catch-all: the public
+// designer owns `/` (and `/?client=…`), and /my-quotes, /admin and every asset live at the root
+// too. scripts/redirects.test.mjs fails when a page in TAB_META has no rule. A plain static server
+// ignores _redirects, so deep links only work on beta/production — locally the app still runs,
+// it just always boots at /portal.html.
 const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // The same idea one level down, for SETTINGS sub-tabs that get renamed. Kept separate from
 // SS_TAB_ALIASES and applied only on the settings page, because a sub slug means nothing on
@@ -589,14 +600,25 @@ const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // is the one failure mode nobody reports because it looks like they mis-clicked.
 const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
 
+// THE ONE PAGE WHOSE ADDRESS IS NOT ITS ID. /admin has been admin.html, the standalone break-glass
+// operator console, since before the portal had pages of its own, and it stays that: so the
+// portal's Admin page (TAB_META.admin, the same console inside the app) lives at /console. Its
+// old address /portal/admin[/<sub>] goes there (_redirects, and ssRootPath below).
+const SS_PAGE_SLUGS = { admin: "console" };
+// The bare app address, the old bare /portal: the sign-in form for someone signed out, and for
+// someone signed in their own landing page (the shell rewrites it to that page's address). It
+// is where the auth emails land (AUTH_PORTAL_URL) and where the designer sends a bare product
+// root, so it carries the email link's #access_token / ?code= through untouched.
+const SS_LOGIN_SLUG = "login";
+
 // ── THE CONTACTS HUB'S ADDRESSES (Carolyn 2026-10-12) ───────────────────────────────────────
 // Every view in the hub has its own URL, so a refresh or the browser's Back lands where it says:
-//   /portal/contacts               the view this person opens on (My Profile, else the default)
-//   /portal/contacts/people        the contact list (the tab labelled "Contacts")
-//   /portal/contacts/designs       the Design list
-//   /portal/contacts/p-<uuid>      one pipeline's board
-//   /portal/contacts/pipeline      "the board": the pipeline picked last, else the first one
-//   /portal/contacts/c-… and d-…   a customer or a design record, opened inside the hub
+//   /contacts               the view this person opens on (My Profile, else the default)
+//   /contacts/people        the contact list (the tab labelled "Contacts")
+//   /contacts/designs       the Design list
+//   /contacts/p-<uuid>      one pipeline's board
+//   /contacts/pipeline      "the board": the pipeline picked last, else the first one
+//   /contacts/c-… and d-…   a customer or a design record, opened inside the hub
 // The hub (02-sales.jsx) rewrites a bare, a "pipeline" or an unknown sub to the view it shows.
 const SS_HUB_PEOPLE = "people";
 const SS_HUB_DESIGNS = "designs";
@@ -608,14 +630,14 @@ function ssHubPipeId(sub) {
   return m && SS_UUID_RE.test(m[1]) ? m[1].toLowerCase() : null;
 }
 // THE OLD ADDRESSES, all of them, into the hub. One place, so the router, navigate() and the
-// popstate handler cannot disagree, and so the wave that drops /portal edits one function.
-//   /portal/designs                 → /portal/contacts (the person's own view)
-//   /portal/designs/list            → the Design list
-//   /portal/designs/pipeline        → the board
-//   /portal/designs/people|deals    → the contact list | the person's own view (the 08-24 era)
-//   /portal/designs/c-…|d-…         → the same record, inside the hub
-//   /portal/pipelines[/<uuid>]      → that pipeline, or the board (the Leads tab, migration 301)
-// /portal/leads[/c-…] reaches /portal/contacts through SS_TAB_ALIASES before this runs.
+// popstate handler cannot disagree. Each holds with or without the old /portal in front.
+//   /designs                 → /contacts (the person's own view)
+//   /designs/list            → the Design list
+//   /designs/pipeline        → the board
+//   /designs/people|deals    → the contact list | the person's own view (the 08-24 era)
+//   /designs/c-…|d-…         → the same record, inside the hub
+//   /pipelines[/<uuid>]      → that pipeline, or the board (the Leads tab, migration 301)
+// /leads[/c-…] reaches /contacts through SS_TAB_ALIASES before this runs.
 function ssCanonRoute(page, sub) {
   if (page === "designs") {
     if (sub && /^[cd]-/.test(sub)) return { page: "contacts", sub };
@@ -631,26 +653,69 @@ function ssCanonRoute(page, sub) {
   }
   return { page, sub };
 }
+// The page a ROOT address's first segment names, or null. Every page's slug is its id except the
+// operator console (SS_PAGE_SLUGS); /admin itself is admin.html's address and never the app's.
+function ssSlugPage(slug) {
+  if (!slug || slug === SS_LOGIN_SLUG || slug === "admin") return null;
+  for (const id in SS_PAGE_SLUGS) if (SS_PAGE_SLUGS[id] === slug) return id;
+  return slug;
+}
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
-  // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
-  if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
+  // Both shapes, read the same way:
+  //   today          ["contacts"] | ["settings","colors"] | ["login"]     (/<slug>[/<sub>])
+  //   before 10-13   ["portal","contacts"] | ["portal","settings","colors"] | ["portal"]
+  // The old one stays readable for the address the host never redirected: a local static server,
+  // a tab left open across the deploy, /portal.html itself. The shell's URL effect (and
+  // ssHealAddress before it) then puts the root form in the address bar.
+  let page, rawSub;
+  if (parts[0] === "portal" || parts[0] === "portal.html") {
+    page = parts[1] || null;
+    rawSub = parts[2] || null;
+  } else {
+    page = ssSlugPage(parts[0] || null);
+    rawSub = page ? parts[1] || null : null;
+  }
   // Old tab ids that must keep resolving. `leads` was renamed to `contacts` on 2026-09-02 so
   // the URL matches the label and the server-side permission area, both already "contacts".
   // `releases` became `support` on 2026-08-30 (Carolyn) — the page had already outgrown its
   // name: it carries the setup checklist and two-way submission threads, not just a changelog.
-  // Its sub-paths ride the alias for free, which matters because /portal/releases/setup and
-  // /portal/releases/mine are both linked from elsewhere in the product.
-  // Live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid> (record
-  // deep links and browser history), and every /portal/designs and /portal/pipelines address
+  // Its sub-paths ride the alias for free, which matters because /releases/setup and
+  // /releases/mine are both linked from elsewhere in the product.
+  // Live shapes depend on this: /leads (nav + bookmarks), /leads/c-<uuid> (record
+  // deep links and browser history), and every /designs and /pipelines address
   // (ssCanonRoute above). Without it every caller does `TAB_META[p.page] ? p.page : "contacts"`,
   // so a stale link would land silently on the default view and a record link would lose its
   // `sub` entirely. The shell's URL effect then rewrites the address bar to the new path, with
   // no history entry.
-  const page = parts[1] || null;
   const aliased = (page && SS_TAB_ALIASES[page]) || page;
-  const r = ssCanonRoute(aliased, parts[2] || null);
+  const r = ssCanonRoute(aliased, rawSub);
   return { page: r.page, sub: (r.page === "settings" && r.sub && SS_SETTINGS_SUB_ALIASES[r.sub]) || r.sub };
+}
+// The ROOT form of an old /portal address, or null when `pathname` is not one. The same mapping
+// the host's 301s make (_redirects); scripts/redirects.test.mjs holds the two to each other for
+// every route the smoke suite knows:
+//   /portal, /portal/, /portal.html  → /login
+//   /portal/admin[/…]                → /console[/…]
+//   /portal/<anything else>          → /<anything else>, untouched (the router reads it after)
+function ssRootPath(pathname) {
+  const p = String(pathname || "");
+  if (p === "/portal" || p === "/portal/" || p === "/portal.html") return "/" + SS_LOGIN_SLUG;
+  const m = /^\/portal\/(.+)$/.exec(p);
+  if (!m) return null;
+  const parts = m[1].split("/");
+  if (SS_PAGE_SLUGS[parts[0]]) parts[0] = SS_PAGE_SLUGS[parts[0]];
+  return "/" + parts.join("/");
+}
+// A page's address without the query: /<slug>[/<sub>], or /login for no page.
+function ssPageBase(page, sub) {
+  if (!page) return "/" + SS_LOGIN_SLUG;
+  return "/" + (SS_PAGE_SLUGS[page] || page) + (sub ? "/" + sub : "");
+}
+// Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
+// every navigation) and drops any hash.
+function ssPagePath(page, sub) {
+  return ssPageBase(page, sub) + (window.location.search || "");
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -711,12 +776,21 @@ function ssAdvancedOn(entitlement) {
   return !!(entitlement && (entitlement.reason === "internal" || entitlement.advancedMode === true));
 }
 
-// Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
-// every navigation) and drops any hash.
-function ssPagePath(page, sub) {
-  const base = "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "");
-  return base + (window.location.search || "");
-}
+// AN OLD /portal ADDRESS HEALS THE MOMENT THE APP LOADS (2026-10-13). On beta and production the
+// host has already 301'd it, so this only acts where nothing did: a local static server, a tab
+// opened before the redirect shipped, /portal.html itself. The address bar then shows the root
+// form before anything else reads it, so the bookmark or the link someone copies from here on is
+// the new one; the router reads both shapes either way (ssParsePath), so nothing depends on this.
+// The query AND THE HASH ride along: an auth email lands as #access_token=… / #error=… / ?code=…,
+// and the sign-in code below reads them after this has run. replaceState, so no history entry.
+(function ssHealAddress() {
+  try {
+    const healed = ssRootPath(window.location.pathname);
+    if (healed && healed !== window.location.pathname) {
+      window.history.replaceState(window.history.state, "", healed + (window.location.search || "") + (window.location.hash || ""));
+    }
+  } catch (_e) { /* history unavailable: the router still reads the old shape */ }
+})();
 
 // Popout mode: a dedicated small window showing ONLY the Projects boards (?popout=1).
 // Read ONCE at boot on purpose: ssPagePath above carries the whole search string through
@@ -848,7 +922,7 @@ const SETTINGS_TAB_AREA = {
 // holders: the sales_rep, dealer and sales_manager presets grant phone 'own'/'view' and no
 // settings_* area at all. Without it they had no Settings tab, so no "Your calls" card to set
 // their own ring hours or greeting on (migration 264), and both apps' "Change in Structure
-// Studio" link (/portal/settings/phone) clamped them to their fallback page. ssSettingsTabs
+// Studio" link (/settings/phone) clamped them to their fallback page. ssSettingsTabs
 // still filters per card, so such a person's rail is Phone (where calling is offered) and My
 // Profile, and nothing else.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
@@ -1576,7 +1650,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // SETTINGS_TAB_AREA.company, which is settings_branding. Team used to be its own rail
     // item on settings_team; folding it in here under the branding area alone would have left
     // someone granted only Team with no way to reach it: the rail would show them My Profile and
-    // nothing else, while /portal/settings/team still rendered perfectly for anyone who
+    // nothing else, while /settings/team still rendered perfectly for anyone who
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
     // settings_crm joined on 2026-09-17 with the Tax tab, for the same reason: someone granted
     // CRM Connection but neither Branding nor Team would otherwise have a Tax tab they may read
@@ -1619,7 +1693,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
     // grace banners, the CRM and scheduling upsells, QuickBooksLocked, the Orders page, and
-    // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
+    // RealTimePricing's onSeeBilling — plus /settings/billing is a link people hold
     // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
     // silently, since an unknown slug clamps to the first tab rather than erroring.
     // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
@@ -1659,8 +1733,8 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
 // navigation inside company"). Her order, verbatim: Business Details, Branding, Team,
 // Locations, Crews, Drivers.
 //
-// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /portal/settings/branding and
-// /portal/settings/team are links people hold — the Client Setup checklist points at them —
+// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /settings/branding and
+// /settings/team are links people hold — the Client Setup checklist points at them —
 // and ssParsePath only reads two path segments anyway, so nesting them would have meant both
 // a router change and a pile of dead bookmarks. They stay flat: the RAIL draws one item
 // (Company) and highlights it for any of these, while this list draws the tabs inside.
@@ -1708,7 +1782,7 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
 // Carolyn 2026-09-11: "in colors I want to split out the paint, shingles and metal colors to
 // their own tab/nav". Same shape as Company — one rail item, a top nav inside.
 //
-// `colors` stays the first tab so /portal/settings/colors, the link that exists today, lands
+// `colors` stays the first tab so /settings/colors, the link that exists today, lands
 // on Paint, which is the section it always opened on. No per-tab gating: all three are the
 // same catalog under settings_options, which is the area that already guarded the rail item.
 //
@@ -1727,7 +1801,7 @@ function ssColorTabs() {
 // charge LEDGER ("we are prepping for logging every charge for the wallet"), which is a table
 // that will fill a screen on its own, and it has nothing to do with which plans are on.
 //
-// `billing` stays the first tab, so /portal/settings/billing — the slug roughly eight CTAs
+// `billing` stays the first tab, so /settings/billing — the slug roughly eight CTAs
 // deep-link to, and the one the billing gate sends people at — still lands on Subscription,
 // exactly the page it has always opened. The wallet card moved off that page, but it was
 // never what those links were pointing at.
@@ -1778,7 +1852,7 @@ function ssOptionTabs() {
 }
 
 // The settings pages that are HUBS: one rail item each, several tabs inside, every tab a
-// real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
+// real /settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
 function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
@@ -1810,8 +1884,8 @@ const SS_SETTINGS_CONTEXT = ["settings", "accounts", "admin"];
 // that split: bail out for a middle click, any modifier, or an already-handled event, and the
 // anchor behaves like the plain link it is.
 //
-// ⚠️ The href only opens correctly where `_redirects` is in force — `/portal/* /portal.html
-// 200` is what makes /portal/settings/colors a real address. A plain static server ignores
+// ⚠️ The href only opens correctly where `_redirects` is in force — `/settings/* /portal.html
+// 200` is what makes /settings/colors a real address. A plain static server ignores
 // that file, so a middle click 404s LOCALLY while left click still works. Beta and production
 // are the places to test this.
 function ssNavClick(fn) {
@@ -1914,7 +1988,7 @@ function ssHubCan(view, canAdmin, access) {
 // Where the clamp LANDS someone must itself pass ssCanSeeTab, or the fallback recreates
 // the exact leak the clamp exists to stop: a hardcoded "designs" put every migration-100
 // driver (designs absent from their map = none) on the full customer-designs list at each
-// bare /portal login — a page their own nav hides (audit 2026-08-20). The Contacts hub first
+// bare /login — a page their own nav hides (audit 2026-08-20). The Contacts hub first
 // (it was Pipeline, the designs list, until 2026-10-12), so the pre-migration-100 shape lands
 // where it always did; then the first page the
 // person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
@@ -1945,7 +2019,7 @@ function ssFallbackTab(access) {
 // `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
 // ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
 // canProjects' default: a call site that forgets it refuses the page rather than offering it.
-// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /portal/settings/myprofile.
+// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /settings/myprofile.
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
 function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
@@ -1953,7 +2027,7 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
-  // role branches on purpose: an admin bookmark to /portal/reports on production should
+  // role branches on purpose: an admin bookmark to /reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
   if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
   // Accounts is the SWITCHER, and a support operator needs it — it is how they reach the
@@ -2169,11 +2243,12 @@ function LoginView({ onRecoverySent, notice }) {
     // Always the canonical production portal, never window.location.origin. Supabase
     // honours only allow-listed redirects and silently substitutes Site URL otherwise,
     // so a reset started on beta (or localhost) used to produce a link that bounced to
-    // the apex root — see AUTH_PORTAL_URL in supabase/functions/admin-catalog/index.ts.
+    // the apex root — see AUTH_PORTAL_URL in supabase/functions/_shared/authPortalUrl.ts, which
+    // names the same address (the root /login since 2026-10-13; /portal before, still redirected).
     // Safe because beta and production share one Supabase project: the password set
     // here works on beta immediately.
     const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: "https://app.structurestudiosuite.com/portal",
+      redirectTo: "https://app.structurestudiosuite.com/login",
     });
     setBusy(false);
     if (err) setError(err.message);

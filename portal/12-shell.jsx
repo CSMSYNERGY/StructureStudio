@@ -1,5 +1,5 @@
-// (DesignsLegacySub and PipelinesLegacyRedirect lived here. Every old /portal/designs and
-// /portal/pipelines address is now mapped into the Contacts hub by ssCanonRoute in 01-core.jsx,
+// (DesignsLegacySub and PipelinesLegacyRedirect lived here. Every old /designs and
+// /pipelines address is now mapped into the Contacts hub by ssCanonRoute in 01-core.jsx,
 // before any page renders, so neither redirect has anything left to do. 2026-10-12.)
 
 // ── Nav rail glyphs ───────────────────────────────────────────────────────────
@@ -605,7 +605,7 @@ function ssRunStyleSave(key, target, styleValue, label, build, confirm) {
   });
 }
 
-// How long a cold /portal/advanced waits on "Checking your account…" for the tenant's billing
+// How long a cold /advanced waits on "Checking your account…" for the tenant's billing
 // answer before it gives up and shows the Designer (review 2026-09-29). Long enough for a cold
 // edge function, short enough that a failed call does not strand anyone. A "yes" that lands later
 // still opens the page. window.__ssAdvancedHoldMs overrides it for the harness.
@@ -631,7 +631,7 @@ function Dashboard({ session }) {
   //         a text on Messages, a call on Calls.
   //   from  where the record's own Back goes, when that isn't the list the record belongs to:
   //         { page, pageSub }. Conversations opens a CONTACT record, whose Back would otherwise
-  //         land on Contacts (pageSub keeps the filter left, /portal/conversations/texts), and the
+  //         land on Contacts (pageSub keeps the filter left, /conversations/texts), and the
   //         Build and Delivery Schedules open a contact or a design record.
   //
   // KEPT IN THE HISTORY ENTRY, not just here (review 2026-10-05). navigate() writes it into the
@@ -653,7 +653,7 @@ function Dashboard({ session }) {
   });   // { sub, deal?, chip?, from?: { page, pageSub } } | null
   // What the URL ASKED for, held until the role/operator gates have resolved. Without this
   // the clamp below runs on the first render — when isOperator is still false because
-  // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
+  // app_operators hasn't come back — and silently rewrites /console to designs before
   // the answer arrives. Cleared the moment it is honoured or provably refused.
   const wanted = useRef((() => { const p = ssParsePath(); return p.page && TAB_META[p.page] ? p.page : null; })());
   // Where "Back to Workspace" goes. Latched at RENDER time below, on every page that is not
@@ -665,8 +665,8 @@ function Dashboard({ session }) {
   // that story; this is the third time it applies.
   //
   // Null until you have been somewhere else, which is the cold-deep-link case
-  // (/portal/settings/colors pasted into the address bar): the reader falls back to
-  // ssFallbackTab, the same landing page a bare /portal login gets.
+  // (/settings/colors pasted into the address bar): the reader falls back to
+  // ssFallbackTab, the same landing page a bare /login gets.
   const beforeSettings = useRef(null);
   // Which rail was up the last time a page actually DECIDED one. My Profile deliberately does
   // not decide (see settingsMode below), so it needs somewhere to inherit from. Up here with
@@ -674,7 +674,7 @@ function Dashboard({ session }) {
   // after them changes the hook count between renders (React #310).
   //
   // Starts false, which is also the answer for a cold deep link straight to
-  // /portal/settings/myprofile: nobody arriving from outside has a context to preserve, and
+  // /settings/myprofile: nobody arriving from outside has a context to preserve, and
   // the workspace rail is the one that can reach everything.
   const railSettings = useRef(false);
 
@@ -728,7 +728,7 @@ function Dashboard({ session }) {
   // holds only on ssCanSeeTab's `!access` branch, and since migration 100 the status call
   // ships a resolved map, so the clamp takes the TAB_AREA.designer branch and DOES rewrite
   // this tab for a title without that area. openInDesigner refuses before navigating now,
-  // which is what keeps `tab` off "designer" for those people; a hand-typed /portal/designer
+  // which is what keeps `tab` off "designer" for those people; a hand-typed /designer
   // still latches this and mounts the host hidden, which costs a fetch and shows nothing.
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
@@ -742,7 +742,7 @@ function Dashboard({ session }) {
   // reports it (AdvancedTab's onDirty), and openAccount / exitAccount ask before throwing it away
   // (the page is remounted per account). A ref: nothing renders from it.
   const advancedDirtyRef = useRef(false);
-  // A cold /portal/advanced is HELD on "Checking your account…" until the entitlement answers
+  // A cold /advanced is HELD on "Checking your account…" until the entitlement answers
   // (the gate below), but not for ever: a billing call that failed, hung, or answered without an
   // entitlement never answers, and the route would sit there for the whole session (review
   // 2026-09-29). Set by the effect beside the clamp, after SS_ADVANCED_HOLD_MS.
@@ -870,7 +870,7 @@ function Dashboard({ session }) {
   // more than view-as now. A support account is also kept out of the ADMIN console on its OWN
   // portal, where supportView is false by design (see the note on it below). That gate opens
   // only on a real `false`. With a false start it would be open before this rpc answers: a
-  // reload or a deep link on /portal/admin would mount AdminShell the moment is_operator
+  // reload or a deep link on /console would mount AdminShell the moment is_operator
   // answered, and its first get_master + list_clients would come back as the two "Operator
   // access required." 403s that app_errors caught on 09-16 (beta and production) and 09-18.
   // (Those came from the old `!supportView` gate, which never closed on the own portal at
@@ -915,8 +915,8 @@ function Dashboard({ session }) {
   //
   // A plain false start would be safe for RENDERING (no tab is the right way to be wrong) and
   // wrong for ROUTING: the URL-normalising effect below runs before this call returns, would
-  // read false as a refusal, and would replaceState a typed /portal/projects away to
-  // /portal/designs while the page itself rendered Projects correctly a moment later. That is
+  // read false as a refusal, and would replaceState a typed /projects away to
+  // /designs while the page itself rendered Projects correctly a moment later. That is
   // the precise silent failure the placement comment on that effect was written about, and it
   // only ever showed up on the operator-gated tabs. So `gatesResolved` waits for a real
   // answer, exactly as it already does for `entitlement`.
@@ -952,7 +952,7 @@ function Dashboard({ session }) {
   // Projects on the client, independently of migration 250: drawn and mounted only once the
   // rpc has said "not support". With 250 applied canProjects is already false for a support
   // account; without it (or while it is being rolled out) this is what keeps a cold load of
-  // /portal/projects from mounting ProjectsTab and firing a list_boards that can only 403.
+  // /projects from mounting ProjectsTab and firing a list_boards that can only 403.
   // If the rpc gave up, Projects opens (see supportCheckGaveUp): the server still refuses a
   // support operator, and a CSM team member must not lose the board to a network blip.
   const projectsOpen = canProjects && !supportView && (isSupportOp === false || (isSupportOp === null && supportCheckGaveUp));
@@ -1045,15 +1045,15 @@ function Dashboard({ session }) {
   //     between renders → React error #310 → blank screen.
   //   Above `isOperator`/`viewing`/`entitlement` → Babel compiles const to var, so those
   //     read `undefined` instead of throwing, `undefined` is falsy, and ssClampTab quietly
-  //     rewrote /portal/admin and /portal/accounts to /portal/designs while the page
+  //     rewrote /console and /accounts to /designs while the page
   //     correctly rendered Admin. Silent, and only on the two operator-gated tabs.
   // So: after every state it reads, before the first early return. Do not move it.
   // It recomputes the clamp via ssClampTab rather than reading `activeTab`, which is only
   // available after those returns.
   //
-  // Two jobs. (1) A cold load at bare /portal has no page in the path, so write the
+  // Two jobs. (1) A cold load at bare /login has no page in the path, so write the
   // resolved one in with replaceState — no history entry, because you did not navigate.
-  // (2) If the clamp REFUSED the requested page (a team member deep-linking /portal/admin),
+  // (2) If the clamp REFUSED the requested page (a team member deep-linking /console),
   // rewrite the URL to what is really on screen. Leaving the old path up is worse than the
   // bounce: reload and you bounce again, so the link looks half-broken.
   //
@@ -1082,8 +1082,8 @@ function Dashboard({ session }) {
   // the builder's map, not the owner's chair — and isSupportOp null (still asking) is not yet a yes.
   const advancedMayRun = viewing ? (!!isOperator && isSupportOp === false) : !!canAdminForUrl;
   const advancedOn = ssAdvancedOn(advancedEnt) && advancedMayRun;
-  // The entitlement arrives AFTER the tenant, so a cold /portal/advanced first renders with no
-  // answer. Refusing then would rewrite our own account's address bar to /portal/designer and
+  // The entitlement arrives AFTER the tenant, so a cold /advanced first renders with no
+  // answer. Refusing then would rewrite our own account's address bar to /designer and
   // mount the Designer, only to jump back when the answer lands. So while it is out the route is
   // HELD: the page says "Checking…" and neither the nav item nor the page itself is drawn (both
   // read advancedOn, never this). Only a real answer decides — or the hold's time limit
@@ -1091,7 +1091,7 @@ function Dashboard({ session }) {
   const advancedAnswered = viewing ? (advancedCtx !== null && isSupportOp !== null) : entitlement !== null;
   const advancedAsked = advancedAnswered || advancedHoldOver;
   const advancedClampOn = advancedOn || (tab === "advanced" && !advancedAsked);
-  // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
+  // ⚠️ canProjects belongs in BOTH clamps or a typed /projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
   // operator-tabs-only failure the placement comment above this block was written about.
   // The same goes for consolesBarred: ssClampTab reads its 5th argument ONLY in the admin and
@@ -1114,16 +1114,16 @@ function Dashboard({ session }) {
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
     // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
-    // go with it: a team member landing on /portal/admin/billing bounces to designs, where
+    // go with it: a team member landing on /console/billing bounces to designs, where
     // "billing" matches none of that tab's sub branches (c-/d-/deals/people) — the body
-    // rendered EMPTY and the rewrite below then published /portal/designs/billing, a URL
+    // rendered EMPTY and the rewrite below then published /designs/billing, a URL
     // that reproduces the blank on every reload. Null it and let the re-run write the clean
     // path. Safe to do only HERE, after the wanted/gatesResolved wait above — at clamp time
     // proper (first render) isOperator is still false, and stripping then would cost an
-    // operator's /portal/admin/<sub> deep link its sub before the answer arrives.
+    // operator's /console/<sub> deep link its sub before the answer arrives.
     if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
-    // The ADDRESS, not only the parsed route: ssParsePath maps an old address (/portal/designs/list,
-    // /portal/leads, /portal/pipelines/<id>) onto today's route, so a parsed match alone left the
+    // The ADDRESS, not only the parsed route: ssParsePath maps an old address (/designs/list,
+    // /leads, /pipelines/<id>) onto today's route, so a parsed match alone left the
     // old address showing in the bar. It is rewritten here once, without a history entry, and the
     // entry's record context (recordCtx) rides along so a reload of it still opens on the deal.
     if (p.page === resolvedTab && (p.sub || null) === (sub || null)
@@ -1135,15 +1135,15 @@ function Dashboard({ session }) {
     } catch (_e) {}
     // `canProjects` is in this list because `gatesResolved` above READS it. Left out, a
     // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
-    // a non-admin on /portal/admin, where projects is not what is being refused — never
+    // a non-admin on /console, where projects is not what is being refused — never
     // re-runs this effect: `wanted.current` stays set, the replaceState never happens, and
     // the address bar keeps a path that bounces again on every reload. isSupportOp is listed
     // for the same reason: gatesResolved reads it too.
   }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects, isSupportOp]);
-  // A REFUSED /portal/advanced shows the Designer, so the Designer host has to mount. The effect
+  // A REFUSED /advanced shows the Designer, so the Designer host has to mount. The effect
   // above rewrites the address bar but leaves `tab` on "advanced", and designerOpened latches on
-  // the raw tab — so without this line the page under /portal/designer is blank. Leaving `tab`
-  // alone is deliberate: an operator's cold /portal/advanced?view=<ours> is refused for a moment
+  // the raw tab — so without this line the page under /designer is blank. Leaving `tab`
+  // alone is deliberate: an operator's cold /advanced?view=<ours> is refused for a moment
   // (their own entitlement answers before ?view= arms) and then resolves, and the URL follows.
   useEffect(() => {
     if (tab === "advanced" && resolvedTab === "designer") setDesignerOpened(true);
@@ -1176,7 +1176,7 @@ function Dashboard({ session }) {
     return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [],
       crmContacts: data.crmContacts || [], crmContactsTotal: data.crmContactsTotal || 0 };
   }, [viewing && viewing.clientId]);
-  // GHL-subaccounts-style deep link: /portal.html?view=<clientId> (e.g. from the
+  // GHL-subaccounts-style deep link: /contacts?view=<clientId> (e.g. from the
   // admin console's "Open portal ↗") auto-opens that account once the operator
   // check passes. Non-operators: ignored (and the server rejects reads anyway).
   useEffect(() => {
@@ -1185,7 +1185,7 @@ function Dashboard({ session }) {
     if (v && /^[a-z0-9][a-z0-9-]*$/.test(v)) {
       setViewing((cur) => cur || { clientId: v, companyName: v });
       // Deliberately does NOT force "designs" any more. ?view= says WHICH tenant; the path
-      // says WHICH page. /portal/settings/colors?view=junior-barns has to mean both, or the
+      // says WHICH page. /settings/colors?view=junior-barns has to mean both, or the
       // operator's deep link silently loses half of itself.
     }
   }, [isOperator]);
@@ -1203,8 +1203,8 @@ function Dashboard({ session }) {
     ssTargetClientId = c.clientId;              // same tick as the click, before the re-render
     setViewing(c); setTab("contacts"); setSub(null);
     // replaceState, not navigate(): entering an account is not a page change, and the path
-    // is rebuilt so ?view= rides alongside /portal/contacts instead of replacing it.
-    try { window.history.replaceState({ page: "contacts", sub: null }, "", "/portal/contacts?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
+    // is rebuilt so ?view= rides alongside /contacts instead of replacing it.
+    try { window.history.replaceState({ page: "contacts", sub: null }, "", ssPageBase("contacts", null) + "?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
   };
   const exitAccount = () => {
     // Leaving remounts the Advanced page too. Only its UNSAVED work asks: that page reports it, and
@@ -1213,7 +1213,7 @@ function Dashboard({ session }) {
     setOpenDesign(null);                        // same replay guard as openAccount
     ssTargetClientId = null;
     setViewing(null); setTab("accounts"); setSub(null);
-    try { window.history.replaceState({ page: "accounts", sub: null }, "", "/portal/accounts"); } catch (_e) {}
+    try { window.history.replaceState({ page: "accounts", sub: null }, "", ssPageBase("accounts", null)); } catch (_e) {}
   };
 
   // ── Sidebar account switcher (operators only) ──────────────────────────────────────
@@ -2738,7 +2738,7 @@ function Dashboard({ session }) {
   const settingsTabs = (settingsPage || settingsMode)
     ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered })
     : null;
-  // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
+  // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
   // Client Setup step whose link_page an operator typed by hand. Both must highlight the tab
   // the BODY is actually showing, which is the first one, rather than highlighting nothing.
@@ -2749,8 +2749,8 @@ function Dashboard({ session }) {
   // its own terms, and no way for a reader to tell which one they are on.
   const onSettingsPage = settingsTabs && settingsPage;
   // Company and Colors are HUBS: one rail item, several tabs inside, every tab a settings
-  // slug in its own right. The rail has to recognise those slugs — /portal/settings/branding
-  // must light COMPANY and /portal/settings/shingles must light COLORS, rather than falling
+  // slug in its own right. The rail has to recognise those slugs — /settings/branding
+  // must light COMPANY and /settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
   const hubs = (settingsPage || settingsMode)
     ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
@@ -2769,7 +2769,7 @@ function Dashboard({ session }) {
     ? ((hubHit && hubHit[1]) || settingsTabs.find((t) => t[0] === settingsSub) || settingsTabs[0])
     : null;
   // Where Back goes: the last workspace page you were on, else the same landing page a bare
-  // /portal login gets. Never history.back() — a pasted deep link has no previous entry, and
+  // /login gets. Never history.back() — a pasted deep link has no previous entry, and
   // the ?view= reconciliation in the popstate handler would have to be reasoned about for it.
   const backTab = beforeSettings.current || ssFallbackTab(myAccess);
   // A hub opens on the first tab the READER can see, not on a hardcoded slug: someone granted
@@ -2831,7 +2831,7 @@ function Dashboard({ session }) {
           {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
               Contacts: the same people, seen by their latest message. Only with the CRM: unlike
               Contacts, which stays in the rail to sell it, one locked item there is enough. A
-              typed /portal/conversations without it still lands on the CRM card below. */}
+              typed /conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -2848,7 +2848,7 @@ function Dashboard({ session }) {
           {/* QuickBooks has no nav entry any more (Carolyn 2026-08-24): it is a config
               surface, not workspace work, and it is already mounted a second time at
               Settings → QuickBooks — which is where the links people actually hold point
-              (/portal/settings/quickbooks). The /portal/quickbooks route, its render
+              (/settings/quickbooks). The /quickbooks route, its render
               block and ICONS.quickbooks all stay, so old deep links still land on the
               real page: same treatment 3D Design got below. Its gating is unchanged —
               admins plus settings_quickbooks holders (migration 100), enforced by
@@ -2865,11 +2865,11 @@ function Dashboard({ session }) {
           {/* RealTime Pricing left this group on 2026-08-28 (Carolyn 2026-08-27: "we maybe
               even remove real-time pricing from this here completely now, and put what is
               here down here") — it lives inside Settings → Structures as a real feature
-              now. The /portal/on-demand-pricing route and its card stay for old deep
+              now. The /on-demand-pricing route and its card stay for old deep
               links, pointing at the settings block: the QuickBooks/3D treatment. */}
           {/* 3D Design has no nav entry any more (Carolyn 2026-08-25): it is live inside
               the Designer (view3d prop) and calibration lives in Settings → Designer, so
-              the standalone tab came off the rail. The /portal/view-3d route and its
+              the standalone tab came off the rail. The /view-3d route and its
               render block stay so old deep links still land somewhere sensible. */}
           {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
@@ -3216,15 +3216,15 @@ function Dashboard({ session }) {
                 an opportunity and the view of being in a person are different, but they're
                 the same."
 
-                Routed on the `sub` segment: /portal/contacts/c-<uuid> for a contact and
-                /portal/contacts/d-<code> for a design. The prefix (c-/d-) is what tells the
+                Routed on the `sub` segment: /contacts/c-<uuid> for a contact and
+                /contacts/d-<code> for a design. The prefix (c-/d-) is what tells the
                 two record kinds apart, so ONE shell serves both.
 
                 INSIDE THE CONTACTS HUB (Carolyn 2026-10-12): both kinds open under the one
                 Contacts tab, so the sidebar never moves when a card, a Design list row or a
                 contact is opened, and the record's Back returns to the hub tab it came from
-                (recordCtx.from). Every older record address (/portal/designs/c-…|d-…,
-                /portal/leads/c-…) reaches here through ssCanonRoute. */}
+                (recordCtx.from). Every older record address (/designs/c-…|d-…,
+                /leads/c-…) reaches here through ssCanonRoute. */}
             {/* ⚠️ canEdit WAS `ssCanRead(myAccess, "contacts") === "edit"`, which was ALWAYS
                 FALSE: ssCanRead returns a BOOLEAN (01-core), so it compared `true` to the
                 string "edit". The whole conversation half of the record page — Activity,
@@ -3435,7 +3435,7 @@ function Dashboard({ session }) {
                   />
                 )} />
             )}
-            {/* CONVERSATIONS — /portal/conversations[/email|texts|calls]. The sub is the filter, so
+            {/* CONVERSATIONS — /conversations[/email|texts|calls]. The sub is the filter, so
                 the browser's Back from a record restores it. Behind the built-in CRM like Contacts;
                 the nav item only appears with it, and a typed URL without it gets the CRM card.
                 A row opens the CONTACT record on the History chip for its channel, and the
@@ -3508,7 +3508,7 @@ function Dashboard({ session }) {
                        ?id= page silently captures leads/drafts, so staff must never browse
                        a customer's design there. */
                     onOpenDesign={openInDesigner}
-                    /* /portal/orders/o-<id>, on the same `<letter>-` sub shape the record
+                    /* /orders/o-<id>, on the same `<letter>-` sub shape the record
                        pages already use. Opening pushes, closing pops -- so Back closes the
                        order instead of leaving Orders, and an order can finally be linked
                        to. `replace` is deliberately NOT used: the open IS the navigation. */
@@ -3529,7 +3529,7 @@ function Dashboard({ session }) {
                 console fires get_master + list_clients on mount, and adminAuth refuses both to
                 a support operator. `!supportView` let it mount on the support account's own
                 portal; `!isSupportOp` would let it mount while the rpc is still out, which is
-                what a reload on /portal/admin does. Once false, a later failed call keeps
+                what a reload on /console does. Once false, a later failed call keeps
                 false (see the rpc's note), so a blip never unmounts the staged work this
                 comment is about. */}
             {activeTab === "admin" && isOperator && isSupportOp === null && (
@@ -3561,7 +3561,7 @@ function Dashboard({ session }) {
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
                 the clamp on that same area — so a settings_quickbooks holder deep-linking
-                /portal/quickbooks got a topbar over an empty body while canAdmin alone
+                /quickbooks got a topbar over an empty body while canAdmin alone
                 gated this render (audit 2026-08-20). */}
             {!gateLocked && activeTab === "quickbooks" && (canAdmin || ssCanRead(myAccess, "settings_quickbooks")) && (
               qboUnlocked ? (
@@ -3719,7 +3719,7 @@ function Dashboard({ session }) {
               />
               )
             )}
-            {/* A cold /portal/advanced before the entitlement has answered (advancedClampOn holds
+            {/* A cold /advanced before the entitlement has answered (advancedClampOn holds
                 the route open). Nothing of the page is drawn until ssAdvancedOn says yes; a "no"
                 lands on the Designer. */}
             {!gateLocked && advancedHeld && (

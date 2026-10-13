@@ -166,7 +166,7 @@ async function scenario(browser, { name, server = "new", photo = true, saved = S
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate(() => { history.pushState({}, "", "/portal/settings/email"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await page.evaluate(() => { history.pushState({}, "", "/settings/email"); window.dispatchEvent(new PopStateEvent("popstate")); });
   await page.waitForFunction(() => document.body.innerText.includes("Send a test email"), null, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(400);
   return { ctx, page, calls, popups };

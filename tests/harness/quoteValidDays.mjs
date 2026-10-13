@@ -120,7 +120,7 @@ async function scenario(browser, { name, server = "new", days = 14, viewport = {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate(() => { history.pushState({}, "", "/portal/settings/company"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await page.evaluate(() => { history.pushState({}, "", "/settings/company"); window.dispatchEvent(new PopStateEvent("popstate")); });
   // Field labels are upper-cased by CSS (S.lbl), and innerText reports them that way.
   await page.waitForFunction((x) => document.body.innerText.toLowerCase().includes(x), TERMS_LABEL, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(400);

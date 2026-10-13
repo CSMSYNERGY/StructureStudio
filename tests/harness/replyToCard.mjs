@@ -139,7 +139,7 @@ async function scenario(browser, { name, server = "new", prefs = PREFS, failFirs
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate(() => { history.pushState({}, "", "/portal/settings/myprofile"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await page.evaluate(() => { history.pushState({}, "", "/settings/myprofile"); window.dispatchEvent(new PopStateEvent("popstate")); });
   await page.waitForFunction(() => document.body.innerText.includes("Where replies to your emails go"), null, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(400);
   return { ctx, page, calls };

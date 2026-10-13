@@ -108,7 +108,7 @@ try {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await go("/portal/settings/pipelines");
+  await go("/settings/pipelines");
   await page.waitForFunction(() => !!document.querySelector("[data-ss-pipeline-settings] input[aria-label='Status name']"), null, { timeout: 20000 })
     .catch(() => { /* the guard below reports it */ });
   await page.waitForTimeout(500);

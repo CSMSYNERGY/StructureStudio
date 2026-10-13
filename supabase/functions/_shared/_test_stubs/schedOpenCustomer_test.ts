@@ -270,18 +270,18 @@ Deno.test("the record context rides in the history entry, and every other naviga
     `${NAV_SRC}}, []); return navigate;`,
   )(
     (f: unknown) => f, { current: "x" }, (v: unknown) => { state.ctx = v; }, (v: unknown) => { state.tab = v; },
-    (v: unknown) => { state.sub = v; }, (p: string, s: string | null) => "/portal/" + p + (s ? "/" + s : ""), ssCanonRoute, fakeWindow,
+    (v: unknown) => { state.sub = v; }, (p: string, s: string | null) => "/" + p + (s ? "/" + s : ""), ssCanonRoute, fakeWindow,
     () => {},
   ) as (...a: unknown[]) => void;
   const from = { page: "build-schedule", pageSub: null };
   navigate("contacts", "c-" + C1, false, { deal: WITH.code, from });
   const rec = { deal: WITH.code, from, sub: "c-" + C1 };
   assertEquals(state.ctx, rec);
-  assertEquals(state.entries.pop(), { s: { page: "contacts", sub: "c-" + C1, rec }, u: "/portal/contacts/c-" + C1, replace: false });
+  assertEquals(state.entries.pop(), { s: { page: "contacts", sub: "c-" + C1, rec }, u: "/contacts/c-" + C1, replace: false });
   // Open in designer, the rail, a filter: no context, and the entry carries none.
   navigate("designer");
   assertEquals(state.ctx, null);
-  assertEquals(state.entries.pop(), { s: { page: "designer", sub: null }, u: "/portal/designer", replace: false });
+  assertEquals(state.entries.pop(), { s: { page: "designer", sub: null }, u: "/designer", replace: false });
   navigate("conversations", "texts", true);
   assertEquals([state.ctx, state.entries.pop()!.s], [null, { page: "conversations", sub: "texts" }]);
   // A design's record, asked for under the old Pipeline page's id (schedCustomerDest still says
@@ -290,7 +290,7 @@ Deno.test("the record context rides in the history entry, and every other naviga
   assertEquals([state.tab, state.sub], ["contacts", "d-" + WITH.code]);
   assertEquals(state.entries.pop(), {
     s: { page: "contacts", sub: "d-" + WITH.code, rec: { deal: null, from, sub: "d-" + WITH.code } },
-    u: "/portal/contacts/d-" + WITH.code, replace: false,
+    u: "/contacts/d-" + WITH.code, replace: false,
   });
 
   // Back/forward: restored from the entry it lands on, and only for the record it was captured for.

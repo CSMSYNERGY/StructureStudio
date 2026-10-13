@@ -153,7 +153,7 @@ export interface InvoiceRequestEmailInput {
   total?: string | number | null;
   /** ISO timestamp of the acceptance; rendered as a plain date. */
   acceptedAtIso: string;
-  /** The order in the portal (/portal/orders/o-<id>), where "Approve & send invoice" lives. */
+  /** The order in the portal (/orders/o-<id>), where "Approve & send invoice" lives. */
   reviewUrl: string;
 }
 

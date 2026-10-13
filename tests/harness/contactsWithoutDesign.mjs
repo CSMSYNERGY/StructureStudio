@@ -41,7 +41,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
+import { launch, reporter, BASE, REF, shotsDir, serveAppRoutes, legacyAppPath } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -225,11 +225,12 @@ async function run(label, S) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  // An older artifact (the "before" runs) reads /portal addresses only: it gets the host as it was.
+  await serveAppRoutes(page, PORTAL_HTML, { legacy: !!S.artifact });
   if (S.artifact) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: S.artifact }));
 
-  await page.goto(`${BASE}/portal/contacts/people${S.query || ""}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}${S.artifact ? legacyAppPath("/contacts/people") : "/contacts/people"}${S.query || ""}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   // The list, with its rows (not the skeleton): a tbody row whose first cell has text.
   const rendered = await page.waitForFunction(() => {
@@ -321,7 +322,7 @@ try {
     await r.page.locator("table button", { hasText: NAMELESS }).click();
     await r.page.waitForTimeout(600);
     const path = await r.page.evaluate(() => location.pathname);
-    ok("A14 a nameless contact's phone is the link to its record", path === `/portal/contacts/c-${cid(202)}`, path);
+    ok("A14 a nameless contact's phone is the link to its record", path === `/contacts/c-${cid(202)}`, path);
     ok("A15 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
     await r.ctx.close();
   }

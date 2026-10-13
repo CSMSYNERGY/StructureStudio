@@ -148,7 +148,7 @@ const run = async () => {
     await page.route(`**/${REF}.supabase.co/**`, shell);
     await page.route(`**/${REF}.functions.supabase.co/**`, shell);
 
-    // CLICKED, not deep-linked: python -m http.server serves files, so /portal/designer 404s
+    // CLICKED, not deep-linked: python -m http.server serves files, so /designer 404s
     // here even though it is a real URL on the live site (the app owns that path client-side).
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });

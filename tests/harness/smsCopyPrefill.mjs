@@ -194,7 +194,7 @@ try {
   // ── P + T. A new builder, nothing saved ────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "P", sms: smsStatus({ row: fullRow }) });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-copy-suggested]", { timeout: 15000 }).catch(() => {});
     const note = await s.page.locator("[data-ss-sms-copy-suggested]").innerText().catch(() => "");
     const shown = ok("P1 the form says the wording was filled in for them", NOTE.test(note.replace(/\s+/g, " ")), note.slice(0, 120));
@@ -264,7 +264,7 @@ try {
     // The real server sends no suggestion beside saved wording; this one does, to prove the form
     // would not take it anyway.
     const s = await scenario(browser, { name: "S", sms: smsStatus({ status: "brand_approved", row: savedRow, forceSuggestion: want }) });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-sample]", { timeout: 15000 }).catch(() => {});
     const f = await readForm(s.page);
     ok("S1 saved wording is what the form shows, untouched by any suggestion",
@@ -281,7 +281,7 @@ try {
   {
     const early = { campaign_message_samples: [] };
     const s = await scenario(browser, { name: "F", sms: smsStatus({ row: early }) });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-copy-suggested]", { timeout: 15000 }).catch(() => {});
     const before = await readForm(s.page);
     ok("F1 with no policy addresses saved, the opt-in answer names none", !!before.messageFlow && !/Privacy Policy/.test(before.messageFlow.value), before.messageFlow && before.messageFlow.value.slice(-200));
@@ -303,7 +303,7 @@ try {
   // ── R. Someone who can only look ──────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "R", role: "user", access: VIEWER_ACCESS, sms: smsStatus({ row: fullRow }) });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-sample]", { timeout: 15000 }).catch(() => {});
     const f = await readForm(s.page);
     const drawn = ok("R0 a viewer reaches the read-only form", !!f.description, await s.page.evaluate(() => location.pathname));
@@ -317,7 +317,7 @@ try {
   // ── C. The record page's consent note ─────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "C", sms: smsStatus(), smsConsented: false });
-    await s.go(`/portal/contacts/c-${CONTACT_ID}`);
+    await s.go(`/contacts/c-${CONTACT_ID}`);
     await s.page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).catch(() => {});
     await s.page.waitForTimeout(400);
     await s.page.evaluate(() => {

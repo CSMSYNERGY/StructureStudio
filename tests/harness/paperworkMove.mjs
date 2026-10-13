@@ -195,7 +195,7 @@ try {
   const sumA = await summary().innerText().catch(() => "");
   ok("A: the stored rate is summarised", /6\.5%, shown on documents as “Sales tax”, not charged on delivery\./.test(sumA), sumA.replace(/\n/g, " | "));
   const hrefA = await summary().getByRole("link", { name: "Change it in Company → Tax" }).getAttribute("href").catch(() => null);
-  ok("A: …with a link to Company → Tax", hrefA === "/portal/settings/tax", String(hrefA));
+  ok("A: …with a link to Company → Tax", hrefA === "/settings/tax", String(hrefA));
   ok("A: no banner while a rate is on file", !t.includes("Before saving, set"));
   ok("A: and none for numbers, nor a warning about restarting at 1", !/Before saving, set a starting/.test(t) && !/restarted at 1/.test(t));
   await fill({ quote: "3101", invoice: "7001" });
@@ -232,12 +232,12 @@ try {
   t = await text();
   ok("C: blank stored rate: no success line, no generic failure text", !t.includes(SAVED_SS) && !/non-2xx/i.test(t));
   const bannerLink = page.locator("[data-company-tax-needed]").getByRole("link", { name: "Company → Tax" });
-  ok("C: the banner links to Company → Tax", (await bannerLink.getAttribute("href").catch(() => null)) === "/portal/settings/tax");
+  ok("C: the banner links to Company → Tax", (await bannerLink.getAttribute("href").catch(() => null)) === "/settings/tax");
   await page.evaluate(() => { window.__ssSameDoc = true; });
   await bannerLink.click().catch(() => {});
   ok("C: the link opens the Tax tab in the same document",
     await waitText("Tax — Your sales tax rate, and optional tax codes", 8000) && (await page.evaluate(() => window.__ssSameDoc === true))
-      && new URL(page.url()).pathname === "/portal/settings/tax", page.url());
+      && new URL(page.url()).pathname === "/settings/tax", page.url());
 
   // D — 0% on file is an answer
   await boot({ invoiceInGhl: true, allowed: false, crm: false, taxPct: 0 });

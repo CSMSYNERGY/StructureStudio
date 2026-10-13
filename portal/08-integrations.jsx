@@ -1,11 +1,11 @@
 // `sub`/`onSub` are supplied by Dashboard so the sub-page lives in the URL
-// (/portal/settings/colors). The internal fallback keeps the shell usable if it is ever
+// (/settings/colors). The internal fallback keeps the shell usable if it is ever
 // ─── QuickBooks (Settings → QuickBooks) ─────────────────────────────────────
 // Connection card + the estimate-line → QuickBooks-item mapping grid. All data flows
 // through portal-settings (qbo_status / list_item_map / save_item_map / list_qbo_items /
 // qbo_test / disconnect_qbo) and qbo-oauth-connect; tokens never reach the browser.
 //
-// The OAuth round trip lands back on /portal/settings/quickbooks?connected=… — this view
+// The OAuth round trip lands back on /settings/quickbooks?connected=… — this view
 // reads that flag once, shows a banner, and strips it from the URL so a refresh doesn't
 // re-announce a stale result.
 const QBO_KINDS = [
@@ -4667,11 +4667,11 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // ssPhoneOffered answer, or the rail would offer a Phone tab the body clamps to Structures.
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
-  // /portal/settings/branding, a link people hold, would fall back to Structures.
+  // /settings/branding, a link people hold, would fall back to Structures.
   const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
-  // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
+  // a renamed sub-tab like /settings/color) survived as-is, and since every content branch
   // below is an equality match on a KNOWN slug, nothing rendered: the banner and sub-tab bar
   // appeared, the caption claimed "Structures — Building styles, sizes and base prices", the body
   // was empty and no tab was underlined. `active` already fell back, so only the label was right.
@@ -4715,7 +4715,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {/* `advanced` is the Advanced mode switch (06-3d.jsx AdvancedModeCard), null where it must not show. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} view3d={view3d} canBill={canBill} advanced={advanced} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
-          Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
+          Every one of them is still a real /settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
@@ -4735,7 +4735,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         ? <PipelineSettings viewing={!!viewingLabel} />
         : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
-          open, and /portal/settings/quickbooks is a link people actually have. */}
+          open, and /settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}

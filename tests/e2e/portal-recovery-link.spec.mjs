@@ -1,6 +1,7 @@
 // A dead email link landing on the portal (2026-09-17). When a reset or invite link has already
 // been used, was superseded, or is past its expiry, Supabase's /verify redirects to
-// /portal#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired.
+// /login#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired
+// (/portal#… before 2026-10-13; the host 301s that to /login and the browser keeps the fragment).
 // The portal must explain it on the login form (with "Forgot password?" right there), scrub the
 // error out of the URL, and log the landing. otp_expired is Supabase correctly REFUSING the link,
 // so its row is severity info. Anything unexplained (server_error, …) is still an error.

@@ -71,8 +71,9 @@ export function customerHomeUrl(
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * The builder's order page: /portal/orders/o-<orders.id> (the deep link portal/12-shell.jsx
- * reads — keyed on the UUID, not order_no).
+ * The builder's order page: /orders/o-<orders.id> (the deep link portal/12-shell.jsx
+ * reads — keyed on the UUID, not order_no). /portal/orders/… until 2026-10-13, when the app's
+ * addresses lost their /portal segment; the host 301s every link already sent to the new one.
  *
  * Used by the "Invoice to approve" email (migration 229), which customer-accept sends while
  * answering a CUSTOMER's request — so the Origin here is the customer's page, and a quote
@@ -83,7 +84,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * path: a missing order row (its upsert is best-effort) still lands the builder one click away.
  */
 export function portalOrderUrl(orderId: string | null | undefined, req?: Request | null): string {
-  const base = `https://${hostFor(req)}/portal/orders`;
+  const base = `https://${hostFor(req)}/orders`;
   const id = String(orderId ?? "").trim();
   return UUID_RE.test(id) ? `${base}/o-${id}` : base;
 }

@@ -55,7 +55,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, shotsDir, BASE, REF } from "./lib.mjs";
+import { launch, reporter, shotsDir, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -173,7 +173,7 @@ const json = (route, body, status = 200) => route.fulfill({ status, contentType:
 // `operator`: the signed-in person is a platform operator (own tenant OPS_CLIENT, answered with
 // `ownStatus`), and `status` is the answer for the tenant they view with ?view= (body.targetClientId).
 // `statusAfterSubscribe`: what `status` answers once a subscribe has been answered 200.
-async function open(label, status, path = "/portal/settings/billing", { subscribeAnswer = null, operator = false, ownStatus = null, statusAfterSubscribe = null } = {}) {
+async function open(label, status, path = "/settings/billing", { subscribeAnswer = null, operator = false, ownStatus = null, statusAfterSubscribe = null } = {}) {
   const billing = [];   // every portal-billing request body, in order
   const logged = [];    // every log_error RPC body (what the portal files in app_errors)
   const pageErrors = [];
@@ -244,8 +244,8 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -473,7 +473,7 @@ try {
 
   // ── e: the server's founding refusal, as the Billing tab shows it ──
   {
-    const S = await open("e", TENANTS.c, "/portal/settings/billing", { subscribeAnswer: REFUSAL });
+    const S = await open("e", TENANTS.c, "/settings/billing", { subscribeAnswer: REFUSAL });
     const loaded = await waitText(S.page, "Choose your features");
     ok("e: the plan picker loads", loaded);
     const btn = checkoutButton(S.page);
@@ -511,7 +511,7 @@ try {
   // and left behind the gate ("…unlock as soon as payment goes through", it says) until they
   // reloaded. A purchase now raises ssEntitlementChanged and the shell re-reads it.
   {
-    const S = await open("f", TENANTS.c, "/portal/designs", {
+    const S = await open("f", TENANTS.c, "/designs", {
       subscribeAnswer: { status: 200, body: { ok: true, subscriptions: [], failed: [] } },
       statusAfterSubscribe: ACTIVE_AFTER,
     });
@@ -532,7 +532,7 @@ try {
   // ── g: an operator viewing a LOCKED builder gets the picker in its view-as mode ──
   // BillingGate used to render BillingView with no viewingLabel, i.e. in the builder's own mode.
   {
-    const S = await open("g1", LAPSED_WITH_CARD, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const S = await open("g1", LAPSED_WITH_CARD, `/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
     const loaded = await waitText(S.page, "Choose your features", 20000);
     ok("g1: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Your subscription has ended"));
     const btn = checkoutButton(S.page);
@@ -551,7 +551,7 @@ try {
     await S.ctx.close();
   }
   {
-    const S = await open("g2", TENANTS.c, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const S = await open("g2", TENANTS.c, `/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
     const loaded = await waitText(S.page, "Choose your features", 20000);
     ok("g2: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Activate your account"));
     ok("g2: with no card on file it says the owner must add one", (await text(S.page)).includes(`${CLIENT} has no card on file`));

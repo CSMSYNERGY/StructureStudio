@@ -46,7 +46,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, shotsDir, collectErrors, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, shotsDir, collectErrors, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES } from "./gableProbe.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -178,8 +178,8 @@ async function open(S, path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -198,7 +198,7 @@ const go = (page, pathname) => page.evaluate((p) => {
 // The designer's 3D button (toolbar): "🧊 Show 3D", "🧊 Hide 3D" (docked) or "🧊 3D ✓".
 const threeDButton = (page) => page.locator(".ssd-tb-btn").filter({ hasText: /🧊 (Show 3D|Hide 3D|3D ✓)/u });
 async function designerHas3D(page, { expect }) {
-  await go(page, "/portal/designer");
+  await go(page, "/designer");
   await page.waitForSelector(".ssd-frame.is-embedded", { timeout: 60000 });
   // The designer's toolbar exists either way; the 3D button is in it or not. When it should be
   // there, wait for it; when it should not, give the page time to draw one before saying no.
@@ -207,7 +207,7 @@ async function designerHas3D(page, { expect }) {
   return (await threeDButton(page).count()) > 0;
 }
 async function settingsDesigner(page) {
-  await go(page, "/portal/settings/designer");
+  await go(page, "/settings/designer");
   await waitText(page, "Give each building style its own 3D look");
   // The section loads the designer module; give whichever answer it draws time to draw.
   await page.waitForFunction(() => {
@@ -218,7 +218,7 @@ async function settingsDesigner(page) {
   return { calibration: t.includes("3D Style Calibration"), teaser: t.includes("3D isn't on for this account yet. Add 3D on the Billing page") };
 }
 async function view3dPage(page) {
-  await go(page, "/portal/view-3d");
+  await go(page, "/view-3d");
   await page.waitForFunction(() => /Customers can spin their design in 3D|Let a shopper turn their floor plan/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
   return page.evaluate(() => {
     const t = document.body.innerText;
@@ -247,7 +247,7 @@ const tagTiles = (page) => page.evaluate(() => {
   });
 });
 async function buy3d(page) {
-  await go(page, "/portal/settings/billing");
+  await go(page, "/settings/billing");
   await page.waitForFunction(() => /Add features|Choose your features/.test(document.body.innerText), null, { timeout: 30000 });
   const names = await tagTiles(page);
   const tile = page.locator('[data-harness-tile="3D View"]');
@@ -266,7 +266,7 @@ try {
   // ── A: paid, no grant ─────────────────────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ granted: [], paid: ["simple_layout", "view_3d"], bought3d: true }) };
-    const { ctx, page, errors } = await open(S, "/portal/designs");
+    const { ctx, page, errors } = await open(S, "/designs");
     ok(`A${TAG}: paid 3D, no grant: the Designer has its 3D button`, await designerHas3D(page, { expect: true }));
     await page.screenshot({ path: join(SHOTS, `A-designer${TAG}.png`) });
     const sd = await settingsDesigner(page);
@@ -282,7 +282,7 @@ try {
   // ── B: neither ────────────────────────────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ granted: [], paid: ["simple_layout"] }) };
-    const { ctx, page, errors } = await open(S, "/portal/designs");
+    const { ctx, page, errors } = await open(S, "/designs");
     ok(`B${TAG}: no grant, nothing paid: no 3D button`, !(await designerHas3D(page, { expect: false })));
     const sd = await settingsDesigner(page);
     ok(`B${TAG}: Settings > Designer says to add 3D on Billing, with no calibration`, sd.teaser && !sd.calibration, JSON.stringify(sd));
@@ -296,8 +296,8 @@ try {
       await page.screenshot({ path: join(SHOTS, "B-view3d.png") });
       if (await cta.count()) {
         await cta.click();
-        await page.waitForFunction(() => location.pathname === "/portal/settings/billing", null, { timeout: 10000 }).catch(() => {});
-        ok("B: …which opens Billing", (await page.evaluate(() => location.pathname)) === "/portal/settings/billing");
+        await page.waitForFunction(() => location.pathname === "/settings/billing", null, { timeout: 10000 }).catch(() => {});
+        ok("B: …which opens Billing", (await page.evaluate(() => location.pathname)) === "/settings/billing");
       }
     }
     ok(`B${TAG}: no page errors`, errors.length === 0, errors.join(" | "));
@@ -307,7 +307,7 @@ try {
   // ── C: a server that predates `paid` ─────────────────────────────────────────────────────
   {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ granted: ["view_3d"], noPaid: true }) };
-    const { ctx, page, errors } = await open(S, "/portal/designs");
+    const { ctx, page, errors } = await open(S, "/designs");
     ok(`C${TAG}: a comp from a server with no paid field: 3D on, as before`, await designerHas3D(page, { expect: true }));
     ok(`C${TAG}: no page errors`, errors.length === 0, errors.join(" | "));
     await ctx.close();
@@ -321,7 +321,7 @@ try {
       statusFor: () => statusAnswer(bought ? { paid: ["simple_layout", "view_3d"], bought3d: true } : { paid: ["simple_layout"] }),
       onSubscribe: (_t, body) => { if ((body.planIds || []).includes("view_3d_annual")) bought = true; },
     };
-    const { ctx, page, calls, errors } = await open(S, "/portal/designs");
+    const { ctx, page, calls, errors } = await open(S, "/designs");
     ok(`D${TAG}: before buying: no 3D button`, !(await designerHas3D(page, { expect: false })));
     await page.evaluate(() => { window.__harnessSamePage = "still here"; });
     const r = await buy3d(page);
@@ -352,7 +352,7 @@ try {
         : statusAnswer({ granted: ["view_3d"], paid: ["simple_layout"] })),
       onSubscribe: (target, body) => { if (target === BUILDER && (body.planIds || []).includes("view_3d_annual")) bought = true; },
     };
-    const { ctx, page, calls, errors, dialogs } = await open(S, `/portal/designs?view=${BUILDER}`);
+    const { ctx, page, calls, errors, dialogs } = await open(S, `/designs?view=${BUILDER}`);
     await page.waitForFunction(() => /Viewing|Exit/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {});
     ok(`E${TAG}: viewing a builder without 3D: no 3D button (the operator's own comp does not leak in)`, !(await designerHas3D(page, { expect: false })));
     await page.evaluate(() => { window.__harnessSamePage = "still here"; });
@@ -386,7 +386,7 @@ try {
       onSubscribe: () => { started = true; },
       subscribeAnswer: () => ({ ok: true, created: [{ planId: "simple_layout_annual" }], failed: [{ planId: "view_3d_annual", error: DO_NOT_RETRY }] }),
     };
-    const { ctx, page, calls, errors } = await open(S, "/portal/designs");
+    const { ctx, page, calls, errors } = await open(S, "/designs");
     ok(`F${TAG}: a never-paid owner is on the paywall`, await waitText(page, "Activate your account"));
     await page.waitForFunction(() => /Choose your features|Add features/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {});
     const names = await tagTiles(page);

@@ -2023,7 +2023,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
 
-        // Where the reset link lands; the panel passes location.origin + "/portal.html".
+        // Where the reset link lands: AUTH_PORTAL_URL, whatever the panel passes.
         const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
         if (error) throw error;
         return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });

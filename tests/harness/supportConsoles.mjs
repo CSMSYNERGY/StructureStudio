@@ -3,14 +3,14 @@
 //
 // app_errors caught it: pairs of admin-catalog get_master + list_clients 403s ("Operator access
 // required.") and portal-projects list_boards 403s ("Support accounts can't open Projects"), at a
-// bare /portal/admin and /portal/projects with no ?view=, on 2026-09-16 (beta AND production)
+// bare /console and /projects with no ?view=, on 2026-09-16 (beta AND production)
 // and 09-18. The server refusals were right. The shell drew both consoles anyway, because every
 // gate read `!supportView`, which is false on the support account's own portal by design.
 //
 // The fix has two halves and this drives the browser half of both:
 //   ADMIN    the shell draws the nav item and mounts AdminShell only on a real
-//            is_support_operator = false, and the route clamps refuse /portal/admin once it is
-//            true. The case that matters is a RELOAD on /portal/admin, where is_operator can
+//            is_support_operator = false, and the route clamps refuse /console once it is
+//            true. The case that matters is a RELOAD on /console, where is_operator can
 //            answer before is_support_operator does. So the stub holds is_support_operator back,
 //            and the checks are "never", not "not at the end".
 //   PROJECTS migration 250 makes can_open_projects() answer false for a support operator, and the
@@ -19,7 +19,7 @@
 //            E checks with the pre-250 answer. G checks the other direction: when the rpc fails
 //            twice, a CSM team member with the Projects area still gets the board.
 //
-// Cold deep links are real here. /portal/<page> is answered with portal.html's own bytes, which
+// Cold deep links are real here. /<page> is answered with portal.html's own bytes, which
 // is what the production _redirects rule does, so ssParsePath sees the path on first render. The
 // service worker is blocked: it answers navigations itself, and page.route never sees those.
 //
@@ -33,11 +33,11 @@
 // prove these checks can fail. Against the artifact before this fix (16b02f6) 12 checks fail, and
 // A reproduces the incident exactly: the Admin item is drawn, list_clients + get_master go out
 // ~340 ms in (before is_support_operator has answered), and the address bar stays on
-// /portal/admin. B's Admin check, C's "only after the answer", D and E fail with it.
+// /console. B's Admin check, C's "only after the answer", D and E fail with it.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -75,8 +75,8 @@ async function run(label, S, path) {
       for (const k of ["admin", "projects", "accounts"]) {
         // Not .ss-back: the Settings rail is always in the markup (hidden by CSS on workspace
         // pages) and its "Back to Workspace" link just mirrors the current tab, so on a cold
-        // /portal/projects it points there for the first render. It is not a way into a console.
-        if (document.querySelector(`a[href^="/portal/${k}"]:not(.ss-back)`)) window.__navSeen[k] = true;
+        // /projects it points there for the first render. It is not a way into a console.
+        if (document.querySelector(`a[href^="/${k}"]:not(.ss-back)`)) window.__navSeen[k] = true;
       }
     };
     const attach = () => {
@@ -135,8 +135,8 @@ async function run(label, S, path) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -150,9 +150,9 @@ async function run(label, S, path) {
     label, calls, pageErrors,
     seen: await page.evaluate(() => window.__navSeen),
     nav: await page.evaluate(() => ({
-      admin: !!document.querySelector('a[href^="/portal/admin"]:not(.ss-back)'),
-      projects: !!document.querySelector('a[href^="/portal/projects"]:not(.ss-back)'),
-      accounts: !!document.querySelector('a[href^="/portal/accounts"]'),
+      admin: !!document.querySelector('a[href^="/console"]:not(.ss-back)'),
+      projects: !!document.querySelector('a[href^="/projects"]:not(.ss-back)'),
+      accounts: !!document.querySelector('a[href^="/accounts"]'),
     })),
     path: await page.evaluate(() => location.pathname),
     bodyText: await page.evaluate(() => (document.querySelector(".ss-body") || document.body).innerText),
@@ -164,37 +164,37 @@ const sent = (r, fn, action) => r.calls.filter((c) => c.fn === fn && (!action ||
 const answeredAt = (r) => { const c = sent(r, "rpc", "is_support_operator")[0]; return c ? c.at : null; };
 
 try {
-  // ── A: support operator, own portal, reload on /portal/admin, is_support_operator held back ──
-  const A = await run("A", { operator: true, support: true, supportDelayMs: 1500, canProjects: false }, "/portal/admin");
+  // ── A: support operator, own portal, reload on /console, is_support_operator held back ──
+  const A = await run("A", { operator: true, support: true, supportDelayMs: 1500, canProjects: false }, "/console");
   ok("A: is_support_operator answered (the stub held it 1.5 s)", answeredAt(A) !== null, `at ${answeredAt(A)} ms`);
   ok("A: the Admin item is never drawn, not even before is_support_operator answers", !A.seen.admin);
   ok("A: AdminShell never mounts: no get_master", sent(A, "admin-catalog", "get_master").length === 0, JSON.stringify(sent(A, "admin-catalog")));
   ok("A: …and no list_clients", sent(A, "admin-catalog", "list_clients").length === 0);
   ok("A: no admin-catalog call of any kind", sent(A, "admin-catalog").length === 0);
-  ok("A: the address bar leaves /portal/admin", A.path !== "/portal/admin", A.path);
+  ok("A: the address bar leaves /console", A.path !== "/console", A.path);
   ok("A: the Accounts switcher is still offered", A.nav.accounts);
   ok("A: no Projects item (can_open_projects answers false after migration 250)", !A.seen.projects);
   ok("A: no portal-projects call", sent(A, "portal-projects").length === 0);
   ok("A: no uncaught page errors", A.pageErrors.length === 0, A.pageErrors.join(" | "));
 
-  // ── B: support operator, own portal, reload on /portal/projects ──
-  const B = await run("B", { operator: true, support: true, supportDelayMs: 800, canProjects: false }, "/portal/projects");
+  // ── B: support operator, own portal, reload on /projects ──
+  const B = await run("B", { operator: true, support: true, supportDelayMs: 800, canProjects: false }, "/projects");
   ok("B: the Projects item is never drawn", !B.seen.projects);
   ok("B: ProjectsTab never mounts: no list_boards", sent(B, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(B, "portal-projects")));
-  ok("B: the address bar leaves /portal/projects", B.path !== "/portal/projects", B.path);
+  ok("B: the address bar leaves /projects", B.path !== "/projects", B.path);
   ok("B: no Admin item and no admin-catalog call", !B.seen.admin && sent(B, "admin-catalog").length === 0);
   ok("B: no portal-projects request of ANY kind, ?warm=1 included", sent(B, "portal-projects").length === 0, JSON.stringify(sent(B, "portal-projects")));
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
 
   // ── C: a platform operator, same reload, same held rpc, still gets Admin ──
-  const C = await run("C", { operator: true, support: false, supportDelayMs: 1500, canProjects: true }, "/portal/admin");
+  const C = await run("C", { operator: true, support: false, supportDelayMs: 1500, canProjects: true }, "/console");
   const firstAdmin = sent(C, "admin-catalog")[0];
   ok("C: the Admin item is drawn", C.nav.admin);
   ok("C: AdminShell mounts: get_master and list_clients are sent", sent(C, "admin-catalog", "get_master").length > 0 && sent(C, "admin-catalog", "list_clients").length > 0,
     JSON.stringify(sent(C, "admin-catalog").map((c) => c.action)));
   ok("C: …but only after is_support_operator answered false", !!firstAdmin && answeredAt(C) !== null && firstAdmin.at >= answeredAt(C),
     `first admin-catalog at ${firstAdmin && firstAdmin.at} ms, rpc answered at ${answeredAt(C)} ms`);
-  ok("C: the deep link survives the wait (still /portal/admin)", C.path === "/portal/admin", C.path);
+  ok("C: the deep link survives the wait (still /console)", C.path === "/console", C.path);
   const cWarm = sent(C, "admin-catalog").filter((c) => c.warm);
   ok("C: the operator warm-up pings admin-catalog (?warm=1), after is_support_operator answered false",
     cWarm.length > 0 && answeredAt(C) !== null && cWarm[0].at >= answeredAt(C), JSON.stringify(cWarm));
@@ -204,17 +204,17 @@ try {
   // ── D: a platform operator whose is_support_operator call FAILS ──
   // The documented trade-off (the same posture as canProjects): unknown keeps the console shut
   // until the next token asks again, rather than guessing "not support".
-  const D = await run("D", { operator: true, support: false, supportFails: true, canProjects: true }, "/portal/admin");
+  const D = await run("D", { operator: true, support: false, supportFails: true, canProjects: true }, "/console");
   ok("D: a failed is_support_operator keeps Admin shut (fails closed)", !D.seen.admin && sent(D, "admin-catalog").length === 0);
   ok("D: …and the Accounts switcher still shows", D.nav.accounts);
-  ok("D: /portal/admin says access could not be confirmed instead of rendering blank", /Couldn't confirm your access/.test(D.bodyText), D.bodyText.slice(0, 120));
+  ok("D: /console says access could not be confirmed instead of rendering blank", /Couldn't confirm your access/.test(D.bodyText), D.bodyText.slice(0, 120));
   ok("D: the failed rpc is asked once more before giving up", sent(D, "rpc", "is_support_operator").length >= 2, String(sent(D, "rpc", "is_support_operator").length));
   ok("D: no uncaught page errors", D.pageErrors.length === 0, D.pageErrors.join(" | "));
 
   // ── E: the frontend alone, before migration 250 is applied ──
   // can_open_projects still answers true for a support account here, as the live database did
   // before 250. The shell's own projectsOpen gate (isSupportOp === false) must close it anyway.
-  const E = await run("E", { operator: true, support: true, supportDelayMs: 800, canProjects: true }, "/portal/projects");
+  const E = await run("E", { operator: true, support: true, supportDelayMs: 800, canProjects: true }, "/projects");
   ok("E: pre-250 rpc: the Projects item is never drawn", !E.seen.projects);
   ok("E: pre-250 rpc: ProjectsTab never mounts: no list_boards", sent(E, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(E, "portal-projects")));
   ok("E: pre-250 rpc: no portal-projects request of ANY kind, ?warm=1 included", sent(E, "portal-projects").length === 0, JSON.stringify(sent(E, "portal-projects")));
@@ -223,10 +223,10 @@ try {
 
   // ── G: a CSM team member with the Projects area (not an operator), is_support_operator FAILS ──
   // Team members never depended on this rpc before; a blip must not cost them the board.
-  const G = await run("G", { operator: false, support: false, supportFails: true, canProjects: true }, "/portal/projects");
+  const G = await run("G", { operator: false, support: false, supportFails: true, canProjects: true }, "/projects");
   ok("G: the Projects item is drawn once the rpc gives up", G.nav.projects);
   ok("G: ProjectsTab mounts: list_boards is sent", sent(G, "portal-projects", "list_boards").length > 0, JSON.stringify(sent(G, "portal-projects")));
-  ok("G: the deep link survives (still /portal/projects)", G.path === "/portal/projects", G.path);
+  ok("G: the deep link survives (still /projects)", G.path === "/projects", G.path);
   ok("G: no Admin item for a non-operator", !G.seen.admin);
   ok("G: no uncaught page errors", G.pageErrors.length === 0, G.pageErrors.join(" | "));
 } finally {

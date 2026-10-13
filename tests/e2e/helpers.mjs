@@ -106,7 +106,7 @@ export const CLIENT = process.env.PW_CLIENT || "pw-demo-barns";
 export async function loginWithMagicToken(page) {
   const token = process.env.PW_MAGIC_TOKEN;
   if (!token) throw new Error("PW_MAGIC_TOKEN is not set (mint one with the Auth admin generate_link API for a test owner)");
-  await page.goto("/portal");
+  await page.goto("/login");
   await page.waitForFunction(() => window.supabase && window.__ssAppBooted === true);
   const key = await anonKey(page);
   const result = await page.evaluate(async ({ url, key, token }) => {

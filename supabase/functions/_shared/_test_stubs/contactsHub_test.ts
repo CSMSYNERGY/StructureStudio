@@ -62,38 +62,59 @@ const CONTACTS_ONLY = { people: true, designs: false };
 
 // ─── 1. Every old address lands in the hub ─────────────────────────────────────────────────────
 Deno.test("old Pipeline, Leads and Contacts addresses all land in the hub, on the view they meant", () => {
+  // Each address at its ROOT form (the app's address since 2026-10-13) AND with the old /portal in
+  // front, which the router still reads for any address no host redirected.
   const cases: [string, Route][] = [
-    ["/portal/contacts", { page: "contacts", sub: null }],
-    ["/portal/contacts/people", { page: "contacts", sub: "people" }],
-    ["/portal/contacts/designs", { page: "contacts", sub: "designs" }],
-    ["/portal/contacts/p-" + A, { page: "contacts", sub: "p-" + A }],
-    ["/portal/contacts/c-" + B, { page: "contacts", sub: "c-" + B }],
+    ["/contacts", { page: "contacts", sub: null }],
+    ["/contacts/people", { page: "contacts", sub: "people" }],
+    ["/contacts/designs", { page: "contacts", sub: "designs" }],
+    ["/contacts/p-" + A, { page: "contacts", sub: "p-" + A }],
+    ["/contacts/c-" + B, { page: "contacts", sub: "c-" + B }],
     // The separate Pipeline page, every one of its views, and its record links.
-    ["/portal/designs", { page: "contacts", sub: null }],
-    ["/portal/designs/list", { page: "contacts", sub: "designs" }],
-    ["/portal/designs/pipeline", { page: "contacts", sub: "pipeline" }],
-    ["/portal/designs/people", { page: "contacts", sub: "people" }],
-    ["/portal/designs/deals", { page: "contacts", sub: null }],
-    ["/portal/designs/d-SS-ABCD2345", { page: "contacts", sub: "d-SS-ABCD2345" }],
-    ["/portal/designs/c-" + A, { page: "contacts", sub: "c-" + A }],
-    ["/portal/designs/billing", { page: "contacts", sub: null }],
-    ["/portal/designs/constructor", { page: "contacts", sub: null }],
+    ["/designs", { page: "contacts", sub: null }],
+    ["/designs/list", { page: "contacts", sub: "designs" }],
+    ["/designs/pipeline", { page: "contacts", sub: "pipeline" }],
+    ["/designs/people", { page: "contacts", sub: "people" }],
+    ["/designs/deals", { page: "contacts", sub: null }],
+    ["/designs/d-SS-ABCD2345", { page: "contacts", sub: "d-SS-ABCD2345" }],
+    ["/designs/c-" + A, { page: "contacts", sub: "c-" + A }],
+    ["/designs/billing", { page: "contacts", sub: null }],
+    ["/designs/constructor", { page: "contacts", sub: null }],
     // The Leads tab's board (migration 301): the pipeline it named, or the board.
-    ["/portal/pipelines", { page: "contacts", sub: "pipeline" }],
-    ["/portal/pipelines/" + A.toUpperCase(), { page: "contacts", sub: "p-" + A }],
-    ["/portal/pipelines/not-a-pipeline", { page: "contacts", sub: "pipeline" }],
+    ["/pipelines", { page: "contacts", sub: "pipeline" }],
+    ["/pipelines/" + A.toUpperCase(), { page: "contacts", sub: "p-" + A }],
+    ["/pipelines/not-a-pipeline", { page: "contacts", sub: "pipeline" }],
     // The pre-09-02 Contacts address.
-    ["/portal/leads", { page: "contacts", sub: null }],
-    ["/portal/leads/c-" + A, { page: "contacts", sub: "c-" + A }],
+    ["/leads", { page: "contacts", sub: null }],
+    ["/leads/c-" + A, { page: "contacts", sub: "c-" + A }],
     // Untouched: Settings → Pipelines is a settings page, and every other page keeps its address.
-    ["/portal/settings/pipelines", { page: "settings", sub: "pipelines" }],
-    ["/portal/settings/myview", { page: "settings", sub: "myprofile" }],
-    ["/portal/orders/o-12", { page: "orders", sub: "o-12" }],
-    ["/portal/releases/mine", { page: "support", sub: "mine" }],
-    ["/portal", { page: null, sub: null }],
-    ["/designer", { page: null, sub: null }],
+    ["/settings/pipelines", { page: "settings", sub: "pipelines" }],
+    ["/settings/myview", { page: "settings", sub: "myprofile" }],
+    ["/orders/o-12", { page: "orders", sub: "o-12" }],
+    ["/releases/mine", { page: "support", sub: "mine" }],
+    ["/designer", { page: "designer", sub: null }],
   ];
-  for (const [path, want] of cases) assertEquals(parse(path), want, path);
+  for (const [path, want] of cases) {
+    assertEquals(parse(path), want, path);
+    assertEquals(parse("/portal" + path), want, "/portal" + path);
+  }
+  // The bare app address, both shapes, and the file itself: no page in it.
+  for (const path of ["/login", "/portal", "/portal.html", "/"]) assertEquals(parse(path), { page: null, sub: null }, path);
+  // The Admin page: /console now (and /portal/admin before); /admin is admin.html, never the app's.
+  assertEquals(parse("/console/clients"), { page: "admin", sub: "clients" });
+  assertEquals(parse("/portal/admin/clients"), { page: "admin", sub: "clients" });
+  assertEquals(parse("/admin"), { page: null, sub: null });
+});
+
+Deno.test("the app writes root addresses and heals an old /portal one to the same place", () => {
+  const R = new Function("window", `${ROUTE_SRC}; return { ssRootPath, ssPageBase, ssPagePath };`)({ location: { pathname: "/", search: "?view=acme" } }) as any;
+  assertEquals(R.ssPagePath("contacts", "p-" + A), "/contacts/p-" + A + "?view=acme");
+  assertEquals(R.ssPageBase("admin", "clients"), "/console/clients");
+  assertEquals(R.ssPageBase(null, "x"), "/login");
+  for (const [from, to] of [["/portal", "/login"], ["/portal/", "/login"], ["/portal.html", "/login"],
+    ["/portal/contacts/c-" + B, "/contacts/c-" + B], ["/portal/admin", "/console"], ["/portal/admin/clients", "/console/clients"],
+    ["/portal/designs/list", "/designs/list"]]) assertEquals(R.ssRootPath(from), to, from);
+  for (const p of ["/", "/login", "/contacts", "/console", "/portalx", "/my-quotes"]) assertEquals(R.ssRootPath(p), null, p);
 });
 
 Deno.test("ssCanonRoute maps an old page id the shell is handed, and nothing else", () => {

@@ -1,6 +1,6 @@
 // The operator console's "Twilio account" card (Workstream 2, phase 9: AdmTwilioAccount in
 // portal/07-admin.jsx), driven for real on the COMPILED portal as a platform operator on
-// /portal/admin/account.
+// /console/account.
 //
 // What it proves, against admin-catalog answers stubbed at the network layer (no login, nothing
 // leaves the machine; the supportConsoles.mjs shape):
@@ -28,7 +28,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -124,9 +124,9 @@ async function run(label, S) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
 
-  await page.goto(`${BASE}/portal/admin/account`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/console/account`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   const card = page.locator("[data-adm-twilio-account]");
   await card.waitFor({ timeout: 30000 });

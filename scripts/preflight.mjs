@@ -585,8 +585,9 @@ function run(files) {
 
   // portal.html's module tag must stay ROOT-ABSOLUTE, and this rule is the only thing that can
   // protect the ONE failure mode no in-page check can reach. If the module URL resolves to
-  // something under /portal/ that is not a real asset, the `/portal/*` splat in _redirects returns
-  // portal.html itself with HTTP 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
+  // something under a page's address that is not a real asset, that page's `/<slug>/*` rule in
+  // _redirects (the `/portal/*` splat until 2026-10-13) returns portal.html itself with HTTP
+  // 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
   // SyntaxError inside its own runner, and that throw ABORTS THE WHOLE QUEUE: the mount block
   // never executes, so the page is blank AND completely unlogged, because the error reporter lives
   // in the block that never ran. A check inside the mount block cannot help, by construction.
@@ -602,8 +603,8 @@ function run(files) {
   // rather than left to habit.
   //
   // (1) The compiled app tags. Every *.compiled.js tag must be ROOT-ABSOLUTE (portal.html is
-  // served at /portal/<page>/<sub> too, where a relative src resolves against URL depth and
-  // the /portal/* splat answers with portal.html at HTTP 200 — a classic script handed HTML
+  // served at /<page>/<sub> too, where a relative src resolves against URL depth and
+  // the page's /<slug>/* rule answers with portal.html at HTTP 200 — a classic script handed HTML
   // is a SyntaxError, and only the guard's sentinel would notice), must carry `defer` (defer
   // executes after parsing — after the guard has set or not set __ssBootBlocked — and in
   // DOCUMENT ORDER; a tag without defer executes mid-parse, BEFORE the guard exists), must
@@ -615,7 +616,7 @@ function run(files) {
     for (const t of tags) {
       const attrs = t[1] + " ";
       if (!t[2].startsWith("/")) {
-        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /portal/* a `
+        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /<page>/* a `
           + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
           + "only the sentinel to notice. Use a leading /");
       }
@@ -624,7 +625,7 @@ function run(files) {
       // for window.ssLoadDesigner(), which injects the real script on demand. `defer` and
       // `async` describe when a script RUNS, and this one never runs, so both rules are
       // vacuous here. The shape is still held to root-absolute above (the loader copies the
-      // src verbatim, so /portal/settings/... would break exactly as it did for a real tag)
+      // src verbatim, so /settings/... would break exactly as it did for a real tag)
       // and is separately required to be BACKED BY A LOADER below — removing the eager
       // tag without one would otherwise pass every check and ship a dead Designer tab.
       const isSrcPointer = /\stype="ss\/designer-src"/.test(attrs);
@@ -1964,11 +1965,13 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  const covered = new Set([...spec.matchAll(/"\/portal\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
+  // Root addresses since 2026-10-13 (/settings/<slug>, no /portal): the spec lists the canonical
+  // form, and scripts/redirects.test.mjs proves each one's old /portal address still redirects.
+  const covered = new Set([...spec.matchAll(/"\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
   const missing = [...slugs].filter((s) => !covered.has(s)).sort();
   if (missing.length) {
     errors.push(`${SPEC}: ${missing.length} Settings slug(s) have no route in the smoke suite — `
-      + missing.map((s) => `"/portal/settings/${s}"`).join(", ")
+      + missing.map((s) => `"/settings/${s}"`).join(", ")
       + ". An unknown sub CLAMPS to the first tab rather than erroring, so an untested settings "
       + "page fails silently by landing people on Structures. Add them to ROUTES.");
   }
@@ -3258,7 +3261,7 @@ if (process.argv.includes("--self-test")) {
       + "reported errors on the real files");
     process.exit(1);
   }
-  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/portal/settings/cladding",', "") })
+  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/settings/cladding",', "") })
         .some((e) => /cladding/.test(e))) {
     console.error("self-test FAILED: a settings slug missing from the smoke suite did not fire");
     process.exit(1);

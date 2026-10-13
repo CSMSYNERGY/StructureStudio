@@ -1099,7 +1099,7 @@ function PMSetupAdmin({ canWrite }) {
                 </div>
               )}
               {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
-              {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
+              {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /{t.link_page}</div>}
               {t.image_url && (
                 <img src={t.image_url} alt="" onClick={() => setViewing({ url: t.image_url, title: t.title })}
                   style={{ display: "block", height: 56, borderRadius: 6, border: "1px solid #E2E8F0", marginTop: 6, cursor: "zoom-in" }} />
@@ -1302,7 +1302,7 @@ function ProjectsTab({ sub, onSub }) {
   useEffect(() => { loadBoards(); }, [loadBoards]);
 
   // "setup" is a reserved slug, not a board: the Client Setup surface rides the same tab
-  // strip and the same /portal/projects/<sub> routing, but has no pm_board behind it. A
+  // strip and the same /projects/<sub> routing, but has no pm_board behind it. A
   // real board can never take the slug — create_board suffixes it like any other clash.
   const setupMode = sub === "setup";
   const activeBoard = useMemo(() => {
@@ -1657,7 +1657,7 @@ function ProjectsTab({ sub, onSub }) {
                 // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
                 // into the popout — Projects is the operator's own console, and a popout
                 // booted with ?view= would re-enter view-as and flip supportView.
-                window.open("/portal/projects" + (slug ? "/" + slug : "") + "?popout=1",
+                window.open(ssPageBase("projects", slug || null) + "?popout=1",
                   "ss_projects_popout", "popup=yes,width=1100,height=800,noopener");
               }}
               style={{ background: "none", border: "none", padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>↗</button>

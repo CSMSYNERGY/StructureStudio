@@ -2,7 +2,7 @@
 // Mounts the shared designer module (structure-studio.component.js, loaded before this
 // block) with `embedded` chrome-suppression/gate-bypass and the tenant passed as a prop
 // — the loader then skips URL parsing entirely and can never hit its bare-root
-// /portal.html redirect (which would loop the portal).
+// redirect to /login (which would loop the portal).
 // ── Photo straightening for fixture images ──────────────────────────────────────────
 // A door photo taken on a phone is never square-on, and in 3D that photo is stretched
 // flat onto the door slab: every degree of camera tilt shows up as a leaning door on the

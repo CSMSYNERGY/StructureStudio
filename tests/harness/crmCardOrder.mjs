@@ -200,11 +200,11 @@ async function openRecord(s, path) {
     return { keys: heads.map((d) => byTitle[d.textContent]), titles: heads.map((d) => d.textContent) };
   }, TITLES);
 }
-const contactPath = `/portal/contacts/c-${CONTACT_ID}`;
-const designPath = `/portal/designs/d-${CODE}`;
+const contactPath = `/contacts/c-${CONTACT_ID}`;
+const designPath = `/designs/d-${CODE}`;
 
 async function openProfile(s) {
-  await s.go("/portal/settings/myprofile");
+  await s.go("/settings/myprofile");
   await s.page.waitForFunction(() => !!document.querySelector('[data-ss-card-order="contact"]'), null, { timeout: 20000 }).catch(() => {});
   await s.page.waitForTimeout(300);
 }

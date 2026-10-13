@@ -27,7 +27,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 import { parseAdoptNumber, parsePortRequest, portRequestView } from "../../supabase/functions/portal-settings/numberRequests.ts";
 import { parseCnamDisplayName, validateIntake } from "../../supabase/functions/_shared/twilioTrustHub.ts";
 
@@ -126,8 +126,8 @@ async function phonePage(label, S) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
-  await page.goto(`${BASE}/portal/settings/phone`, { waitUntil: "domcontentloaded" });
+  await serveAppRoutes(page, PORTAL_HTML);
+  await page.goto(`${BASE}/settings/phone`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   await page.waitForSelector("[data-ss-phone-callerid]", { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(300);
@@ -274,8 +274,8 @@ try {
     };
     await page.route(`**/${REF}.supabase.co/**`, handler);
     await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-    await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
-    await page.goto(`${BASE}/portal/admin`, { waitUntil: "domcontentloaded" });
+    await serveAppRoutes(page, PORTAL_HTML);
+    await page.goto(`${BASE}/console`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
     const reqCard = page.locator("[data-adm-number-requests]");
     await reqCard.waitFor({ timeout: 30000 }).catch(() => {});

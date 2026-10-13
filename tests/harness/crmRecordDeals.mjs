@@ -37,7 +37,7 @@
 // Fixtures are obviously fake (example.test, 555 numbers, a made-up tenant), per the public-repo rule.
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
+import { launch, reporter, BASE, REF, shotsDir, serveAppRoutes } from "./lib.mjs";
 
 const CLIENT = "harness-crm-record-deals";
 const CONTACT_ID = "7d1f3a52-6c0b-4c8e-9a51-2f4e8b7c1d90";
@@ -182,7 +182,9 @@ async function scenario(browser, { withPipeline = true, access = EDIT_ACCESS }) 
     const src = readFileSync(process.env.SS_PORTAL_ARTIFACT, "utf8");
     await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: src }));
   }
-  await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
+  // The app at its root address (/login, the bare one), answered from _redirects as the host does.
+  await serveAppRoutes(page);
+  await page.goto(`${BASE}/login`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 90000 });
   await page.waitForTimeout(600);
   const go = async (path) => {
@@ -214,7 +216,7 @@ try {
   // ════ The pipeline block present (the new server) ════
   {
     const { ctx, page, pageErrors, calls, go } = await scenario(browser, { withPipeline: true });
-    await go(`/portal/contacts/c-${CONTACT_ID}`);
+    await go(`/contacts/c-${CONTACT_ID}`);
     await page.waitForFunction(() => !!document.querySelector("[data-ss-deal-row]"), null, { timeout: 30000 }).catch(() => {});
     const rendered = ok("the Deals rows rendered", (await page.locator("[data-ss-deal-row]").count()) > 0);
     if (!rendered) throw new Error("no deal rows; every check below would be vacuous");
@@ -327,7 +329,7 @@ try {
     ok("H2 then moves with that reason", m3.length === 3 && m3[2].stageId === SOLD.stages[3].id && m3[2].lostReason === "Financing fell through", JSON.stringify(m3[2]));
 
     // ── I ──
-    await go(`/portal/designs/d-${D_DLX.short_code}`);
+    await go(`/designs/d-${D_DLX.short_code}`);
     await page.waitForFunction(() => !!document.querySelector('[data-ss-stage-label="sales"]'), null, { timeout: 20000 }).catch(() => {});
     const dRow = await barRow(page);
     ok("I1 a design record draws its card's pipeline", dRow && dRow.label === "Shed Deals" && dRow.lit.join() === "Attempting Contact", JSON.stringify(dRow));
@@ -335,7 +337,7 @@ try {
     await shot(page, "design-record");
 
     // ── L ──
-    await go("/portal/designs/pipeline");
+    await go("/designs/pipeline");
     const card = page.locator(`[data-ss-deal="${DEALS()[2].id}"]`);
     await card.waitFor({ timeout: 20000 }).catch(() => {});
     const onBoard = ok("L0 the deluxe card is on the Shed Deals board", (await card.count()) === 1);
@@ -351,7 +353,7 @@ try {
       await shot(page, "opened-from-board");
     }
     // A LEAD card (no design, so no short code) opens its customer with that deal picked (C22).
-    await go(`/portal/contacts/p-${SOLD.id}`);
+    await go(`/contacts/p-${SOLD.id}`);
     const leadCard = page.locator(`[data-ss-deal="${LEAD_ID}"]`);
     await leadCard.waitFor({ timeout: 20000 }).catch(() => {});
     if (ok("L3 the lead card is on the Sold board", (await leadCard.count()) === 1)) {
@@ -401,7 +403,7 @@ try {
       search: await page.getByPlaceholder("Search: company, name, phone, email…").inputValue().catch(() => null),
     });
     const UTIL_DEAL = DEALS()[1].id;
-    await go(`/portal/contacts/p-${SOLD.id}`);
+    await go(`/contacts/p-${SOLD.id}`);
     await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
     const unfiltered = await shownCards();
     ok("M0 the Sold board shows three cards before any filter", unfiltered.length === 3, JSON.stringify(unfiltered));
@@ -423,7 +425,7 @@ try {
     await page.waitForTimeout(400);
     const afterBack = await boardState();
     ok("M3 the record's Back lands on the same board, still searched and filtered",
-      afterBack.path === `/portal/contacts/p-${SOLD.id}` && JSON.stringify(afterBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBack.filter === "Payment Received" && afterBack.search === "util",
+      afterBack.path === `/contacts/p-${SOLD.id}` && JSON.stringify(afterBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBack.filter === "Payment Received" && afterBack.search === "util",
       JSON.stringify(afterBack));
     await shot(page, "board-after-record-back");
     // And the browser's Back.
@@ -435,15 +437,15 @@ try {
     await page.waitForTimeout(400);
     const afterBrowserBack = await boardState();
     ok("M4 the browser's Back does the same",
-      afterBrowserBack.path === `/portal/contacts/p-${SOLD.id}` && JSON.stringify(afterBrowserBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBrowserBack.filter === "Payment Received" && afterBrowserBack.search === "util",
+      afterBrowserBack.path === `/contacts/p-${SOLD.id}` && JSON.stringify(afterBrowserBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBrowserBack.filter === "Payment Received" && afterBrowserBack.search === "util",
       JSON.stringify(afterBrowserBack));
     // Another pipeline keeps its own view: Shed Deals is not filtered by Sold's.
-    await go(`/portal/contacts/p-${SHED.id}`);
+    await go(`/contacts/p-${SHED.id}`);
     await page.waitForTimeout(400);
     const shedView = await boardState();
     ok("M5 another pipeline's board is not filtered by this one's view", shedView.filter === "All statuses" && shedView.search === "", JSON.stringify(shedView));
     // Cleared, it stays cleared: × on the filter, × on the search, open a card, Back.
-    await go(`/portal/contacts/p-${SOLD.id}`);
+    await go(`/contacts/p-${SOLD.id}`);
     await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
     await page.getByRole("button", { name: "Clear the status filter" }).click();
     await page.getByRole("button", { name: "Clear search" }).click();
@@ -465,7 +467,7 @@ try {
   // ════ K: a reader who can't edit contacts ════
   {
     const { ctx, page, pageErrors, calls, go } = await scenario(browser, { withPipeline: true, access: VIEW_ACCESS });
-    await go(`/portal/contacts/c-${CONTACT_ID}`);
+    await go(`/contacts/c-${CONTACT_ID}`);
     await page.waitForFunction(() => !!document.querySelector("[data-ss-deal-row]"), null, { timeout: 30000 }).catch(() => {});
     await page.locator(`${rowEl(D_LOFT.short_code)} button[aria-expanded]`).click();
     await page.waitForTimeout(500);
@@ -481,7 +483,7 @@ try {
   // ════ J: a server without the pipeline block ════
   {
     const { ctx, page, pageErrors, go } = await scenario(browser, { withPipeline: false });
-    await go(`/portal/contacts/c-${CONTACT_ID}`);
+    await go(`/contacts/c-${CONTACT_ID}`);
     await page.waitForFunction(() => !!document.querySelector("[data-ss-deal-row]"), null, { timeout: 30000 }).catch(() => {});
     const keys = await page.evaluate(() => [...document.querySelectorAll("[data-ss-deal-row]")].map((r) => r.getAttribute("data-ss-deal-row")));
     ok("J1 the designs are still the Deals rows", JSON.stringify(keys) === JSON.stringify(DESIGNS.map((d) => d.short_code)), JSON.stringify(keys));

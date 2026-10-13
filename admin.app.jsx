@@ -358,7 +358,7 @@ function AdminApp() {
     if (!to) return;
     setEmailTestBusy(true); setMsg(null);
     try {
-      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal" });
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/login" });
       flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
     } catch (e) { flash({ err: e.message }); }
     setEmailTestBusy(false);
@@ -532,7 +532,7 @@ function AdminApp() {
       const email = ownerEmail.trim();
       const r = await api("link_owner", pwd, {
         clientId: sel, email, role: linkRole,
-        portalUrl: location.origin + "/portal",
+        portalUrl: location.origin + "/login",
         ...(reassign ? { reassign: true } : {}),
       });
       // Names the role link_owner actually wrote: "owner" (every area, Billing included), never
@@ -762,8 +762,9 @@ function AdminApp() {
           <button onClick={togglePayments} disabled={!sel} style={S.btn(sel ? "#FEF3C7" : "#F1F5F9", sel ? "#92400E" : "#94A3B8")} title={sel ? `Card payments + merchant id for ${sel}` : "Select a builder first"}>{payOpen ? "Cancel" : "Card payments"}</button>
           <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
-              client (portal.html auto-opens ?view= for logged-in operators). */}
-          {sel && <a href={`/portal?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
+              client (portal.html auto-opens ?view= for logged-in operators), on Contacts —
+              where the portal's own account switcher lands too. */}
+          {sel && <a href={`/contacts?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>

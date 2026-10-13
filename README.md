@@ -19,7 +19,7 @@ The app was renamed **Structure Studio Suite** (trademark conflict), so hosting 
 Each customer (a shed business) is a **tenant** identified by a `client_id` slug, with:
 
 - A **public designer link** — `https://app.structurestudiosuite.com/?client=<client_id>` — branded with their config. Shoppers design a building and submit for a quote; no login required.
-- A **business portal** — `https://<site>/portal.html` (also where the bare site root redirects) — where the owner logs in to see their submitted designs/leads, copy their customer link, run the build/delivery schedules, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
+- A **business portal** — `https://<site>/login` (also where the bare site root redirects; every page has a root address such as `/contacts` or `/settings/colors`, and old `/portal/…` links 301 there) — where the owner logs in to see their submitted designs/leads, copy their customer link, run the build/delivery schedules, and manage their GoHighLevel + business settings. Row Level Security guarantees each business only ever sees its own data.
 
 The tenant parser also recognizes per-tenant subdomains on either apex, but **no wildcard DNS is provisioned** — subdomain links do not currently resolve; tenant links use `?client=<id>`.
 
@@ -94,7 +94,7 @@ New tenants land on a billing gate until they subscribe; tenants predating the g
 
 ## Supabase Auth settings
 
-Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://app.structurestudiosuite.com`, with `https://app.structurestudiosuite.com/portal` on the redirect allow-list so password-recovery emails land there. Keep the legacy structurestudio.app entries while already-sent links are alive.
+Configured in the Dashboard (Authentication): public sign-ups disabled (the operator creates owner accounts), Site URL `https://app.structurestudiosuite.com`, with `https://app.structurestudiosuite.com/login` on the redirect allow-list so password-recovery emails land there (`/portal` until 2026-10-13; keep it listed while links already sent are alive — the host 301s it to `/login`). Keep the legacy structurestudio.app entries while already-sent links are alive.
 
 ⛔ **Never run `supabase config push`.** It is declarative and `supabase/config.toml` deliberately has no `[auth]` section — pushing it would reset `site_url` to localhost, de-allow-list the real redirect, and clear custom SMTP. Make auth changes in the dashboard.
 
