@@ -326,7 +326,7 @@ try {
   // where it sits, that nothing overlaps or scrolls, that exactly one thing looks picked, that the
   // arrow keys stay inside a group, and that a narrow window puts the bubble on its own line.
   {
-    const HUB = "/portal/contacts";
+    const HUB = "/contacts";
     const ACC = "rgb(61, 54, 114)";
     // The row's geometry and looks, in the page. `units` are what a person sees as one thing each:
     // a pipeline tab, the drop-down (its tab and ▾ together), one part of the bubble.
