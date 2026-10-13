@@ -1073,8 +1073,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // A new tenant used to open Settings → Options → Electrical to three "Your standards"
         // dropdowns holding nothing but "— none —", because the choices are the tenant's own
         // electrical_items rows and neither the blank path nor the clone path above creates any.
-        // Seed the three the package lays out — the same shape migration 206 gave every
-        // pre-existing tenant — and point the standards at them, so the only thing left to do
+        // Seed the three the package lays out (the shape migration 206 gave every pre-existing
+        // tenant) plus four common add-ons, and point the standards at the three, so the only thing left to do
         // is price them. Both prices NULL on purpose: NULL reads "not offered" until the builder
         // decides, never a guessed dollar amount. `enabled` keeps its default (off) for the same
         // reason — nothing is offered to a customer by a seed.
@@ -1084,10 +1084,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // check. ignoreDuplicates because (client_id, name) is unique and a retry must not 500.
         let electricalSeeded = 0;
         try {
+          // The four add-ons joined the same day ("also add these"), copied from structure-studio's
+          // own list: mount, height and sort order as there, prices still NULL.
           const starters = [
-            { name: "Outlet",       icon: "🔌", mount: "wall",    height_off_floor_in: 24, sort_order: 1 },
-            { name: "Light Switch", icon: "🎚️", mount: "wall",    height_off_floor_in: 48, sort_order: 2 },
-            { name: "Light",        icon: "💡", mount: "ceiling", height_off_floor_in: 96, sort_order: 3 },
+            { name: "Outlet",        icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 1 },
+            { name: "Light Switch",  icon: "🎚️", mount: "wall",    height_off_floor_in: 48,  sort_order: 2 },
+            { name: "Light",         icon: "💡", mount: "ceiling", height_off_floor_in: 96,  sort_order: 3 },
+            { name: "Ceiling Fan",   icon: "🌀", mount: "ceiling", height_off_floor_in: 96,  sort_order: 10 },
+            { name: "Flood Light",   icon: "🔦", mount: "wall",    height_off_floor_in: 108, sort_order: 20 },
+            { name: "220V Outlet",   icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 30 },
+            { name: "Extra Breaker", icon: "🧰", mount: "wall",    height_off_floor_in: 60,  sort_order: 40 },
           ];
           const ins = await sb.from("electrical_items")
             .upsert(starters.map((it) => ({ client_id: clientId, ...it, price_with_package: null, price_standalone: null })),
