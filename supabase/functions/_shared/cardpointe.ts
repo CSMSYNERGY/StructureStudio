@@ -894,8 +894,12 @@ export function cpTokenizerHeight(rail: "card" | "ach" | "swipe"): number {
   // expiry fields onto separate lines and doubled every label gap.
   // Generous by ~20px: an over-tall frame is whitespace, an under-tall one is a form the
   // customer cannot finish, and nothing errors when it happens.
-  // The swipe rail is ONE labelled box, like ach (no expiry, no CVV), so it takes ach's height
-  // rather than leaving the "Ready" button under 150px of empty frame.
+  // The swipe rail is ONE box and no label (itoke draws cardlabel only beside an expiry or CVV
+  // box). MEASURED 2026-10-13 on the UAT iframe with the CSS above: the box spans 5-48px and
+  // the form ends at 60px. It was 130 (ach's): 70px of the frame's own blank page under the box,
+  // and a click there left the frame's focus on its body, where a swipe vanished. The portal now
+  // covers this frame with a click target of its own; the height is kept to the box anyway.
+  if (rail === "swipe") return 64;
   return rail === "card" ? 265 : 130;
 }
 

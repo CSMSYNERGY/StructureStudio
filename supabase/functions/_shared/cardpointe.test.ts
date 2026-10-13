@@ -291,7 +291,9 @@ Deno.test("the SWIPE tokenizer is its own parameter set, so the reader's letters
   for (const p of ["cardnumbernumericonly", "formatinput", "useexpiry", "useexpiryfield", "usecvv", "invalidcreditcardevent", "invalidexpiryevent", "invalidcvvevent"]) {
     check(`swipe has NO ${p}`, !q.has(p) && !swipe.includes(`${p}=`), swipe);
   }
-  check("one box, so ach's height", cp.cpTokenizerHeight("swipe") >= 110 && cp.cpTokenizerHeight("swipe") < cp.cpTokenizerHeight("card"), String(cp.cpTokenizerHeight("swipe")));
+  // The box and its margin end at 60px (measured on the UAT iframe). Any taller is the frame's own
+  // blank page, where a click leaves the focus on its body and the next swipe vanishes.
+  check("sized to its one box: clears the measured 60px, not much more", cp.cpTokenizerHeight("swipe") >= 60 && cp.cpTokenizerHeight("swipe") <= 76, String(cp.cpTokenizerHeight("swipe")));
 });
 
 Deno.test("adding the swipe rail left the card and ach URLs byte-for-byte as they were", async () => {

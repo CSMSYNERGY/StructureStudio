@@ -3653,6 +3653,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [entry, setEntry] = useState("keyed");          // "keyed" | "swipe"
   const [payOpts, setPayOpts] = useState(null);
   const [payToken, setPayToken] = useState(null);
+  const payTokenRef = useRef(null);   // the token right now, for the read timer (see the message listener)
+  payTokenRef.current = payToken;
   const [payExpiry, setPayExpiry] = useState(null);
   const [tokenErr, setTokenErr] = useState("");
   const [surcharge, setSurcharge] = useState(null);
@@ -3666,6 +3668,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const readTimerRef = useRef(null);   // the reader typed, no token yet: see the message listener
   const landTimerRef = useRef(null);   // the trap's "the burst is over" debounce
   const stopReadTimer = () => { if (readTimerRef.current) { clearTimeout(readTimerRef.current); readTimerRef.current = null; } };
+  // How long a read may take, from the reader's FIRST key, before the page says Fiserv refused it.
+  // The frame says "typing" once per read and nothing at the end of one, so this window has to
+  // hold the whole read: a key pressed before the swipe, the reader's own typing speed (never
+  // measured), the frame's 2 s of quiet and CardSecure's answer. At 8 s a slow read was told
+  // "refused" while the reader was still typing (2026-10-13).
+  const READ_WAIT_MS = 20000;
   // The bank rail's two boxes (see achTokenize). These two strings are the ONLY place the
   // numbers live: every way out of the modal empties them, and nothing copies them anywhere.
   const [achRouting, setAchRouting] = useState("");
@@ -3746,14 +3754,22 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // character and {cardTyping:false} after a token; neither carries a token or an error, so
       // both fall through to the `!tok` return below. When Fiserv's card system refuses the read
       // (a reader keyed for the other system, a damaged stripe), the frame posts NOTHING else:
-      // it only answers a 200. So "typing, then 8 s of silence" is the only sign there is.
-      if (m && m.cardTyping === true && entry === "swipe") {
+      // it only answers a 200. So "typing, then READ_WAIT_MS of silence" is the only sign there is.
+      //   * Not while a token is held: after a token the frame says "typing" again on ANY key in
+      //     its box (an Enter, a Shift), and the timer then threw a good card away.
+      //   * Only for the frame that said it: a switch to Bank / ACH, or a Ready that reloads the
+      //     frame, leaves this timer behind, and it must not touch what is on screen by then.
+      //   * Until it fires the page stays armed: "Press Ready" mid-read reloads the frame and
+      //     throws the read away.
+      if (m && m.cardTyping === true && entry === "swipe" && !payTokenRef.current) {
         stopReadTimer();
+        const f = frameRef.current;
         readTimerRef.current = setTimeout(() => {
           readTimerRef.current = null;
-          setPayToken(null); setArmed(false);
+          if (frameRef.current !== f || payTokenRef.current) return;
+          setArmed(false);
           setTokenErr("The reader read the card, but Fiserv's card system didn't accept it. Press Ready and swipe again. If it happens twice, stop.");
-        }, 8000);
+        }, READ_WAIT_MS);
       }
       // Every answer below ends the swipe attempt, so each one disarms: "Press Ready" has to be
       // a button that works, not one that stays grey for the rest of the minute.
@@ -3782,7 +3798,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     };
     window.addEventListener("message", onMsg, false);
     return () => { window.removeEventListener("message", onMsg, false); stopReadTimer(); };
-  }, [payOpen, collect, payOpts, entry]);
+  }, [payOpen, collect, payOpts, entry, method]);
 
   // The bank rail has no iframe to post a token back: once BOTH boxes are valid, the numbers
   // are tokenized from here, two seconds after the last keystroke — the quiet the tokenizer's
@@ -3892,14 +3908,26 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       landTimerRef.current = setTimeout(() => { landTimerRef.current = null; setArmed(false); }, 1500);
     };
     document.addEventListener("keydown", swallow, true);
-    // An indefinitely armed page is one where the next thing anyone types disappears.
-    const t = setTimeout(() => setArmed(false), 60000);
+    // An indefinitely armed page is one where the next thing anyone types disappears. A read
+    // still in flight keeps it armed: the read timer disarms when it gives up.
+    const t = setTimeout(() => { if (!readTimerRef.current) setArmed(false); }, 60000);
     return () => {
       document.removeEventListener("keydown", swallow, true);
       clearTimeout(t);
       if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; }
     };
-  }, [armed]);
+    // armCount: a re-arm while armed (a click on the reader's frame) starts the minute again.
+  }, [armed, armCount]);
+
+  // "Ready": a NEW reader frame (armCount is its key), whose autofocus puts the focus in its box,
+  // and nothing left of the last read. The Ready button and a click on the reader's frame both
+  // come here.
+  const armReader = () => {
+    stopReadTimer();
+    setArmCount((n) => n + 1); setFrameReady(false);
+    setPayToken(null); setPayExpiry(null); setTokenErr("");
+    setArmed(true);
+  };
 
   const askCents = payOpts && payOpts.canCharge ? payOpts.askCents : 0;
   const feeCents = surcharge && surcharge.applies && surcharge.percent
@@ -4545,7 +4573,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       // Not where the server has already said this account can't charge: there
                       // is no toggle back from "charge" (see the effect beside pay_options).
                       setCollect((id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge) ? "charge" : "recorded");
-                      setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
+                      setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch();
                     }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
@@ -4561,7 +4589,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
-                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); clearAch(); }}
+                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); }}
                         style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                     ))}
                   </div>
@@ -4582,7 +4610,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {method === "card" && (
                     <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                       {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
-                        <button key={id} type="button" onClick={() => { setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); }}
+                        // The one already chosen does nothing: it reloads no frame, so dropping the
+                        // arm (or the card) there left the reader typing into this button, unheard.
+                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); }}
                           style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                       ))}
                     </div>
@@ -4594,6 +4624,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       bank rail is the two boxes below, and with no iframe mounted the
                       message listener's frameRef test refuses anything posted meanwhile. */}
                   {method !== "ach" && payOpts && payOpts.tokenizer && (
+                    <div style={{ position: "relative" }}>
                     <iframe
                       // A new key per Ready press is a NEW frame: an empty box (a failed read
                       // left its characters in the old one, and the next swipe was appended),
@@ -4610,6 +4641,17 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       style={{ width: "100%", display: "block", height: ((entry === "swipe" && payOpts.tokenizer.swipeHeight) || payOpts.tokenizer.cardHeight || 265), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
                       frameBorder="0" scrolling="no"
                     />
+                    {/* ⚠️ The reader's frame takes no click of its own. A click anywhere in it but
+                        ON its box leaves the frame's focus on its BODY, where a swipe vanishes:
+                        no token, no message, and no key reaches the trap (2026-10-13). So a click
+                        there is "Ready" instead: a new frame, whose autofocus puts the focus in
+                        the box. Ignored while that frame is still loading. */}
+                    {entry === "swipe" && (
+                      <div aria-hidden="true" data-ss-reader-cover="1"
+                        onClick={() => { if (busy || (armed && !frameReady)) return; armReader(); }}
+                        style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, cursor: "pointer", background: "transparent" }} />
+                    )}
+                    </div>
                   )}
                   {keyedCard && payOpts && payOpts.tokenizer && (
                     // Name on card, billing street and ZIP: prefilled from the delivery address
@@ -4669,13 +4711,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                           the modal is merely open. Each press reloads the reader's frame (a new
                           key) and drops whatever the last read left: a stale first card must
                           not stay chargeable while the second swipe is in flight. */}
-                      <button type="button" disabled={armed}
-                        onClick={() => {
-                          stopReadTimer();
-                          setArmCount((n) => n + 1); setFrameReady(false);
-                          setPayToken(null); setPayExpiry(null); setTokenErr("");
-                          setArmed(true);
-                        }}
+                      <button type="button" disabled={armed} onClick={armReader}
                         style={{ ...S.btn(armed ? "#DCFCE7" : "#F1F5F9", armed ? "#166534" : "#334155"), border: "1px solid #E2E8F0", fontSize: 12, width: "100%" }}>
                         {armed ? (frameReady ? "Ready — swipe the card now" : "Getting the card box ready…") : payToken ? "Card read ✓ — swipe again" : "Ready to swipe"}
                       </button>

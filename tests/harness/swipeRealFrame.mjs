@@ -17,7 +17,8 @@
 // so a harness built on it would have passed against the broken URL.
 //
 //   S  the reader's frame is the swipe rail: the exact URL the server composes, one visible box,
-//      no numeric-only / expiry / CVV, and short enough for the height the server serves
+//      no numeric-only / expiry / CVV, and the served height fits the box with little to spare
+//      (measured from the box itself: the frame's scrollHeight never reads below the frame)
 //   A  Card > Swipe > Ready: the label says "Getting the card box ready…" until the new frame has
 //      loaded, then "Ready — swipe the card now" with the card box focused INSIDE the frame; a
 //      ~460-character blob (uppercase hex with % ^ ? ; = and letters) plus the reader's two Enters
@@ -29,9 +30,24 @@
 //      and is the one charged
 //   C  Ready, then a click on a blank part of the modal, then a swipe: "didn't land", nothing sent
 //      to CardSecure, every key of the burst swallowed while still armed, and Ready back within
-//      ~2 s of the last key; Ready then takes a swipe normally
-//   D  CardSecure refuses (the request is ABORTED): the Fiserv-refusal sentence within 10 s, no
-//      "Card captured", and Ready usable again
+//      ~2 s of the last key; then the call script's recovery, a click on the reader's frame, gets
+//      a new frame with the focus in its box, and the next swipe is captured
+//   F  after Ready, a click on the reader's frame OFF its box (the blank band under it) lands on
+//      the page's cover, not the frame: it re-arms (a new frame, focus in its box), and the swipe
+//      is captured whole. Before the cover, the frame's focus stayed on its BODY and the swipe
+//      vanished: no token, no message, a minute of grey buttons
+//   G  after "Card captured ✓", an Enter and a Shift in the card box (the frame says "typing"
+//      again): past the whole read window the card is still captured and Charge still on
+//   H  a key in the card box after Ready (Caps Lock, as the call prep has it) and the swipe 6.5 s
+//      later: captured, and the refusal sentence never shows
+//   I  a slow reader, 15 ms per character: captured whole, and the refusal sentence never shows
+//   J  the Swipe button, already chosen, clicked while armed: still armed, no reload, and the swipe
+//      that follows is caught by the trap ("didn't land"), not lost in silence
+//   D  CardSecure refuses (the request is ABORTED): nothing said and Ready still off while the read
+//      window runs, then the Fiserv-refusal sentence, no "Card captured", and Ready usable again
+//   K  CardSecure refuses, and the operator switches to Bank / ACH at once and enters a bank
+//      account: past the card read's window the bank token and Charge stand, and the card
+//      reader's refusal sentence never reaches the bank screen
 //   E  the published test card number typed slowly by hand into the swipe frame: tokenized as
 //      "manual" (stub), refused with "That was typed, not swiped…", no "Card captured", Charge off,
 //      and the refusal sentence does not follow it
@@ -43,8 +59,9 @@
 // ⚠️ WHAT LEAVES THE MACHINE: GETs for the UAT tokenizer page and its own script, nothing else.
 // EVERY request to /cardsecure/ (tokenize, retrievePublicKey) is answered here or aborted, so
 // nothing is ever tokenized by Fiserv. Every Supabase host is answered here; every other request is
-// aborted. The only things typed are random hex blobs and the published test card 4111111111111111,
-// and neither the blobs nor any keystroke is ever printed: checks report lengths and booleans.
+// aborted. The only things typed are random hex blobs, the published test card 4111111111111111 and
+// the bank rail's own placeholder routing number with a made-up account number, and neither the
+// blobs nor any keystroke is ever printed: checks report lengths, counts and booleans.
 // Not run by preflight (it needs the network). When the UAT host cannot be reached it prints
 // SKIPPED and exits 0.
 //
@@ -132,11 +149,16 @@ await ctx.addInitScript(([ref, s]) => {
   try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
   // Keydowns that reach the PORTAL's document (never the frame's), COUNTED ONLY: which key it was
   // is card data and is never read. `unarmed` = arrived while Ready was clickable, i.e. not trapped.
-  window.__harnessKeys = { parent: 0, unarmed: 0 };
+  window.__harnessKeys = { parent: 0, unarmed: 0, typing: 0 };
   window.addEventListener("keydown", () => {
     window.__harnessKeys.parent++;
     const b = [...document.querySelectorAll("button")].find((x) => /^(Ready to swipe|Card read)/.test(x.textContent));
     if (b && !b.disabled) window.__harnessKeys.unarmed++;
+  }, true);
+  // How many times a frame said {cardTyping:true}: the trigger of the portal's read timer. Only
+  // that flag is looked at, never any other field of any message.
+  window.addEventListener("message", (e) => {
+    try { if (JSON.parse(e.data).cardTyping === true) window.__harnessKeys.typing++; } catch (_e) { /* not JSON */ }
   }, true);
 }, [REF, SESSION]);
 const page = await ctx.newPage();
@@ -231,8 +253,21 @@ async function hidType(s, delay = 0) {
     if (delay) await page.waitForTimeout(delay);
   }
 }
-// A swipe: the blob, then the VP3350's default postfix (two carriage returns).
-const swipe = async (blob) => { S.expect = blob; await hidType(blob); await page.keyboard.press("Enter"); await page.keyboard.press("Enter"); };
+// A swipe: the blob, then the VP3350's default postfix (two carriage returns). msPerChar paces it
+// on the wall clock (a slow reader); 0 is as fast as the browser takes the keys.
+const swipe = async (blob, msPerChar = 0) => {
+  S.expect = blob;
+  if (!msPerChar) await hidType(blob);
+  else {
+    const t0 = Date.now();
+    let i = 0;
+    for (const ch of blob) { await hidType(ch); i++; const wait = t0 + i * msPerChar - Date.now(); if (wait > 0) await page.waitForTimeout(wait); }
+  }
+  await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
+};
+// The portal's read window (READ_WAIT_MS in portal/04-orders.jsx): from the frame's first
+// "typing" to the Fiserv-refusal sentence.
+const READ_WAIT = 20000;
 
 let modal = null;
 const recordBtn = page.getByRole("button", { name: "Record a payment" });
@@ -275,6 +310,16 @@ const frameState = (f) => f.evaluate(() => {
   return { active: a ? (a.id || a.tagName) : null, len: box ? box.value.length : null };
 }).catch(() => ({ active: null, len: null }));
 const keys = () => page.evaluate(() => ({ ...window.__harnessKeys }));
+// A real mouse click on the reader's frame: "band" is the frame's blank strip under its box, "box"
+// the box itself. Returns whether the page's own cover took it (the frame never sees the click).
+async function clickReader(where) {
+  const bb = await modal.locator("iframe[title='Payment details']").boundingBox();
+  const x = bb.x + bb.width * 0.9;
+  const y = where === "band" ? bb.y + bb.height - 4 : bb.y + 26;
+  const covered = await page.evaluate(([px, py]) => { const e = document.elementFromPoint(px, py); return !!(e && e.dataset && e.dataset.ssReaderCover === "1"); }, [x, y]);
+  await page.mouse.click(x, y);
+  return covered;
+}
 const DIDNT_LAND = "That swipe didn't land in the card box.";
 const REFUSED = "The reader read the card, but Fiserv's card system didn't accept it.";
 const TYPED = "That was typed, not swiped. Press Ready and swipe the card.";
@@ -298,15 +343,27 @@ try {
     ["autofocus", "invalidinputevent", "sendcardtypingevent", "swipeonly"].every((p) => q.get(p) === "true"), [...q.keys()].join(","));
   ok("S: no numeric-only, format, expiry or CVV parameter",
     ["cardnumbernumericonly", "formatinput", "useexpiry", "useexpiryfield", "usecvv", "invalidcreditcardevent", "invalidexpiryevent", "invalidcvvevent"].every((p) => !q.has(p)));
-  const shown = await frame.evaluate(() => ({
-    inputs: [...document.querySelectorAll("input")].filter((i) => i.type !== "hidden" && getComputedStyle(i).display !== "none").map((i) => i.id),
-    height: document.documentElement.scrollHeight,
-    placeholder: (document.getElementById("ccnumfield") || {}).placeholder,
-  }));
+  // Measured once the served CSS is in (itoke fetches it after load; before that the box is small).
+  await frame.waitForFunction(() => { const i = document.getElementById("ccnumfield"); return !!i && getComputedStyle(i).paddingTop === "10px"; }, null, { timeout: 15000 }).catch(() => {});
+  const shown = await frame.evaluate(() => {
+    const box = document.getElementById("ccnumfield");
+    const r = box ? box.getBoundingClientRect() : { bottom: 0 };
+    const form = document.getElementById("tokenform");
+    return {
+      inputs: [...document.querySelectorAll("input")].filter((i) => i.type !== "hidden" && getComputedStyle(i).display !== "none").map((i) => i.id),
+      styled: !!box && getComputedStyle(box).paddingTop === "10px",
+      // The box with its own bottom margin, or the form, whichever ends lower. NOT scrollHeight:
+      // it never reads below the frame's own height, so it cannot see an over-tall frame.
+      content: Math.ceil(Math.max(r.bottom + (box ? parseFloat(getComputedStyle(box).marginBottom) || 0 : 0), form ? form.getBoundingClientRect().bottom : 0)),
+      placeholder: box ? box.placeholder : null,
+    };
+  });
   ok("S: one box, the card reader's, and no expiry or CVV boxes", shown.inputs.length === 1 && shown.inputs[0] === "ccnumfield" && shown.placeholder === "Swipe the card", JSON.stringify(shown));
   const drawn = await modal.locator("iframe[title='Payment details']").evaluate((el) => el.style.height);
-  ok("S: the frame is drawn at the served swipe height, and its content fits", drawn === `${TOKENIZER.swipeHeight}px` && shown.height <= TOKENIZER.swipeHeight,
-    `drawn ${drawn}, content ${shown.height}px, served ${TOKENIZER.swipeHeight}px`);
+  ok("S: the frame is drawn at the served swipe height", drawn === `${TOKENIZER.swipeHeight}px`, `drawn ${drawn}, served ${TOKENIZER.swipeHeight}px`);
+  ok("S: the box fits the frame, with at most 16px of the frame's blank page under it",
+    shown.styled && shown.content <= TOKENIZER.swipeHeight && TOKENIZER.swipeHeight - shown.content <= 16,
+    `content ends at ${shown.content}px (css in: ${shown.styled}), served ${TOKENIZER.swipeHeight}px`);
 
   // ── A: Ready, wait for the new frame, swipe, charge ─────────────────────────────────────────────
   S.pageDelayMs = 1500;
@@ -400,12 +457,120 @@ try {
   ok("C: nothing went to CardSecure, the box is still empty, nothing captured",
     tokenizes.length === tokC && (await frameState(frame)).len === 0 && !(await modalText()).includes("Card captured ✓"));
   await page.screenshot({ path: join(shotsDir("swipeRealFrame"), "C-didnt-land.png") }).catch(() => {});
-  await pressReady();
-  ok("C: Ready then takes a swipe normally", await waitSwipeNow());
+  // The call script's recovery: "click inside the Card reader box, then swipe". Clicked on the
+  // frame's blank strip, the worst place, where the frame alone would keep the focus on its body.
+  const loadsC = net.tokenizerGets;
+  ok("C: the click on the reader's frame lands on the page's cover", await clickReader("band"));
+  ok("C: …which gets a NEW frame ready, like Ready", await waitSwipeNow() && net.tokenizerGets > loadsC, `${loadsC} -> ${net.tokenizerGets}; ${JSON.stringify(await readyBtn())}`);
+  frame = await swipeFrame();
+  ok("C: …with the focus in its empty box, and the old message gone", !!frame && (await frameState(frame)).active === "ccnumfield" && (await frameState(frame)).len === 0 && !(await modalText()).includes(DIDNT_LAND),
+    frame ? JSON.stringify(await frameState(frame)) : "no frame");
   const blobC = makeBlob();
   await swipe(blobC);
   ok("C: …captured, whole", await until(async () => (await modalText()).includes("Card captured ✓"), 8000)
     && tokenizes.length === tokC + 1 && tokenizes[tokC].intact === true && !(await modalText()).includes(DIDNT_LAND));
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // ── F: after Ready, a click on the reader's frame OFF its box ──────────────────────────────────
+  frame = await openSwipe();
+  await pressReady();
+  ok("F: Ready", await waitSwipeNow());
+  const loadsF = net.tokenizerGets;
+  const keysF = await keys();
+  ok("F: the click on the frame's blank strip lands on the page's cover, not the frame", await clickReader("band"));
+  ok("F: …which re-arms: a NEW frame, and \"swipe now\" once it has loaded", await waitSwipeNow() && net.tokenizerGets > loadsF,
+    `${loadsF} -> ${net.tokenizerGets}; ${JSON.stringify(await readyBtn())}`);
+  frame = await swipeFrame();
+  ok("F: the focus is in the card box, not on the frame's body", !!frame && (await frameState(frame)).active === "ccnumfield", frame ? JSON.stringify(await frameState(frame)) : "no frame");
+  const blobF = makeBlob();
+  const tokF = tokenizes.length;
+  await swipe(blobF);
+  ok("F: the swipe is captured, whole, and not one key reached the page",
+    await until(async () => (await modalText()).includes("Card captured ✓"), 8000) && tokenizes.length === tokF + 1 && tokenizes[tokF].intact === true
+      && (await keys()).parent === keysF.parent, JSON.stringify({ got: tokenizes.slice(tokF), keys: await keys() }));
+  const tokenF = `94180000000${String(S.minted).padStart(5, "0")}`;
+
+  // ── G: a key in the card box after the card is captured ──────────────────────────────────────
+  await until(async () => !(await chargeOff()), 6000);
+  frame = await swipeFrame();
+  ok("G: the focus is still in the card box after the token", !!frame && (await frameState(frame)).active === "ccnumfield", frame ? JSON.stringify(await frameState(frame)) : "no frame");
+  const typG = (await keys()).typing;
+  const keyAtG = Date.now();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Shift");
+  ok("G: an Enter and a Shift in the box: the frame says \"typing\" again", await until(async () => (await keys()).typing > typG, 3000), JSON.stringify(await keys()));
+  await page.waitForTimeout(Math.max(0, keyAtG + READ_WAIT + 1500 - Date.now()));
+  ok("G: past the whole read window the card is still captured, Charge on, no refusal sentence",
+    (await modalText()).includes("Card captured ✓") && !(await chargeOff()) && !(await modalText()).includes(REFUSED), await flat());
+  const chargesG = charges().length;
+  await modal.getByRole("button", { name: /^Charge \$/ }).click();
+  await until(() => charges().length > chargesG, 6000);
+  const chG = charges().slice(-1)[0] || {};
+  ok("G: …and Charge sends that card", chG.payToken === tokenF && chG.entry === "swipe", JSON.stringify({ entry: chG.entry, same: chG.payToken === tokenF }));
+
+  // ── H: a key in the card box after Ready, and the swipe 6.5 s later ────────────────────────────
+  frame = await openSwipe();
+  await pressReady();
+  await waitSwipeNow();
+  const typH = (await keys()).typing;
+  // Caps Lock on, then off: the call prep's "Caps Lock off", done after Ready.
+  await page.keyboard.press("CapsLock");
+  await page.keyboard.press("CapsLock");
+  ok("H: the frame says \"typing\" at that key, so the read window starts there", await until(async () => (await keys()).typing > typH, 3000), JSON.stringify(await keys()));
+  await page.waitForTimeout(6500);
+  const blobH = makeBlob();
+  const tokH = tokenizes.length;
+  let refusedH = false;
+  let capturedH = false;
+  await swipe(blobH);
+  for (const end = Date.now() + 12000; Date.now() < end && !capturedH; await page.waitForTimeout(200)) {
+    const t = await modalText();
+    refusedH = refusedH || t.includes(REFUSED);
+    capturedH = t.includes("Card captured ✓");
+  }
+  ok("H: captured, whole", capturedH && tokenizes.length === tokH + 1 && tokenizes[tokH].intact === true, JSON.stringify(tokenizes.slice(tokH)));
+  ok("H: and the refusal sentence never showed on the way", !refusedH && !(await modalText()).includes(REFUSED), await flat());
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // ── I: a slow reader, 15 ms per character ──────────────────────────────────────────────────────
+  frame = await openSwipe();
+  await pressReady();
+  await waitSwipeNow();
+  const blobI = makeBlob();
+  const tokI = tokenizes.length;
+  const firstKeyI = Date.now();
+  await swipe(blobI, 15);
+  const typedMsI = Date.now() - firstKeyI;
+  let refusedI = false;
+  let capturedI = false;
+  for (const end = Date.now() + 12000; Date.now() < end && !capturedI; await page.waitForTimeout(200)) {
+    const t = await modalText();
+    refusedI = refusedI || t.includes(REFUSED);
+    capturedI = t.includes("Card captured ✓");
+  }
+  ok("I: a 15 ms-per-character read is captured, whole", capturedI && tokenizes.length === tokI + 1 && tokenizes[tokI].intact === true,
+    `${blobI.length} characters in ${typedMsI} ms; captured ${Date.now() - firstKeyI} ms after the first key`);
+  ok("I: and the refusal sentence never showed while the reader typed", !refusedI && !(await modalText()).includes(REFUSED), await flat());
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // ── J: the Swipe button, already chosen, clicked while armed ───────────────────────────────────
+  frame = await openSwipe();
+  await pressReady();
+  await waitSwipeNow();
+  const loadsJ = net.tokenizerGets;
+  await modal.getByRole("button", { name: "Swipe", exact: true }).click();
+  await page.waitForTimeout(500);
+  const rJ = (await readyBtn()) || {};
+  ok("J: clicking the Swipe button already chosen changes nothing: still armed, no reload",
+    rJ.text === "Ready — swipe the card now" && rJ.disabled === true && net.tokenizerGets === loadsJ, JSON.stringify({ rJ, loads: net.tokenizerGets - loadsJ }));
+  const keysJ = await keys();
+  const tokJ = tokenizes.length;
+  await swipe(makeBlob());
+  ok("J: the swipe that follows is caught: \"didn't land\", every key swallowed while armed",
+    await until(async () => (await modalText()).includes(DIDNT_LAND), 3000) && (await keys()).parent - keysJ.parent >= 460 && (await keys()).unarmed === keysJ.unarmed,
+    JSON.stringify({ before: keysJ, after: await keys() }));
+  ok("J: nothing went to CardSecure", tokenizes.length === tokJ);
+  await until(async () => { const r = await readyBtn(); return !!r && !r.disabled; }, 4000);
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
 
   // ── D: CardSecure refuses the read ───────────────────────────────────────────────────────────
@@ -414,16 +579,38 @@ try {
   await pressReady();
   await waitSwipeNow();
   const tokD = tokenizes.length;
+  const firstKeyD = Date.now();
   await swipe(makeBlob());
-  const lastKeyD = Date.now();
   ok("D: the read went to CardSecure (and was aborted here)", await until(() => tokenizes.length > tokD, 8000) && net.cardsecureAborted > 0);
-  ok("D: the Fiserv-refusal sentence within 10 s of the swipe", await until(async () => (await modalText()).includes(REFUSED), 10000) && Date.now() - lastKeyD <= 10000,
-    `${Date.now() - lastKeyD} ms`);
+  await page.waitForTimeout(Math.max(0, firstKeyD + READ_WAIT - 3000 - Date.now()));
+  const rD = (await readyBtn()) || {};
+  ok("D: while the read window runs nothing is said, and Ready stays off (pressing it mid-read throws the read away)",
+    !(await modalText()).includes(REFUSED) && rD.disabled === true, JSON.stringify(rD));
+  ok("D: then the Fiserv-refusal sentence, once the window is over", await until(async () => (await modalText()).includes(REFUSED), 7000) && Date.now() - firstKeyD <= READ_WAIT + 4000,
+    `${Date.now() - firstKeyD} ms after the first key`);
   ok("D: no \"Card captured\", Charge off", !(await modalText()).includes("Card captured ✓") && await chargeOff());
   ok("D: Ready usable again", await until(async () => { const r = await readyBtn(); return !!r && !r.disabled; }, 2000), JSON.stringify(await readyBtn()));
   await page.screenshot({ path: join(shotsDir("swipeRealFrame"), "D-refused.png") }).catch(() => {});
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // ── K: a refused read in flight, and the operator switches to Bank / ACH ──────────────────────
+  frame = await openSwipe();
+  await pressReady();
+  await waitSwipeNow();
+  const typK = (await keys()).typing;
+  const firstKeyK = Date.now();
+  await swipe(makeBlob());
+  ok("K: the read started (the frame said \"typing\")", (await keys()).typing > typK);
+  await modal.getByRole("button", { name: "Bank / ACH", exact: true }).click();
   S.cardsecure = "stub";
+  await modal.getByLabel("Routing number").fill("031201360");
+  await modal.getByLabel("Checking account number").fill("000987654321");
+  ok("K: the bank details are captured", await until(async () => (await modalText()).includes("Bank details captured ✓"), 8000), await flat());
+  await page.waitForTimeout(Math.max(0, firstKeyK + READ_WAIT + 1500 - Date.now()));
+  ok("K: past the card read's window the bank token stands: \"Bank details captured ✓\", Charge on",
+    (await modalText()).includes("Bank details captured ✓") && !(await chargeOff()), await flat());
+  ok("K: and the card reader's refusal sentence is not on the bank screen", !(await modalText()).includes(REFUSED), await flat());
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
 
   // ── E: a card number typed by hand into the swipe frame ─────────────────────────────────────────
   frame = await openSwipe();
@@ -438,8 +625,8 @@ try {
   ok("E: refused: \"That was typed, not swiped…\"", await until(async () => (await modalText()).includes(TYPED), 4000), await flat());
   ok("E: no \"Card captured\", Charge off", !(await modalText()).includes("Card captured ✓") && await chargeOff());
   ok("E: Ready usable again", await until(async () => { const r = await readyBtn(); return !!r && !r.disabled; }, 2000));
-  await page.waitForTimeout(Math.max(0, firstKeyE + 9500 - Date.now()));
-  ok("E: the refusal timer was stopped by that answer: no Fiserv sentence 9.5 s on", !(await modalText()).includes(REFUSED) && (await modalText()).includes(TYPED), await flat());
+  await page.waitForTimeout(Math.max(0, firstKeyE + READ_WAIT + 1500 - Date.now()));
+  ok("E: the refusal timer was stopped by that answer: no Fiserv sentence past the read window", !(await modalText()).includes(REFUSED) && (await modalText()).includes(TYPED), await flat());
   await modal.getByRole("button", { name: "Cancel", exact: true }).click();
 
   // ── X ──
