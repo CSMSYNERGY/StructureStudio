@@ -78,6 +78,13 @@ function tab(opts: { search?: string; pathname?: string; pinged?: boolean; conne
         location.pathname = path;
         location.search = q ? `?${q}` : "";
       },
+      // The shell's navigate() replaces for a tab row's switch; no new entry, the address moves.
+      replaceState(state: unknown, _t: string, url: string) {
+        this.state = state;
+        const [path, q] = url.split("?");
+        location.pathname = path;
+        location.search = q ? `?${q}` : "";
+      },
     },
     // As the browser does: every popstate listener hears it (the shell's router, and the port's).
     dispatchEvent: (e: { type: string; state: unknown }) => {
@@ -106,11 +113,11 @@ function tab(opts: { search?: string; pathname?: string; pinged?: boolean; conne
   };
   const h = new Function(
     "window", "navigator", "ssIsBetaHost", "ssPagePath", "ssParsePath", "document", "PopStateEvent", "setTimeout", "clearTimeout",
-    `${PHONE_BLOCK}; return { ssPhoneNavTarget, ssPhoneRoutable, ssPhonePortOpen, ssPhonePortVisit };`,
+    `${PHONE_BLOCK}; return { ssPhoneNavTarget, ssPhoneRoutable, ssPhonePortOpen, ssPhonePortVisit, ssPhonePortMoved };`,
   )(
     win, { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/140" }, () => false, ssPagePath, ssParsePath, doc, PopStateEvent,
     (f: Fn, ms: number) => { timers.push({ f, ms }); return timers.length; }, () => {},
-  ) as { ssPhoneNavTarget: (m: unknown) => unknown; ssPhoneRoutable: (s?: string) => boolean; ssPhonePortOpen: () => Promise<void>; ssPhonePortVisit: () => void };
+  ) as { ssPhoneNavTarget: (m: unknown) => unknown; ssPhoneRoutable: (s?: string) => boolean; ssPhonePortOpen: () => Promise<void>; ssPhonePortVisit: () => void; ssPhonePortMoved: () => void };
   const settle = () => new Promise((r) => setTimeout(r, 0));
   /** Run the held timers except the ping timeouts (the fake extension always answers in time). */
   const tick = async () => {
@@ -200,6 +207,46 @@ Deno.test("the tab says which page it shows (so one already on the contact is pi
   t.location.pathname = "/portal/contacts/c-1..%2Fadmin";
   t.h.ssPhonePortVisit();
   assertEquals([p.posted.at(-1)?.page, p.posted.at(-1)?.sub], [null, null]);
+});
+
+// ── 12-shell: the app's own navigation says the new page too ───────────────────────────────
+// The hub and the record move with the shell's navigate() (pushState or replaceState), which fires
+// no popstate. Before the integration review (2026-10-13) only Back did, so a tab that opened a
+// customer from a board card was never reported on contacts/c-<id>, and the extension's "prefer a
+// tab already on this contact" (C49) rarely found it. This runs the SHIPPED navigate().
+Deno.test("the shell's navigate() says the page it moved to, for a push and for a replace (C49)", async () => {
+  const SHELL = (await Deno.readTextFile(new URL("../../portal/12-shell.jsx", import.meta.url))).replace(/\r\n/g, "\n");
+  const NAV = slice(SHELL, "const navigate = useCallback(", "}, []);", "the shell's navigate()");
+  const t = tab({ pathname: "/portal/contacts/designs" });
+  await t.tick();
+  const p = t.ports[0];
+  p.send({ type: "sss.welcome" });
+  const navigate = new Function(
+    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window", "ssPhonePortMoved",
+    `${NAV}}, []); return navigate;`,
+  )(
+    (f: unknown) => f, { current: null }, () => {}, () => {}, () => {},
+    (page: string, sub: string | null) => "/portal/" + page + (sub ? "/" + sub : ""),
+    (page: string, sub: string | null) => ({ page, sub }), t.win, t.h.ssPhonePortMoved,
+  ) as (page: string, sub?: string | null, replace?: boolean, rec?: unknown) => void;
+  const before = p.posted.length;
+  navigate("contacts", `c-${CONTACT}`, false, { deal: null, from: { page: "contacts", pageSub: "designs" } });
+  const seen = p.posted.slice(before).filter((m) => m.type === "sss.seen");
+  assertEquals(seen.length, 1, "one sss.seen per navigate");
+  assertEquals([seen[0].page, seen[0].sub], ["contacts", `c-${CONTACT}`]);
+  assertEquals(t.popped.length, 0, "and no popstate was faked to get it");
+  navigate("contacts", "designs", true);
+  assertEquals([p.posted.at(-1)?.type, p.posted.at(-1)?.page, p.posted.at(-1)?.sub], ["sss.seen", "contacts", "designs"]);
+  // No port (no extension, another browser): navigate still moves, and says nothing.
+  const none = tab({ connect: false });
+  await none.tick();
+  const nav2 = new Function(
+    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window", "ssPhonePortMoved",
+    `${NAV}}, []); return navigate;`,
+  )((f: unknown) => f, { current: null }, () => {}, () => {}, () => {}, (page: string) => "/portal/" + page,
+    (page: string, sub: string | null) => ({ page, sub }), none.win, none.h.ssPhonePortMoved) as (page: string) => void;
+  nav2("orders");
+  assertEquals([none.pushed, none.ports.length], [["/portal/orders"], 0]);
 });
 
 // ── 02-sales: the SMS tab's hand-off carries the contact's name ────────────────────────────

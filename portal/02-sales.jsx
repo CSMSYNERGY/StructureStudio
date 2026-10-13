@@ -2868,16 +2868,15 @@ function crmPipeMoved(pipe, dealId, stage, lostReason) {
     })),
   };
 }
-// A read-only status pill. NOT SsStatusPill, which is the Pipeline board's control: on the record
-// a status is shown, never set.
+// A deal's status on its Deals row: the board's own pill (SsStatusPill, a plain label since the
+// statuses became the system's on 2026-10-12), so the record and the board draw one status one
+// way. The wrapper marks it for the record's checks and keeps it from shrinking in the row.
 function CrmDealStatusPill({ status }) {
   if (!status) return null;
-  const color = /^#[0-9A-Fa-f]{6}$/.test(status.color || "") ? status.color : "#64748B";
   return (
-    <span data-ss-deal-status="" title="Set by the system as the deal moves along"
-      style={{ flexShrink: 0, alignSelf: "center", background: color + "1F", color, border: "1px solid " + color + "55",
-        borderRadius: 999, padding: "1px 9px", fontSize: 10.5, fontWeight: 800, lineHeight: "16px",
-        maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{status.name}</span>
+    <span data-ss-deal-status="" style={{ flexShrink: 0, alignSelf: "center", display: "inline-flex", minWidth: 0 }}>
+      <SsStatusPill statuses={[status]} value={status.id} style={{ maxWidth: 130 }} />
+    </span>
   );
 }
 
@@ -6385,7 +6384,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
           onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
           onAdded={(r) => { setDialog(null); loadDeals(); }} />
       )}
-      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} statuses={statuses} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
+      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
       {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}
         onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
       {dialog && dialog.lost && (

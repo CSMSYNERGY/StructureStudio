@@ -34,7 +34,7 @@ const slice = (src: string, a: string, b: string, what: string) => {
   return src.slice(i, j);
 };
 
-const BLOCK = slice(SRC, "const crmPipeDealFor =", "// A read-only status pill.", "the pipeline helpers");
+const BLOCK = slice(SRC, "const crmPipeDealFor =", "// A deal's status on its Deals row", "the pipeline helpers");
 type Fn = (...a: any[]) => any;
 const H = new Function(
   `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmPipeMoveTargets, crmDealRows, crmPipeBarRow, crmPipeMoved };`,

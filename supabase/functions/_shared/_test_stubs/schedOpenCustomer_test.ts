@@ -264,12 +264,14 @@ Deno.test("the record context rides in the history entry, and every other naviga
       replaceState: (s: unknown, _t: string, u: string) => state.entries.push({ s, u, replace: true }),
     },
   };
+  // ssPhonePortMoved: navigate() tells My Synergy Phone the new page (portalPhonePort_test runs it).
   const navigate = new Function(
-    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window",
+    "useCallback", "wanted", "setRecordCtx", "setTab", "setSub", "ssPagePath", "ssCanonRoute", "window", "ssPhonePortMoved",
     `${NAV_SRC}}, []); return navigate;`,
   )(
     (f: unknown) => f, { current: "x" }, (v: unknown) => { state.ctx = v; }, (v: unknown) => { state.tab = v; },
     (v: unknown) => { state.sub = v; }, (p: string, s: string | null) => "/portal/" + p + (s ? "/" + s : ""), ssCanonRoute, fakeWindow,
+    () => {},
   ) as (...a: unknown[]) => void;
   const from = { page: "build-schedule", pageSub: null };
   navigate("contacts", "c-" + C1, false, { deal: WITH.code, from });

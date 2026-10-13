@@ -702,6 +702,10 @@ function Dashboard({ session }) {
       if (replace) window.history.replaceState(state, "", url);
       else window.history.pushState(state, "", url);
     } catch (_e) { /* history unavailable — the app still works, the URL just won't track */ }
+    // My Synergy Phone (01-core): tell the extension the page this tab shows now. A push or
+    // replace fires no popstate, so without this a tab that opened a customer from the board was
+    // never reported on contacts/c-<id>, and Open in Structure Studio rarely found it (C49).
+    ssPhonePortMoved();
   }, []);
 
   // (Back/forward lives further down, after exitAccount — the popstate handler has to
