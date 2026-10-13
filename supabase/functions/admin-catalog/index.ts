@@ -1076,6 +1076,60 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           console.error("setup checklist assign failed for", clientId, e instanceof Error ? e.message : String(e));
         }
 
+        // ── Electrical starter items (Carolyn 2026-10-12) ─────────────────────────────
+        // A new tenant used to open Settings → Options → Electrical to three "Your standards"
+        // dropdowns holding nothing but "— none —", because the choices are the tenant's own
+        // electrical_items rows and neither the blank path nor the clone path above creates any.
+        // Seed the three the package lays out (the shape migration 206 gave every pre-existing
+        // tenant) plus four common add-ons, and point the standards at the three, so the only thing left to do
+        // is price them. Both prices NULL on purpose: NULL reads "not offered" until the builder
+        // decides, never a guessed dollar amount. `enabled` keeps its default (off) for the same
+        // reason — nothing is offered to a customer by a seed.
+        //
+        // Best-effort, like the checklist: the tenant exists by now, and a seed failing is a
+        // cosmetic problem, not a reason to leave a half-made tenant behind the duplicate-slug
+        // check. ignoreDuplicates because (client_id, name) is unique and a retry must not 500.
+        let electricalSeeded = 0;
+        try {
+          // The four add-ons joined the same day ("also add these"), copied from structure-studio's
+          // own list: mount, height and sort order as there, prices still NULL.
+          const starters = [
+            { name: "Outlet",        icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 1 },
+            { name: "Light Switch",  icon: "🎚️", mount: "wall",    height_off_floor_in: 48,  sort_order: 2 },
+            { name: "Light",         icon: "💡", mount: "ceiling", height_off_floor_in: 96,  sort_order: 3 },
+            { name: "Ceiling Fan",   icon: "🌀", mount: "ceiling", height_off_floor_in: 96,  sort_order: 10 },
+            { name: "Flood Light",   icon: "🔦", mount: "wall",    height_off_floor_in: 108, sort_order: 20 },
+            { name: "220V Outlet",   icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 30 },
+            { name: "Extra Breaker", icon: "🧰", mount: "wall",    height_off_floor_in: 60,  sort_order: 40 },
+          ];
+          const ins = await sb.from("electrical_items")
+            .upsert(starters.map((it) => ({ client_id: clientId, ...it, price_with_package: null, price_standalone: null })),
+              { onConflict: "client_id,name", ignoreDuplicates: true });
+          if (ins.error) throw new Error(ins.error.message);
+          const got = await sb.from("electrical_items").select("id, name").eq("client_id", clientId)
+            .in("name", starters.map((it) => it.name));
+          if (got.error) throw new Error(got.error.message);
+          const idOf = (name: string) => (got.data ?? []).find((r: any) => r.name === name)?.id ?? null;
+          const std = { outlet_item_id: idOf("Outlet"), switch_item_id: idOf("Light Switch"), light_item_id: idOf("Light") };
+          // Upsert, not insert: a clone path or a future seed may have made the row first; and the
+          // standards are only filled where still unset, so nothing a builder chose is overwritten.
+          const cur = await sb.from("electrical_settings").select("outlet_item_id, switch_item_id, light_item_id")
+            .eq("client_id", clientId).maybeSingle();
+          if (cur.error) throw new Error(cur.error.message);
+          const row = {
+            client_id: clientId,
+            outlet_item_id: cur.data?.outlet_item_id ?? std.outlet_item_id,
+            switch_item_id: cur.data?.switch_item_id ?? std.switch_item_id,
+            light_item_id:  cur.data?.light_item_id  ?? std.light_item_id,
+            updated_at: new Date().toISOString(),
+          };
+          const up = await sb.from("electrical_settings").upsert(row, { onConflict: "client_id" });
+          if (up.error) throw new Error(up.error.message);
+          electricalSeeded = (got.data ?? []).length;
+        } catch (e) {
+          console.error("electrical starter seed failed for", clientId, e instanceof Error ? e.message : String(e));
+        }
+
         // ── The builder's own Twilio sub-account (2026-10-12, C55) ─────────
         // Best-effort for the checklist's reason: the tenant exists and the answer is about to say
         // so. Only with TWILIO_SUBACCOUNTS "on"; never throws, and the create waits at most
@@ -1091,7 +1145,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         });
 
         return json({
-          ok: true, clientId, blank, cloned: clonedCounts, setupAssigned,
+          ok: true, clientId, blank, cloned: clonedCounts, setupAssigned, electricalSeeded,
           twilio: twilio.outcome,
           ...(twilio.reason ? { twilioReason: twilio.reason } : {}),
           ...(twilio.code ? { twilioCode: twilio.step ? `${twilio.step}:${twilio.code}` : twilio.code } : {}),
