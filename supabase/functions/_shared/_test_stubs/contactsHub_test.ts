@@ -1,9 +1,10 @@
 // The Contacts hub (Carolyn 2026-10-12), tested against the SHIPPED portal source.
 //
 // "Let's have one tab and we can have contacts, and we can have this instead of list is designs,
-// and then we have pipelines." One sidebar item, Contacts, over a tab row: Contacts, Design list,
-// then every pipeline in the account's order, at most five pipeline positions with the fifth a
-// drop-down for the rest, and never a scroll bar.
+// and then we have pipelines." One sidebar item, Contacts, over a tab row: every pipeline in the
+// account's order from the left, at most five pipeline positions with the fifth a drop-down for the
+// rest, and never a scroll bar; and, since Ahsan's call of 2026-10-13, Contacts | Design list as a
+// rounded bubble at the row's far right (on its own line above the pipelines in a narrow row).
 //
 //   1. ssParsePath / ssCanonRoute (01-core): every old address lands in the hub, the Settings
 //      "pipelines" page and every other page untouched.
@@ -11,7 +12,8 @@
 //   3. ssHubResolve (02-sales): which tab shows for whom — the first pipeline with the CRM, the
 //      Design list without it or for a designs-only role, a padlocked card for an address that
 //      asked for the CRM's, a wait (never a flash of the wrong tab) while the CRM answer is out.
-//   4. ssHubFit (02-sales): how many pipeline tabs fit inline; the rest go in the drop-down.
+//   4. ssHubFit + ssHubLayout (02-sales): how many pipeline tabs fit inline once the bubble has
+//      taken its room; the rest go in the drop-down. When the bubble takes its own line.
 //   5. pins on the wiring: no Pipeline nav item, the hub mounted under Contacts, records inside it,
 //      the board's picker hidden when hosted, the old toggle gone, My Profile saving contactsView.
 //
@@ -27,6 +29,7 @@ const CORE = await read("../../../../portal/01-core.jsx");
 const SALES = await read("../../../../portal/02-sales.jsx");
 const SHELL = await read("../../../../portal/12-shell.jsx");
 const INTEG = await read("../../../../portal/08-integrations.jsx");
+const PAGE = await read("../../../../portal.html");
 
 const slice = (src: string, a: string, b: string, what: string) => {
   const i = src.indexOf(a);
@@ -50,7 +53,7 @@ function parse(pathname: string): Route {
   return new Function("window", `${ROUTE_SRC}; return ssParsePath();`)({ location: { pathname } }) as Route;
 }
 const K = new Function(`${ROUTE_SRC}; ${SAVED_SRC}; ${HUB_SRC};
-  return { ssCanonRoute, ssHubPipeId, ssSavedHubView, ssHubResolve, ssHubFit, ssHubPipes, SS_HUB_MAX_PIPES };`)() as any;
+  return { ssCanonRoute, ssHubPipeId, ssSavedHubView, ssHubResolve, ssHubFit, ssHubLayout, ssHubPipes, SS_HUB_MAX_PIPES, SS_HUB_STACK_W };`)() as any;
 
 const A = "0f7c4b2e-8a1d-4c3b-9e6f-2a5d7c8b9e01";
 const B = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
@@ -226,7 +229,7 @@ Deno.test("ssHubPipes keeps the account's order and what a tab needs", () => {
 });
 
 // ─── 4. How many pipeline tabs fit ─────────────────────────────────────────────────────────────
-// Widths in px. Contacts + Design list = 220; every pipeline tab 150; the ▾ 30; gap 2.
+// Widths in px. The bubble and the gap before it = 220; every pipeline tab 150; the ▾ 30; gap 2.
 const fit = (n: number, avail: number, activeIdx = -1, widths: number[] | null = null) =>
   K.ssHubFit({ avail, fixedW: 220, pipeW: widths ?? Array.from({ length: n }, () => 150), caretW: 30, activeIdx });
 
@@ -267,6 +270,54 @@ Deno.test("the drop-down wears the open pipeline's name, so ITS width is what mu
   assertEquals(fit(8, 1010, 1, widths), 4);
 });
 
+// The bubble (Ahsan 2026-10-13): Contacts | Design list at the row's far right. Its width and the
+// gap before it come off the row before any pipeline gets a tab; a narrow row puts it on a line of
+// its own, and then the pipelines have the whole width.
+const layout = (rowW: number, listsW: number, hasPipes = true) => K.ssHubLayout({ rowW, listsW, gap: 16, hasPipes });
+
+Deno.test("the bubble shares the pipelines' line on a wide row, and its width comes off it", () => {
+  assertEquals(layout(1312, 214), { stacked: false, fixedW: 230 });
+  assertEquals(layout(992, 214.4), { stacked: false, fixedW: 231 }, "rounded up, never down");
+  // Exactly at the threshold it still shares the line.
+  assertEquals(layout(K.SS_HUB_STACK_W, 214).stacked, false);
+});
+
+Deno.test("a narrow row puts the bubble on its own line, and gives the pipelines the whole width", () => {
+  assertEquals(K.SS_HUB_STACK_W, 620);
+  assertEquals(layout(K.SS_HUB_STACK_W - 1, 214), { stacked: true, fixedW: 0 });
+  assertEquals(layout(484, 214), { stacked: true, fixedW: 0 });
+  assertEquals(layout(308, 214), { stacked: true, fixedW: 0 });
+});
+
+Deno.test("no pipeline tab, or no bubble: nothing stacks", () => {
+  // A Crew Leader (Design list only) or an account with the CRM and no pipeline yet: the bubble
+  // just sits at the right, never alone on a line above an empty one (what it takes is moot).
+  assertEquals(layout(484, 120, false), { stacked: false, fixedW: 136 });
+  assertEquals(layout(1312, 120, false), { stacked: false, fixedW: 136 });
+  // No bubble at all (nobody here may open either list): nothing is taken.
+  assertEquals(layout(1312, 0), { stacked: false, fixedW: 0 });
+  assertEquals(layout(484, 0), { stacked: false, fixedW: 0 });
+});
+
+Deno.test("with the bubble on the line, pipelines fold into the drop-down sooner; without it, they don't", () => {
+  // 8 pipelines of 150 on a 1000-wide row. The bubble (214 + 16) takes 230: three tabs and the
+  // drop-down (230 + 3*152 + 150 + 30 + 2 = 868; four would be 1020). Without the bubble, four.
+  const pipeW = Array.from({ length: 8 }, () => 150);
+  const k = (rowW: number, listsW: number) =>
+    K.ssHubFit({ avail: rowW, fixedW: layout(rowW, listsW).fixedW, pipeW, caretW: 30 });
+  assertEquals(k(1000, 214), 3);
+  assertEquals(k(1000, 0), 4);
+  // Never more than fit: whatever k comes back, the tabs, the drop-down and the bubble fit the row.
+  for (let rowW = 300; rowW <= 2000; rowW += 7) {
+    const { fixedW } = layout(rowW, 214);
+    const n = k(rowW, 214);
+    const used = fixedW + n * 152 + (n < 8 ? 150 + 30 + 2 : 0);
+    assert(used <= rowW || n === 0, `row ${rowW}: ${n} tabs use ${used}`);
+  }
+  // A narrow row stacks the bubble, so the pipelines there get the full width back.
+  assertEquals(k(600, 214), K.ssHubFit({ avail: 600, fixedW: 0, pipeW, caretW: 30 }));
+});
+
 // ─── 5. Pins on the wiring ─────────────────────────────────────────────────────────────────────
 Deno.test("one sidebar item: Contacts, and no Pipeline", () => {
   assert(SHELL.includes('{navItem("contacts", "Contacts")}'), "the Contacts item is gone");
@@ -304,7 +355,29 @@ Deno.test("the board's own picker hides when the hub hosts it, and the old toggl
   const designs = slice(SALES, "function DesignsTable(", "\nfunction ", "DesignsTable");
   assert(!designs.includes('[["list", "List"], ["pipeline", "Pipeline"]]'), "the List | Pipeline toggle is back");
   assert(!designs.includes("<SalesPipelines"), "the Design list draws a board again");
-  assert(SALES.includes('fixed.push({ id: SS_HUB_DESIGNS, label: "Design list" });'), "the tab is not called Design list (C23)");
+  assert(SALES.includes('lists.push({ id: SS_HUB_DESIGNS, label: "Design list" });'), "the tab is not called Design list (C23)");
+});
+
+Deno.test("Contacts and Design list are the bubble at the row's right, apart from the pipelines (Ahsan 2026-10-13)", () => {
+  const row = slice(SALES, "function SsHubTabs(", "\n// The hub. The shell builds", "SsHubTabs");
+  // Two groups, each its own tablist: the pipelines' underline tabs, then the bubble.
+  assert(/className="ss-hub-pipes" data-ss-hub-pipes="" role=\{n \? "tablist" : undefined\}/.test(row), "the pipelines are not a group of their own");
+  assert(/className="ss-hub-lists" data-ss-hub-lists="" role="tablist" aria-label=\{lists\.map\(\(t\) => t\.label\)\.join\(" and "\)\}/.test(row),
+    "Contacts and Design list are not the bubble, or the bubble is not named for what it holds");
+  assert(row.indexOf('className="ss-hub-pipes"') < row.indexOf('className="ss-hub-lists"'), "the bubble comes before the pipelines in the row");
+  assert(row.includes("{lists.map(seg)}") && !row.includes("lists.map((t) => tab(t))"), "the lists are drawn as underline tabs again");
+  assert(row.includes('className={"ss-hub-seg" + (t.locked ? " locked" : "")}'), "a padlocked list loses its look");
+  // The bubble's width is taken off the row before the pipelines are fitted.
+  assert(row.includes("ssHubFit({ avail: room.row, fixedW: lay.fixedW,"), "the pipelines are fitted without taking the bubble off the row");
+  assert(row.includes("data-ss-hub-stacked={lay.stacked ? \"\" : undefined}"), "a narrow row does not put the bubble on its own line");
+  // Arrow keys stay inside a group.
+  assert((row.match(/onKeyDown=\{onArrows\}/g) || []).length === 2, "each group does not walk its own tabs with the arrow keys");
+  // The stylesheet: right of the pipelines (order 1), above them when stacked (order -1), and the
+  // look picked from aria-selected, so only the open view looks picked.
+  assert(PAGE.includes(".ss-hub-lists{order:1;"), "the bubble is not at the right of the row");
+  assert(PAGE.includes(".ss-hub-row[data-ss-hub-stacked] .ss-hub-lists{order:-1;"), "a narrow row does not lift the bubble above the pipelines");
+  assert(PAGE.includes(".ss-hub-pipes{display:flex;flex-wrap:wrap;align-items:flex-end;gap:2px;flex:1 1 0;"), "the pipelines' line can push the bubble onto a line of its own");
+  assert(PAGE.includes('.ss-hub-seg[aria-selected="true"]{'), "the picked part of the bubble does not look picked");
 });
 
 Deno.test("My Profile saves which tab Contacts opens on, through the one commit", () => {
