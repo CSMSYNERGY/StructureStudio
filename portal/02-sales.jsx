@@ -3859,8 +3859,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // needsPick is derived and redundant, and that is the point: it puts the `kind ===
   // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
   // — which would break the free Pipeline list that opens design records without a CRM.
+  // A picked LEAD (a card with no design, so no short code) counts as picked (integration review
+  // 2026-10-13): a lead card on the board opens its customer with the lead picked, and the tabs
+  // said "Pick a deal or order on the left first" under a picked deal. Its notes, activities,
+  // texts, emails and uploads file against the customer alone (shortCode null, which every one of
+  // those actions takes), so nothing can land on another deal's history.
   const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
-    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode,
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode && !pickedLead,
     // My Synergy Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
     viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
@@ -4593,14 +4598,17 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     // The cards THEMSELVES stay — she settled that on 2026-08-28 ("the card just is going to
     // be blank. It'll say build schedule. And it just is nothing"), and hiding the Build card
     // would remove the place a builder goes to SCHEDULE the build. Only the rails hide.
+    // A picked lead has no design, so nothing was built, delivered or repaired for it: say that,
+    // rather than "pick a deal" under a picked one, and show none of the customer's other deals'.
     const pickFirst = (what) => (
-      <div style={{ fontSize: 12, color: "#94A3B8" }}>Pick a deal or order above to see its {what}.</div>
+      <div style={{ fontSize: 12, color: "#94A3B8" }}>{pickedLead ? `This lead has no design yet, so it has no ${what}.` : `Pick a deal or order above to see its ${what}.`}</div>
     );
+    const railNeedsPick = kind === "contact" && !activeCode;
     const railSubject = kind === "contact" ? activeDeal : record;
     if (key === "build") {
       if (!data.build) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : data.build;
-      if (!bJobs.length && ctx.needsPick) return pickFirst("build schedule");
+      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : pickedLead ? [] : data.build;
+      if (!bJobs.length && railNeedsPick) return pickFirst("build schedule");
       if (!bJobs.length && !crmHasInvoice(railSubject)) {
         return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
       }
@@ -4626,8 +4634,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     }
     if (key === "delivery") {
       if (!data.delivery) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : data.delivery;
-      if (!dStops.length && ctx.needsPick) return pickFirst("deliveries");
+      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : pickedLead ? [] : data.delivery;
+      if (!dStops.length && railNeedsPick) return pickFirst("deliveries");
       if (!dStops.length && !crmHasInvoice(railSubject)) {
         return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
       }
@@ -4654,8 +4662,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       // Scoped to the pick like its siblings, but ⚠️ NO INVOICE GATE. A repair is not
       // gated on billing — repairs key on design_short_code and have no invoice
       // relationship at all, so "invoice first" would be a sentence that never becomes true.
-      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : data.repairs;
-      if (!reps.length && ctx.needsPick) return pickFirst("repairs");
+      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : pickedLead ? [] : data.repairs;
+      if (!reps.length && railNeedsPick) return pickFirst("repairs");
       if (!reps.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
       return (
         <div>

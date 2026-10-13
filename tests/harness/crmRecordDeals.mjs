@@ -17,7 +17,8 @@
 //   I. a design record (d-...) draws its card's pipeline too
 //   J. a server without the pipeline block: the record is what it was (designs, SALES ladder)
 //   K. someone who can't edit contacts sees the stage, can't change it, and has no move or add
-//   L. a card clicked on the Pipeline board opens the record ON that deal, the bar on its pipeline
+//   L. a card clicked on the Pipeline board opens the record ON that deal, the bar on its pipeline;
+//      a lead card too, with the lead picked, its write tabs open and a note filed on the customer
 //   M. the board's search and Status filter survive opening a card and coming Back (the record's
 //      Back and the browser's), per pipeline, and a cleared one stays cleared
 //   Z. no crm_deal_set_status from anywhere on the record, and no page errors
@@ -363,6 +364,30 @@ try {
         await page.evaluate(() => location.pathname));
       ok("L5 and the bar on the lead's pipeline and stage", leadOpened && leadOpened.label === "Sold" && leadOpened.lit.join() === "Signed", JSON.stringify(leadOpened));
       await shot(page, "lead-opened-from-board");
+
+      // The lead is PICKED, so the write tabs are open: a lead has no design, and what is written
+      // on it is filed against the customer alone (integration review 2026-10-13).
+      const tabsOff = await page.evaluate(() => Object.fromEntries(["Notes", "Activity", "Email", "Uploads"].map((name) => {
+        const b = [...document.querySelectorAll("button")].find((x) => x.innerText.trim() === name);
+        return [name, b ? b.disabled : "missing"];
+      })));
+      const tabsOpen = ok("L6 with a lead picked, Notes, Activity, Email and Uploads are open", Object.values(tabsOff).every((v) => v === false), JSON.stringify(tabsOff));
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      ok("L7 nothing says to pick a deal, and the rails say the lead has no design yet",
+        !/Pick a deal/.test(bodyText) && /This lead has no design yet, so it has no build schedule\./.test(bodyText),
+        (bodyText.match(/[^\n]*(Pick a deal|This lead has no design)[^\n]*/g) || []).join(" | "));
+      const before = calls.length;
+      if (tabsOpen) {
+        await page.locator("button", { hasText: /^Notes$/ }).click();
+        await page.locator('textarea[placeholder="Click here to add a note…"]').fill("Called about the second building");
+        await page.locator("button", { hasText: "Save note" }).click();
+        await page.waitForTimeout(700);
+      }
+      const saved = calls.slice(before).filter((c) => c.action === "crm_save_note");
+      ok("L8 a note on the lead is one crm_save_note on the customer, with no design code",
+        saved.length === 1 && saved[0].contactId === CONTACT_ID && !saved[0].shortCode && saved[0].body === "Called about the second building",
+        JSON.stringify(saved));
+      await shot(page, "lead-note-saved");
     }
 
     // ── M: the board's search and Status filter survive opening a card and coming Back (C22 + C42) ──
