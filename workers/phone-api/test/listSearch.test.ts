@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B,
-  appRequest, call, callerCtx, jsonRes, makeEnv, pgTable,
+  appRequest, call, callerCtx, jsonRes, makeEnv, pgTable, phoneListSearch, supabaseUrls,
 } from "./helpers";
 import { listSearchDigits, listSearchTerm, snippetAround, termPattern } from "../src/routes/reads";
 
@@ -49,6 +49,8 @@ async function setup(ctx: Row, w: World = {}, visible: string[] | null = null) {
   auth.serve(net);
   net.rpc("phone_caller_context", () => ctx);
   net.rpc("crm_visible_contact_ids", (s) => (visible ? (s.json.p_ids as string[]).filter((id) => visible.includes(id)) : s.json.p_ids));
+  // Migration 305's search function, over the same rows (helpers.ts phoneListSearch).
+  net.rpc("phone_list_search", phoneListSearch(w));
   net.rest("GET", "sms_messages", pgTable(w.sms ?? []));
   net.rest("GET", "crm_contacts", pgTable(w.contacts ?? []));
   net.rest("GET", "phone_calls", pgTable(w.calls ?? []));
@@ -78,6 +80,26 @@ async function allPages(env: ReturnType<typeof makeEnv>, page: (cursor: string |
   return { seen, pages };
 }
 const searchCalls = (token: string, body: unknown) => appRequest("POST", "/calls/search", token, body);
+/** What the Worker asked migration 305's function, in order: each one a POST body. */
+const asked = (net: FakeNet) => net.rpcCalls("phone_list_search").map((r) => {
+  expect(r.method).toBe("POST");
+  return r.json as Record<string, unknown>;
+});
+const askedFor = (net: FakeNet, kind: string) => asked(net).filter((j) => j.p_kind === kind);
+
+/**
+ * LIMITED USE (migration 305): nothing anyone typed rides in a URL to Supabase, whose API request
+ * logs keep every URL. No URL carries a LIKE filter at all, nor any of `secrets` (the term, its
+ * digits, a number the search matched), in any case, once decoded.
+ */
+function expectNothingTypedInUrls(net: FakeNet, ...secrets: string[]) {
+  const urls = supabaseUrls(net);
+  expect(urls.length).toBeGreaterThan(0);
+  for (const u of urls) {
+    expect(u).not.toMatch(/i?like\./);
+    for (const t of secrets) expect(u.toLowerCase(), u).not.toContain(t.toLowerCase());
+  }
+}
 const keys = (list: { key: string }[]) => list.map((t) => t.key);
 const ids = (list: { id: string }[]) => list.map((c) => c.id);
 
@@ -136,8 +158,9 @@ describe("the term", () => {
     // A hit at the very end is not cut behind.
     const tail = snippetAround(`${"d".repeat(400)} lean-to`, pat);
     expect(tail.startsWith("…") && tail.endsWith("lean-to")).toBe(true);
-    // _ is any one character, as in ilike.
-    expect(termPattern("a_c").test("xABCx")).toBe(true);
+    // _ is itself: migration 305 escapes LIKE's wildcards, so the snippet finds what the database did.
+    expect(termPattern("a_c").test("xABCx")).toBe(false);
+    expect(termPattern("a_c").test("xA_Cx")).toBe(true);
   });
 });
 
@@ -215,9 +238,20 @@ describe("POST /threads/search", () => {
       },
     ]);
     expect(json).not.toHaveProperty("cursor");
-    // Every read is this business's; contacts merged away are never candidates.
-    for (const r of [...net.reads("sms_messages"), ...net.reads("crm_contacts")]) expect(r.url.searchParams.get("client_id")).toBe(`eq.${CLIENT}`);
-    expect(net.reads("crm_contacts")[0].url.searchParams.get("merged_into")).toBe("is.null");
+    // Every read is this business's. The function is asked for this tenant, by POST, the term in
+    // the body (it reads inside the tenant and leaves contacts merged away out:
+    // tests/sql/migration305.test.cjs); the one GET left reads the page's contacts by id.
+    expect(asked(net).map((j) => j.p_kind).sort()).toEqual(["contacts", "conversations", "texts"]);
+    for (const j of asked(net)) expect(j.p_client_id).toBe(CLIENT);
+    expect(askedFor(net, "texts")[0]).toMatchObject({ p_term: "lean-to", p_digits: null, p_limit: 500 });
+    expect(askedFor(net, "contacts")[0]).toMatchObject({ p_term: "lean-to", p_digits: null, p_limit: 100 });
+    expect(askedFor(net, "conversations")[0]).toMatchObject({ p_ids: [CONTACT_2, CONTACT_1], p_numbers: [UNKNOWN], p_before: null, p_limit: 500 });
+    expect(net.reads("sms_messages")).toEqual([]);
+    for (const r of net.reads("crm_contacts")) {
+      expect(r.url.searchParams.get("client_id")).toBe(`eq.${CLIENT}`);
+      expect(r.url.searchParams.get("id")).toBe(`in.(${CONTACT_1},${CONTACT_2})`);
+    }
+    expectNothingTypedInUrls(net, "lean-to", "lean");
   });
 
   it("finds by the contact's name (match name); a contact who never texted has no conversation to show", async () => {
@@ -287,8 +321,7 @@ describe("POST /threads/search", () => {
     const { json } = await call(env, searchThreads(token, { q: "lean-to", scope: "team" }));
     expect(keys(json.threads)).toEqual([CONTACT_1]);
     // The walk reads only conversations they may see: Casey's and the unknown number's texts are never asked for.
-    const walk = net.reads("sms_messages")[1];
-    expect(walk.url.searchParams.get("or")).toBe(`(contact_id.in.(${CONTACT_1}))`);
+    expect(askedFor(net, "conversations")[0]).toMatchObject({ p_ids: [CONTACT_1], p_numbers: [] });
 
     const viewOwn = await setup(callerCtx({ phone_level: "view", contacts_level: "own_view", own_contacts_only: true }), world, [CONTACT_2]);
     expect(keys((await call(viewOwn.env, searchThreads(viewOwn.token, { q: "lean-to", scope: "team" }))).json.threads)).toEqual([CONTACT_2]);
@@ -297,6 +330,7 @@ describe("POST /threads/search", () => {
     const { res, json: nothing } = await call(none.env, searchThreads(none.token, { q: "lean-to", scope: "team" }));
     expect(res.status).toBe(200);
     expect(nothing).toEqual({ ok: true, threads: [] });
+    expect(asked(none.net)).toEqual([]);
     expect(none.net.reads("sms_messages")).toEqual([]);
     expect(none.net.reads("crm_contacts")).toEqual([]);
   });
@@ -324,16 +358,44 @@ describe("POST /threads/search", () => {
     const raw = new Request("https://phone.example.test/threads/search", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "q=lean" });
     const { res } = await call(env, raw);
     expect(res.status).toBe(400);
+    expect(asked(net)).toEqual([]);
     expect(net.reads("sms_messages")).toEqual([]);
     // No login, no search.
     expect((await call(env, searchThreads("", { q: "lean", scope: "team" }))).res.status).toBe(401);
   });
 
-  it("strips filter syntax out of the term before it reaches a filter", async () => {
+  it("cleans the term as the apps do, and hands it to the database only in a POST body", async () => {
     const { net, token, env } = await setup(callerCtx({ phone_level: "view" }), world);
     await call(env, searchThreads(token, { q: "lean),to*(", scope: "team" }));
-    expect(net.reads("sms_messages")[0].url.searchParams.get("or")).toBe("(body.ilike.*lean to*)");
-    expect(net.reads("crm_contacts")[0].url.searchParams.get("or")).toBe("(name.ilike.*lean to*)");
+    expect(askedFor(net, "texts")[0].p_term).toBe("lean to");
+    expect(askedFor(net, "contacts")[0].p_term).toBe("lean to");
+    expectNothingTypedInUrls(net, "lean to", "lean),to", "lean");
+  });
+
+  it("Limited Use: the term, its digits and the numbers it matched never ride in a URL to Supabase, on any page", async () => {
+    // 500 texts that say "zebrafence" from 60 contacts and 3 unknown numbers (two pages, so the
+    // walk's "already shown" check runs too), and a number search that finds an unknown number.
+    const people = Array.from({ length: 60 }, (_, i) => person(uuidOf(0xb000 + i), `Pat ${i}`));
+    const strangers = ["+15555550171", "+15555550172", "+15555550173"];
+    const sms = [
+      ...Array.from({ length: 497 }, (_, i) => text(`z${i}`, { contact_id: people[i % 60].id, body: `the zebrafence ${i}`, created_at: S(i + 1) })),
+      ...strangers.map((n, i) => text(`zs${i}`, { from_number: n, body: "a zebrafence for the yard", created_at: S(600 + i) })),
+    ];
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }), { contacts: people, sms });
+    const { seen, pages } = await allPages(env, (cursor) => searchThreads(token, { q: "Zebrafence", scope: "team", ...(cursor ? { cursor } : {}) }));
+    expect(pages).toBe(2);
+    expect(seen).toHaveLength(63);
+    expect(askedFor(net, "conversations").some((j) => j.p_after)).toBe(true);
+    expectNothingTypedInUrls(net, "zebrafence", ...strangers, ...strangers.map((n) => n.slice(2)));
+
+    const byNumber = await setup(callerCtx({ phone_level: "view" }), world);
+    for (const q of ["5555550150", "555 555 0150", "(555) 555-0150"]) {
+      const { json } = await call(byNumber.env, searchThreads(byNumber.token, { q, scope: "team" }));
+      expect(keys(json.threads), q).toEqual([`n:${UNKNOWN}`]);
+    }
+    expectNothingTypedInUrls(byNumber.net, "5555550150", "0150", UNKNOWN);
+    // And the app's request to the Worker carries it in the body only.
+    for (const s of byNumber.net.seen) expect(s.url.href).not.toContain("0150");
   });
 
   it("pages: every matching conversation once, in order of its newest text, even when the pages cut through their texts", async () => {
@@ -428,8 +490,8 @@ describe("POST /threads/search", () => {
     });
     const ok = await call(env, searchThreads(token, { q: SECRET, scope: "team" }));
     expect(keys(ok.json.threads)).toEqual([CONTACT_1]);
-    // PostgREST's parse error repeats the filter, term and all.
-    net.rest("GET", "sms_messages", (s) => jsonRes({ code: "PGRST100", message: `failed to parse logic tree (${s.url.searchParams.get("or")})`, details: s.url.search }, 400));
+    // A database error that repeats what it was asked, term and all.
+    net.rpc("phone_list_search", (s) => jsonRes({ code: "PGRST100", message: `failed near "${s.json.p_term}"`, details: JSON.stringify(s.json) }, 400));
     const bad = await call(env, searchThreads(token, { q: SECRET, scope: "team" }));
     expect(bad.res.status).toBe(500);
     expect(bad.json.error.code).toBe("internal");
@@ -480,10 +542,17 @@ describe("POST /calls/search", () => {
       expect(json.calls[0]).toHaveProperty(k);
     }
     expect(json.calls[1]).toMatchObject({ voicemail: { id: "v5", transcript: "Jordan again" }, match: { field: "name" } });
-    const byName = net.reads("phone_calls").find((r) => r.url.searchParams.has("crm_contacts.name"))!;
-    expect(byName.url.searchParams.get("crm_contacts.name")).toBe("ilike.*jordan*");
-    expect(byName.url.searchParams.get("select")).toContain("crm_contacts!inner(");
-    for (const r of net.reads("phone_calls")) expect(r.url.searchParams.get("client_id")).toBe(`eq.${CLIENT}`);
+    // Found by the function (POST, the term in the body), then read back by id with GET /calls's columns.
+    expect(asked(net)).toEqual([{
+      p_client_id: CLIENT, p_kind: "calls", p_term: "jordan", p_digits: null, p_before: null, p_limit: 50,
+      p_voicemail: false, p_user_id: null, p_customers: true,
+    }]);
+    const reads = net.reads("phone_calls");
+    expect(reads).toHaveLength(1);
+    expect(reads[0].url.searchParams.get("client_id")).toBe(`eq.${CLIENT}`);
+    expect(reads[0].url.searchParams.get("id")).toBe("in.(k1,k5)");
+    expect(reads[0].url.searchParams.get("select")).not.toContain("!inner(");
+    expectNothingTypedInUrls(net, "jordan");
   });
 
   it("finds by the customer's number however it is typed (\"I ever called this number\"), never by the business's own", async () => {
@@ -505,18 +574,23 @@ describe("POST /calls/search", () => {
     const { json } = await call(env, searchCalls(token, { q: "lean-to", scope: "team" }));
     expect(ids(json.calls)).toEqual(["k3"]);
     expect(json.calls[0].match).toEqual({ field: "transcript", snippet: "Hi, it's about the lean-to estimate. Call me back when you can." });
-    const byWords = net.reads("phone_calls").find((r) => r.url.searchParams.has("phone_voicemails.transcript"))!;
-    expect(byWords.url.searchParams.get("phone_voicemails.transcript")).toBe("ilike.*lean-to*");
-    expect(byWords.url.searchParams.get("phone_voicemails.deleted_at")).toBe("is.null");
-    expect(byWords.url.searchParams.get("select")).toContain("phone_voicemails!inner(");
+    expect(asked(net)[0]).toMatchObject({ p_kind: "calls", p_term: "lean-to", p_voicemail: false });
+    expectNothingTypedInUrls(net, "lean-to");
   });
 
   it("voicemail: true (the Voicemail tab) finds only calls that left a voicemail that isn't deleted", async () => {
-    const { token, env } = await setup(callerCtx({ phone_level: "view" }), world);
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }), world);
     const { json } = await call(env, searchCalls(token, { q: "jordan", scope: "team", voicemail: true }));
     expect(ids(json.calls)).toEqual(["k5"]);
     const { json: byNumber } = await call(env, searchCalls(token, { q: "555 555", scope: "team", voicemail: true }));
     expect(ids(byNumber.calls)).toEqual(["k3", "k5"]);
+    // Asked of the function, and the rows read back with the Voicemail tab's own join (as ?voicemail=1 reads them).
+    expect(asked(net).map((j) => j.p_voicemail)).toEqual([true, true]);
+    for (const r of net.reads("phone_calls")) {
+      expect(r.url.searchParams.get("select")).toContain("phone_voicemails!inner(");
+      expect(r.url.searchParams.get("phone_voicemails.deleted_at")).toBe("is.null");
+    }
+    expectNothingTypedInUrls(net, "jordan", "555 555", "555555");
   });
 
   it("a call that matches more than one way comes back once, with the first reason (name, number, transcript)", async () => {
@@ -549,7 +623,7 @@ describe("POST /calls/search", () => {
     const none = await setup(callerCtx({ phone_level: "view", contacts_level: "none" }), world);
     const { json: nothing } = await call(none.env, searchCalls(none.token, { q: "jordan", scope: "team" }));
     expect(nothing.calls).toEqual([]);
-    expect(none.net.reads("phone_calls").some((r) => r.url.searchParams.has("crm_contacts.name"))).toBe(false);
+    expect(asked(none.net)[0]).toMatchObject({ p_term: "jordan", p_customers: false });
   });
 
   it("pages like GET /calls: a full read hands back a cursor, and the next page continues below it, nothing twice", async () => {
@@ -561,7 +635,7 @@ describe("POST /calls/search", () => {
     const second = await call(env, searchCalls(token, { q: "555 555 0160", scope: "team", cursor: first.json.cursor }));
     expect(ids(second.json.calls)).toEqual(Array.from({ length: 25 }, (_, i) => `p${50 + i}`));
     expect(second.json).not.toHaveProperty("cursor");
-    expect(net.reads("phone_calls").at(-1)!.url.searchParams.get("started_at")).toBe(`lt.${S(50)}`);
+    expect(asked(net).at(-1)!.p_before).toBe(S(50));
   });
 
   it("reads short of a page each but more than a page together: every call, over the pages, once (Team and My)", async () => {
@@ -594,24 +668,15 @@ describe("POST /calls/search", () => {
     const { json } = await call(env, searchCalls(token, { q: "555-555-0188", scope: "mine" }));
     expect(ids(json.calls)).toEqual(["me1", "me2"]);
     expect(json).not.toHaveProperty("cursor");
-    // Each way twice, as GET /calls reads My: the calls I took part in (one `or`; the number's has
-    // mine inside it), and the unanswered calls on customers I own.
-    const reads = net.reads("phone_calls");
-    const mine = `placed_by.eq.${USER_A},answered_by.eq.${USER_A},transferred_from.eq.${USER_A},rang_user_ids.cs.{${USER_A}}`;
-    const involved = reads.filter((r) => (r.url.searchParams.get("or") ?? "").includes(mine));
-    const owned = reads.filter((r) => r.url.searchParams.get("crm_contacts.owner_user_id") === `eq.${USER_A}`);
-    expect(involved).toHaveLength(3); // name, number, transcript
-    expect(owned).toHaveLength(3);
-    expect(reads).toHaveLength(6);
-    for (const r of reads) expect(r.url.searchParams.getAll("or").length).toBeLessThanOrEqual(1);
-    const byNumber = involved.find((r) => (r.url.searchParams.get("or") ?? "").includes("to_e164.like"))!;
-    expect(byNumber.url.searchParams.get("or")).toBe(
-      `(and(direction.eq.in,from_e164.like.*5555550188*,or(${mine})),and(direction.eq.out,to_e164.like.*5555550188*,or(${mine})))`,
-    );
-    for (const r of owned) {
-      expect(r.url.searchParams.get("status")).toBe("in.(missed,voicemail,ringing)");
-      expect(r.url.searchParams.get("select")).toContain("crm_contacts!inner(");
-    }
+    // One ask, for MY calls, as GET /calls reads My: the calls I took part in, and the unanswered
+    // calls on customers I own (p_user_id with p_customers; the SQL is in migration 305). Then the
+    // page's rows by id.
+    expect(asked(net)).toEqual([{
+      p_client_id: CLIENT, p_kind: "calls", p_term: "555-555-0188", p_digits: "5555550188", p_before: null, p_limit: 50,
+      p_voicemail: false, p_user_id: USER_A, p_customers: true,
+    }]);
+    expect(net.reads("phone_calls")).toHaveLength(1);
+    expectNothingTypedInUrls(net, "5555550188", "555-555-0188", "0188");
     // Team: all 62, over two pages.
     const view = await setup(callerCtx({ phone_level: "view" }), { calls });
     const { seen } = await allPages(view.env, (cursor) => searchCalls(view.token, { q: "555-555-0188", scope: "team", ...(cursor ? { cursor } : {}) }));
@@ -630,12 +695,13 @@ describe("POST /calls/search", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { net, token, env } = await setup(callerCtx({ phone_level: "view" }), world);
     await call(env, searchCalls(token, { q: "estimate", scope: "team" }));
-    net.rest("GET", "phone_calls", (s) => jsonRes({ code: "PGRST100", message: `failed to parse filter (${s.url.search})` }, 400));
+    net.rpc("phone_list_search", (s) => jsonRes({ code: "PGRST100", message: `failed near "${s.json.p_term}"`, details: JSON.stringify(s.json) }, 400));
     const bad = await call(env, searchCalls(token, { q: "estimate", scope: "team" }));
     expect(bad.res.status).toBe(500);
     const said = [...net.writes("app_errors").map((w) => w.body), ...log.mock.calls.flat(), ...warn.mock.calls.flat()].map(String).join("\n");
     expect(said).not.toContain("estimate");
     expect(said).not.toContain("lean-to");
+    expect(said).toContain("PGRST100");
   });
 });
 

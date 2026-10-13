@@ -726,6 +726,9 @@ export function emailSearchTerm(q: string): string | null {
   return t.length >= 3 || (t.length >= 2 && t.includes("@")) ? t : null;
 }
 
+/** The contacts GET /search reads per way of matching (by name or number, and by address). */
+export const DIRECTORY_READ = 60;
+
 /**
  * GET /search?q=: contacts by name or 3+ digits of their number, each with a number to call or
  * text. `&email=1` (2026-10-05, the phone app's New message) also matches the email address and
@@ -734,6 +737,10 @@ export function emailSearchTerm(q: string): string | null {
  * after the name and number matches, so a common address fragment never pushes a name out of
  * the 20. Without it the answer is exactly as before, which old app builds, the extension's
  * Keypad and New message, and the Contacts tab (a call list) all read.
+ *
+ * Both reads go through migration 305's search function by POST (`findRows`, below), so the term
+ * never rides in a URL to Supabase. The term is matched as itself (`_` is no wildcard any more),
+ * and a failed read is logged with the database's code only (`quiet`).
  */
 export async function search(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
@@ -745,23 +752,16 @@ export async function search(env: Env, req: Request): Promise<Response> {
   const digits = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   if (term.length < 2 && digits.length < 3) return ok({ contacts: [] });
 
-  const ors: string[] = [];
-  if (term.length >= 2) ors.push(`name.ilike.*${term}*`);
-  if (digits.length >= 3) ors.push(`phone_digits.like.*${digits}*`);
   type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email?: string | null };
-  const contactsQuery = () =>
-    c.admin.from("crm_contacts").select(withEmail ? "id, name, phone, phone_digits, email" : "id, name, phone, phone_digits")
-      .eq("client_id", c.ctx.client_id).is("merged_into", null)
-      .order("updated_at", { ascending: false }).limit(60);
   const emailTerm = withEmail ? emailSearchTerm(raw) : null;
   const [byName, byEmail] = await Promise.all([
-    contactsQuery().or(ors.join(",")),
+    findRows(c, "directory", { p_term: term.length >= 2 ? term : null, p_digits: digits.length >= 3 ? digits : null, p_limit: DIRECTORY_READ }),
     // email_lower is generated (lower(btrim(email)), migration 130).
-    emailTerm ? contactsQuery().ilike("email_lower", `*${emailTerm}*`) : null,
+    emailTerm ? findRows(c, "directory_email", { p_term: emailTerm, p_limit: DIRECTORY_READ }) : null,
   ]);
-  const named = (must(byName, "search contacts") as Row[] | null) ?? [];
+  const named = (quiet(byName, "search contacts") as Row[] | null) ?? [];
   const found = new Set(named.map((r) => r.id));
-  const addressed = byEmail ? ((must(byEmail, "search contacts by email") as Row[] | null) ?? []).filter((r) => !found.has(r.id)) : [];
+  const addressed = byEmail ? ((quiet(byEmail, "search contacts by email") as Row[] | null) ?? []).filter((r) => !found.has(r.id)) : [];
   const rows = [...named, ...addressed];
 
   const visible = await visibleContactIds(c, rows.map((r) => r.id));
@@ -789,14 +789,19 @@ export async function search(env: Env, req: Request): Promise<Response> {
 // number", in both My and Team. The phone repo's docs/SPEC.md section 3 "List search" is the
 // contract (phone-core listSearch.ts is the client half).
 //
-// ⚠️ LIMITED USE. The term travels only in the POST body (request URLs are logged), and it never
-// reaches a log line, phone_call_events or app_errors: a failed search query is logged with the
-// database's code only (quiet below), because a PostgREST parse error quotes the filter, and the
-// filter holds the term. Nothing here logs a name, a number, a text or a transcript.
+// ⚠️ LIMITED USE. The term travels only in POST bodies, both hops: the app's request to this Worker
+// (request URLs are logged here), and this Worker's requests to Supabase (decided 2026-10-13: its
+// API request logs keep every URL, and a PostgREST GET carries its filters in the URL). Every read
+// that filters by the term, its digits or a number the search found goes through migration 305's
+// public.phone_list_search by POST rpc (findRows below); what a search still reads by GET is named
+// by the tenant and row ids only (contacts and calls read back by id). The term never reaches a
+// log line, phone_call_events or app_errors: a failed search read is logged with the database's
+// code only (quiet below). Nothing here logs a name, a number, a text or a transcript.
 //
-// SCOPE: search never shows more than the lists. Rows come from the same reads the lists make and
-// pass the same rules after them: visibleContactIds and mayReadUnknownNumbers for threads, then
-// "mine" exactly as listThreads; scopeCalls and isMineCall for calls, as listCalls.
+// SCOPE: search never shows more than the lists. The function only finds candidates inside the
+// tenant; the rules are applied here after it, as the lists apply them: visibleContactIds and
+// mayReadUnknownNumbers for threads, then "mine" exactly as listThreads; scopeCalls and isMineCall
+// for calls, as listCalls.
 
 /** Refused under this many characters, once searchTerm has cleaned the term. */
 export const LIST_SEARCH_MIN = 2;
@@ -828,10 +833,11 @@ export const SEARCH_CONTACTS = 100;
 /** Matching texts read, newest first, to find the conversations whose words or number match. */
 export const SEARCH_TEXTS = 500;
 /**
- * At most this many conversations are searched: contacts, and unknown numbers. One read's `in`
- * list (the inbox's INBOX_ID_CHUNK: about 37 characters an id, inside what the proxies and
- * PostgREST accept in a URL). Counted after the scope (only conversations this person may see),
- * and past it the newest matches win; the answer then says `partial: true`.
+ * At most this many conversations are searched: contacts, and unknown numbers. Sized when they were
+ * one GET's `in` list (the inbox's INBOX_ID_CHUNK, inside what a URL holds); since migration 305
+ * they travel in a POST body, and the caps stay so a page and `partial` mean what they did.
+ * Counted after the scope (only conversations this person may see), and past it the newest matches
+ * win; the answer then says `partial: true`.
  */
 export const SEARCH_THREAD_CONTACTS = 150;
 export const SEARCH_THREAD_NUMBERS = 50;
@@ -851,12 +857,13 @@ export function listSearchDigits(raw: string): string | null {
 }
 
 /**
- * The term as `ilike` reads it, for telling which field matched and where: case-insensitive, and
- * `_` (which searchTerm keeps) is any one character there too.
+ * The term as the search function matches it, for telling which field matched and where:
+ * case-insensitive, and every character as itself. Migration 305 escapes LIKE's `%`, `_` and `\`,
+ * so `_` (which searchTerm keeps) is an underscore, not "any one character" (it was, while the
+ * reads were PostgREST `ilike` filters).
  */
 export function termPattern(term: string): RegExp {
-  const src = [...term].map((ch) => (ch === "_" ? "." : ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("");
-  return new RegExp(src, "iu");
+  return new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
 }
 
 /** Does a number hold these digits? Compared on its E.164 digits, so a typed leading 1 matches too. */
@@ -890,6 +897,22 @@ export function snippetAround(text: string, pattern: RegExp): string {
 function quiet<T>(res: { data: T | null; error: { message?: string; code?: string } | null }, op: string): T | null {
   if (res.error) throw new DbError(op, `failed (${res.error.code ?? "no code"})`, res.error.code ?? null);
   return res.data;
+}
+
+/** One read of a search, as migration 305's public.phone_list_search names it (its header says what each finds). */
+type SearchKind = "texts" | "contacts" | "conversations" | "calls" | "directory" | "directory_email";
+
+/**
+ * A search read through migration 305's public.phone_list_search (security definer, service_role
+ * only), by POST rpc: the term, its digits and the numbers a search found travel in the request
+ * BODY, which Supabase's API request logs don't keep, where a GET's filters would ride in its URL.
+ * Each kind is the PostgREST read it replaced (same filters, order and limit), inside this tenant;
+ * the function escapes LIKE's `%`, `_` and `\` and finds nothing for a term under 2 characters.
+ * ⚠️ Migration 305 must be applied before this Worker is deployed: without it every search, and
+ * GET /search, fails (PGRST202, logged by code only).
+ */
+function findRows(c: Caller, kind: SearchKind, args: Record<string, unknown>) {
+  return c.admin.rpc("phone_list_search", { p_client_id: c.ctx.client_id, p_kind: kind, ...args });
 }
 
 interface ListSearch {
@@ -934,23 +957,6 @@ async function listSearchRequest(c: Caller, req: Request): Promise<ListSearch> {
 /** Why a row matched: the first of name, number, then the text or transcript. */
 type ListMatch = { field: "name" | "number" | "body" | "transcript"; snippet?: string; at?: string };
 
-/** A contact's 10-digit phone_digits against the term's digits, as on its E.164 ("1" + digits). */
-function contactDigitsOrs(digits: string): string[] {
-  const ors = [`phone_digits.like.*${digits}*`];
-  // A typed country code: "1555012" is "555012" at the start of the ten digits.
-  if (digits.startsWith("1") && digits.length > 1) ors.push(`phone_digits.like.${digits.slice(1)}*`);
-  return ors;
-}
-
-/**
- * A text's or a call's customer number against the term's digits: only the customer's side.
- * `also` (a PostgREST `or` list) must hold too: one `or` parameter carries both, never two.
- */
-function numberOrs(digits: string, from: string, to: string, also: string | null = null): string[] {
-  const more = also ? `,or(${also})` : "";
-  return [`and(direction.eq.in,${from}.like.*${digits}*${more})`, `and(direction.eq.out,${to}.like.*${digits}*${more})`];
-}
-
 /**
  * POST /threads/search: the Messages list, searched. A conversation matches when any of its texts
  * (not only the newest) holds the term, when its contact's name does, or, for a number-like term,
@@ -958,16 +964,19 @@ function numberOrs(digits: string, from: string, to: string, also: string | null
  * conversation, newest first by its newest text.
  *
  * Two steps. First the candidates: contacts whose name or number matches (SEARCH_CONTACTS) and the
- * newest SEARCH_TEXTS matching texts, narrowed by the contacts scope, then capped at
- * SEARCH_THREAD_CONTACTS contacts and SEARCH_THREAD_NUMBERS unknown numbers, newest matches first.
+ * newest SEARCH_TEXTS matching texts (the function's `contacts` and `texts`: a number matches on
+ * the customer's side of a text only, and a contact's phone_digits with or without a typed leading
+ * 1), narrowed by the contacts scope, then capped at SEARCH_THREAD_CONTACTS contacts and
+ * SEARCH_THREAD_NUMBERS unknown numbers, newest matches first.
  * When a read or a cap was full, older matches may be missing, and every page says `partial: true`
  * (an addition to the contract: the apps can say "Showing the newest matches"; older builds ignore
  * it), so a cursor is never read as "this is everything".
- * Then listThreads' own walk over THOSE conversations' texts only: newest first below the
- * cursor, SCAN at a time, the "already shown on an earlier page" check, "mine", and the same
- * cursor rule (a full page continues after its last row; a full read that filtered down to a
- * short page continues from where the read ended). The candidates are the same on every page, so
- * the pages fit together.
+ * Then listThreads' own walk over THOSE conversations' texts only (the function's `conversations`,
+ * so an unknown number the search found travels in a body too): newest first below the cursor,
+ * SCAN at a time, the "already shown on an earlier page" check, "mine", and the same cursor rule (a
+ * full page continues after its last row; a full read that filtered down to a short page continues
+ * from where the read ended). The candidates are the same on every page, so the pages fit together.
+ * The one GET left reads the page's contacts by id.
  */
 export async function searchThreads(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
@@ -978,14 +987,10 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
   const mine = !s.team;
   const none = Promise.resolve({ data: [], error: null });
 
-  // ── the candidates ──
-  const textOrs = [`body.ilike.*${s.term}*`, ...(s.digits ? numberOrs(s.digits, "from_number", "to_number") : [])];
-  const contactOrs = [`name.ilike.*${s.term}*`, ...(s.digits ? contactDigitsOrs(s.digits) : [])];
+  // ── the candidates (migration 305's function, by POST: the term and its digits in the body) ──
   const [textRes, contactRes] = await Promise.all([
-    c.admin.from("sms_messages").select("id, contact_id, direction, body, created_at, from_number, to_number")
-      .eq("client_id", client).or(textOrs.join(",")).order("created_at", { ascending: false }).limit(SEARCH_TEXTS),
-    c.admin.from("crm_contacts").select("id").eq("client_id", client).is("merged_into", null)
-      .or(contactOrs.join(",")).order("updated_at", { ascending: false }).limit(SEARCH_CONTACTS),
+    findRows(c, "texts", { p_term: s.term, p_digits: s.digits, p_limit: SEARCH_TEXTS }),
+    findRows(c, "contacts", { p_term: s.term, p_digits: s.digits, p_limit: SEARCH_CONTACTS }),
   ]);
   const hits = (quiet(textRes, "search texts") as MsgRow[] | null) ?? [];
   const named = (quiet(contactRes, "search contacts") as { id: string }[] | null) ?? [];
@@ -1024,16 +1029,12 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
   if (!ids.length && !nums.length) return ok({ threads: [], ...(partial ? { partial: true } : {}) });
   const wanted = new Set([...ids, ...nums.map((n) => `n:${n}`)]);
 
-  // ── listThreads' walk, over the candidates' texts only ──
-  const scopeOrs = [
-    ...(ids.length ? [`contact_id.in.(${ids.join(",")})`] : []),
-    ...(nums.length ? [`and(contact_id.is.null,or(from_number.in.(${nums.join(",")}),to_number.in.(${nums.join(",")})))`] : []),
-  ];
-  let q = c.admin.from("sms_messages")
-    .select("id, contact_id, direction, body, status, created_at, from_number, to_number, sent_by")
-    .eq("client_id", client).or(scopeOrs.join(",")).order("created_at", { ascending: false }).limit(SCAN);
-  if (s.cursor) q = q.lt("created_at", s.cursor);
-  const msgs = (quiet(await q, "read the matching conversations") as MsgRow[] | null) ?? [];
+  // ── listThreads' walk, over the candidates' texts only (by POST too: the unknown numbers it
+  // names are what the search matched) ──
+  const msgs = (quiet(
+    await findRows(c, "conversations", { p_ids: ids, p_numbers: nums, p_before: s.cursor, p_limit: SCAN }),
+    "read the matching conversations",
+  ) as MsgRow[] | null) ?? [];
   const boundary = msgs.length === SCAN ? msgs[msgs.length - 1].created_at : null;
 
   const groups = new Map<string, { last: MsgRow; sentByMe: boolean }>();
@@ -1049,15 +1050,11 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
   if (s.cursor && groups.size) {
     const pageIds = [...groups.keys()].filter((k) => !k.startsWith("n:"));
     const pageNums = [...groups.keys()].filter((k) => k.startsWith("n:")).map((k) => k.slice(2));
+    const newer = (which: { p_ids: string[] } | { p_numbers: string[] }) =>
+      findRows(c, "conversations", { ...which, p_after: s.cursor, p_limit: 1000 });
     const [newerC, newerN] = await Promise.all([
-      pageIds.length
-        ? c.admin.from("sms_messages").select("contact_id").eq("client_id", client).gte("created_at", s.cursor).in("contact_id", pageIds).limit(1000)
-        : none,
-      pageNums.length
-        ? c.admin.from("sms_messages").select("direction, from_number, to_number, contact_id").eq("client_id", client)
-          .gte("created_at", s.cursor).is("contact_id", null)
-          .or(`from_number.in.(${pageNums.join(",")}),to_number.in.(${pageNums.join(",")})`).limit(1000)
-        : none,
+      pageIds.length ? newer({ p_ids: pageIds }) : none,
+      pageNums.length ? newer({ p_numbers: pageNums }) : none,
     ]);
     for (const r of (quiet(newerC as never, "check newer texts") as MsgRow[] | null) ?? []) groups.delete(threadKey(r));
     for (const r of (quiet(newerN as never, "check newer texts") as MsgRow[] | null) ?? []) groups.delete(threadKey(r));
@@ -1109,14 +1106,17 @@ export async function searchThreads(env: Env, req: Request): Promise<Response> {
  * by its contact's name, its customer number (a number-like term), or its voicemail's transcript.
  * Rows are GET /calls rows plus `match`, newest first by started_at, paged like GET /calls.
  *
- * One read a way of matching, each newest first below the cursor and PAGE long: by name (an inner
- * join on crm_contacts), by number (the customer's side of the call only, so the business's own
- * number matches nothing), and by transcript (an inner join on phone_voicemails). Recording
- * transcripts and summaries are not searched: those are read only on request (GET
- * /calls/:id/transcript). My reads each way twice, as listCalls reads My, so the database finds MY
- * calls and a page isn't spent on the team's: the calls I took part in, and the unanswered calls
- * on customers I own. The reads merge as listCalls' do (mergeCallReads: a cursor whenever more may
- * follow). Then scopeCalls and, for My, isMineCall, as listCalls.
+ * Two steps. First migration 305's function (`calls`, by POST: the term and its digits in the body)
+ * finds the newest PAGE calls below the cursor that match any way: by the contact's name, by number
+ * (the customer's side of the call only, so the business's own number matches nothing), or by the
+ * transcript of a voicemail that isn't deleted (retention deletes the words with the audio).
+ * Recording transcripts and summaries are not searched: those are read only on request (GET
+ * /calls/:id/transcript). For My it asks the database for MY calls, as listCalls reads My, so a
+ * page isn't spent on the team's: the calls I took part in, and the unanswered calls on customers I
+ * own. The Voicemail tab (`voicemail`) keeps to calls with a voicemail that isn't deleted.
+ * Then the rows, read back by id with GET /calls's own columns (the Voicemail tab's join as
+ * `?voicemail=1` reads it), in the function's order. A full page hands back a cursor (its oldest
+ * call), as GET /calls's does. Then scopeCalls and, for My, isMineCall, as listCalls.
  */
 export async function searchCalls(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
@@ -1125,55 +1125,22 @@ export async function searchCalls(env: Env, req: Request): Promise<Response> {
   // Contacts `none` sees no customer's call, so neither a name nor "my customers" can find one.
   const customers = c.ctx.contacts_level !== "none";
 
-  // `contacts` inner when the read filters on the contact (a name, an owner). `voicemails` inner
-  // for the Voicemail tab and for the transcript: a deleted voicemail is no voicemail, never
-  // listed, and its transcript (retention deletes the words with the audio) never searched.
-  const read = (contactsInner: boolean, vmInner: boolean) => {
+  const found = (quiet(await findRows(c, "calls", {
+    p_term: s.term, p_digits: s.digits, p_before: s.cursor, p_limit: PAGE, p_voicemail: s.voicemail,
+    p_user_id: s.team ? null : me, p_customers: customers,
+  }), "search calls") as { id: string; started_at: string }[] | null) ?? [];
+
+  let fetched: CallWithJoins[] = [];
+  if (found.length) {
     let q = c.admin.from("phone_calls")
-      .select(`${CALL_COLUMNS}, crm_contacts${contactsInner ? "!inner" : ""}(name, owner_user_id), ${vmInner ? VM_INNER : VM_SELECT}, ${REC_SELECT}`)
-      .eq("client_id", c.ctx.client_id).order("started_at", { ascending: false }).limit(PAGE);
-    if (vmInner) q = q.is("phone_voicemails.deleted_at", null);
-    if (s.cursor) q = q.lt("started_at", s.cursor);
-    return q;
-  };
-  type Query = ReturnType<typeof read>;
-  /** One way of matching. `mine` (My's first read) is one more condition the call must meet. */
-  type Way = { op: string; contactsInner: boolean; vmInner: boolean; match: (q: Query, mine: string | null) => Query };
-  const ways: Way[] = [];
-  if (customers) {
-    ways.push({
-      op: "search calls by name", contactsInner: true, vmInner: s.voicemail,
-      match: (q, mine) => (mine ? q.or(mine) : q).ilike("crm_contacts.name", `*${s.term}*`),
-    });
+      .select(`${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${s.voicemail ? VM_INNER : VM_SELECT}, ${REC_SELECT}`)
+      .eq("client_id", c.ctx.client_id).in("id", found.map((r) => r.id));
+    if (s.voicemail) q = q.is("phone_voicemails.deleted_at", null);
+    const read = (quiet(await q, "read the matching calls") as CallWithJoins[] | null) ?? [];
+    const order = new Map(found.map((r, i) => [r.id, i]));
+    fetched = read.filter((r) => order.has(r.id)).sort((x, y) => order.get(x.id)! - order.get(y.id)!);
   }
-  if (s.digits) {
-    const digits = s.digits;
-    ways.push({
-      op: "search calls by number", contactsInner: false, vmInner: s.voicemail,
-      match: (q, mine) => q.or(numberOrs(digits, "from_e164", "to_e164", mine).join(",")),
-    });
-  }
-  ways.push({
-    op: "search voicemail transcripts", contactsInner: false, vmInner: true,
-    match: (q, mine) => (mine ? q.or(mine) : q).ilike("phone_voicemails.transcript", `*${s.term}*`),
-  });
-  const reads: { op: string; q: Query }[] = [];
-  for (const w of ways) {
-    if (s.team) {
-      reads.push({ op: w.op, q: w.match(read(w.contactsInner, w.vmInner), null) });
-      continue;
-    }
-    reads.push({ op: w.op, q: w.match(read(w.contactsInner, w.vmInner), involvedOr(me)) });
-    if (customers) {
-      reads.push({
-        op: `${w.op} (my customers)`,
-        q: w.match(read(true, w.vmInner), null).eq("crm_contacts.owner_user_id", me).in("status", UNANSWERED),
-      });
-    }
-  }
-  const results = await Promise.all(reads.map((r) => r.q));
-  const lists = results.map((r, i) => (quiet(r as never, reads[i].op) as CallWithJoins[] | null) ?? []);
-  const { fetched, nextCursor } = mergeCallReads(lists);
+  const nextCursor = found.length === PAGE ? found[PAGE - 1].started_at : null;
 
   let rows = await scopeCalls(c, fetched);
   if (!s.team) rows = rows.filter((r) => isMineCall(me, r));
@@ -1187,8 +1154,7 @@ export async function searchCalls(env: Env, req: Request): Promise<Response> {
     return { ...row, ...(match ? { match } : {}) };
   });
   // Counts only: never the term, a name, a number or a transcript.
-  const rowsRead = lists.reduce((n, l) => n + l.length, 0);
-  console.log(`[phone-api] calls search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}${s.voicemail ? ", voicemail" : ""}, ${reads.length} reads, ${rowsRead} read, ${calls.length} rows`);
+  console.log(`[phone-api] calls search: term ${s.term.length} chars${s.digits ? ", number-like" : ""}${s.voicemail ? ", voicemail" : ""}, ${found.length} found, ${fetched.length} read, ${calls.length} rows`);
   return ok({ calls, ...(nextCursor ? { cursor: nextCursor } : {}) });
 }
 

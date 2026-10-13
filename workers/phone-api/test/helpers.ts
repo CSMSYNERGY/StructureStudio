@@ -328,6 +328,90 @@ export function pgTable(rows: Record<string, unknown>[]) {
   };
 }
 
+// ── Migration 305's search function, as the Worker's rpc meets it (2026-10-13) ──────
+// public.phone_list_search in JS, over the same fixture rows pgTable serves: what
+// tests/sql/migration305.test.cjs proves the SQL does (PGlite), kind by kind. The term is matched
+// as itself (LIKE's `%`, `_` and `\` escaped), case aside; under 2 characters finds nothing; only
+// p_client_id's rows; a call's contact and voicemail are its embeds (crm_contacts,
+// phone_voicemails), and a deleted voicemail is no voicemail.
+
+type FixtureRow = Record<string, unknown>;
+const oneOf = (v: unknown): FixtureRow | null => (Array.isArray(v) ? (v[0] as FixtureRow) ?? null : (v as FixtureRow) ?? null);
+const timeOf = (v: unknown) => Date.parse(String(v));
+/** Newest first by `col`, ties by id (the function's order). */
+const newestBy = (col: string) => (a: FixtureRow, b: FixtureRow) =>
+  timeOf(b[col]) - timeOf(a[col]) || (String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0);
+const pick = (r: FixtureRow, cols: string[]) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
+
+export function phoneListSearch(w: { sms?: FixtureRow[]; contacts?: FixtureRow[]; calls?: FixtureRow[] }): Reply {
+  return (s: Seen) => {
+    const a = (s.json ?? {}) as Record<string, any>;
+    const client = String(a.p_client_id ?? "").trim();
+    if (!client) return jsonRes({ code: "22004", message: "phone_list_search: a tenant is required" }, 400);
+    const raw = String(a.p_term ?? "").trim();
+    const term = raw.length >= 2 ? raw.slice(0, 60).toLowerCase() : null;
+    const digits = typeof a.p_digits === "string" && /^[0-9]{3,60}$/.test(a.p_digits) ? a.p_digits : null;
+    const limit = Math.min(Math.max(Number(a.p_limit ?? 50) || 50, 1), 1000);
+    const before = a.p_before ? timeOf(a.p_before) : null;
+    const after = a.p_after ? timeOf(a.p_after) : null;
+    const holds = (v: unknown) => term !== null && v != null && String(v).toLowerCase().includes(term);
+    const has = (v: unknown, d: string | null) => d !== null && v != null && String(v).includes(d);
+    const mineOf = (r: FixtureRow) => r.client_id === client;
+    const kind = String(a.p_kind ?? "");
+
+    if (kind === "texts") {
+      return (w.sms ?? []).filter(mineOf)
+        .filter((m) => holds(m.body) || (m.direction === "in" ? has(m.from_number, digits) : has(m.to_number, digits)))
+        .sort(newestBy("created_at")).slice(0, limit)
+        .map((m) => pick(m, ["id", "contact_id", "direction", "body", "created_at", "from_number", "to_number"]));
+    }
+    if (kind === "contacts" || kind === "directory" || kind === "directory_email") {
+      const cc = kind === "contacts" && digits?.startsWith("1") ? digits.slice(1) : null;
+      return (w.contacts ?? []).filter(mineOf).filter((k) => k.merged_into == null)
+        .filter((k) => (kind === "directory_email"
+          ? holds(k.email_lower)
+          : holds(k.name) || has(k.phone_digits, digits) || (cc !== null && String(k.phone_digits ?? "").startsWith(cc))))
+        .sort(newestBy("updated_at")).slice(0, limit)
+        .map((k) => (kind === "contacts" ? { id: k.id } : pick(k, ["id", "name", "phone", "phone_digits", "email"])));
+    }
+    if (kind === "conversations") {
+      const ids = new Set((a.p_ids ?? []) as string[]);
+      const nums = new Set(((a.p_numbers ?? []) as string[]).filter(Boolean));
+      if (!ids.size && !nums.size) return [];
+      return (w.sms ?? []).filter(mineOf)
+        .filter((m) => ids.has(String(m.contact_id)) || (m.contact_id == null && (nums.has(String(m.from_number)) || nums.has(String(m.to_number)))))
+        .filter((m) => (before === null || timeOf(m.created_at) < before) && (after === null || timeOf(m.created_at) >= after))
+        .sort(newestBy("created_at")).slice(0, limit)
+        .map((m) => pick(m, ["id", "contact_id", "direction", "body", "status", "created_at", "from_number", "to_number", "sent_by"]));
+    }
+    if (kind === "calls") {
+      const customers = a.p_customers !== false;
+      const user = (a.p_user_id ?? null) as string | null;
+      return (w.calls ?? []).filter(mineOf).filter((r) => {
+        const contact = r.contact_id ? oneOf(r.crm_contacts) : null;
+        const vm = oneOf(r.phone_voicemails);
+        const voicemail = vm && !vm.deleted_at ? vm : null;
+        const matches = (customers && holds(contact?.name))
+          || (r.direction === "in" ? has(r.from_e164, digits) : has(r.to_e164, digits))
+          || holds(voicemail?.transcript);
+        if (!matches) return false;
+        if (a.p_voicemail === true && !voicemail) return false;
+        if (before !== null && !(timeOf(r.started_at) < before)) return false;
+        if (user === null) return true;
+        return r.placed_by === user || r.answered_by === user || r.transferred_from === user
+          || ((r.rang_user_ids ?? []) as string[]).includes(user)
+          || (customers && contact?.owner_user_id === user && ["missed", "voicemail", "ringing"].includes(String(r.status)));
+      }).sort(newestBy("started_at")).slice(0, limit).map((r) => ({ id: r.id, started_at: r.started_at }));
+    }
+    return jsonRes({ code: "22023", message: `phone_list_search: unknown kind ${kind}` }, 400);
+  };
+}
+
+/** Every Supabase request a test made, as a URL: what Supabase's API request logs would keep. */
+export function supabaseUrls(net: FakeNet): string[] {
+  return net.seen.filter((s) => s.url.origin === SUPABASE_URL).map((s) => decodeURIComponent(s.url.href));
+}
+
 /** A PostgREST filter value from a request, e.g. eq("id") → the id asked for. */
 export function filter(s: Seen, col: string): string | null {
   const v = s.url.searchParams.get(col);

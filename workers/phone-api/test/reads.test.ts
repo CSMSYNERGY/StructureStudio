@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B, USER_C,
-  appRequest, call, callerCtx, eventRows, filter, jsonRes, makeEnv, type Seen,
+  appRequest, call, callerCtx, eventRows, filter, jsonRes, makeEnv, phoneListSearch, supabaseUrls, type Seen,
 } from "./helpers";
 
 const T = (min: number) => new Date(Date.UTC(2026, 8, 29, 12, 0) - min * 60_000).toISOString();
@@ -912,24 +912,55 @@ describe("GET /threads/:key email (emails and compose)", () => {
 });
 
 describe("GET /search and /team", () => {
+  // GET /search reads through migration 305's search function (POST rpc, the term in the body);
+  // phoneListSearch (helpers.ts) answers the way tests/sql/migration305.test.cjs proves the SQL does.
+  const asked = (net: FakeNet) => net.rpcCalls("phone_list_search").map((r) => {
+    expect(r.method).toBe("POST");
+    return r.json as Record<string, unknown>;
+  });
+
   it("searches by name or digits with the row scope applied", async () => {
     const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), [CONTACT_1]);
-    net.rest("GET", "crm_contacts", () => [
-      { id: CONTACT_1, name: "Jordan Demo", phone: "(555) 555-0142", phone_digits: "5555550142" },
-      { id: CONTACT_2, name: "Jordan Other", phone: "555-555-0143", phone_digits: "5555550143" },
-    ]);
+    net.rpc("phone_list_search", phoneListSearch({ contacts: [
+      { id: CONTACT_1, client_id: CLIENT, merged_into: null, name: "Jordan Demo", phone: "(555) 555-0142", phone_digits: "5555550142", updated_at: T(1) },
+      { id: CONTACT_2, client_id: CLIENT, merged_into: null, name: "Jordan Other", phone: "555-555-0143", phone_digits: "5555550143", updated_at: T(2) },
+    ] }));
     const { json } = await call(env, appRequest("GET", "/search?q=jord", token));
     expect(json.contacts).toEqual([{ id: CONTACT_1, name: "Jordan Demo", e164: "+15555550142" }]);
-    const q = net.reads("crm_contacts")[0];
-    expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
-    expect(filter(q, "client_id")).toBe(CLIENT);
+    expect(asked(net)).toEqual([{ p_client_id: CLIENT, p_kind: "directory", p_term: "jord", p_digits: null, p_limit: 60 }]);
+    expect(net.reads("crm_contacts")).toEqual([]);
   });
 
   it("strips filter syntax out of the search text", async () => {
     const { net, token, env } = await setup(callerCtx());
-    net.rest("GET", "crm_contacts", () => []);
+    net.rpc("phone_list_search", () => []);
     await call(env, appRequest("GET", `/search?q=${encodeURIComponent("a,b(c)*d 555")}`, token));
-    expect(net.reads("crm_contacts")[0].url.searchParams.get("or")).toBe("(name.ilike.*a b c d 555*,phone_digits.like.*555*)");
+    expect(asked(net)).toEqual([{ p_client_id: CLIENT, p_kind: "directory", p_term: "a b c d 555", p_digits: "555", p_limit: 60 }]);
+  });
+
+  it("Limited Use: what was typed reaches Supabase only in a POST body, never a URL (migration 305)", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    net.rpc("phone_list_search", phoneListSearch({ contacts: [
+      { id: CONTACT_1, client_id: CLIENT, merged_into: null, name: "Zebra Fence", phone: "(555) 555-0142", phone_digits: "5555550142", email: "zebra@example.com", email_lower: "zebra@example.com", updated_at: T(1) },
+    ] }));
+    for (const q of ["zebra", "555 0142", "zebra@ex"]) {
+      const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent(q)}&email=1`, token));
+      expect(json.contacts.map((c: { id: string }) => c.id), q).toEqual([CONTACT_1]);
+    }
+    const urls = supabaseUrls(net);
+    expect(urls.length).toBeGreaterThan(0);
+    for (const u of urls) {
+      expect(u).not.toMatch(/i?like\./);
+      for (const t of ["zebra", "5550142", "555 0142", "0142"]) expect(u.toLowerCase(), u).not.toContain(t);
+    }
+    // A failed read is logged with the database's code only, never what it repeats of the request.
+    net.rpc("phone_list_search", (sn) => jsonRes({ code: "PGRST100", message: `failed near "${sn.json.p_term}"` }, 400));
+    net.rest("POST", "app_errors", () => []);
+    const { res } = await call(env, appRequest("GET", "/search?q=zebra", token));
+    expect(res.status).toBe(500);
+    const written = net.writes("app_errors").map((w) => w.body).join("\n");
+    expect(written).toContain("PGRST100");
+    expect(written).not.toContain("zebra");
   });
 
   describe("?email=1, the phone app's New message (2026-10-05)", () => {
@@ -940,9 +971,9 @@ describe("GET /search and /team", () => {
       const r: Record<string, unknown> = { id, client_id: CLIENT, merged_into: null, name: null, phone: null, phone_digits: null, email: null, updated_at: T(0), ...over };
       return { ...r, email_lower: r.email == null ? null : String(r.email).trim().toLowerCase() };
     };
-    // The two reads ?email=1 makes: names and numbers (the `or` one), and addresses.
-    const nameReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("or"));
-    const addressReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("email_lower"));
+    // The two reads ?email=1 makes, both of migration 305's function: names and numbers, and addresses.
+    const nameReads = (net: FakeNet) => asked(net).filter((j) => j.p_kind === "directory");
+    const addressReads = (net: FakeNet) => asked(net).filter((j) => j.p_kind === "directory_email");
     const ROWS = [
       contact(CONTACT_1, { name: "Jordan Phone", phone: "(555) 555-0142", phone_digits: "5555550142", email: "jordan@example.com", updated_at: T(1) }),
       contact(CONTACT_2, { name: "Jordan Mail", email: " Jo@Example.com ", updated_at: T(2) }),
@@ -955,12 +986,10 @@ describe("GET /search and /team", () => {
 
     it("without it, the answer is exactly as before: contacts with a number, no email filter and no email column", async () => {
       const { net, token, env } = await setup(callerCtx());
-      net.rest("GET", "crm_contacts", table(ROWS));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json } = await call(env, appRequest("GET", "/search?q=jord", token));
       expect(json.contacts).toEqual([{ id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142" }]);
-      const q = net.reads("crm_contacts")[0];
-      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
-      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits");
+      expect(nameReads(net)).toEqual([{ p_client_id: CLIENT, p_kind: "directory", p_term: "jord", p_digits: null, p_limit: 60 }]);
       expect(addressReads(net)).toEqual([]);
       // An address typed without the param matches nobody.
       const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex", token));
@@ -969,46 +998,39 @@ describe("GET /search and /team", () => {
 
     it("with it, an email-only contact comes back with e164 null and its address; every row carries email", async () => {
       const { net, token, env } = await setup(callerCtx());
-      net.rest("GET", "crm_contacts", table(ROWS));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
       expect(json.contacts).toEqual([
         { id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142", email: "jordan@example.com" },
         { id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" },
       ]);
-      const [q] = nameReads(net);
-      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
-      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
-      const [e] = addressReads(net);
-      expect(e.url.searchParams.get("email_lower")).toBe("ilike.*jord*");
-      for (const r of [q, e]) {
-        expect(filter(r, "client_id")).toBe(CLIENT);
-        expect(r.url.searchParams.get("merged_into")).toBe("is.null");
-        expect(r.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
-        expect(r.url.searchParams.get("order")).toBe("updated_at.desc");
-        expect(r.url.searchParams.get("limit")).toBe("60");
-      }
+      // This tenant's contacts not merged away, most recently updated first, 60 a read: the
+      // function's (tests/sql/migration305.test.cjs).
+      expect(nameReads(net)).toEqual([{ p_client_id: CLIENT, p_kind: "directory", p_term: "jord", p_digits: null, p_limit: 60 }]);
+      expect(addressReads(net)).toEqual([{ p_client_id: CLIENT, p_kind: "directory_email", p_term: "jord", p_limit: 60 }]);
+      expect(net.reads("crm_contacts")).toEqual([]);
     });
 
     it("matches on the email address, whatever its case", async () => {
       const { net, token, env } = await setup(callerCtx());
-      net.rest("GET", "crm_contacts", table(ROWS));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent("JO@Ex")}&email=1`, token));
       expect(json.contacts).toEqual([{ id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" }]);
-      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*JO@Ex*)");
-      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*jo@ex*");
+      expect(nameReads(net)[0].p_term).toBe("JO@Ex");
+      expect(addressReads(net)[0].p_term).toBe("jo@ex");
     });
 
     it("finds an address with a + in it, typed whole or in part", async () => {
       const { net, token, env } = await setup(callerCtx());
       const SAM = "00000000-0000-4000-8000-00000000c006";
-      net.rest("GET", "crm_contacts", table([...ROWS, contact(SAM, { name: null, email: "sam+sheds@example.com", updated_at: T(6) })]));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: [...ROWS, contact(SAM, { name: null, email: "sam+sheds@example.com", updated_at: T(6) })] }));
       for (const q of ["sam+sheds", "Sam+Sheds@Example.com"]) {
         const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent(q)}&email=1`, token));
         expect(json.contacts).toEqual([{ id: SAM, name: "", e164: null, email: "sam+sheds@example.com" }]);
       }
-      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*sam+sheds*");
+      expect(addressReads(net)[0].p_term).toBe("sam+sheds");
       // The name half is unchanged: searchTerm still drops the +.
-      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*sam sheds*)");
+      expect(nameReads(net)[0].p_term).toBe("sam sheds");
     });
 
     it("lists name matches before address matches, so a common address fragment never pushes a name out", async () => {
@@ -1017,7 +1039,7 @@ describe("GET /search and /team", () => {
       const dotCom = Array.from({ length: 70 }, (_, i) =>
         contact(`00000000-0000-4000-8000-0000000e${String(i).padStart(4, "0")}`, { name: `Pat ${i}`, email: `pat${i}@gmail.com`, updated_at: T(i) }));
       const combs = contact(CONTACT_1, { name: "Casey Combs", phone: "(555) 555-0142", phone_digits: "5555550142", email: "casey@example.com", updated_at: T(500) });
-      net.rest("GET", "crm_contacts", table([...dotCom, combs]));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: [...dotCom, combs] }));
       const { json } = await call(env, appRequest("GET", "/search?q=Com&email=1", token));
       expect(json.contacts[0]).toEqual({ id: CONTACT_1, name: "Casey Combs", e164: "+15555550142", email: "casey@example.com" });
       expect(json.contacts).toHaveLength(20);
@@ -1031,22 +1053,23 @@ describe("GET /search and /team", () => {
 
     it("keeps the own-customers scope: a rep never finds another rep's email-only contact", async () => {
       const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), [CONTACT_1]);
-      net.rest("GET", "crm_contacts", table(ROWS));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
       expect(ids(json.contacts)).toEqual([CONTACT_1]);
       const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex&email=1", token));
       expect(byEmail.contacts).toEqual([]);
       // Contacts `none` sees no customer at all, and nothing is read.
       const none = await setup(callerCtx({ contacts_level: "none" }));
-      none.net.rest("GET", "crm_contacts", table(ROWS));
+      none.net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json: nothing } = await call(none.env, appRequest("GET", "/search?q=jo@ex&email=1", none.token));
       expect(nothing.contacts).toEqual([]);
+      expect(asked(none.net)).toHaveLength(0);
       expect(none.net.reads("crm_contacts")).toHaveLength(0);
     });
 
     it("still drops a contact with neither a valid number nor a valid address", async () => {
       const { net, token, env } = await setup(callerCtx());
-      net.rest("GET", "crm_contacts", table(ROWS));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: ROWS }));
       const { json } = await call(env, appRequest("GET", "/search?q=nothing&email=1", token));
       expect(json.contacts).toEqual([]);
       // The row was read (its name matched); the Worker left it out.
@@ -1057,7 +1080,7 @@ describe("GET /search and /team", () => {
       const { net, token, env } = await setup(callerCtx());
       const many = Array.from({ length: 30 }, (_, i) =>
         contact(`00000000-0000-4000-8000-0000000d${String(i).padStart(4, "0")}`, { name: `Jo ${i}`, email: `jo${i}@example.com`, updated_at: T(i) }));
-      net.rest("GET", "crm_contacts", table(many));
+      net.rpc("phone_list_search", phoneListSearch({ contacts: many }));
       const { json } = await call(env, appRequest("GET", "/search?q=jo&email=1", token));
       expect(json.contacts).toHaveLength(20);
       expect(json.contacts[0]).toEqual({ id: "00000000-0000-4000-8000-0000000d0000", name: "Jo 0", e164: null, email: "jo0@example.com" });
