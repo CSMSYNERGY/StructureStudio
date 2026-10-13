@@ -1,10 +1,11 @@
 // The Contacts hub (Carolyn 2026-10-12), driven for real on the COMPILED portal.
 //
 // "Let's have one tab and we can have contacts, and we can have this instead of list is designs,
-// and then we have pipelines." One sidebar item, Contacts; inside it a tab row: Contacts, Design
-// list, then each pipeline in the account's order, at most five pipeline positions (the fifth a
-// drop-down for the rest), never a scroll bar; a card opens its customer INSIDE Contacts and Back
-// returns to the exact board. Replaces pipelineDefaultView.mjs, whose List | Pipeline toggle and
+// and then we have pipelines." One sidebar item, Contacts; inside it a tab row: each pipeline in
+// the account's order from the left, at most five pipeline positions (the fifth a drop-down for
+// the rest), and Contacts | Design list as a rounded bubble at the far right (Ahsan 2026-10-13;
+// Carolyn's 10-12 order had them first, on the left); never a scroll bar; a card opens its
+// customer INSIDE Contacts and Back returns to the exact board. Replaces pipelineDefaultView.mjs, whose List | Pipeline toggle and
 // "How the Pipeline tab opens" card this replaced; its scenarios carry on here.
 //
 //   A. CRM, nothing saved: /portal/contacts opens on the FIRST pipeline, the address follows, one
@@ -13,6 +14,11 @@
 //   C. 8 pipelines at 1280 and 1920: four tabs, the fifth is the drop-down wearing the fifth's name;
 //      ▾ lists the rest; picking the seventh opens it in one click, and the fifth tab wears its name.
 //   D. 8 pipelines in a narrow window: more fold into the drop-down, still one line, no scroll.
+//   P. The bubble (Ahsan 2026-10-13): at 1440 and 1280, with 3 and 8 pipelines, it sits right of
+//      the last pipeline tab on the same line, nothing overlaps or scrolls, and exactly one thing
+//      looks picked (the open pipeline, or the open part of the bubble); arrow keys stay inside a
+//      group; at 600px it has a line of its own above the pipelines, at the right; without the
+//      CRM, 🔒 Contacts keeps its padlock inside it; a Crew Leader's holds the Design list alone.
 //   E. No CRM: the Design list, with 🔒 Contacts and 🔒 Pipeline; the padlocked tabs sell the CRM.
 //   F. A designs-only role (Crew Leader): the Design list and nothing else.
 //   G. The CRM answer held ~1.5 s: the hub waits, and a MutationObserver watching from the first
@@ -194,17 +200,30 @@ async function settled(page, want = null, timeout = 15000) {
   return page.evaluate(() => {
     const v = document.querySelector("[data-ss-hub-view]");
     const row = document.querySelector("[data-ss-hub-tabs]");
-    const tabs = row ? [...row.querySelectorAll(":scope > a[role=tab], :scope > span > a[role=tab]")] : [];
+    // Two groups since 2026-10-13: the pipelines' underline tabs, and the Contacts | Design list
+    // bubble at the right. `tabs` lists the bubble's first, then the pipelines', so the checks
+    // written for one row (Contacts, Design list, then each pipeline) still read the same.
+    const pipeTabs = row ? [...row.querySelectorAll("[data-ss-hub-pipes] a[role=tab]")] : [];
+    const listTabs = row ? [...row.querySelectorAll("[data-ss-hub-lists] a[role=tab]")] : [];
+    const tabs = [...listTabs, ...pipeTabs];
+    const bubble = row ? row.querySelector("[data-ss-hub-lists]") : null;
     const more = row ? row.querySelector("[data-ss-hub-more]") : null;
-    const tops = tabs.map((t) => Math.round(t.getBoundingClientRect().top));
+    const tops = pipeTabs.map((t) => Math.round(t.getBoundingClientRect().top));
+    // One line: every pipeline tab on the same line, and the bubble on that line too.
+    const b = bubble ? bubble.getBoundingClientRect() : null;
+    const p0 = pipeTabs[0] ? pipeTabs[0].getBoundingClientRect() : null;
+    const bubbleOnLine = !b || !p0 || (b.top < p0.bottom && b.bottom > p0.top);
     const nav = [...document.querySelectorAll(".ss-ws-nav .ss-nav a")].map((a) => a.textContent.trim());
     return {
       view: v ? v.getAttribute("data-ss-hub-view") : null,
       path: location.pathname,
       tabs: tabs.map((t) => t.textContent.trim()),
+      pipes: pipeTabs.map((t) => t.textContent.trim()),
+      lists: listTabs.map((t) => t.textContent.trim()),
+      stacked: !!row && row.hasAttribute("data-ss-hub-stacked"),
       active: tabs.filter((t) => t.getAttribute("aria-selected") === "true").map((t) => t.textContent.trim()),
       more: more ? more.textContent.trim() : null,
-      oneLine: tops.length > 0 && tops.every((t) => t === tops[0]),
+      oneLine: (tops.length > 0 || listTabs.length > 0) && tops.every((t) => t === tops[0]) && bubbleOnLine,
       rowScroll: row ? row.scrollWidth - row.clientWidth : null,
       pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       nav,
@@ -225,7 +244,9 @@ try {
     const r = await settled(page, "pipe");
     if (width === 1280) {
       ok("A1 CRM, nothing saved: Contacts opens on the FIRST pipeline, and the address says so", r.view === "pipe" && r.path === `/portal/contacts/p-${pipeId(0)}` && r.active[0] === "Shed Deals", JSON.stringify(r));
-      ok("A2 the row reads Contacts, Design list, then each pipeline in order", JSON.stringify(r.tabs) === JSON.stringify(["Contacts", "Design list", "Shed Deals", "Manufacturer Outreach", "Sold"]), r.tabs.join(" | "));
+      ok("A2 the pipelines read in order from the left, and Contacts | Design list is the bubble at the right (Ahsan 2026-10-13)",
+        JSON.stringify(r.pipes) === JSON.stringify(["Shed Deals", "Manufacturer Outreach", "Sold"]) && JSON.stringify(r.lists) === JSON.stringify(["Contacts", "Design list"]) && !r.stacked,
+        `pipelines: ${r.pipes.join(" | ")} / bubble: ${r.lists.join(" | ")}`);
       ok("A3 one sidebar item: Contacts, no Pipeline", r.nav.includes("Contacts") && !r.nav.includes("Pipeline") && r.activeNav.join() === "Contacts", r.nav.join(", "));
       ok("A4 no pipeline drop-down picker; the board's own controls are still there", !r.select && r.controls.length === 3, `select ${r.select}; ${r.controls.join(", ")}`);
       ok("A5 no page errors", errors.length === 0, errors.join(" | "));
@@ -293,6 +314,153 @@ try {
     ok("D5 no page errors", errors.length === 0, errors.join(" | "));
     await shot(page, "U1-400-8pipes.png");
     await ctx.close();
+  }
+
+  // ── P: the bubble (Ahsan 2026-10-13) ──
+  // Contacts | Design list left the underline row for a rounded bubble at its far right. Checked
+  // where it sits, that nothing overlaps or scrolls, that exactly one thing looks picked, that the
+  // arrow keys stay inside a group, and that a narrow window puts the bubble on its own line.
+  {
+    const HUB = "/portal/contacts";
+    const ACC = "rgb(61, 54, 114)";
+    // The row's geometry and looks, in the page. `units` are what a person sees as one thing each:
+    // a pipeline tab, the drop-down (its tab and ▾ together), one part of the bubble.
+    const geo = (page) => page.evaluate((acc) => {
+      const row = document.querySelector("[data-ss-hub-tabs]");
+      const pipesBox = row.querySelector("[data-ss-hub-pipes]");
+      const bubble = row.querySelector("[data-ss-hub-lists]");
+      const R = (el) => { const r = el.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; };
+      const pipeItems = [...pipesBox.querySelectorAll(":scope > a[role=tab], :scope > [data-ss-hub-more]")];
+      const segs = bubble ? [...bubble.querySelectorAll("a[role=tab]")] : [];
+      const parts = [...pipesBox.querySelectorAll("a[role=tab], button"), ...segs];
+      const overlaps = [];
+      for (let i = 0; i < parts.length; i++) {
+        for (let j = i + 1; j < parts.length; j++) {
+          if (parts[i].contains(parts[j]) || parts[j].contains(parts[i])) continue;
+          const a = R(parts[i]); const c = R(parts[j]);
+          const w = Math.min(a.r, c.r) - Math.max(a.l, c.l); const h = Math.min(a.b, c.b) - Math.max(a.t, c.t);
+          if (w > 0.5 && h > 0.5) overlaps.push(`${parts[i].textContent.trim()} × ${parts[j].textContent.trim()}`);
+        }
+      }
+      const looks = (el) => {
+        const cs = getComputedStyle(el);
+        return (parseFloat(cs.borderBottomWidth) >= 2 && cs.borderBottomStyle !== "none" && cs.borderBottomColor === acc)
+          || cs.backgroundColor === "rgb(255, 255, 255)" || cs.color === acc;
+      };
+      const units = [...pipeItems, ...segs];
+      const picked = units.filter((u) => looks(u) || [...u.querySelectorAll("a, button")].some(looks)).map((u) => u.textContent.trim());
+      const bs = bubble ? getComputedStyle(bubble) : null;
+      const tabCs = pipeItems[0] ? getComputedStyle(pipeItems[0].matches("a") ? pipeItems[0] : pipeItems[0].querySelector("a")) : null;
+      return {
+        row: R(row), bubble: bubble ? R(bubble) : null, last: pipeItems.length ? R(pipeItems[pipeItems.length - 1]) : null,
+        pipeTop: pipeItems.length ? Math.min(...pipeItems.map((x) => R(x).t)) : null,
+        stacked: row.hasAttribute("data-ss-hub-stacked"),
+        overlaps, picked, selected: [...row.querySelectorAll("[aria-selected=true]")].map((x) => x.textContent.trim()),
+        rowScroll: row.scrollWidth - row.clientWidth, pipesScroll: pipesBox.scrollWidth - pipesBox.clientWidth,
+        pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        bubbleLook: bs ? { radius: parseFloat(bs.borderTopLeftRadius), bg: bs.backgroundColor, border: bs.borderTopWidth } : null,
+        tabLook: tabCs ? { radius: parseFloat(tabCs.borderTopLeftRadius), bg: tabCs.backgroundColor } : null,
+      };
+    }, ACC);
+    const focused = (page) => page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : ""));
+
+    for (const width of [1440, 1280]) {
+      for (const n of [3, 8]) {
+        const { ctx, page, errors } = await open({ crm: true, n, width }, HUB);
+        await settled(page, "pipe");
+        const g = await geo(page);
+        ok(`P1 ${width}, ${n} pipelines: the bubble sits right of the last pipeline tab, on its line, at the row's right edge`,
+          g.bubble && g.last && !g.stacked && g.bubble.l >= g.last.r + 4 && Math.abs(g.row.r - g.bubble.r) <= 1.5
+            && g.bubble.t < g.last.b && g.bubble.b > g.last.t,
+          JSON.stringify({ bubble: g.bubble, last: g.last, row: g.row }));
+        ok(`P2 ${width}, ${n} pipelines: nothing in the row overlaps`, g.overlaps.length === 0, g.overlaps.join("; "));
+        ok(`P3 ${width}, ${n} pipelines: nothing scrolls sideways`, g.rowScroll <= 0 && g.pipesScroll <= 0 && g.pageScroll <= 0,
+          `row ${g.rowScroll}, pipelines ${g.pipesScroll}, page ${g.pageScroll}`);
+        ok(`P4 ${width}, ${n} pipelines: one thing looks picked, the open pipeline`,
+          g.picked.length === 1 && g.picked[0].startsWith("Shed Deals") && JSON.stringify(g.selected) === JSON.stringify(["Shed Deals"]),
+          `looks picked: ${g.picked.join(" | ")} / aria-selected: ${g.selected.join(" | ")}`);
+        if (width === 1280 && n === 8) {
+          ok("P5 the bubble looks unlike the tabs: a rounded, filled pill against bare underline tabs",
+            g.bubbleLook && g.bubbleLook.radius >= 16 && g.bubbleLook.bg === "rgb(241, 245, 249)" && g.bubbleLook.border === "1px"
+              && g.tabLook && g.tabLook.radius === 0 && g.tabLook.bg === "rgba(0, 0, 0, 0)",
+            JSON.stringify({ bubble: g.bubbleLook, tab: g.tabLook }));
+          for (const [id, label] of [["people", "Contacts"], ["designs", "Design list"]]) {
+            await page.locator(`[data-ss-hub-tab="${id}"]`).click();
+            await settled(page, id);
+            const s = await geo(page);
+            ok(`P6 with ${label} open, it is the one thing that looks picked (its part of the bubble), and no pipeline does`,
+              JSON.stringify(s.picked) === JSON.stringify([label]) && JSON.stringify(s.selected) === JSON.stringify([label]),
+              `looks picked: ${s.picked.join(" | ")} / aria-selected: ${s.selected.join(" | ")}`);
+            await shot(page, `P-1280-8pipes-${id}.png`);
+          }
+          // Arrow keys: along the pipelines (wrapping, Home/End), and along the bubble without leaving it.
+          await page.locator("[data-ss-hub-pipes] a[role=tab]").first().focus();
+          await page.keyboard.press("ArrowRight");
+          const k1 = await focused(page);
+          await page.keyboard.press("End");
+          const k2 = await page.evaluate(() => document.activeElement && document.activeElement.getAttribute("aria-haspopup"));
+          await page.keyboard.press("ArrowRight");
+          const k3 = await focused(page);
+          await page.locator('[data-ss-hub-tab="people"]').focus();
+          await page.keyboard.press("ArrowRight");
+          const k4 = await focused(page);
+          await page.keyboard.press("ArrowRight");
+          const k5 = await focused(page);
+          await page.keyboard.press("ArrowLeft");
+          const k6 = await focused(page);
+          ok("P7 arrow keys walk one group: the pipelines (End is the ▾, then wraps), and the bubble stays in the bubble",
+            k1 === NAMES[1] && k2 === "menu" && k3 === NAMES[0] && k4 === "Design list" && k5 === "Contacts" && k6 === "Design list",
+            JSON.stringify([k1, k2, k3, k4, k5, k6]));
+          const fv = await page.evaluate(() => { const cs = getComputedStyle(document.activeElement); return `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`; });
+          ok("P8 a keyboard-focused part of the bubble shows its focus ring (the brand teal)", fv === "solid 2px rgb(27, 120, 149)", fv);
+        }
+        ok(`P9 ${width}, ${n} pipelines: no page errors`, errors.length === 0, errors.join(" | "));
+        await shot(page, `P-${width}-${n}pipes.png`);
+        await ctx.close();
+      }
+    }
+    // A narrow window: the bubble on a line of its own above the pipelines, still at the right.
+    {
+      const { ctx, page, errors } = await open({ crm: true, n: 8, width: 600, height: 800 }, HUB);
+      const r = await settled(page, "pipe");
+      const g = await geo(page);
+      ok("P10 at 600px the bubble has its own line, above the pipelines and at the right",
+        g.stacked && g.bubble && g.pipeTop !== null && g.bubble.b <= g.pipeTop + 0.5 && Math.abs(g.row.r - g.bubble.r) <= 1.5,
+        JSON.stringify({ stacked: g.stacked, bubble: g.bubble, pipeTop: g.pipeTop, row: g.row }));
+      ok("P11 at 600px the pipelines still fold into the drop-down, nothing overlaps, nothing scrolls",
+        !!r.more && g.overlaps.length === 0 && g.rowScroll <= 0 && g.pipesScroll <= 0 && g.pageScroll <= 0 && g.picked.length === 1,
+        `${r.pipes.join(" | ")} / more: ${r.more} / overlaps: ${g.overlaps.join("; ")} / row ${g.rowScroll}, page ${g.pageScroll} / picked: ${g.picked.join(" | ")}`);
+      ok("P12 no page errors", errors.length === 0, errors.join(" | "));
+      await shot(page, "P-600-8pipes.png");
+      await ctx.close();
+    }
+    // No CRM: the padlocked Contacts keeps its padlock in the bubble, and the Design list is the one picked.
+    {
+      const { ctx, page, errors } = await open({ crm: false, n: 3, width: 1280 }, HUB);
+      const r = await settled(page, "designs");
+      const g = await geo(page);
+      ok("P13 no CRM: 🔒 Contacts sits in the bubble, 🔒 Pipeline on the left, and only Design list looks picked",
+        JSON.stringify(r.lists) === JSON.stringify(["🔒Contacts", "Design list"]) && JSON.stringify(r.pipes) === JSON.stringify(["🔒Pipeline"])
+          && JSON.stringify(g.picked) === JSON.stringify(["Design list"]) && g.overlaps.length === 0,
+        `bubble: ${r.lists.join(" | ")} / pipelines: ${r.pipes.join(" | ")} / picked: ${g.picked.join(" | ")}`);
+      ok("P14 no page errors", errors.length === 0, errors.join(" | "));
+      await shot(page, "P-1280-no-crm.png");
+      await ctx.close();
+    }
+    // A designs-only role: the bubble holds the Design list alone, still at the right, named for
+    // what it holds; and with no pipeline tab, never lifted onto a line of its own, even narrow.
+    for (const width of [1280, 600]) {
+      const { ctx, page, errors } = await open({ crm: true, n: 3, role: "user", access: CREW_LEADER, width }, HUB);
+      const r = await settled(page, "designs");
+      const g = await geo(page);
+      const label = await page.locator("[data-ss-hub-lists]").getAttribute("aria-label").catch(() => null);
+      ok(`P15 ${width}: a Crew Leader's bubble is the Design list alone, at the right, labelled for it, not stacked`,
+        JSON.stringify(r.lists) === JSON.stringify(["Design list"]) && r.pipes.length === 0 && label === "Design list"
+          && !g.stacked && g.bubble && Math.abs(g.row.r - g.bubble.r) <= 1.5 && g.rowScroll <= 0 && g.pageScroll <= 0,
+        JSON.stringify({ lists: r.lists, pipes: r.pipes, label, stacked: g.stacked, bubble: g.bubble, row: g.row }));
+      ok(`P16 ${width}: no page errors`, errors.length === 0, errors.join(" | "));
+      await ctx.close();
+    }
   }
 
   // ── E: no CRM ──

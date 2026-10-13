@@ -165,6 +165,29 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    columns share the full width or wrap onto another row, never a scroll bar (SalesPipelines,
    ssBoardColumns). Keyed on the board itself, so whichever page hosts it gets the width. */
 .ss-inner:has([data-ss-board-wide]){max-width:none}
+/* The Contacts hub's tab row (SsHubTabs, 02-sales.jsx). Ahsan, 2026-10-13: "design and contacts
+   should be different from the pipelines visually so its easier to see and they should be on the
+   right side of the screen may be with a bubble". The pipelines are underline tabs from the left;
+   Contacts and Design list are a rounded two-part bubble at the far right. Carolyn's order from
+   10-12 put those two first, on the left: to go back to it, set .ss-hub-lists's order to -1 (the
+   pipelines' line grows to fill whatever the bubble leaves, on either side).
+   The pipelines' line is flex-basis 0, so the bubble never wraps for want of room; the hub folds
+   pipelines into the ▾ drop-down instead (ssHubLayout takes the bubble's width off the row, using
+   the column-gap below as read from here). In a narrow row SsHubTabs sets data-ss-hub-stacked and
+   the bubble takes its own line above the pipelines, still at the right. Only one thing in the row
+   looks picked: the open pipeline's underline, or the bubble's white part (aria-selected). */
+.ss-hub-row{position:relative;display:flex;flex-wrap:wrap;align-items:flex-end;column-gap:16px;border-bottom:2px solid #E2E8F0;margin-bottom:14px;min-width:0}
+.ss-hub-pipes{display:flex;flex-wrap:wrap;align-items:flex-end;gap:2px;flex:1 1 0;min-width:0}
+.ss-hub-lists{order:1;flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:3px;margin-bottom:4px;background:#F1F5F9;border:1px solid #E2E8F0;border-radius:999px}
+.ss-hub-row[data-ss-hub-stacked] .ss-hub-lists{order:-1;margin:0 0 8px auto}
+.ss-hub-row[data-ss-hub-stacked] .ss-hub-pipes{flex-basis:100%}
+.ss-hub-seg{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:700;letter-spacing:.2px;line-height:18px;color:#475569;text-decoration:none;white-space:nowrap;cursor:pointer;transition:background-color .12s,color .12s,box-shadow .12s}
+.ss-hub-seg .ico{display:inline-flex}
+.ss-hub-seg svg{width:15px;height:15px;flex-shrink:0}
+.ss-hub-seg.locked{color:#94A3B8}
+.ss-hub-seg:hover{background:rgba(255,255,255,.6);color:#1E293B}
+.ss-hub-seg[aria-selected="true"]{background:#FFF;color:#3D3672;box-shadow:0 1px 3px rgba(15,23,42,.14),0 0 0 1px rgba(61,54,114,.18)}
+.ss-hub-seg:focus-visible{outline:2px solid #1B7895;outline-offset:2px}
 /* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
    (body scroll would double-scroll under the sticky topbar). */
 .ss-main.ss-designer-active{height:100vh;height:100dvh}
@@ -272,7 +295,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=ccf24294"></script>
-<script defer src="/portal.app.compiled.js?v=00df3abb" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=65e00dd9" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

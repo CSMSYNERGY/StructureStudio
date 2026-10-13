@@ -11,6 +11,14 @@
 // It replaced the List | Pipeline toggle and the board's pipeline <select>, both of which sat
 // where the row sits now (she drew the arrow from "26 cards" to the toggle: "up here").
 //
+// WHERE CONTACTS AND DESIGN LIST SIT (Ahsan 2026-10-13, after testing the sandbox): "design and
+// contacts should be different from the pipelines visually so its easier to see and they should be
+// on the right side of the screen may be with a bubble". So the pipelines are the underline tabs,
+// from the left, and Contacts | Design list is a rounded two-part bubble at the row's far right
+// (SsHubTabs; on a line of its own above the pipelines in a narrow window). That reverses the
+// order Carolyn gave above. Putting the two back first is one flex order (.ss-hub-lists in
+// portal.html).
+//
 // HOW MANY PIPELINE TABS (C27, C29): "let's say they can display five pipelines ... And then if
 // they have more, the very last pipeline will have a drop down and they have to click down." And
 // on Ahsan's scroll-left/right idea: "I just don't like a scroll bar." So at most five pipeline
@@ -81,7 +89,9 @@ function ssHubResolve({ sub = null, saved = null, reach, crm, crmKnown, pipeline
 }
 
 // How many pipeline tabs fit in the row inline. Pure, tested with contactsHub_test.ts.
-//   avail    the row's width; fixedW: the Contacts and Design list tabs together
+//   avail    the row's width; fixedW: what else shares the pipelines' line, which is the
+//            Contacts | Design list bubble and the gap before it (ssHubLayout), or 0 when the
+//            bubble has a line of its own
 //   pipeW    each pipeline tab's width, in order; caretW: the drop-down's ▾
 //   activeIdx  the open pipeline's index, or -1: the drop-down wears its name when it holds it
 // Returns k: pipelines [0, k) are tabs, and when k < pipeW.length the rest sit in the drop-down,
@@ -95,6 +105,26 @@ function ssHubFit({ avail, fixedW, pipeW, caretW, activeIdx = -1, max = SS_HUB_M
     if (fixedW + run(k) + pipeW[shown] + caretW + gap <= avail) return k;
   }
   return 0;
+}
+
+// Below this row width (a window narrower than about 720px, where the sidebar is icons) the bubble
+// takes a line of its own above the pipelines, still at the right, and the pipelines get the
+// whole width.
+const SS_HUB_STACK_W = 620;
+
+// Where the Contacts | Design list bubble goes, and how much of the row it leaves the pipelines.
+// Pure, tested with contactsHub_test.ts.
+//   rowW      the row's width; listsW: the bubble's own width (0 when there is no bubble)
+//   gap       the space between the pipelines and the bubble (.ss-hub-row's column-gap)
+//   hasPipes  any pipeline tab at all (with none, the bubble just sits at the right, never alone
+//             on a line above an empty one)
+// Returns { stacked, fixedW }: stacked = the bubble is on its own line; fixedW = the room it
+// takes from the pipelines' line, which ssHubFit takes off before any pipeline gets a tab, so the
+// pipelines fold into the drop-down before anything can overlap.
+function ssHubLayout({ rowW, listsW, gap = 0, hasPipes = true, stackBelow = SS_HUB_STACK_W }) {
+  if (!(listsW > 0)) return { stacked: false, fixedW: 0 };
+  const stacked = !!hasPipes && rowW < stackBelow;
+  return { stacked, fixedW: stacked ? 0 : Math.ceil(listsW + gap) };
 }
 
 // The account's pipelines, for the tab row and for My Profile's picker. Cached like a tab
@@ -126,8 +156,9 @@ function useSsPipelineList(clientId, enabled) {
   return { pipelines: enabled ? list : null, error: enabled ? err : null, replace };
 }
 
-// One tab's look. The underline strip Settings' hubs use (SubTabs, 08-integrations), so the two
-// kinds of sub-navigation read alike; the active tab carries the accent underline.
+// One pipeline tab's look. The underline strip Settings' hubs use (SubTabs, 08-integrations), so
+// the two kinds of sub-navigation read alike; the active tab carries the accent underline.
+// Contacts and Design list are not drawn with this: they are the bubble (.ss-hub-seg).
 const ssHubTabStyle = (on, locked) => ({
   display: "inline-flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer",
   fontFamily: "inherit", padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
@@ -138,38 +169,61 @@ const ssHubTabStyle = (on, locked) => ({
 // A pipeline's name is capped, so one long name cannot take the row from the others.
 const SS_HUB_NAME = { display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "bottom" };
 const SS_HUB_CRM_TITLE = "Part of the built-in CRM";
+// The bubble's two glyphs, built once (the rail's ICONS reasoning, 12-shell): people for Contacts
+// (the rail's own Contacts glyph), a page with lines for the Design list.
+const SS_HUB_ICONS = {
+  [SS_HUB_PEOPLE]: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  [SS_HUB_DESIGNS]: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>,
+};
 
 // The row. Real links (Carolyn 2026-09-11: every nav button opens in a new tab on a right or
-// middle click), one click per tab. `fixed` and `pipes` are [{ id, label, locked? }]; `active` is
-// the open tab's id.
-function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
+// middle click), one click per tab. `lists` (Contacts, Design list) and `pipes` are
+// [{ id, label, locked? }]; `active` is the open tab's id, and only that one looks picked, in
+// whichever group it is.
+//
+// TWO GROUPS, TWO TABLISTS (Ahsan 2026-10-13): the pipelines are underline tabs from the left, and
+// the lists are a rounded bubble pushed to the far right (.ss-hub-row and friends in portal.html).
+// Arrow keys walk one group at a time. The bubble's width comes off the row before the pipelines
+// are fitted (ssHubLayout, then ssHubFit), so the pipelines fold into the drop-down instead of
+// running under it; in a narrow row it takes a line of its own above them (data-ss-hub-stacked).
+function SsHubTabs({ lists, pipes, active, onPick, hrefFor }) {
   const boxRef = useRef(null);
+  const listsRef = useRef(null);
   const measRef = useRef(null);
   const ddRef = useRef(null);
   const menuRef = useRef(null);
-  const [avail, setAvail] = useState(null);
-  const [widths, setWidths] = useState(null);   // { fixed, pipes: [], caret } in px, or null
+  const [room, setRoom] = useState(null);       // { row, lists, gap } in px, or null before the first read
+  const [widths, setWidths] = useState(null);   // { pipes: [], caret } in px, or null
   const [menu, setMenu] = useState(null);       // { top, left } in viewport px, or null = shut
-  const labelKey = fixed.concat(pipes).map((t) => (t.locked ? "!" : "") + t.label).join("\u0001");
-  // Every label measured in an invisible copy of the row (same type, same padding), so the fit is
-  // decided before the first paint and never by trial and error on screen. Again once the page's
-  // font has loaded, since a label is wider in it than in the fallback.
+  const labelKey = pipes.map((t) => (t.locked ? "!" : "") + t.label).join("\u0001");
+  const hasLists = lists.length > 0;
+  // Every pipeline label measured in an invisible copy of the row (same type, same padding), so the
+  // fit is decided before the first paint and never by trial and error on screen. Again once the
+  // page's font has loaded, since a label is wider in it than in the fallback.
   React.useLayoutEffect(() => {
     let off = false;
     const measure = () => {
       const m = measRef.current;
       if (off || !m) return;
       const w = Array.from(m.children).map((x) => Math.ceil(x.getBoundingClientRect().width));
-      setWidths({ fixed: w.slice(0, fixed.length).reduce((a, x) => a + x + 2, 0), pipes: w.slice(fixed.length, fixed.length + pipes.length), caret: w[w.length - 1] || 24 });
+      setWidths({ pipes: w.slice(0, pipes.length), caret: w[w.length - 1] || 24 });
     };
     measure();
     try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure, () => {}); } catch (_e) { /* no font API */ }
     return () => { off = true; };
   }, [labelKey]);
+  // The row's width and the bubble's, read together, and again whenever either changes (a resize,
+  // the font arriving, Contacts gaining or losing its padlock). The gap is the stylesheet's own.
   React.useLayoutEffect(() => {
     const el = boxRef.current;
     if (!el) return undefined;
-    const read = () => setAvail(el.clientWidth);
+    const read = () => {
+      const b = listsRef.current;
+      let gap = 0;
+      try { gap = parseFloat(window.getComputedStyle(el).columnGap) || 0; } catch (_e) { /* no computed style */ }
+      const next = { row: el.clientWidth, lists: b ? Math.ceil(b.getBoundingClientRect().width) : 0, gap };
+      setRoom((cur) => (cur && cur.row === next.row && cur.lists === next.lists && cur.gap === next.gap ? cur : next));
+    };
     read();
     if (typeof ResizeObserver === "undefined") {
       window.addEventListener("resize", read);
@@ -177,8 +231,9 @@ function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
     }
     const ro = new ResizeObserver(read);
     ro.observe(el);
+    if (listsRef.current) ro.observe(listsRef.current);
     return () => ro.disconnect();
-  }, []);
+  }, [hasLists]);
   // The drop-down's list: painted in viewport coordinates (RowMenu's reason: nothing it sits in
   // may clip it or grow a scroll bar for it), and shut by a click away, Escape, a scroll or a resize.
   useEffect(() => {
@@ -204,37 +259,61 @@ function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
 
   const n = pipes.length;
   const activeIdx = pipes.findIndex((t) => t.id === active);
-  const k = (widths && avail)
-    ? ssHubFit({ avail, fixedW: widths.fixed, pipeW: widths.pipes, caretW: widths.caret, activeIdx })
+  const lay = room ? ssHubLayout({ rowW: room.row, listsW: room.lists, gap: room.gap, hasPipes: n > 0 }) : { stacked: false, fixedW: 0 };
+  const k = (widths && room && room.row)
+    ? ssHubFit({ avail: room.row, fixedW: lay.fixedW, pipeW: widths.pipes, caretW: widths.caret, activeIdx })
     : (n <= SS_HUB_MAX_PIPES ? n : SS_HUB_MAX_PIPES - 1);
   const inline = pipes.slice(0, k);
   const rest = pipes.slice(k);
   const shownRest = rest.length ? (activeIdx >= k ? pipes[activeIdx] : rest[0]) : null;
 
+  // Arrow keys move along ONE group (the pipelines, or the bubble) and wrap at its ends; Home and
+  // End go to its first and last. Focus only: Enter opens the focused one, as on any link.
+  const onArrows = (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (!step && e.key !== "Home" && e.key !== "End") return;
+    const items = Array.from(e.currentTarget.querySelectorAll("[data-ss-hub-key]"));
+    const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const j = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (i + step + items.length) % items.length;
+    items[j].focus();
+  };
+  const pick = (id) => ssNavClick(() => { setMenu(null); onPick(id); });
   const tab = (t, extra = null) => {
     const on = t.id === active;
     return (
-      <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={on ? "true" : "false"} data-ss-hub-tab={t.id}
+      <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={on ? "true" : "false"} data-ss-hub-tab={t.id} data-ss-hub-key=""
         title={t.locked ? SS_HUB_CRM_TITLE : t.label}
-        onClick={ssNavClick(() => { setMenu(null); onPick(t.id); })}
+        onClick={pick(t.id)}
         style={{ ...ssHubTabStyle(on, t.locked), ...(extra || {}) }}>
         {t.locked && <span aria-hidden="true">🔒</span>}
         <span style={SS_HUB_NAME}>{t.label}</span>
       </a>
     );
   };
+  // One part of the bubble. Its look is the stylesheet's (.ss-hub-seg), keyed on aria-selected, so
+  // what a screen reader is told is picked and what looks picked cannot disagree. A padlocked one
+  // wears the padlock where its glyph would be, and still opens the card that sells the CRM.
+  const seg = (t) => (
+    <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={t.id === active ? "true" : "false"} data-ss-hub-tab={t.id} data-ss-hub-key=""
+      className={"ss-hub-seg" + (t.locked ? " locked" : "")} title={t.locked ? SS_HUB_CRM_TITLE : t.label}
+      onClick={pick(t.id)}>
+      {t.locked ? <span aria-hidden="true">🔒</span> : <span className="ico" aria-hidden="true">{SS_HUB_ICONS[t.id] || null}</span>}
+      <span>{t.label}</span>
+    </a>
+  );
   const openMenu = () => {
     const r = ddRef.current.getBoundingClientRect();
     const W = 240;
     setMenu({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - W - 8)), width: W });
   };
   return (
-    <div ref={boxRef} role="tablist" aria-label="Contacts views" data-ss-hub-tabs=""
-      style={{ position: "relative", display: "flex", gap: 2, alignItems: "flex-end", flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14, minWidth: 0 }}>
+    <div ref={boxRef} className="ss-hub-row" data-ss-hub-tabs="" data-ss-hub-stacked={lay.stacked ? "" : undefined}>
       {/* The measuring copy: no size of its own and clipped, so it can never widen the page. */}
       <div aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden", pointerEvents: "none" }}>
         <div ref={measRef} style={{ display: "flex", width: "max-content" }}>
-          {fixed.concat(pipes).map((t) => (
+          {pipes.map((t) => (
             <span key={t.id} style={ssHubTabStyle(false, t.locked)}>
               {t.locked && <span>🔒</span>}
               <span style={SS_HUB_NAME}>{t.label}</span>
@@ -243,16 +322,27 @@ function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
           <span style={{ ...ssHubTabStyle(false, false), padding: "12px 8px 10px" }}>▾</span>
         </div>
       </div>
-      {fixed.map((t) => tab(t))}
-      {inline.map((t) => tab(t))}
-      {shownRest && (
-        <span ref={ddRef} data-ss-hub-more="" style={{ display: "inline-flex", alignItems: "flex-end" }}>
-          {tab(shownRest, { paddingRight: 4 })}
-          <button type="button" aria-haspopup="menu" aria-expanded={menu ? "true" : "false"}
-            aria-label={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`} title={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`}
-            onClick={() => (menu ? setMenu(null) : openMenu())}
-            style={{ ...ssHubTabStyle(shownRest.id === active, false), padding: "12px 8px 10px", fontSize: 12 }}>▾</button>
-        </span>
+      {/* The pipelines, from the left. Always drawn, so the bubble keeps the right edge even with
+          no pipeline to show; a tablist only when it holds a tab. */}
+      <div className="ss-hub-pipes" data-ss-hub-pipes="" role={n ? "tablist" : undefined} aria-label={n ? "Pipelines" : undefined}
+        onKeyDown={onArrows}>
+        {inline.map((t) => tab(t))}
+        {shownRest && (
+          <span ref={ddRef} data-ss-hub-more="" style={{ display: "inline-flex", alignItems: "flex-end" }}>
+            {tab(shownRest, { paddingRight: 4 })}
+            <button type="button" aria-haspopup="menu" aria-expanded={menu ? "true" : "false"} data-ss-hub-key=""
+              aria-label={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`} title={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`}
+              onClick={() => (menu ? setMenu(null) : openMenu())}
+              style={{ ...ssHubTabStyle(shownRest.id === active, false), padding: "12px 8px 10px", fontSize: 12 }}>▾</button>
+          </span>
+        )}
+      </div>
+      {/* The bubble: Contacts and Design list, at the far right (Ahsan 2026-10-13). */}
+      {hasLists && (
+        <div ref={listsRef} className="ss-hub-lists" data-ss-hub-lists="" role="tablist" aria-label={lists.map((t) => t.label).join(" and ")}
+          onKeyDown={onArrows}>
+          {lists.map(seg)}
+        </div>
       )}
       {menu && (
         <div ref={menuRef} role="menu" data-ss-hub-menu=""
@@ -262,7 +352,7 @@ function SsHubTabs({ fixed, pipes, active, onPick, hrefFor }) {
             const on = t.id === active;
             return (
               <a key={t.id} href={hrefFor(t.id)} role="menuitem" aria-current={on ? "page" : undefined}
-                onClick={ssNavClick(() => { setMenu(null); onPick(t.id); })}
+                onClick={pick(t.id)}
                 style={{ display: "block", padding: "7px 9px", borderRadius: 6, fontSize: 13, fontWeight: on ? 800 : 700, textDecoration: "none",
                   color: on ? ACCENT : "#334155", background: on ? "#EEF2FF" : "transparent", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {t.label}
@@ -300,9 +390,10 @@ function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked
   }, [r.view, r.pipeId, clientId]);
 
   const crmOff = crmKnown && !crmUnlocked;
-  const fixed = [];
-  if (reach.people) fixed.push({ id: SS_HUB_PEOPLE, label: "Contacts", locked: crmOff });
-  if (reach.designs) fixed.push({ id: SS_HUB_DESIGNS, label: "Design list" });
+  // The bubble at the row's right (Ahsan 2026-10-13): only what this person may open.
+  const lists = [];
+  if (reach.people) lists.push({ id: SS_HUB_PEOPLE, label: "Contacts", locked: crmOff });
+  if (reach.designs) lists.push({ id: SS_HUB_DESIGNS, label: "Design list" });
   // Without the CRM there are no boards to list, and one padlocked "Pipeline" tab stays to say
   // they exist, where the padlocked Pipeline button used to.
   const pipes = canPipes ? (pipelines || []).map((p) => ({ id: "p-" + p.id, label: p.name }))
@@ -315,7 +406,7 @@ function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked
 
   return (
     <div data-ss-contacts-hub="">
-      <SsHubTabs fixed={fixed} pipes={pipes} active={active}
+      <SsHubTabs lists={lists} pipes={pipes} active={active}
         hrefFor={(id) => ssPagePath("contacts", id)}
         onPick={(id) => onRoute(id, false)} />
       {error && canPipes && (pipelines || []).length === 0 && <div style={S.err}>{error}</div>}
