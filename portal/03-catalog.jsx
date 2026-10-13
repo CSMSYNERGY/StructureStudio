@@ -5068,7 +5068,12 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   );
 }
 
-function LayoutPricing({ viewingLabel = null, clientId = null }) {
+// `group` picks which of the catalog's layout items this card prices: "interior" (the
+// Interior items tab, the default) or "doors" / "windows", where the two rough openings
+// live beside their fixture catalogs (Carolyn 2026-10-12: "Move the Window one on to
+// Windows and Door one to Doors"). One component, three mounts — the save action upserts
+// per row, so a card that holds only its own group can never touch another's prices.
+function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior" }) {
   // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
@@ -5084,7 +5089,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
     // no longer shown or archived here. The three electrical devices are not layout items at
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
-    return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
+    return (data.items || []).filter((it) => it.key !== "ramp" && (it.paletteGroup || "interior") === group).map((it) => {
       const p = byKey[it.key] || {};
       // An item that stays out of the customer's palette until it is PRICED (171's shelves, 278's partition
       // wall) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
@@ -5257,7 +5262,14 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             a tab called Options, inside the Interior group, said nothing about what it holds.
             HEADING ONLY — the component, the save_layout_pricing action and every item_key are
             untouched, so nothing joins on this string. */}
-        <div style={S.h2}>Interior items</div>
+        <div style={S.h2}>{group === "doors" ? "Rough opening (door)" : group === "windows" ? "Rough opening (window)" : "Interior items"}</div>
+        {group !== "interior" ? (
+          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+            A framed hole with no {group === "doors" ? "door" : "window"} in it — the customer places it like any other
+            {group === "doors" ? " door" : " window"} and types the size. <b>each</b> = rate × count; the other methods
+            work as on the Interior items tab.
+          </p>
+        ) : (
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Set how each item customers can place on the floor plan is priced —
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
@@ -5266,6 +5278,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
           These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Structures</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
+        )}
         {/* A real table, so the skeleton keeps the real <thead> and puts SkelRows in the body
             at the same six columns — Item / How it's priced / Rate / Image / Internal /
             archive — so the header and the first paint line up and nothing jumps when the
@@ -5280,7 +5293,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             </table>
           </div>
         ) : rows.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
+          <div style={{ fontSize: 13, color: "#64748B" }}>{group === "interior" ? "No placeable items are enabled for your designer yet." : "No rough opening is enabled for your designer."}</div>
         ) : (
           <>
             {/* overflowX wrapper: the method select + rate input enforce ~300px of minimum
@@ -5352,11 +5365,13 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
+              {group === "interior" && (<>
               <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
               <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
                 {busy ? "Working…" : "⬆ Upload CSV"}
                 <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
               </label>
+              </>)}
             </div>
           </>
         )}
@@ -6337,6 +6352,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 
 function DoorsView({ viewingLabel = null, clientId = null }) {
   return (
+    <>
     <div style={S.card}>
       <div style={S.h2}>Doors</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -6348,6 +6364,8 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
       </p>
       <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
     </div>
+    <LayoutPricing group="doors" viewingLabel={viewingLabel} clientId={clientId} />
+    </>
   );
 }
 
@@ -6744,6 +6762,7 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
   // a just-added color appears in each window's availability checkboxes immediately.
   const [colorsSavedAt, setColorsSavedAt] = useState(0);
   return (
+    <>
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
       <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} onSaved={() => setColorsSavedAt((n) => n + 1)} />
@@ -6756,6 +6775,8 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
       </p>
       <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt} />
     </div>
+    <LayoutPricing group="windows" viewingLabel={viewingLabel} clientId={clientId} />
+    </>
   );
 }
 
