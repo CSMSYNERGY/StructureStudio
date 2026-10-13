@@ -321,7 +321,7 @@ async function clickReader(where) {
   return covered;
 }
 const DIDNT_LAND = "That swipe didn't land in the card box.";
-const REFUSED = "The reader read the card, but Fiserv's card system didn't accept it.";
+const REFUSED = "That swipe didn't go through. Press Ready and swipe again, or key the card in.";
 const TYPED = "That was typed, not swiped. Press Ready and swipe the card.";
 
 try {

@@ -3768,18 +3768,21 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           readTimerRef.current = null;
           if (frameRef.current !== f || payTokenRef.current) return;
           setArmed(false);
-          setTokenErr("The reader read the card, but Fiserv's card system didn't accept it. Press Ready and swipe again. If it happens twice, stop.");
+          setTokenErr("That swipe didn't go through. Press Ready and swipe again, or key the card in.");
         }, READ_WAIT_MS);
       }
       // Every answer below ends the swipe attempt, so each one disarms: "Press Ready" has to be
       // a button that works, not one that stays grey for the rest of the minute.
-      if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(m.validationError); setArmed(false); return; }
+      // A swipe's frame text is about typed numbers ("Invalid Account Number" for a half read),
+      // so the reader gets its own sentence; the keyed form keeps the frame's own words.
+      const swipeMiss = "The reader didn't get a clean read. Press Ready and swipe again.";
+      if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(entry === "swipe" ? swipeMiss : m.validationError); setArmed(false); return; }
       // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
       // indistinguishable from a strange token and the button would arm on nothing.
       if (m && m.errorCode && String(m.errorCode) !== "0") {
         stopReadTimer();
         setPayToken(null);
-        setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
+        setTokenErr(entry === "swipe" ? swipeMiss : (m.errorMessage || "That card wasn't accepted — check the number."));
         setArmed(false);
         return;
       }
