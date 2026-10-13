@@ -3927,22 +3927,38 @@ function Electrical({ viewingLabel = null, clientId = null }) {
           items in the table below with two prices like everything else; the standards just say
           WHICH item the package lays out. Leave one unset and the package lays none of those. */}
       <div style={{ ...S.lbl, marginBottom: 8 }}>Your standards</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
-        {[["outletItemId", "Outlets are"], ["switchItemId", "The switch is"], ["lightItemId", "Lights are"]].map(([k, label]) => (
-          <label key={k} style={{ display: "block", minWidth: 180 }}>
-            <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
-            <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} style={{ ...S.input, width: 180 }}>
-              <option value="">&mdash; none &mdash;</option>
-              {/* `it.id` guard: an item added in this session has no id yet, and an option
-                  with value="" reads back as "— none —" the moment it is picked. Save first,
-                  then point a standard at it. */}
-              {items.filter((it) => it.id && (it.name || "").trim()).map((it) => (
-                <option key={it.id} value={it.id}>{it.name}</option>
+      {/* `it.id` guard: an item added in this session has no id yet, and an option with
+          value="" reads back as "— none —" the moment it is picked. Save first, then point a
+          standard at it. */}
+      {(() => {
+        const pickable = items.filter((it) => it.id && (it.name || "").trim());
+        return (
+          <>
+            {pickable.length === 0 && (
+              /* A brand-new tenant saw three dropdowns holding nothing but "— none —" and no
+                 clue why (Carolyn 2026-10-12). The choices ARE the saved items below. */
+              <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", maxWidth: 640 }}>
+                Nothing to choose from yet. Add your outlet, switch and light under <b>Your electrical items</b> below,
+                click <b>Save</b>, then come back here and pick them &mdash; that is how the package knows what to lay out.
+              </p>
+            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+              {[["outletItemId", "Outlets are"], ["switchItemId", "The switch is"], ["lightItemId", "Lights are"]].map(([k, label]) => (
+                <label key={k} style={{ display: "block", minWidth: 180 }}>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
+                  <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} disabled={pickable.length === 0}
+                    style={{ ...S.input, width: 180, opacity: pickable.length === 0 ? 0.55 : 1 }}>
+                    <option value="">{pickable.length === 0 ? "no saved items yet" : "— none —"}</option>
+                    {pickable.map((it) => (
+                      <option key={it.id} value={it.id}>{it.name}</option>
+                    ))}
+                  </select>
+                </label>
               ))}
-            </select>
-          </label>
-        ))}
-      </div>
+            </div>
+          </>
+        );
+      })()}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
         {num("outletSpacingFt", "Outlet every", "ft", "measured around the walls")}
         {num("outletHeightIn", "Outlet height", "in", "off the floor")}
