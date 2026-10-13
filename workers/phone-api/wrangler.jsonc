@@ -80,7 +80,7 @@
     // below, Deepgram nova-3, about $0.005-0.01 per minute) from the minute tick, and asks the
     // phone-call-summary edge function for a summary of each. Anything else: off. Set the Supabase
     // function secret of the same name with it (portal-settings reads it for the Settings card).
-    "CALL_TRANSCRIBE": "off",
+    "CALL_TRANSCRIBE": "on",
     // One Twilio sub-account per builder (SETUP.md 7f). "on" since 2026-10-11 (go-live, after the
     // support-demo call tests): a builder's first number or first texting submit makes their sub-account.
     // Set the Supabase function secret of the same name to the same value. After any builder is on
