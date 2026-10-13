@@ -19,12 +19,12 @@
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { b64urlDecodeJson } from "../src/b64";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
 import { recordingSweep } from "../src/cron/sweep";
-import { retention } from "../src/cron/retention";
+import { recordingRetention, retention } from "../src/cron/retention";
 import { recordingBackstop } from "../src/recording";
 import { updateCall } from "../src/twilioRest";
 import { CRON_PERIOD_MS, cronAccounts, envForClient, webhookEnv, type WebhookAccount } from "../src/twilioAccount";
@@ -337,12 +337,103 @@ describe("crons per account", () => {
     net.rest("PATCH", "phone_voicemails", () => []);
     net.rest("POST", "app_errors", () => []);
     const out = await retention(env, new Date("2027-12-01T00:00:00Z"));
-    expect(out).toEqual({ deleted: 2, failed: 1 });
+    expect(out).toEqual({ deleted: 2, failed: 1, parent: 0 });
     // The voicemail's transcripts are looked for in the same account as its recording.
     expect(net.to(/Recordings\/RE/).map((s) => [s.method, s.url.pathname.split("/")[3], s.headers.get("authorization")])).toEqual([
       ["GET", SUB, basic(SUB_KEY, SUB_SECRET)], ["DELETE", SUB, basic(SUB_KEY, SUB_SECRET)],
       ["GET", PARENT, basic(PARENT_KEY, "test-api-secret")], ["DELETE", PARENT, basic(PARENT_KEY, "test-api-secret")],
     ]);
+  });
+
+  // 2026-10-13: a business moved onto its own sub-account keeps every recording made before the
+  // move in the PARENT, and the privacy policy promises deletion from Twilio at 12 months. A 404 in
+  // the sub is not "done": the parent is asked too, transcripts first, before the row is stamped.
+  describe("a recording left in the parent from before the business's sub-account", () => {
+    const TR = (n: number) => "TR" + String(n).padStart(32, "0");
+    const inAcct = (acct: string, tail: RegExp) => (u: URL) => u.pathname.startsWith(`/2010-04-01/Accounts/${acct}/`) && tail.test(u.pathname);
+    const twilio = (net: FakeNet) => net.to(/api\.twilio\.com/).map((s) => `${s.method} ${s.url.pathname.split("/")[3] === SUB ? "sub" : s.url.pathname.split("/")[3] === PARENT ? "parent" : "?"} ${s.url.pathname.replace(/^.*\/Accounts\/[^/]+/, "")}`);
+    function world(env = on()) {
+      const net = new FakeNet().install();
+      net.rest("GET", "phone_voicemails", () => [{ id: "v1", recording_sid: RE(1), client_id: CLIENT }]);
+      net.rpc("twilio_account_creds", () => [subRow()]);
+      // The sub never had it: 404 for its transcripts and for the recording.
+      net.on("GET", inAcct(SUB, /\/Recordings\/RE\w+\/Transcriptions\.json$/), () => jsonRes({ code: 20404 }, 404));
+      net.on("DELETE", inAcct(SUB, /\/Recordings\/RE\w+\.json$/), () => jsonRes({ code: 20404 }, 404));
+      net.rest("PATCH", "phone_voicemails", () => []);
+      net.rest("PATCH", "phone_call_recordings", () => []);
+      net.rest("POST", "app_errors", () => []);
+      return { net, env };
+    }
+
+    it("voicemail: 404 in the sub, so the parent deletes its transcripts and then the recording, then the row is stamped", async () => {
+      const { net, env } = world();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      net.on("GET", inAcct(PARENT, /\/Recordings\/RE0+1\/Transcriptions\.json$/), () => jsonRes({ transcriptions: [{ sid: TR(1), transcription_text: "Call me back about the lean-to" }] }));
+      net.on("DELETE", inAcct(PARENT, /\/Transcriptions\/TR0+1\.json$/), () => new Response(null, { status: 204 }));
+      net.on("DELETE", inAcct(PARENT, /\/Recordings\/RE0+1\.json$/), () => new Response(null, { status: 204 }));
+      expect(await retention(env, new Date("2027-12-01T00:00:00Z"))).toEqual({ deleted: 1, failed: 0, parent: 1 });
+      expect(twilio(net)).toEqual([
+        `GET sub /Recordings/${RE(1)}/Transcriptions.json`, `DELETE sub /Recordings/${RE(1)}.json`,
+        `GET parent /Recordings/${RE(1)}/Transcriptions.json`, `DELETE parent /Transcriptions/${TR(1)}.json`, `DELETE parent /Recordings/${RE(1)}.json`,
+      ]);
+      // Each account with its own credentials.
+      expect(net.to(/api\.twilio\.com/).map((s) => s.headers.get("authorization"))).toEqual([
+        basic(SUB_KEY, SUB_SECRET), basic(SUB_KEY, SUB_SECRET), basic(PARENT_KEY, "test-api-secret"), basic(PARENT_KEY, "test-api-secret"), basic(PARENT_KEY, "test-api-secret"),
+      ]);
+      const patch = net.writes("phone_voicemails", "PATCH");
+      expect(patch.map((s) => [filter(s, "id"), s.json.transcript])).toEqual([["v1", null]]);
+      // Summary only: counts, never a SID, a number or a transcript.
+      const said = log.mock.calls.flat().map(String).join("\n");
+      expect(said).toContain('"from_parent":1');
+      expect(said).not.toMatch(/RE0|TR0|lean-to|\+1/);
+      log.mockRestore();
+    });
+
+    it("voicemail: 404 in the sub AND the parent is already gone: stamped, nothing more asked", async () => {
+      const { net, env } = world();
+      net.on("GET", inAcct(PARENT, /\/Transcriptions\.json$/), () => jsonRes({ code: 20404 }, 404));
+      net.on("DELETE", inAcct(PARENT, /\/Recordings\/RE\w+\.json$/), () => jsonRes({ code: 20404 }, 404));
+      expect(await retention(env, new Date("2027-12-01T00:00:00Z"))).toEqual({ deleted: 1, failed: 0, parent: 0 });
+      expect(twilio(net)).toHaveLength(4);
+      expect(net.writes("phone_voicemails", "PATCH")).toHaveLength(1);
+    });
+
+    it("voicemail: the parent refusing keeps the row for tomorrow, logged with the code only", async () => {
+      const { net, env } = world();
+      net.on("GET", inAcct(PARENT, /\/Transcriptions\.json$/), () => jsonRes({ transcriptions: [] }));
+      net.on("DELETE", inAcct(PARENT, /\/Recordings\/RE\w+\.json$/), () => jsonRes({ code: 20500, message: `Recording ${RE(1)} is busy` }, 500));
+      expect(await retention(env, new Date("2027-12-01T00:00:00Z"))).toEqual({ deleted: 0, failed: 1, parent: 0 });
+      expect(net.writes("phone_voicemails")).toEqual([]);
+      const err = net.writes("app_errors")[0];
+      expect(err.json.code).toBe("voicemail_retention_failed");
+      expect(err.body).not.toContain(RE(1));
+    });
+
+    it("a business on the parent, or the switch off: a 404 there is gone, and nothing is asked twice", async () => {
+      for (const env of [on(), makeEnv()]) {
+        const net = new FakeNet().install();
+        installDenoShim(env);
+        net.rest("GET", "phone_voicemails", () => [{ id: "v2", recording_sid: RE(2), client_id: "parent-builder" }]);
+        net.rpc("twilio_account_creds", () => []);
+        net.on("GET", (u) => u.pathname.endsWith("/Transcriptions.json"), () => jsonRes({ code: 20404 }, 404));
+        net.on("DELETE", (u) => /\/Recordings\/RE\w+\.json$/.test(u.pathname), () => jsonRes({ code: 20404 }, 404));
+        net.rest("PATCH", "phone_voicemails", () => []);
+        net.rest("POST", "app_errors", () => []);
+        expect(await retention(env, new Date("2027-12-01T00:00:00Z"))).toEqual({ deleted: 1, failed: 0, parent: 0 });
+        expect(twilio(net)).toEqual([`GET parent /Recordings/${RE(2)}/Transcriptions.json`, `DELETE parent /Recordings/${RE(2)}.json`]);
+      }
+    });
+
+    it("a call recording the same way: 404 in the sub, deleted at the parent, then stamped", async () => {
+      const { net, env } = world();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      net.rpc("phone_recordings_expired", () => [{ id: "r1", call_id: "c1", client_id: CLIENT, recording_sid: RE(3) }]);
+      net.on("DELETE", inAcct(PARENT, /\/Recordings\/RE0+3\.json$/), () => new Response(null, { status: 204 }));
+      expect(await recordingRetention(env, new Date("2027-12-01T00:00:00Z"))).toEqual({ deleted: 1, failed: 0, parent: 1 });
+      expect(twilio(net)).toEqual([`DELETE sub /Recordings/${RE(3)}.json`, `DELETE parent /Recordings/${RE(3)}.json`]);
+      expect(net.writes("phone_call_recordings", "PATCH").map((s) => filter(s, "id"))).toEqual(["r1"]);
+      log.mockRestore();
+    });
   });
 
   it("the recording backstop lists a call's recordings in its business's account", async () => {

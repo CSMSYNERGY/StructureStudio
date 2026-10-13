@@ -800,7 +800,29 @@ export async function search(env: Env, req: Request): Promise<Response> {
 
 /** Refused under this many characters, once searchTerm has cleaned the term. */
 export const LIST_SEARCH_MIN = 2;
+/** The longest term the apps send (phone-core LIST_SEARCH_MAX); the Worker cuts there first too. */
+export const LIST_SEARCH_MAX = 60;
 const TOO_SHORT = "Type at least 2 characters to search.";
+
+/**
+ * The text a list search searches, or null to refuse it (400, TOO_SHORT). EXACTLY phone-core's
+ * rule, the client half (packages/phone-core/src/listSearch.ts: listSearchTerm, then
+ * listSearchCleaned on what it returns), so the Worker refuses precisely the terms the apps hold
+ * back without asking and takes every term they send (workers/phone-api test/listSearch.test.ts
+ * pins the two together when PHONE_CORE_DIR is set):
+ *   1. what the apps send: spaces collapsed, trimmed, cut to 60, trimmed again; under 2 refused;
+ *   2. what is searched: searchTerm on THAT; under 2 refused too ("+1", "(8", "#5", "$5", "a+", "?!").
+ * The cut comes BEFORE the cleaning, as in the apps. Cleaning the whole body first (this route's
+ * first cut) took a long term whose first 60 characters clean to nothing, and could end a term on
+ * half of a character that the cut split.
+ */
+export function listSearchTerm(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const sent = raw.replace(/\s+/g, " ").trim().slice(0, LIST_SEARCH_MAX).trim();
+  if (sent.length < LIST_SEARCH_MIN) return null;
+  const term = searchTerm(sent);
+  return term.length >= LIST_SEARCH_MIN ? term : null;
+}
 /** Contacts read whose name or number matches, to find their conversations. */
 export const SEARCH_CONTACTS = 100;
 /** Matching texts read, newest first, to find the conversations whose words or number match. */
@@ -822,7 +844,7 @@ export const SNIPPET_CHARS = 160;
  * is words. phone-core's listSearchDigits, the client half, follows the same rule.
  */
 export function listSearchDigits(raw: string): string | null {
-  const t = String(raw ?? "").replace(/\s+/g, " ").trim().slice(0, 60).trim();
+  const t = String(raw ?? "").replace(/\s+/g, " ").trim().slice(0, LIST_SEARCH_MAX).trim();
   if (!/^[\d\s().+-]+$/.test(t)) return null;
   const d = t.replace(/\D/g, "");
   return d.length >= 3 ? d : null;
@@ -881,16 +903,16 @@ interface ListSearch {
 }
 
 /**
- * The POST body: {q, scope, cursor?, voicemail?}. `q` is cleaned like GET /search's (searchTerm),
- * and under 2 characters is refused. `scope` other than mine or team is refused; team for someone
+ * The POST body: {q, scope, cursor?, voicemail?}. `q` goes through listSearchTerm (phone-core's own
+ * rule: cut, then cleaned like GET /search's searchTerm), and under 2 characters either way is
+ * refused. `scope` other than mine or team is refused; team for someone
  * whose phone level isn't a team level means mine, as in the lists. The cursor is the lists' (an
  * ISO time), opaque to the apps.
  */
 async function listSearchRequest(c: Caller, req: Request): Promise<ListSearch> {
   const body = await readJson(req);
-  if (typeof body.q !== "string") throw new ApiError("bad_request", TOO_SHORT);
-  const term = searchTerm(body.q);
-  if (term.length < LIST_SEARCH_MIN) throw new ApiError("bad_request", TOO_SHORT);
+  const term = listSearchTerm(body.q);
+  if (term === null) throw new ApiError("bad_request", TOO_SHORT);
   const scope = body.scope ?? "mine";
   if (scope !== "mine" && scope !== "team") throw new ApiError("bad_request", "Search My or Team.");
   let cursor: string | null = null;
@@ -901,7 +923,7 @@ async function listSearchRequest(c: Caller, req: Request): Promise<ListSearch> {
   }
   return {
     term,
-    digits: listSearchDigits(body.q),
+    digits: listSearchDigits(body.q as string), // a string: listSearchTerm refused anything else
     pattern: termPattern(term),
     team: scope === "team" && isTeamLevel(c.ctx.phone_level),
     cursor,

@@ -221,7 +221,7 @@ describe("retention (daily)", () => {
     net.rest("PATCH", "phone_voicemails", () => []);
     net.rest("POST", "app_errors", () => []);
     const now = new Date("2026-09-29T09:00:00Z");
-    expect(await retention(env, now)).toEqual({ deleted: 2, failed: 1 });
+    expect(await retention(env, now)).toEqual({ deleted: 2, failed: 1, parent: 0 });
     const q = net.reads("phone_voicemails")[0];
     expect(q.url.searchParams.get("created_at")).toBe(`lt.${new Date(now.getTime() - 365 * 86_400_000).toISOString()}`);
     expect(q.url.searchParams.get("deleted_at")).toBe("is.null");
@@ -242,7 +242,7 @@ describe("retention (daily)", () => {
     net.on("DELETE", /Transcriptions\/TR0+2\.json$/, () => jsonRes({ code: 20404 }, 404)); // already gone
     net.on("DELETE", /Recordings\/RE0+1\.json$/, () => new Response(null, { status: 204 }));
     net.rest("PATCH", "phone_voicemails", () => []);
-    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 1, failed: 0 });
+    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 1, failed: 0, parent: 0 });
     expect(net.to(/api\.twilio\.com/).map((s) => `${s.method} ${s.url.pathname.replace(/^.*\/Accounts\/[^/]+/, "")}`)).toEqual([
       `GET /Recordings/${RE(1)}/Transcriptions.json`,
       `DELETE /Transcriptions/${TR(1)}.json`,
@@ -263,7 +263,7 @@ describe("retention (daily)", () => {
     net.on("GET", /Recordings\/RE0+1\/Transcriptions\.json/, () => jsonRes({ transcriptions: [{ sid: TR1, transcription_text: "Call me back about the shed" }] }));
     net.on("DELETE", /Transcriptions\/TR0+1\.json$/, () => jsonRes({ code: 20500, message: "Call me back about the shed" }, 500));
     net.rest("POST", "app_errors", () => []);
-    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 0, failed: 1 });
+    expect(await retention(env, new Date("2026-09-29T09:00:00Z"))).toEqual({ deleted: 0, failed: 1, parent: 0 });
     expect(net.to(/Recordings\/RE0+1\.json$/)).toEqual([]);
     expect(net.writes("phone_voicemails")).toEqual([]);
     const err = net.writes("app_errors")[0];

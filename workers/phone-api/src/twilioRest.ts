@@ -165,10 +165,15 @@ export async function listRecordings(env: Env, since: string, max = 200): Promis
   return out.slice(0, max);
 }
 
-/** Delete a recording at Twilio. A recording already gone counts as deleted. */
-export async function deleteRecording(env: Env, recordingSid: string): Promise<void> {
+/**
+ * Delete a recording at Twilio. True: deleted. False: this account has no such recording (404),
+ * which counts as deleted where only one account can hold it (greeting.ts); retention then also
+ * asks the parent (cron/retention.ts deleteWherever).
+ */
+export async function deleteRecording(env: Env, recordingSid: string): Promise<boolean> {
   const res = await call(env, "delete recording", `/Recordings/${encodeURIComponent(recordingSid)}.json`, { method: "DELETE" });
-  if (res.status === 204 || res.status === 404) return;
+  if (res.status === 204) return true;
+  if (res.status === 404) return false;
   throw new TwilioError("delete recording", res.status, await codeOf(res));
 }
 
