@@ -75,7 +75,7 @@
     // on from its next call. The order, and the kill switch, are SETUP.md 7d.
     // The kill switch is "off" + deploy + commit to beta. A tree saying "on" while live says
     // "off" re-arms recording for everyone: stop and ask.
-    "CALL_RECORDING": "off",
+    "CALL_RECORDING": "on",
     // Release B2. Exactly "on" transcribes recorded calls with Workers AI (the "ai" binding
     // below, Deepgram nova-3, about $0.005-0.01 per minute) from the minute tick, and asks the
     // phone-call-summary edge function for a summary of each. Anything else: off. Set the Supabase
