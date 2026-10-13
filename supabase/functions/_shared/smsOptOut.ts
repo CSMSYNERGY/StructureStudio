@@ -16,6 +16,10 @@
 //
 // ⚠️ A LEAF, ON PURPOSE: zero imports. smsSend.ts imports this, and smsSend.ts is bundled into the
 // phone-api Worker (Cloudflare), which cannot resolve a jsr: or https: import.
+//
+// IMPORTERS, for a redeploy after a change here: portal-settings, sms-status, every importer of
+// smsSend.ts, and the phone-api Worker, which bundles it twice over (through smsSend.ts, and
+// directly in src/routes/reads.ts). The Worker is deployed by hand (workers/phone-api/README.md).
 
 /** Twilio's "the recipient has opted out" error code. */
 export const TWILIO_OPTED_OUT = 21610;

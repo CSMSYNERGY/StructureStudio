@@ -503,8 +503,8 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
   const notFound = () => new ApiError("not_found", "That conversation wasn't found.");
   if (c.ctx.contacts_level === "none") throw notFound();
 
-  // from_number / to_number only to know the number the composer texts (`sms` below); the
-  // messages the apps get carry neither.
+  // from_number / to_number only to know the thread's number when there is none on record (`sms`
+  // below); the messages the apps get carry neither.
   const msgCols = "id, direction, body, status, created_at, sent_by, client_temp_id, num_media, from_number, to_number";
   let msgs;
   let calls;
@@ -551,8 +551,12 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
   const m = (must(msgs, "read texts") as MsgRow[] | null) ?? [];
   let cr = (must(calls, "read calls") as CallWithJoins[] | null) ?? [];
   if (!isTeamLevel(c.ctx.phone_level)) cr = cr.filter((r) => isMineCall(c.userId, r));
-  // The number the composer texts: the newest text's customer, else the one on record.
-  const textTo = (m[0] ? toE164(customerNumber(m[0])) : null) ?? toE164(onRecord);
+  // The number a text from this thread goes to, so the state below is about the number Send uses.
+  // A contact's: the phone on record, because POST /sms/send texts a contact there and nowhere
+  // else, and portal-settings crm_record and crm_record_consent key on it too (the newest text's
+  // number only when there is none on record). An unknown number's thread: its own number.
+  const newestTo = m[0] ? toE164(customerNumber(m[0])) : null;
+  const textTo = UUID_RE.test(key) ? (toE164(onRecord) ?? newestTo) : (newestTo ?? toE164(onRecord));
   const [callRows, sms] = await Promise.all([
     summaries(c, cr),
     smsStateFor(c, textTo, contactOptOutAt).catch(async (e: unknown) => {

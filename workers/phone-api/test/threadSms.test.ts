@@ -100,21 +100,35 @@ describe("GET /threads/:key sms (opt-out state)", () => {
     expect((await call(none.env, read(none.token))).json.sms).toEqual({ e164: CUSTOMER, opted_out: false, opted_out_at: null, consent: "none", opted_out_reason: null });
   });
 
-  it("the number is the newest text's customer number, else the contact's phone on record; none at all is sms: null, with nothing read", async () => {
-    // The newest text was to a second number: that is the one the composer texts.
-    const newest = await setup(callerCtx(), {
+  it("a contact's number is the phone on record (the one POST /sms/send texts), else the newest text's; none at all is sms: null, with nothing read", async () => {
+    // The newest text was to a second number, and the phone on record opted out: the state is the
+    // phone on record's, as /sms/send (contact's phone only), crm_record and crm_record_consent see it.
+    const second = await setup(callerCtx(), {
       sms: [
         text("m1", { created_at: T(5) }),
         text("m2", { direction: "out", from_number: BUSINESS_NUMBER, to_number: "+15555550143", created_at: T(1) }),
       ],
       optOuts: [optOut()],
     });
-    const a = (await call(newest.env, read(newest.token))).json;
-    expect(a.sms).toMatchObject({ e164: "+15555550143", opted_out: false });
-    expect(newest.net.reads("sms_opt_outs")[0].url.searchParams.get("phone_digits")).toBe("eq.5555550143");
+    const a = (await call(second.env, read(second.token))).json;
+    expect(a.sms).toMatchObject({ e164: CUSTOMER, opted_out: true, opted_out_reason: "stop" });
+    expect(second.net.reads("sms_opt_outs")[0].url.searchParams.get("phone_digits")).toBe(`eq.${DIGITS}`);
+    // The second number opted out and the phone on record didn't: Send to the phone on record goes.
+    const secondOut = await setup(callerCtx(), {
+      sms: [text("m2", { direction: "in", from_number: "+15555550143", created_at: T(1) })],
+      optOuts: [optOut({ phone_digits: "5555550143" })],
+    });
+    expect((await call(secondOut.env, read(secondOut.token))).json.sms).toMatchObject({ e164: CUSTOMER, opted_out: false });
     // No texts yet: the phone on record.
     const onRecord = await setup(callerCtx(), { optOuts: [optOut()] });
     expect((await call(onRecord.env, read(onRecord.token))).json.sms).toMatchObject({ e164: CUSTOMER, opted_out: true });
+    // No phone on record, but texts: the newest text's number.
+    const noPhone = await setup(callerCtx(), {
+      contact: { phone: null },
+      sms: [text("m3", { direction: "in", from_number: "+15555550143", created_at: T(1) })],
+      optOuts: [optOut({ phone_digits: "5555550143" })],
+    });
+    expect((await call(noPhone.env, read(noPhone.token))).json.sms).toMatchObject({ e164: "+15555550143", opted_out: true });
     // A contact who only emails: nothing to text, and nothing asked.
     const emailOnly = await setup(callerCtx(), { contact: { phone: null } });
     const { json } = await call(emailOnly.env, read(emailOnly.token));
