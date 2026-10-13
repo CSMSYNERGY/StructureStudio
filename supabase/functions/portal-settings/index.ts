@@ -8481,7 +8481,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // ADDED, NOT CHANGED: main's frontend reads crm_record and never looks at this key. Read
       // only, and it never seeds pipelines (crm_pipelines_list does that the first time the board
-      // opens). undefined on any failed read, the absent-vs-empty rule the blocks above follow.
+      // opens). NULL on any failed read (2026-10-13), not undefined: the answer then leaves
+      // `pipeline` out and says `pipelineError: true`, so the record can tell "couldn't load this
+      // deal's pipeline" from "no pipeline for this reader" and never draws the old ladder for a
+      // deal whose pipeline it simply failed to read. Older frontends ignore the extra key.
       (async () => {
         if (!mayReadContacts) return undefined;
         const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_reason, stage_entered_at, created_at";
@@ -8503,7 +8506,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
           dealsQ.order("created_at", { ascending: false }).limit(100),
         ]);
-        if (pRes.error || sRes.error || tRes.error || dRes.error) return undefined;
+        if (pRes.error || sRes.error || tRes.error || dRes.error) return null;
         const stages = sRes.data ?? [];
         return {
           pipelines: (pRes.data ?? []).map((p: any) => ({
@@ -8529,7 +8532,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline });
+    // A failed pipeline read (null) is said, never sent as a block: see EACH DEAL'S PIPELINE above.
+    const pipelineError = pipeline === null ? true : undefined;
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline: pipeline ?? undefined, pipelineError });
   }
 
   if (action === "crm_feed") {
