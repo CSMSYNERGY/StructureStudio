@@ -200,3 +200,45 @@ Deno.test("the hint no longer tells anyone to click a status to change it", () =
   assert(!/click (its|a|the) status/i.test(BOARD), "no 'click its status to change it'");
   assert(BOARD.includes("Statuses are set automatically."), "the hint says where statuses come from");
 });
+
+// ── 4. The board's view outlives opening a card (C22 with C42, integration review 2026-10-13) ──
+// A card opens its customer inside the Contacts tab and the board unmounts, so its search, Owner
+// and Status filter used to be gone when Back brought it back. ssBoardViewOf / ssBoardViewPut keep
+// each pipeline's view in memory, per signed-in person and account. tests/harness/crmRecordDeals.mjs
+// (L6-L8) drives the round trip in a browser.
+type View = { query: string; owner: string; status: F; key: string };
+Deno.test("each pipeline's search, Owner and Status filter are kept per person and account, and dropped once cleared", () => {
+  const v = new Function("ssCurrentUserId", `${BLOCK}; return { ssBoardViewOf, ssBoardViewPut };`)("user-1") as {
+    ssBoardViewOf: (clientId: string, pipelineId: string | null, user?: string) => View;
+    ssBoardViewPut: (clientId: string, pipelineId: string | null, view: Partial<View>, user?: string) => View;
+  };
+  const bare = (x: View) => ({ query: x.query, owner: x.owner, status: x.status });
+  const OFF = { query: "", owner: "all", status: { mode: "inc", ids: [] } };
+  assertEquals(bare(v.ssBoardViewOf("acct", "p-1")), OFF, "a board nobody has filtered opens unfiltered");
+  const f = { mode: "exc", ids: [EST] };
+  const put = v.ssBoardViewPut("acct", "p-1", { query: "lofted", owner: "all", status: f });
+  assertEquals(bare(put), { query: "lofted", owner: "all", status: f });
+  assertEquals(bare(v.ssBoardViewOf("acct", "p-1")), { query: "lofted", owner: "all", status: f }, "the board comes back as it was left");
+  assertEquals(put.key, v.ssBoardViewOf("acct", "p-1").key);
+  // Another pipeline, another account (an operator's view-as) or another person: their own view.
+  assertEquals(bare(v.ssBoardViewOf("acct", "p-2")), OFF);
+  assertEquals(bare(v.ssBoardViewOf("other-acct", "p-1")), OFF);
+  assertEquals(bare(v.ssBoardViewOf("acct", "p-1", "user-2")), OFF);
+  assert(v.ssBoardViewOf("acct", "p-2").key !== put.key, "a view is keyed to its pipeline, so it is never applied to another");
+  // An Owner alone is a view too.
+  v.ssBoardViewPut("acct", "p-2", { query: "", owner: "none", status: { mode: "inc", ids: [] } });
+  assertEquals(v.ssBoardViewOf("acct", "p-2").owner, "none");
+  // Cleared (the ×, Clear, an emptied search): nothing is kept.
+  v.ssBoardViewPut("acct", "p-1", { query: "", owner: "all", status: { mode: "exc", ids: [] } });
+  assertEquals(bare(v.ssBoardViewOf("acct", "p-1")), OFF);
+  // No pipeline yet (the list hasn't loaded): nothing is kept under a blank one.
+  v.ssBoardViewPut("acct", null, { query: "x", owner: "all", status: { mode: "inc", ids: [] } });
+  assertEquals(v.ssBoardViewOf("acct", null).query, "");
+});
+
+Deno.test("the board reads its view from ssBoardViewOf and keeps every change with ssBoardViewPut", () => {
+  assert(BOARD.includes("ssBoardViewOf(clientId, pipeId)"), "the board does not open on the view it was left with");
+  assert(BOARD.includes("ssBoardViewPut(clientId, pipeId,"), "a change to the search or a filter is not kept");
+  assert(!/const \[(query|owner|statusFilter), set\w+\] = useState/.test(BOARD), "the search or a filter is plain component state again, lost when a card is opened");
+  assert(!/sessionStorage|localStorage\.setItem\(\s*["'`]ss_board/.test(BOARD), "the view must stay in memory (a search is a customer's name)");
+});

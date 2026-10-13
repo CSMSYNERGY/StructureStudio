@@ -5657,6 +5657,36 @@ function ssStatusFilterLabel(f, statuses) {
   return f.mode === "exc" ? `All but ${names}` : names;
 }
 
+// ── THE BOARD'S VIEW OUTLIVES OPENING A CARD (C22 with C42, integration review 2026-10-13) ──
+// Carolyn, 2026-10-12, on opening a card and coming back: "wait where what was I". A card opens
+// its customer INSIDE the Contacts tab, and the shell draws the hub only while no record is open,
+// so the board unmounts on every card click and its search, Owner and Status filter went with it:
+// Back landed on an unfiltered board. Each pipeline's view is kept here instead, per signed-in
+// person and account, until it is cleared (the ×, Clear, an emptied search) or the page reloads.
+// IN MEMORY, never sessionStorage, for ssTabCache's reason (01-core): a search is a customer's
+// name or number, and a shared shop computer must not keep it past a sign-out.
+const SS_BOARD_VIEW_OFF = { query: "", owner: "all", status: SS_STATUS_FILTER_OFF };
+const ssBoardViews = new Map();
+const ssBoardViewKey = (clientId, pipelineId, user) => `${user || "anon"}|${clientId || "own"}|${pipelineId || ""}`;
+// The view a pipeline's board opens on: the one left on it, else nothing filtered. `key` says
+// which board it belongs to, so a view kept in React state is never applied to another pipeline.
+function ssBoardViewOf(clientId, pipelineId, user = ssCurrentUserId) {
+  const key = ssBoardViewKey(clientId, pipelineId, user);
+  const kept = pipelineId ? ssBoardViews.get(key) : null;
+  return { ...(kept || SS_BOARD_VIEW_OFF), key };
+}
+// Keep a board's view (nothing is kept once every part of it is back to "all").
+function ssBoardViewPut(clientId, pipelineId, v, user = ssCurrentUserId) {
+  const key = ssBoardViewKey(clientId, pipelineId, user);
+  const st = v && v.status && Array.isArray(v.status.ids) ? v.status : SS_STATUS_FILTER_OFF;
+  const next = { query: (v && typeof v.query === "string") ? v.query : "", owner: (v && v.owner) || "all", status: st };
+  if (pipelineId) {
+    if (!next.query && next.owner === "all" && !next.status.ids.length) ssBoardViews.delete(key);
+    else ssBoardViews.set(key, next);
+  }
+  return { ...next, key };
+}
+
 // ── THE BOARD IS AS WIDE AS THE PAGE, NEVER WIDER (Carolyn 2026-10-12) ── "This scroll bar is
 // not going to be there. I am going to make this like the designer where it can be as wide as it
 // needs to be." The board used to be a fixed-width strip of 230px columns inside a sideways
@@ -6053,9 +6083,8 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
   const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
   const [deals, setDeals] = useState(null);    // null = loading
   const [err, setErr] = useState(null);
-  const [query, setQuery] = useState("");
-  const [owner, setOwner] = useState("all");
-  const [statusFilter, setStatusFilter] = useState(SS_STATUS_FILTER_OFF);  // { mode, ids }, see ssStatusFilterKeep
+  // The search, Owner and Status filter as last changed here; `view` below reads it (C22 + C42).
+  const [viewEdit, setViewEdit] = useState(null);
   // The board's own width, for how many stage columns go across (ssBoardColumns). A ref callback,
   // not an effect, because the board mounts only once the pipelines are in, after the early return
   // below. Measured on a full-width wrapper, never on the grid it sizes (whose width it caps).
@@ -6098,6 +6127,19 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
     setPickedLocal(id);
     if (onPickPipeline) onPickPipeline(id);
   };
+  // This pipeline's view: as changed here, else as it was left the last time this board showed
+  // (opening a card unmounts the board; see ssBoardViewOf). One object keyed by its pipeline, so
+  // switching pipelines never carries the last one's filter across.
+  const view = useMemo(() => {
+    const kept = ssBoardViewOf(clientId, pipeId);
+    return viewEdit && viewEdit.key === kept.key ? viewEdit : kept;
+  }, [viewEdit, clientId, pipeId]);
+  const setView = (patch) => setViewEdit(ssBoardViewPut(clientId, pipeId, { ...view, ...patch }));
+  const { query, owner } = view;
+  const statusFilter = view.status;  // { mode, ids }, see ssStatusFilterKeep
+  const setQuery = (v) => setView({ query: v });
+  const setOwner = (v) => setView({ owner: v });
+  const setStatusFilter = (v) => setView({ status: v });
 
   const loadDeals = useCallback(async () => {
     if (!pipeId) return;

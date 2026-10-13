@@ -18,6 +18,8 @@
 //   J. a server without the pipeline block: the record is what it was (designs, SALES ladder)
 //   K. someone who can't edit contacts sees the stage, can't change it, and has no move or add
 //   L. a card clicked on the Pipeline board opens the record ON that deal, the bar on its pipeline
+//   M. the board's search and Status filter survive opening a card and coming Back (the record's
+//      Back and the browser's), per pipeline, and a cleared one stays cleared
 //   Z. no crm_deal_set_status from anywhere on the record, and no page errors
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
@@ -362,6 +364,73 @@ try {
       ok("L5 and the bar on the lead's pipeline and stage", leadOpened && leadOpened.label === "Sold" && leadOpened.lit.join() === "Signed", JSON.stringify(leadOpened));
       await shot(page, "lead-opened-from-board");
     }
+
+    // ── M: the board's search and Status filter survive opening a card and coming Back (C22 + C42) ──
+    // Carolyn, 2026-10-12: "wait where what was I". The board unmounts while a record is open.
+    const shownCards = () => page.evaluate(() => [...document.querySelectorAll("[data-ss-deal]")].map((e) => e.getAttribute("data-ss-deal")).sort());
+    const boardState = async () => ({
+      path: await page.evaluate(() => location.pathname),
+      cards: await shownCards(),
+      // The button's label, without its ▾.
+      filter: ((await page.locator("[data-ss-status-filter-button]").innerText().catch(() => "")) || "").replace(/\s*▾\s*$/, "").trim(),
+      search: await page.getByPlaceholder("Search: company, name, phone, email…").inputValue().catch(() => null),
+    });
+    const UTIL_DEAL = DEALS()[1].id;
+    await go(`/portal/contacts/p-${SOLD.id}`);
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
+    const unfiltered = await shownCards();
+    ok("M0 the Sold board shows three cards before any filter", unfiltered.length === 3, JSON.stringify(unfiltered));
+    await page.locator("[data-ss-status-filter-button]").click();
+    await page.locator(`[data-ss-status-option="${STATUSES[2].id}"] input[type="checkbox"]`).check();
+    await page.locator("[data-ss-status-filter-menu] button", { hasText: "Done" }).click();
+    await page.getByPlaceholder("Search: company, name, phone, email…").fill("util");
+    await page.waitForTimeout(400);
+    const filtered = await boardState();
+    ok("M1 filtered to Payment Received and searched: one card", JSON.stringify(filtered.cards) === JSON.stringify([UTIL_DEAL]) && filtered.filter === "Payment Received", JSON.stringify(filtered));
+    await shot(page, "board-filtered");
+    // Open the card, then the record's own Back.
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).click();
+    await page.waitForFunction(() => /\/contacts\/c-/.test(location.pathname), null, { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    ok("M2 the card opened its customer", /\/contacts\/c-/.test(await page.evaluate(() => location.pathname)));
+    await page.getByRole("button", { name: "Back", exact: true }).first().click();
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    const afterBack = await boardState();
+    ok("M3 the record's Back lands on the same board, still searched and filtered",
+      afterBack.path === `/portal/contacts/p-${SOLD.id}` && JSON.stringify(afterBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBack.filter === "Payment Received" && afterBack.search === "util",
+      JSON.stringify(afterBack));
+    await shot(page, "board-after-record-back");
+    // And the browser's Back.
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).click();
+    await page.waitForFunction(() => /\/contacts\/c-/.test(location.pathname), null, { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.goBack();
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    const afterBrowserBack = await boardState();
+    ok("M4 the browser's Back does the same",
+      afterBrowserBack.path === `/portal/contacts/p-${SOLD.id}` && JSON.stringify(afterBrowserBack.cards) === JSON.stringify([UTIL_DEAL]) && afterBrowserBack.filter === "Payment Received" && afterBrowserBack.search === "util",
+      JSON.stringify(afterBrowserBack));
+    // Another pipeline keeps its own view: Shed Deals is not filtered by Sold's.
+    await go(`/portal/contacts/p-${SHED.id}`);
+    await page.waitForTimeout(400);
+    const shedView = await boardState();
+    ok("M5 another pipeline's board is not filtered by this one's view", shedView.filter === "All statuses" && shedView.search === "", JSON.stringify(shedView));
+    // Cleared, it stays cleared: × on the filter, × on the search, open a card, Back.
+    await go(`/portal/contacts/p-${SOLD.id}`);
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
+    await page.getByRole("button", { name: "Clear the status filter" }).click();
+    await page.getByRole("button", { name: "Clear search" }).click();
+    await page.waitForTimeout(300);
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).click();
+    await page.waitForFunction(() => /\/contacts\/c-/.test(location.pathname), null, { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    await page.goBack();
+    await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    const cleared = await boardState();
+    ok("M6 a cleared filter and search stay cleared after a round trip", cleared.cards.length === 3 && cleared.filter === "All statuses" && cleared.search === "", JSON.stringify(cleared));
 
     ok("Z1 nothing on the record set a status", !calls.some((c) => c.action === "crm_deal_set_status"), JSON.stringify(calls.map((c) => c.action)));
     ok("Z2 no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
