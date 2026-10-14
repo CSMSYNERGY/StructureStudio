@@ -89,7 +89,10 @@
 //      run against the same vectors, no line naming a bank number may also touch storage, a
 //      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
 //      off (checkAchBankInputs).
-//  10. "Estimate", never "quote", in text a person reads (Carolyn 2026-10-06): string
+//  10. How long a card token may be held before the page asks for the card again (Fiserv: the
+//      CVV is kept for 2 minutes): CARD_TOKEN_MAX_MS in my-quotes.html and portal/04-orders.jsx
+//      must be present, equal, and no more than 110 s (checkCardTokenMaxAge).
+//  11. "Estimate", never "quote", in text a person reads (Carolyn 2026-10-06): string
 //      literals, template parts and JSX text in the portal parts, both designer twins, the
 //      page sources, my-quotes.html, the portal's install manifest and every edge-function
 //      module, read with the vendored Babel. Identifiers, log-only text and the
@@ -1033,6 +1036,58 @@ function checkAchBankInputs(files) {
         }
       }
     }
+  }
+  return errors;
+}
+
+// ── How long a card token may be held: one number, in two hand-kept copies ─────────────────────
+//
+// Fiserv (CardPointe integrations), 2026-10-14: the CVV stays linked to the CardSecure token for 2
+// minutes. Both card surfaces, the customer's pay panel in my-quotes.html and the builder's
+// Record-a-payment modal in portal/04-orders.jsx, refuse to charge a card token older than
+// CARD_TOKEN_MAX_MS and ask for the card again. The two copies must be the same number (one page
+// timing out at 100 s and the other at 180 s is a CVV lost on one surface only), and neither may
+// creep up to the 2 minutes themselves: above 110 s there is no room left for the upload, an edge
+// cold start and the database writes before /auth. Taken from the SHIPPED text of both files, so a
+// copy cannot drift while the gate reads something else. Exactly one assignment per file, as a
+// plain integer: anything cleverer is a number this check cannot vouch for.
+//
+// Takes the texts as arguments so --self-test can hand it broken variants.
+const CARD_TOKEN_FILES = ["my-quotes.html", "portal/04-orders.jsx"];
+const CARD_TOKEN_MAX_CEILING_MS = 110000;
+function checkCardTokenMaxAge(files) {
+  const errors = [];
+  const seen = {};
+  for (const f of CARD_TOKEN_FILES) {
+    const text = (files[f] ?? "").replace(/\r\n/g, "\n");
+    const hits = [...text.matchAll(/\bCARD_TOKEN_MAX_MS\s*=(?!=)\s*([^;,\n]*)/g)];
+    if (hits.length === 0) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is gone — the card token age limit (Fiserv: the CVV is kept `
+        + "for 2 minutes) lives there. If the limit moved, point checkCardTokenMaxAge at it.");
+      continue;
+    }
+    if (hits.length > 1) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is assigned ${hits.length} times — keep one, so the limit `
+        + "this check reads is the one the page uses");
+      continue;
+    }
+    const raw = hits[0][1].trim();
+    const at = text.slice(0, hits[0].index).split("\n").length;
+    if (!/^\d+$/.test(raw)) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${raw} — write it as a plain number of milliseconds`);
+      continue;
+    }
+    const ms = Number(raw);
+    if (ms > CARD_TOKEN_MAX_CEILING_MS) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${ms} is above ${CARD_TOKEN_MAX_CEILING_MS} — the CVV leaves `
+        + "the token 2 minutes after tokenizing, and the charge needs time to reach /auth");
+    }
+    seen[f] = ms;
+  }
+  const [a, b] = CARD_TOKEN_FILES;
+  if (seen[a] !== undefined && seen[b] !== undefined && seen[a] !== seen[b]) {
+    errors.push(`CARD_TOKEN_MAX_MS differs: ${a} says ${seen[a]}, ${b} says ${seen[b]} — the two card `
+      + "surfaces must ask for the card again at the same age");
   }
   return errors;
 }
@@ -2976,6 +3031,43 @@ if (process.argv.includes("--self-test")) {
     + "digit, a number in storage or an error sentence, a box the browser may remember, a missing "
     + "validator and a hardcoded CardSecure host are each refused");
 
+  // ── How long a card token may be held ──
+  // The real files pass; the limit raised in ONE copy, raised past the ceiling in both, gone from
+  // one, assigned twice, and written as an expression each fail.
+  const tokReal = Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, read(f)]));
+  if (checkCardTokenMaxAge(tokReal).length) {
+    console.error("self-test FAILED: the real my-quotes.html / portal/04-orders.jsx do not pass checkCardTokenMaxAge:");
+    for (const e of checkCardTokenMaxAge(tokReal)) console.error("  " + e);
+    process.exit(1);
+  }
+  const tokMutants = [
+    ["the portal's limit drifted from my-quotes'", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 90000;"] }, /differs/],
+    ["both limits raised past the 2 minutes", {
+      "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 120000;"],
+      "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 120000;"],
+    }, /is above 110000/],
+    ["the limit gone from my-quotes", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_LIMIT = 100000;"] }, /my-quotes\.html: CARD_TOKEN_MAX_MS is gone/],
+    ["a second assignment in the portal", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 100000; window.CARD_TOKEN_MAX_MS = 100000;"] }, /assigned 2 times/],
+    ["the limit as an expression", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 2 * 60000;"] }, /plain number/],
+  ];
+  for (const [what, edits, want] of tokMutants) {
+    const mutated = { ...tokReal };
+    for (const [f, [from, to]] of Object.entries(edits)) {
+      const src = tokReal[f].replace(/\r\n/g, "\n");
+      mutated[f] = src.replace(from, to);
+      if (mutated[f] === src) {
+        console.error(`self-test FAILED: could not plant "${what}" in ${f} — the subject of checkCardTokenMaxAge moved`);
+        process.exit(1);
+      }
+    }
+    if (!checkCardTokenMaxAge(mutated).some((e) => want.test(e))) {
+      console.error(`self-test FAILED: checkCardTokenMaxAge passed ${what}`);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: CARD_TOKEN_MAX_MS is read from both card surfaces, and a drifted copy, a "
+    + "limit past 110 s, a missing one, a second assignment and an expression are each refused");
+
   // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
   // This rule had NO self-test at all until now, in either direction — while quietly running
   // zero checks on one of the four functions it named. So prove the whole mechanism: that
@@ -3409,6 +3501,7 @@ errors.push(...checkStandalonePagesParse({
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkEstimateWording());
 
 if (errors.length) {
