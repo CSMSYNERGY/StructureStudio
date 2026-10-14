@@ -1101,7 +1101,11 @@ Deno.test("photo design: with no name, every field closes its gap and nothing el
   assertIncludes(named.html, ">SEE IT, Alex</a>");
 });
 
-Deno.test("photo design: Outlook gets a fixed 600px card, everything else may shrink it", () => {
+Deno.test("photo design: Outlook gets a fixed 600px column, everything else may shrink the card", () => {
   const q = photoQuote();
-  assertIncludes(q.html, `width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="width:600px;max-width:100%;`);
+  const open = `<!--[if mso]><table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->`;
+  const card = `bgcolor="#FFFFFF" style="width:100%;max-width:600px;`;
+  const close = `<!--[if mso]></td></tr></table><![endif]-->`;
+  assert(q.html.indexOf(open) >= 0 && q.html.indexOf(open) < q.html.indexOf(card), "the Outlook column opens before the card");
+  assert(q.html.lastIndexOf(close) > q.html.indexOf("All rights reserved."), "and closes after it");
 });

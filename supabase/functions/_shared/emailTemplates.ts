@@ -787,14 +787,17 @@ function photoEstimateEmail(input: EstimateEmailInput, copy: TemplateCopy, p: Ph
     ? `<p style="margin:10px 0 0 0;font-family:${FONT};font-size:11px;line-height:1.6;color:#94A3B8;">${esc(terms).replace(/\n/g, "<br>")}</p>`
     : "";
 
-  // width:600px is what Outlook on Windows uses (it ignores max-width, and would stretch a
-  // width:100% card across the whole reading pane); everywhere else max-width:100% lets the card
-  // shrink to a phone's width (the classic card scrolls sideways there; hers didn't).
+  // Outlook on Windows ignores max-width, so a width:100% card would stretch across its whole
+  // reading pane: it alone reads the [if mso] table, a fixed 600px column. Everything else skips
+  // that and lets width:100%;max-width:600px shrink the card to a phone's width (the classic card
+  // scrolls sideways there; hers didn't). A width:600px card can't do both: inside a table cell,
+  // max-width:100% resolves against the 600px it asked for.
   const html = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#EAF0F6" style="background-color:#EAF0F6;margin:0;padding:0;">
   <tr>
     <td align="center" style="padding:24px 12px;">
       <div style="display:none;font-size:1px;color:#EAF0F6;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${esc(p.preheader)}</div>
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="width:600px;max-width:100%;background-color:#FFFFFF;">
+      <!--[if mso]><table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="width:100%;max-width:600px;background-color:#FFFFFF;">
         ${top}
         ${accentRule(accent, 2)}
         <tr>
@@ -823,6 +826,7 @@ function photoEstimateEmail(input: EstimateEmailInput, copy: TemplateCopy, p: Ph
           </td>
         </tr>
       </table>
+      <!--[if mso]></td></tr></table><![endif]-->
     </td>
   </tr>
 </table>`;
