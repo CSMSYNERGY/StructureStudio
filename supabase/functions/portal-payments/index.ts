@@ -57,6 +57,8 @@ import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt }
 import {
   achFundingRead,
   fundingAnswerShape,
+  fundingDayIsEmpty,
+  gatewayErrorText,
   fundingStateFromSetlstat,
   returnedPaymentPatch,
   settlementStatuses,
@@ -917,7 +919,9 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // with the merchant's last four and the class of failure, never a body (a 4xx carries the
     // gateway's own text). Until 2026-10-14 a settlestat failure was swallowed whole, so "the call
     // failed" and "nothing moved" looked the same, and a date refused on every sweep was invisible.
-    const gatewayFailures: { call: "settlestat" | "funding"; merchant: string; env: string; day: string; kind: string }[] = [];
+    // One exception to "never a body": an answer that is ONLY the gateway's error message (achState.ts
+    // gatewayErrorText) is filed with that message, digit runs masked, as kind "answered_error".
+    const gatewayFailures: { call: "settlestat" | "funding"; merchant: string; env: string; day: string; kind: string; message?: string }[] = [];
     // Once the limiter says no, this sweep asks nothing more: the 40 TPM quota is shared with live
     // charges, and every further call would only be refused too. What is left waits for the next sweep.
     let limited = false;
@@ -984,6 +988,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
           // Whatever the answer is wrapped in (a list of batches, a list of rows, one batch):
           // settlementStatuses walks it. Reading `txns` off the top level found nothing in a list.
           const answer = await cpSettleStat(m, d);
+          const said = gatewayErrorText(answer);
+          if (said) {
+            gatewayFailures.push({ call: "settlestat", merchant: "…" + m.merchid.slice(-4), env: m.env, day: d, kind: "answered_error", message: said });
+            continue;
+          }
           for (const [rr, st] of settlementStatuses(answer)) byRetref.set(`${m.env}|${m.merchid}|${rr}`, st);
         } catch (e) {
           // One bad day must not stop the rest, but it is no longer silent (gatewayFailures).
@@ -1087,6 +1096,16 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       const day = ymdOf(w.day);
       try {
         const answer = await cpFunding(w.m, day);
+        // A 200 that is only the gateway's error message is a refusal like a 4xx: filed with its
+        // words, and the funding pass stops for this sweep (the same words would come back again).
+        // "No deposits match your request" is an empty day (fundingDayIsEmpty), not a refusal.
+        if (fundingDayIsEmpty(answer)) { fundingAnswers.set(key, { txns: [] }); continue; }
+        const said = gatewayErrorText(answer);
+        if (said) {
+          gatewayFailures.push({ call: "funding", merchant: "…" + w.m.merchid.slice(-4), env: w.m.env, day, kind: "answered_error", message: said });
+          fundingRefused = true;
+          continue;
+        }
         const shape = fundingAnswerShape(answer);
         if (shape.recognised) fundingAnswers.set(key, answer);
         else unrecognised.push({ merchant: "…" + w.m.merchid.slice(-4), env: w.m.env, day, keyPaths: shape.keyPaths });

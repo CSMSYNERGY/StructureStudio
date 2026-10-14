@@ -286,6 +286,36 @@ const SUMMARY_LIST = /^(fundings?|adjustments?|fees?|deposits?)$/i;
  * `keyPaths` says what it looked like: key names and nesting only, never a value, digit runs masked,
  * capped at 60 paths.
  */
+/**
+ * The gateway's own refusal, when a settlestat or funding answer is ONLY that: one object of
+ * scalars, with no lists or nested objects, carrying an error-message field (errormsg, resptext,
+ * message, error). The first live funding read on 2026-10-14 came back exactly so ({errormsg}), and a
+ * key-paths-only log could not say what it said. The text is the gateway's words about our request,
+ * not card or bank data; runs of five or more digits are cut to their last four anyway, and it is
+ * capped at 160 characters. Anything else (a data answer, an empty one, a non-object) is null.
+ */
+export function gatewayErrorText(answer: unknown): string | null {
+  if (!answer || typeof answer !== "object" || Array.isArray(answer)) return null;
+  const obj = answer as Record<string, unknown>;
+  if (Object.values(obj).some((v) => v !== null && typeof v === "object")) return null;
+  for (const k of Object.keys(obj)) {
+    if (!/^(errormsg|errormessage|error|message|resptext)$/i.test(k)) continue;
+    const v = typeof obj[k] === "string" ? (obj[k] as string).trim() : "";
+    if (v) return v.replace(/[0-9]{5,}/g, (run) => "…" + run.slice(-4)).slice(0, 160);
+  }
+  return null;
+}
+
+/**
+ * A funding day with nothing on it. The live UAT gateway, 2026-10-14, asked about a day the merchant
+ * had no deposit: a 200 with {errormsg: "No deposits match your request"}. That is the gateway
+ * understanding the date and finding nothing, the same fact as an empty list, so reconcile reads it as
+ * an empty day and moves past it, rather than as a refusal it would retry on every sweep.
+ */
+export function fundingDayIsEmpty(answer: unknown): boolean {
+  return /^no deposits match/i.test(gatewayErrorText(answer) ?? "");
+}
+
 export function fundingAnswerShape(answer: unknown): { recognised: boolean; keyPaths: string[] } {
   if (!answer || typeof answer !== "object") {
     return { recognised: false, keyPaths: [`(${answer === null ? "null" : typeof answer})`] };
