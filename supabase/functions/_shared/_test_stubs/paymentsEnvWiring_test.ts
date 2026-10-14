@@ -15,7 +15,8 @@
 //     4. a charge goes to the builder's system, and its attempt records cp_env;
 //     5. void and refund go to the system the charge was TAKEN on (cp_env, NULL = uat), whatever the
 //        builder is on now; reconcile asks settlestat once per (system, merchant, day), and never for
-//        a system with no credentials;
+//        a system with no credentials (nor /funding, since 2026-10-14); a return on the test system
+//        files as info, on live as a fault;
 //     6. a database WITHOUT 296 (no cardpointe_env, no cp_env): charges still go through, on UAT,
 //        which is what every charge was before it;
 //     7. neither system configured: every action refused as it always was.
@@ -398,21 +399,35 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
     id, order_id: `o-${id}`, amount_cents: 50000, gateway: "cardpointe", gateway_txn_id: retref, attempt_id: attempt,
     funding_state: "pending", method: "ach", received_at: "2026-10-01T15:00:00Z",
   });
-  // The SAME MID on both systems, same day: two calls, each batch read for its own system.
+  // The SAME MID on both systems, same day: two calls, each batch read for its own system. The
+  // funding days list nothing (an empty day), so settlestat decides; the sale is over seven days old,
+  // so its "Accepted" may settle a bank payment (ACH_CLEARED_AFTER_DAYS).
   const world: World = {
     payments: [ach("a1", 41, "rt-a1"), ach("a2", 42, "rt-a2")],
     attempts: [{ id: 41, merchid: MID, cp_env: null }, { id: 42, merchid: MID, cp_env: "prod" }],
-    gateway: (system) => ({ txns: [{ retref: system === "uat" ? "rt-a1" : "rt-a2", setlstat: system === "uat" ? "Accepted" : "Rejected" }] }),
+    gateway: (system, path) => path === "/funding"
+      ? { txns: [] }
+      : { txns: [{ retref: system === "uat" ? "rt-a1" : "rt-a2", setlstat: system === "uat" ? "Accepted" : "Rejected" }] },
   };
   const both = await payments({ action: "reconcile" }, world, { live: true });
   assertEquals(both.status, 200, both.text);
-  assertEquals(both.trace.gateway.map((g) => `${g.system} ${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort(),
+  const settlestat = (t: Trace) => t.gateway.filter((g) => g.path === "/settlestat");
+  assertEquals(settlestat(both.trace).map((g) => `${g.system} ${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort(),
     [`live /settlestat ${MID} 20261001`, `uat /settlestat ${MID} 20261001`]);
   assertEquals(Object.fromEntries((both.body.updated as any[]).map((u) => [u.paymentId, u.to])), { a1: "settled", a2: "returned" });
   assertEquals(both.body.daysChecked, ["20261001"]);
-  // Production unset: only the test batch is asked for, and the live payment stays as it is.
+  // The funding pass (2026-10-14) also asks each system about its own payment, from the sale day on,
+  // never more than 8 calls a sweep. These answers list nothing, so it moves nothing itself.
+  const funding = both.trace.gateway.filter((g) => g.path === "/funding");
+  assert(funding.length > 0 && funding.length <= 8, `funding calls: ${funding.length}`);
+  assertEquals(both.body.fundingChecked, funding.length);
+  for (const g of funding) assert(String(g.url.searchParams.get("date")) >= "20261001", g.url.href);
+  // The LIVE return is a fault for us; on the test system every bank payment returns, so it is info.
+  const returned = both.trace.faults.filter((f) => f.code === "ach_returned");
+  assertEquals(returned.map((f) => [(f.context as any).paymentId, f.severity]), [["a2", "error"]]);
+  // Production unset: only the test system is asked, and the live payment stays as it is.
   const one = await payments({ action: "reconcile" }, world);
-  assertEquals(one.trace.gateway.map((g) => g.system), ["uat"]);
+  assertEquals([...new Set(one.trace.gateway.map((g) => g.system))], ["uat"]);
   assertEquals((one.body.updated as any[]).map((u) => u.paymentId), ["a1"]);
 });
 

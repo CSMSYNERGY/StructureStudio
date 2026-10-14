@@ -48,7 +48,9 @@ function restore() {
 /** Made-up merchants, one on each system. */
 const UAT_M = { merchid: "100200300400", env: "uat" as const };
 const PROD_M = { merchid: "100200300500", env: "prod" as const };
-const REQ = { merchant: UAT_M, amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
+/** ecomind is REQUIRED on a request since 2026-10-14 (invoicePayment.ts ecomindFor decides it); "E" is
+ *  the shopper keying their own card, the plainest sale. */
+const REQ = { merchant: UAT_M, amountCents: 600, account: "9413948780281111", orderid: "ssp_x", ecomind: "E" as const };
 
 /** Run cpAuth and hand back the thrown error, or null when it returned. */
 async function authError(): Promise<Error | null> {
@@ -709,12 +711,18 @@ Deno.test("cpBillingFields: trim, strip controls, cap the street at 60, keep onl
   }
 });
 
-Deno.test("ecomind: E by default, NONE on a swipe (null), and never R", async () => {
+Deno.test("ecomind: what the request says, NONE on a swipe (null), never R, and no default", async () => {
   // CardPointe defines R as RECURRING. Every swipe used to go out as "R".
-  check("default E", (await sentBody(REQ)).body.ecomind === "E");
+  check("E when asked", (await sentBody(REQ)).body.ecomind === "E");
   const swipe = (await sentBody({ ...REQ, ecomind: null })).body;
   check("a swipe sends none", !("ecomind" in swipe), JSON.stringify(Object.keys(swipe)));
+  // Fiserv (CardPointe integrations), 2026-10-14: a card a builder keys is T.
   check("T when asked", (await sentBody({ ...REQ, ecomind: "T" })).body.ecomind === "T");
+  // The field is required, and there is NO silent default any more: an untyped caller that leaves it
+  // out gets nothing sent, never an "E" nobody chose (which is how builder sales went out as E).
+  const { ecomind: _e, ...noEcomind } = REQ;
+  const bare = (await sentBody(noEcomind as unknown as Parameters<typeof cp.cpAuth>[0])).body;
+  check("no default E", !("ecomind" in bare), JSON.stringify(Object.keys(bare)));
 });
 
 Deno.test("cpAuthFieldNames is exactly the keys /auth is sent, sorted, and never a value", async () => {

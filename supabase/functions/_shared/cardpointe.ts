@@ -366,16 +366,24 @@ export type CpAuthRequest = {
   name?: string;
   address?: string;
   /**
-   * "E" e-commerce: a KEYED card, whether the customer typed it online or a builder typed it in.
-   * Left undefined it is "E". `null` sends NO ecomind, which is what a card-present SWIPE must do.
+   * REQUIRED, with no default. invoicePayment.ts ecomindFor is the one place that decides it:
    *
-   * ⚠️ "R" IS RECURRING in CardPointe's API, not retail. This comment called it retail until
-   * 2026-10, and every swipe went out flagged as a recurring card-not-present sale. The swipe's
-   * own track data is what tells the gateway the card was there. "T" (mail/telephone order) is
-   * typed for Fiserv's answer on keyed builder charges; nothing sends it yet.
+   *   "E"    e-commerce: the CARDHOLDER keyed their own card online (my-quotes). Bank payments carry
+   *          it too, unchanged, until the SEC-code work decides what they send.
+   *   "T"    mail/telephone order: a builder's STAFF keyed the card. Fiserv (CardPointe
+   *          integrations), 2026-10-14: with the customer not present a keyed card is T, because "this
+   *          is not an electronic transaction". Every builder-keyed card went out as E until then.
+   *   null   NO ecomind at all: a card-present SWIPE. The track data is what tells the gateway the
+   *          card was there, and Fiserv confirmed on 2026-10-14 that a swipe may leave it out.
+   *
+   * ⚠️ "R" IS RECURRING in CardPointe's API, not retail, and nothing here ever sends it. This comment
+   * called it retail until 2026-10, and every swipe went out flagged as a recurring card-not-present
+   * sale. The field was optional with a silent "E" default until 2026-10-14, which is how builder
+   * sales came to send E without anyone choosing it; a required field makes the choice visible.
    */
-  ecomind?: "E" | "T" | null;
-  /** ACH needs the routing/account form and its own MID; the gateway auto-captures it. */
+  ecomind: "E" | "T" | null;
+  /** ACH needs the routing/account form and a MID set up for ACH (the tenant's one MID, on which
+   *  Fiserv enables ACH); the gateway auto-captures it. */
   rail?: "card" | "ach";
 };
 
@@ -434,8 +442,8 @@ function cpAuthBody(req: CpAuthRequest): Record<string, unknown> {
     orderid: req.orderid,
     capture: "Y",
   };
-  const ecomind = req.ecomind === undefined ? "E" : req.ecomind;
-  if (ecomind) body.ecomind = ecomind;
+  // Exactly what the request says: null (a swipe) sends none, and there is no default to fall to.
+  if (req.ecomind) body.ecomind = req.ecomind;
   // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
   // /auth wants MMYY.
   const exp = cpExpiry(req.expiry);
@@ -673,14 +681,31 @@ export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyRe
   }
 }
 
-/** Settlement status for a date (YYYYMMDD). ONE call returns the whole batch — always
- *  preferred over a per-payment inquire loop, which would 429 itself into uselessness and
- *  starve real customer charges of the shared per-MID quota. */
+/** Settlement status for a date (sent YYYYMMDD; see cpFunding on why that is unproven). ONE call
+ *  returns the whole batch — always preferred over a per-payment inquire loop, which would 429
+ *  itself into uselessness and starve real customer charges of the shared per-MID quota. The answer
+ *  is read by achState.ts settlementStatuses, whatever it is wrapped in: a copy of Fiserv's API
+ *  reference says it is a list, which the code used to read as an object and so read nothing. */
 export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<unknown> {
   return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }
 
-/** Funding detail — the final word on whether an ACH debit actually funded. */
+/** Funding detail — the final word on whether an ACH debit actually funded. Fiserv (CardPointe
+ *  integrations), 2026-10-14: every UAT bank payment comes back R03, and the return shows in the
+ *  FUNDING data, which settlestat does not carry. portal-payments reconcile reads it for bank
+ *  payments still clearing and for settled ones inside their return window, and achState.ts
+ *  achFundingRead reads the answer.
+ *
+ *  ⚠️ THE DATE FORMAT IS UNPROVEN. It goes out YYYYMMDD, the spelling settlestat has always been
+ *  sent; a copy of Fiserv's API reference says MMDD for both, and neither has been seen answered
+ *  live. One read-only UAT call settles it, and should be made before this ships. What a wrong date
+ *  looks like depends on the gateway: a 4xx files reconcile_gateway_failed (kind "config") and ends
+ *  that sweep's funding calls; a 200 that is not a funding answer files
+ *  reconcile_funding_unrecognised. But a 200 with EMPTY lists for a date it misread looks exactly
+ *  like a day with nothing funded, and nothing can tell the two apart from here. Reconcile
+ *  remembers every day it has read (payments.funding_checked_through, migration 308), so days read
+ *  under a wrong format stay read: after changing the format, set that column back to null on the
+ *  cardpointe bank payments and every day is read again. */
 export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {
   return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }

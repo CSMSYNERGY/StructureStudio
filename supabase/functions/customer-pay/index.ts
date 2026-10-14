@@ -426,8 +426,9 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     postal: billing.postal,
     name: billing.name,
     address: billing.address,
-    // Always keyed: a customer paying online is never card-present.
-    ecomind: "E",
+    // Always keyed: a customer paying online is never card-present. The shopper keys their own
+    // card, so the auth says E (invoicePayment.ts ecomindFor, actorKind customer); no `entry` is
+    // ever passed from here.
     actorKind: "customer",
     // Who paid: the verified phone, or the verified address for an email session (migration
     // 230). payments.actor_ref is free text (174), so either reads back as itself.
@@ -438,7 +439,15 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     // `blocking` IS the fault flag, and the mapping is exact: blocking means the outcome
     // could not be verified and a human must reconcile it before anyone tries again. A
     // plain decline is not that, and must not be filed as though it were.
-    return json({ error: result.error, blocking: result.blocking }, result.status, result.blocking);
+    //
+    // newCardNeeded: true rides ONLY on a failure that reached /auth and did not stand (a decline,
+    // a voided partial): the token's CVV is spent, so the page asks for the card again. Every
+    // refusal above this line, and every blocking failure, goes without it.
+    return json({
+      error: result.error,
+      blocking: result.blocking,
+      ...(result.newCardNeeded ? { newCardNeeded: true } : {}),
+    }, result.status, result.blocking);
   }
 
   return json({

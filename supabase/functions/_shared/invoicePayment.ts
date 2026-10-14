@@ -72,7 +72,23 @@ export type PaymentResult =
     balanceCents: number;
     already: boolean;
   }
-  | { ok: false; error: string; blocking: boolean; status: number };
+  | {
+    ok: false;
+    error: string;
+    blocking: boolean;
+    status: number;
+    /**
+     * true ONLY when the attempt reached /auth and did not stand as a payment: a card decline, or a
+     * partial approval that was voided. The token has been used, and Fiserv (CardPointe
+     * integrations), 2026-10-14, says its CVV stays linked to it for 2 minutes; the first auth
+     * very likely uses it up. So the page asks for the card again rather than re-sending a token
+     * with no security code behind it. Never set on a refusal made before /auth (amount, block,
+     * race, throttle, configuration) or on a BLOCKING failure (an unknown outcome, a partial whose
+     * void failed, a charge not recorded): those keep or block, they never invite a retry. Both
+     * callers put it in the JSON body as `newCardNeeded: true`, and only when it is true.
+     */
+    newCardNeeded?: true;
+  };
 
 // ─────────────────────────────────────────────────────────────────────────────────────
 // The amount, decided in one pure place.
@@ -264,16 +280,104 @@ export type ChargeOpts = {
   postal?: string;
   name?: string;
   address?: string;
-  /** For a KEYED card: "E" (the default). Never sent on a swipe, whatever this says — see `entry`. */
-  ecomind?: "E" | "T";
+  // There is no `ecomind` here any more (2026-10-14): ecomindFor decides it from rail, entry and
+  // actorKind, so no caller can pick it and no caller can forget it.
   /** "swipe" = read by the card reader, card physically present: the auth carries NO ecomind
    *  (CardPointe's "R" means RECURRING, which is what swipes used to be sent as), and the
-   *  payment's entry_mode still says it was a swipe when the gateway does not. */
+   *  payment's entry_mode still says it was a swipe when the gateway does not. Read ONLY on a
+   *  card: a bank payment is never a swipe, whatever the page sent (rail "ach" ignores it). */
   entry?: "keyed" | "swipe";
+  /** Who is paying, for the audit trail, and since 2026-10-14 also what the auth says: the shopper
+   *  ("customer") keying their own card sends ecomind E, anyone else keying one sends T
+   *  (ecomindFor). It also picks the wording of the partial-approval messages. */
   actorKind: "customer" | "operator" | "staff";
   actorRef?: string | null;
   createdBy?: string | null;
 };
+
+/**
+ * The ecomind every /auth carries, decided HERE and nowhere else. cpAuth has one caller (below), so
+ * a rule in this function is a rule for every sale, and no caller can drift from it: the two near-
+ * identical callers have drifted before.
+ *
+ *   card, swiped                 null, none sent. The track data says the card was there; Fiserv
+ *                                (CardPointe integrations), 2026-10-14, confirmed a swipe may omit it.
+ *   card, the shopper keyed it   "E": the cardholder typed their own card online (my-quotes).
+ *   card, anyone else keyed it   "T": a builder's staff typed it in. Fiserv (CardPointe
+ *                                integrations), 2026-10-14: with the customer not present that is
+ *                                T, "not an electronic transaction". It was E until then.
+ *   ach                          "E", whoever keyed it, and `entry` is ignored. UNCHANGED, and only
+ *                                until the SEC-code work: if the gateway takes the SEC code from
+ *                                ecomind, T on a bank payment would read as TEL (recorded verbal
+ *                                consent, which nothing here collects). So bank payments keep
+ *                                today's bytes until Fiserv names the SEC field and that change
+ *                                decides the code per surface.
+ *
+ * R (recurring in CardPointe's API) is never returned.
+ */
+export function ecomindFor(
+  o: { rail: "card" | "ach"; entry?: "keyed" | "swipe"; actorKind: ChargeOpts["actorKind"] },
+): "E" | "T" | null {
+  if (o.rail === "ach") return "E";
+  if (o.entry === "swipe") return null;
+  return o.actorKind === "customer" ? "E" : "T";
+}
+
+/**
+ * payments.entry_mode when the gateway gives no `entrymode` of its own, read from what /auth was
+ * SENT and the rail, never from what the page said. Until 2026-10-14 it was read off `entry`, so a
+ * modal left on Swipe and switched to Bank posted a BANK payment labelled "Swipe".
+ *
+ *   card, no ecomind (a swipe)   "Swipe"
+ *   card, T                      "Moto", mail/telephone order, which is what T means (not "Keyed",
+ *                                which reads as a card-present keyed sale)
+ *   everything else              "ECommerce": a card keyed with E, and every bank payment
+ */
+export function entryModeFor(rail: "card" | "ach", sentEcomind: "E" | "T" | null): string {
+  if (rail === "card" && sentEcomind === null) return "Swipe";
+  if (rail === "card" && sentEcomind === "T") return "Moto";
+  return "ECommerce";
+}
+
+/** The two partial-approval sentences, worded for whoever is reading. A builder reads them in the
+ *  Record-a-payment modal, so "your card" and "contact your builder" are the shopper's words only.
+ *  Neither promises the hold is released: after a void the card's bank may still show the pending
+ *  amount for a few days, and only the bank decides when it drops off. */
+export function partialApprovalText(
+  actorKind: ChargeOpts["actorKind"],
+  approvedCents: number,
+  requestedCents: number,
+  voided: boolean,
+): string {
+  const a = `$${(approvedCents / 100).toFixed(2)}`;
+  const b = `$${(requestedCents / 100).toFixed(2)}`;
+  const shopper = actorKind === "customer";
+  if (voided) {
+    return shopper
+      ? `Your card only approved ${a} of ${b}, so the payment was cancelled and nothing was taken. ` +
+        `If your bank shows a pending ${a}, it drops off on its own. Try another card.`
+      : `The card only approved ${a} of ${b}, so the sale was cancelled and nothing was taken. ` +
+        `If the cardholder's bank shows a pending ${a}, it drops off on its own. Try another card.`;
+  }
+  return shopper
+    ? "Your card only approved part of the amount and we could not release the hold. Do NOT try again — contact your builder."
+    : "The card only approved part of the amount and the hold could not be released. Don't run it again; CSM Synergy has been alerted.";
+}
+
+/**
+ * Gateway text with every run of five or more digits cut to its last four ("…1808").
+ *
+ * Fiserv (CardPointe integrations), 2026-10-14: a bank payment with a routing number that is not a
+ * bank's declines with resptext "The RoutingNumber (<bankaba>) is not a valid routing number.", so
+ * a decline's sentence can carry the number the payer typed. That sentence is stored on the attempt,
+ * shown to the payer, and, as the 4xx body, filed into app_errors by withErrorLog; a routing or
+ * account number may be in none of those. Five digits is the floor because a routing number is
+ * nine, a card thirteen to nineteen and most account numbers longer than four; a ZIP masked on the
+ * way is the cost. The last four are what the payer needs to see which number it meant.
+ */
+export function maskDigitRuns(s: string): string {
+  return s.replace(/[0-9]{5,}/g, (run) => "…" + run.slice(-4));
+}
 
 /**
  * The billing name, street and ZIP for a charge, from the request body and the design's contact.
@@ -436,7 +540,8 @@ export async function chargeInvoicePayment(
   //    rep charges the same balance all land on this.
   const orderRef = mintOrderRef();
   // The request is built BEFORE the attempt row, so the row can say which fields the sale
-  // carries. A swipe sends no ecomind at all; a keyed card sends "E" unless told otherwise.
+  // carries. ecomindFor is the only source of the ecomind: none on a card swipe, E for the
+  // shopper's own card, T for a card a builder keyed, E on every bank payment.
   const authReq: CpAuthRequest = {
     merchant: opts.merchant,
     amountCents,
@@ -446,7 +551,7 @@ export async function chargeInvoicePayment(
     postal: opts.postal,
     name: opts.name,
     address: opts.address,
-    ecomind: opts.entry === "swipe" ? null : (opts.ecomind ?? "E"),
+    ecomind: ecomindFor({ rail, entry: opts.entry, actorKind: opts.actorKind }),
     rail,
   };
   const attemptRow: Record<string, unknown> = {
@@ -510,7 +615,10 @@ export async function chargeInvoicePayment(
   try {
     auth = await cpAuth(authReq);
   } catch (se) {
-    const msg = String((se as Error).message ?? "");
+    // Masked before it goes ANYWHERE (the attempt's detail, a fault row, the decline sentence, which
+    // the caller returns as a 4xx body that withErrorLog files): gateway text can carry a number the
+    // payer typed (maskDigitRuns).
+    const msg = maskDigitRuns(String((se as Error).message ?? ""));
 
     if (isGatewayUnknown(se)) {
       // The card MAY have been charged and we cannot know. Do not record, do not retry.
@@ -563,7 +671,8 @@ export async function chargeInvoicePayment(
     const v = cpDeclineVerification(se);
     await closeAttempt("closed_declined", msg, { ...(v ? { respstat: "C" } : {}), ...verificationColumns(v) });
     const clean = msg.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 200);
-    return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402 };
+    // The token went to /auth: the page asks for the card again (PaymentResult.newCardNeeded).
+    return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402, newCardNeeded: true };
   }
 
   // 4e. PARTIAL APPROVAL. Neither an approval nor a decline: it takes some of the money
@@ -587,13 +696,14 @@ export async function chargeInvoicePayment(
       await closeAttempt("closed_declined", `partial approval voided (approved ${auth.approvedCents} of ${auth.requestedCents})`, {
         retref: auth.retref,
       });
+      // Worded for whoever is reading (partialApprovalText). It used to say "That hold has been
+      // released", which only the card's bank decides, and it said "Your card" to a builder.
       return {
         ok: false,
-        error:
-          `Your card only approved $${(auth.approvedCents / 100).toFixed(2)} of $${(auth.requestedCents / 100).toFixed(2)}. ` +
-          "That hold has been released — nothing was taken. Try another card.",
+        error: partialApprovalText(opts.actorKind, auth.approvedCents, auth.requestedCents, true),
         blocking: false,
         status: 402,
+        newCardNeeded: true,
       };
     }
     await closeAttempt("closed_unknown", `partial approval and the void FAILED (retref ${auth.retref})`, {
@@ -603,10 +713,10 @@ export async function chargeInvoicePayment(
       "payment_partial_void_failed",
       `${clientId}: partial approval ${auth.approvedCents} of ${auth.requestedCents} on order ${orderId}, retref ${auth.retref}, and the void failed. Release it by hand at the gateway.`,
     );
+    // Blocking, so no newCardNeeded: the order is held until a person releases the partial.
     return {
       ok: false,
-      error:
-        "Your card only approved part of the amount and we could not release the hold. Do NOT try again — contact your builder.",
+      error: partialApprovalText(opts.actorKind, auth.approvedCents, auth.requestedCents, false),
       blocking: true,
       status: 409,
     };
@@ -633,10 +743,11 @@ export async function chargeInvoicePayment(
     gateway_authcode: auth.authcode,
     instrument_brand: auth.brand ?? (rail === "ach" ? "ACH" : null),
     instrument_last4: auth.last4,
-    // The gateway's own word when it gives one. Otherwise what WE know: a swipe or a keyed card.
-    // (This read "Retail" for a swipe, the label of the "R" ecomind swipes used to send, which
-    // CardPointe defines as recurring.)
-    entry_mode: auth.entrymode ?? (opts.entry === "swipe" ? "Swipe" : "ECommerce"),
+    // The gateway's own word when it gives one. Otherwise what WE sent (entryModeFor): a card
+    // swipe, a card a builder keyed (T, "Moto"), or ECommerce for the shopper's card and every
+    // bank payment. (This read "Retail" for a swipe, the label of the "R" ecomind swipes used to
+    // send, which CardPointe defines as recurring.)
+    entry_mode: auth.entrymode ?? entryModeFor(rail, authReq.ecomind),
     avs_result: auth.avsresp,
     cvv_result: auth.cvvresp,
     surcharge_cents: auth.surchargeCents,
@@ -847,10 +958,34 @@ export async function resolveUnknownAttempt(
     return { resolved: true, outcome: "not_charged" };
   }
 
+  // The gateway holds a transaction under that orderid. Two things must be true before it is booked
+  // as a payment (2026-10-14), and each failure LEAVES THE BLOCK for a human, never lifts it:
+  const retref = String(found.retref);
+  const leaveBlocked = async (reason: "not_approved" | "amount_unreadable", why: string): Promise<ResolveResult> => {
+    await admin.from("app_errors").insert({
+      source: "edge:invoice-payment",
+      severity: "error",
+      code: `payment_recovery_${reason}`,
+      message:
+        `${clientId}: reconciliation found retref ${retref} on order ${att.order_id} for attempt ${att.id}, but ${why}. ` +
+        `Not recorded — check it at the gateway, then close attempt ${att.id} by hand. The attempt stays blocking until then, on purpose.`,
+      client_id: clientId,
+    }).then(() => undefined, () => undefined);
+    return { resolved: false, reason };
+  };
+  //   1. It was APPROVED. Nothing read respstat here before: if inquireByOrderid also answers with a
+  //      declined transaction (not yet seen live), a decline whose answer we lost would have been
+  //      booked as a payment and the order marked paid.
+  const stat = typeof found.respstat === "string" ? found.respstat.trim().toUpperCase() : "";
+  if (stat !== "A") return await leaveBlocked("not_approved", `its respstat is "${stat.slice(0, 4) || "none"}", not A`);
+  //   2. Its amount can be READ. This used to fall back to att.amount_cents, the WHOLE ask, so a
+  //      partial approval found by an inquire with no readable amount skipped the partial guard
+  //      below and marked the order paid in full. cpAuth throws UNKNOWN on the same answer.
+  const chargedCents = cpCents(found.amount);
+  if (chargedCents === null) return await leaveBlocked("amount_unreadable", "its amount could not be read");
+
   // It DID charge. Complete the choreography that was interrupted. The insert is idempotent
   // via payments_gateway_txn_uniq, so this is safe to run more than once.
-  const retref = String(found.retref);
-  const chargedCents = cpCents(found.amount) ?? Number(att.amount_cents);
 
   // A RECORD SHORT OF THE ASK IS NOT THE PAYMENT THIS ATTEMPT WAS FOR. The charge path never
   // turns a partial approval into a payment (4e: it voids it, and a void that fails closes the
