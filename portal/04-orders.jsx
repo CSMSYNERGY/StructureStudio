@@ -3655,6 +3655,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [payToken, setPayToken] = useState(null);
   const payTokenRef = useRef(null);   // the token right now, for the read timer (see the message listener)
   payTokenRef.current = payToken;
+  // When the CARD frame posted its token (Date.now()), for the age check in chargeCard. A bank
+  // token is never stamped: it carries no CVV. See CARD_TOKEN_MAX_MS.
+  const payTokenAtRef = useRef(0);
+  // Part of the keyed card frame's key: bumped for a NEW, empty frame once its card is spent (too
+  // old, or seen by the gateway). The reader's frame has armCount for the same job.
+  const [cardGen, setCardGen] = useState(0);
   const [payExpiry, setPayExpiry] = useState(null);
   const [tokenErr, setTokenErr] = useState("");
   const [surcharge, setSurcharge] = useState(null);
@@ -3674,6 +3680,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // measured), the frame's 2 s of quiet and CardSecure's answer. At 8 s a slow read was told
   // "refused" while the reader was still typing (2026-10-13).
   const READ_WAIT_MS = 20000;
+  // ⚠️ A CARD TOKEN HOLDS THE CVV FOR 2 MINUTES, AND FOR ONE AUTH. Fiserv (CardPointe integrations),
+  // 2026-10-14: the CVV stays linked to the CardSecure token for 2 minutes. Counted from the moment
+  // the frame posts the token, on the wall clock, and treated as used up by the first auth, approved
+  // or not. A builder keying a phone order often reads the card, then confirms the address with the
+  // customer, and that can pass 2 minutes. So Charge checks the age first (100 s leaves the upload,
+  // a cold start and the database writes inside the 2 minutes), and a charge the gateway saw
+  // (newCardNeeded) asks for the card again. A swipe is held to the same limit: whether its track
+  // data lasts longer is not known, and one more Ready press costs little. Bank tokens are not
+  // timed. scripts/preflight.mjs (checkCardTokenMaxAge) holds this equal to my-quotes.html's.
+  const CARD_TOKEN_MAX_MS = 100000;
   // The bank rail's two boxes (see achTokenize). These two strings are the ONLY place the
   // numbers live: every way out of the modal empties them, and nothing copies them anywhere.
   const [achRouting, setAchRouting] = useState("");
@@ -3797,6 +3813,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         setTokenErr("That was typed, not swiped. Press Ready and swipe the card.");
         return;
       }
+      payTokenAtRef.current = Date.now();
       setTokenErr(""); setPayExpiry(m.expiry || null); setPayToken(String(tok)); setArmed(false);
     };
     window.addEventListener("message", onMsg, false);
@@ -3942,9 +3959,25 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     setBillName(""); setBillStreet(""); setBillZip(""); setBillErr("");
   };
 
+  // The card is spent, so the next Charge must carry a NEW one: a new, empty keyed frame (cardGen),
+  // or for a swipe the word to press Ready, which makes a new reader frame. `why` is the sentence.
+  const askForCardAgain = (why) => {
+    setPayToken(null); setPayExpiry(null);
+    if (entry !== "swipe") setCardGen((n) => n + 1);
+    setTokenErr(why);
+  };
+
   const chargeCard = async () => {
     if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
     if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    // Too old to still hold its CVV (CARD_TOKEN_MAX_MS): nothing is sent. Before the billing
+    // check, which is not worth answering for a card that has to be entered again anyway.
+    if (method === "card" && Date.now() - payTokenAtRef.current > CARD_TOKEN_MAX_MS) {
+      askForCardAgain(entry === "swipe"
+        ? "That card read has expired. Press Ready and swipe the card again."
+        : "The card details expired: the security code is only kept for 2 minutes. Key the card in again, then press Charge.");
+      return;
+    }
     // Required here, optional on the server: production's portal sends none of these yet.
     if (keyedCard && billProblem) { setBillErr(billProblem); return; }
     // The button is off until then (feeReady); this is the belt to that brace.
@@ -3957,7 +3990,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         rail: method === "ach" ? "ach" : "card",
         payToken,
         expiry: payExpiry || undefined,
-        entry,
+        // A card only. The method chip resets `entry` to keyed on leaving Card, and this is the
+        // second guard; the server ignores it off the card rail too. Before 2026-10-14 Card, then
+        // Swipe, then Bank / ACH sent a bank payment marked "swipe" with no ecomind.
+        ...(method === "card" ? { entry } : {}),
         // A keyed card only: a swipe carries its own name, and a bank payment's holder is named
         // by the server from the estimate.
         ...(keyedCard ? { name: billName.trim(), address: billStreet.trim(), postal: billZip.trim() } : {}),
@@ -3967,18 +4003,30 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       },
     });
     setBusy(false);
+    // The gateway SAW this card (a decline, or a partial approval that was voided), so its CVV is
+    // spent and the same token, or a fresh one from the same filled-in frame, must not go again.
+    // portal-payments says so with newCardNeeded; a 402 is the same thing from a server older than
+    // that flag. A refusal before the gateway (409, 429, a business rule) does not carry it.
+    const failed = (m, seen) => {
+      // Said INSIDE the modal too (tokenErr): `msg` renders on the order behind the overlay,
+      // so on its own the operator was left looking at a Charge button gone grey, no reason.
+      setMsg({ err: m });
+      if (method === "card" && seen) {
+        askForCardAgain(`${m} ${entry === "swipe" ? "Press Ready and swipe the card again." : "Key the card in again, then press Charge."}`);
+        return;
+      }
+      setPayToken(null); setTokenErr(m);
+    };
     if (error) {
       // A non-2xx from an edge function surfaces as a generic message; the real sentence —
       // the decline reason, or "do NOT try again" — is in the body.
       let m = "That payment didn't go through.";
-      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
-      // Said INSIDE the modal too (tokenErr): `msg` renders on the order behind the overlay,
-      // so on its own the operator was left looking at a Charge button gone grey, no reason.
-      setMsg({ err: m });
-      setPayToken(null); setTokenErr(m);
+      let seen = !!(error.context && error.context.status === 402);
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; if (ctx && ctx.newCardNeeded === true) seen = true; } catch (_e) {}
+      failed(m, seen);
       return;
     }
-    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); setTokenErr(data.error); return; }
+    if (data && data.error) { failed(data.error, data.newCardNeeded === true); return; }
     closePay();
     setMsg({
       ok: data && data.pending
@@ -4133,6 +4181,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       let m = "That couldn't be reversed.";
       let settled = false;
       try { const ctx = await error.context.json(); if (ctx) { if (ctx.error) m = ctx.error; settled = !!ctx.settled; } } catch (_e) {}
+      // A bank payment still clearing is the exception: refunding a debit that has not funded
+      // pays the customer twice if it later returns, so portal-payments refuses refund_payment
+      // for it. Say that here rather than chaining into a refund the server will turn down.
+      if (settled && p.method === "ach" && p.funding_state === "pending") {
+        setMsg({ err: "This bank payment is still clearing. It can be refunded once it clears." });
+        return;
+      }
       // "Already settled" is not a failure, it is the next step — a refund rather than a void.
       if (settled) {
         const { data: rd, error: re } = await sb.functions.invoke("portal-payments", {
@@ -4577,6 +4632,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       // is no toggle back from "charge" (see the effect beside pay_options).
                       setCollect((id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge) ? "charge" : "recorded");
                       setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch();
+                      // Swipe is a card's choice: leaving Card drops it, so Card again starts on
+                      // Key it in, and nothing else can carry a stale "swipe" (see chargeCard).
+                      if (id !== "card") setEntry("keyed");
                     }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
@@ -4631,8 +4689,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     <iframe
                       // A new key per Ready press is a NEW frame: an empty box (a failed read
                       // left its characters in the old one, and the next swipe was appended),
-                      // and the frame's autofocus runs again. See armCount.
-                      key={entry === "swipe" ? "swipe-" + armCount : "card"}
+                      // and the frame's autofocus runs again. See armCount. The keyed frame's
+                      // cardGen does the same once its card is spent (see CARD_TOKEN_MAX_MS): the
+                      // new frame is empty, so the next token has to carry a freshly typed CVV.
+                      key={entry === "swipe" ? "swipe-" + armCount : "card-" + cardGen}
                       ref={frameRef}
                       title="Payment details"
                       src={entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}

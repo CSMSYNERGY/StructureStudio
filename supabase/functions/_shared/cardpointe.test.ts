@@ -48,7 +48,9 @@ function restore() {
 /** Made-up merchants, one on each system. */
 const UAT_M = { merchid: "100200300400", env: "uat" as const };
 const PROD_M = { merchid: "100200300500", env: "prod" as const };
-const REQ = { merchant: UAT_M, amountCents: 600, account: "9413948780281111", orderid: "ssp_x" };
+/** ecomind is REQUIRED on a request since 2026-10-14 (invoicePayment.ts ecomindFor decides it); "E" is
+ *  the shopper keying their own card, the plainest sale. */
+const REQ = { merchant: UAT_M, amountCents: 600, account: "9413948780281111", orderid: "ssp_x", ecomind: "E" as const };
 
 /** Run cpAuth and hand back the thrown error, or null when it returned. */
 async function authError(): Promise<Error | null> {
@@ -709,12 +711,18 @@ Deno.test("cpBillingFields: trim, strip controls, cap the street at 60, keep onl
   }
 });
 
-Deno.test("ecomind: E by default, NONE on a swipe (null), and never R", async () => {
+Deno.test("ecomind: what the request says, NONE on a swipe (null), never R, and no default", async () => {
   // CardPointe defines R as RECURRING. Every swipe used to go out as "R".
-  check("default E", (await sentBody(REQ)).body.ecomind === "E");
+  check("E when asked", (await sentBody(REQ)).body.ecomind === "E");
   const swipe = (await sentBody({ ...REQ, ecomind: null })).body;
   check("a swipe sends none", !("ecomind" in swipe), JSON.stringify(Object.keys(swipe)));
+  // Fiserv (CardPointe integrations), 2026-10-14: a card a builder keys is T.
   check("T when asked", (await sentBody({ ...REQ, ecomind: "T" })).body.ecomind === "T");
+  // The field is required, and there is NO silent default any more: an untyped caller that leaves it
+  // out gets nothing sent, never an "E" nobody chose (which is how builder sales went out as E).
+  const { ecomind: _e, ...noEcomind } = REQ;
+  const bare = (await sentBody(noEcomind as unknown as Parameters<typeof cp.cpAuth>[0])).body;
+  check("no default E", !("ecomind" in bare), JSON.stringify(Object.keys(bare)));
 });
 
 Deno.test("cpAuthFieldNames is exactly the keys /auth is sent, sorted, and never a value", async () => {
@@ -743,4 +751,21 @@ Deno.test("a DECLINE carries its AVS/CVV answer; anything else carries none", as
   check("an UNKNOWN carries none", cp.cpDeclineVerification(new Error("GATEWAY_UNKNOWN: x")) === null);
   check("nothing carries none", cp.cpDeclineVerification(null) === null);
   check("cpVerification reads blanks as null", JSON.stringify(cp.cpVerification({ avsresp: " ", cvvresp: 3 })) === JSON.stringify({ respcode: null, avsresp: null, cvvresp: null }));
+});
+
+Deno.test("settlestat and funding ask the gateway for the day as MMDD (cpReportDay)", async () => {
+  check("YYYYMMDD", cp.cpReportDay("20261009") === "1009");
+  check("YYYY-MM-DD", cp.cpReportDay("2026-01-03") === "0103");
+  check("MMDD passes through", cp.cpReportDay("1009") === "1009");
+  check("anything else passes through", cp.cpReportDay("x") === "x");
+  const seen: Seen[] = [];
+  recordAll({ txns: [] }, seen);
+  try {
+    await cp.cpSettleStat(UAT_M, "20261009");
+    await cp.cpFunding(UAT_M, "2026-10-09");
+  } finally {
+    restore();
+  }
+  check("two calls", seen.length === 2, String(seen.length));
+  for (const s of seen) check(`${s.url} asks date=1009`, new URL(s.url).searchParams.get("date") === "1009", s.url);
 });
