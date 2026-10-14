@@ -413,7 +413,8 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
   assertEquals(both.status, 200, both.text);
   const settlestat = (t: Trace) => t.gateway.filter((g) => g.path === "/settlestat");
   assertEquals(settlestat(both.trace).map((g) => `${g.system} ${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort(),
-    [`live /settlestat ${MID} 20261001`, `uat /settlestat ${MID} 20261001`]);
+    // The gateway is asked MMDD (cardpointe.ts cpReportDay); daysChecked keeps reconcile's YYYYMMDD keys.
+    [`live /settlestat ${MID} 1001`, `uat /settlestat ${MID} 1001`]);
   assertEquals(Object.fromEntries((both.body.updated as any[]).map((u) => [u.paymentId, u.to])), { a1: "settled", a2: "returned" });
   assertEquals(both.body.daysChecked, ["20261001"]);
   // The funding pass (2026-10-14) also asks each system about its own payment, from the sale day on,
@@ -421,7 +422,7 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
   const funding = both.trace.gateway.filter((g) => g.path === "/funding");
   assert(funding.length > 0 && funding.length <= 8, `funding calls: ${funding.length}`);
   assertEquals(both.body.fundingChecked, funding.length);
-  for (const g of funding) assert(String(g.url.searchParams.get("date")) >= "20261001", g.url.href);
+  for (const g of funding) assert(String(g.url.searchParams.get("date")) >= "1001", g.url.href);
   // The LIVE return is a fault for us; on the test system every bank payment returns, so it is info.
   const returned = both.trace.faults.filter((f) => f.code === "ach_returned");
   assertEquals(returned.map((f) => [(f.context as any).paymentId, f.severity]), [["a2", "error"]]);
