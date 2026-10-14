@@ -9519,10 +9519,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // and followers." Same three-state contract as every field here, which is why it travels
     // as TEXT: "" is a real instruction to UNASSIGN, and a uuid cannot carry it.
     const owner = fld(payload.owner, 64);
+    // COMPANY (308). Carolyn, 2026-10-14 call @11:08: "+ Add lead" asks for the company name,
+    // "but there's no places … for me to edit that company name later, because I got the
+    // company name wrong." 200 characters, crm_create_lead's cap. Same three-state contract.
+    const company = fld(payload.company, 200);
     if (name === null && phone === null && email === null
         && street === null && city === null && state === null && zip === null
         && billingStreet === null && billingCity === null && billingState === null
-        && billingZip === null && owner === null) {
+        && billingZip === null && owner === null && company === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -9545,6 +9549,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       p_owner: owner,
       p_billing_street: billingStreet, p_billing_city: billingCity,
       p_billing_state: billingState, p_billing_zip: billingZip,
+      // Sent only when it is being edited. PostgREST resolves a named call by its argument
+      // names, so p_company on a database still holding 188's 15-argument function would turn
+      // EVERY contact save into "function not found", not just the ones that touch the company.
+      // Left out, an older database keeps saving everything else.
+      ...(company !== null ? { p_company: company } : {}),
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.

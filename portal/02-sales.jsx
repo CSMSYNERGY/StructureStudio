@@ -2704,6 +2704,19 @@ function CrmOwnerPicker({ edit, setEdit, team }) {
     </>
   );
 }
+// THE COMPANY (migration 308). Carolyn, 2026-10-14 @11:08: "+ Add lead" asks for a company
+// name, "but there's no places … for me to edit that company name later, because I got the
+// company name wrong." One component for the same two editors CrmAddressFields serves. "" is a
+// real answer (the server clears the field), like every input here.
+function CrmCompanyField({ edit, setEdit }) {
+  return (
+    <>
+      <span style={S.lbl}>Company</span>
+      <input style={{ ...S.input, marginBottom: 7 }} value={edit.company || ""} placeholder="Acme Sheds" maxLength={200}
+        data-ss-edit-company="" onChange={(e) => setEdit((p) => ({ ...p, company: e.target.value }))} />
+    </>
+  );
+}
 // Titles are stored as slugs (`sales_rep`); this is the only place the record page shows one.
 function ssTitleLabel(t) {
   return String(t || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -3966,7 +3979,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
     viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
     hasCalls: (data.feed || []).some((e) => e.type === "call" || e.type === "call_missed" || e.type === "voicemail") };
-  const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
+  // The company comes before the email and phone because "+ Add lead" accepts a company with no
+  // contact name (crm_create_lead needs one or the other), and the board card already heads
+  // such a lead with it; the record used to title it with an email instead.
+  const cname = (data.contact && (data.contact.name || data.contact.company || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
     ? ([sel.style, sel.size].filter(Boolean).join(" ") || (record && record.short_code) || "Design")
@@ -4018,6 +4034,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // `edit` itself is declared with the other hooks at the top of this component — see the
   // warning there; it cannot live at this line, below the early returns.
   const startEdit = () => setEdit({
+    // COMPANY (308). Carolyn, 2026-10-14 @11:08: "+ Add lead" asks for it, "but there's no
+    // places … for me to edit that company name later, because I got the company name wrong."
+    company: (data.contact && data.contact.company) || "",
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
@@ -4067,7 +4086,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         id: (data.contact && data.contact.id) || null,
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
-        name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
+        company: edit.company, name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
         street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
         billingStreet: edit.billingStreet, billingCity: edit.billingCity,
         billingState: edit.billingState, billingZip: edit.billingZip,
@@ -4427,6 +4446,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       return kind === "contact" ? (
         edit ? (
           <div style={{ fontSize: 13 }}>
+            {/* Company first, the order "+ Add lead" asks in. */}
+            <CrmCompanyField edit={edit} setEdit={setEdit} />
             <span style={S.lbl}>Name</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
               onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
@@ -4458,11 +4479,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           </div>
         ) : (
           <div style={{ fontSize: 13, color: "#475569" }}>
+            {/* Only when there is one: most contacts are homeowners who came through the designer,
+                and a "No company" line on every one of them would be noise. ✎ Edit offers the
+                field either way. */}
+            {data.contact.company && <div data-ss-contact-company="" style={{ fontWeight: 700, color: "#1E293B" }}>{data.contact.company}</div>}
             <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
             <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
             {canEditContact && (
               <button type="button" onClick={startEdit}
-                title="Edit this contact's name, email and phone"
+                title="Edit this contact's company, name, email and phone"
                 style={{ background: "none", border: "none", padding: 0, marginTop: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
                 ✎ Edit
               </button>
@@ -4893,6 +4918,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             <div style={{ border: "1px solid #E2E8F0", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "9px 9px 8px", marginTop: -1 }}>
               {edit && canEditContact ? (
                 <div style={{ fontSize: 13 }}>
+                  <CrmCompanyField edit={edit} setEdit={setEdit} />
                   <span style={S.lbl}>Name</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
                     onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
@@ -4924,6 +4950,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 </div>
               ) : (
                 <div>
+                  {data.contact.company && ro("Company", data.contact.company)}
                   {ro("Name", data.contact.name)}
                   {ro("Email", data.contact.email)}
                   {ro("Phone", data.contact.phone)}
@@ -4935,7 +4962,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       and re-opened. */}
                   {canEditContact ? (
                     <button type="button" onClick={startEdit}
-                      title="Edit this contact's name, email and phone"
+                      title="Edit this contact's company, name, email and phone"
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
                       ✎ Edit
                     </button>
