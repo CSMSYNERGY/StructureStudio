@@ -836,6 +836,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       if (e2) { setTplMsg({ err: e2 }); return; }
       setTpl((p) => ({ ...p, [kind]: { ...(p[kind] || {}), [which]: data.url } }));
     };
+    r.onerror = () => setTplMsg({ err: "That picture couldn't be read. Try saving it again as a JPG or PNG." });
     r.readAsDataURL(f);
   };
 
@@ -1770,10 +1771,12 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 );
               })()}
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                <button type="button" disabled={tplBusy} onClick={saveWording}
-                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: tplBusy ? 0.6 : 1 }}>{tplBusy ? "Saving…" : "Save wording"}</button>
-                <button type="button" disabled={pvBusy} onClick={previewWording}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: pvBusy ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
+                {/* Not while a picture uploads: its address only reaches the boxes when the upload
+                    answers, so a save in between would say "Saved." without the photo. */}
+                <button type="button" disabled={tplBusy || !!imgBusy} onClick={saveWording}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: (tplBusy || imgBusy) ? 0.6 : 1 }}>{tplBusy ? "Saving…" : imgBusy ? "Uploading picture…" : "Save wording"}</button>
+                <button type="button" disabled={pvBusy || !!imgBusy} onClick={previewWording}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: (pvBusy || imgBusy) ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
                 {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
                 {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
               </div>
