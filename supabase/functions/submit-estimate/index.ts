@@ -3503,6 +3503,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           formalPdfUrl: quotePdfUrl,
           quoteTerms: quoteTerms || null,
           docWord: "quote",
+          // The photo design's signature carries the address (her GHL email does).
+          address: businessAddress,
         });
       const replyTo = await quoteReplyTo(intendedTo);
       const outcome = await sendTenantEmail(supabase, clientId, {
@@ -3970,6 +3972,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             pdfUrl: tenantStorageUrl(imageUrl),
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
+            address: businessAddress,
           });
           const replyTo = await quoteReplyTo(intendedTo);
           const outcome = await sendTenantEmail(supabase, clientId, {

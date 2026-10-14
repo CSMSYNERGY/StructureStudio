@@ -603,7 +603,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 // field the server knows comes back whenever it said something; one it doesn't know (an older
 // server build) is dropped with an ok, and this is the only place that shows. The photo switch
 // is stored only when it is OFF, so only an unticked box can go missing.
-const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]];
+const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"],
+  // The photo design (Carolyn 2026-10-14). Its switch and pictures are strings too, so the same
+  // test reports a server that predates them.
+  ["layout", "photo design"], ["hero", "top photo"], ["heading", "heading"], ["message", "message"], ["tagline", "slogan"],
+  ["signName", "signature name"], ["signTitle", "signature title"], ["footer", "bottom banner"], ["accent", "accent colour"], ["buttonColor", "button colour"]];
 function ssWordingDropped(sent, kept) {
   const out = [];
   for (const kind of ["estimate", "quote", "invoice"]) {
@@ -640,6 +644,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // preview never sits under the wrong tab.
   const [pv, setPv] = useState(null);
   const [pvBusy, setPvBusy] = useState(false);
+  // The photo design's picture upload in flight: "hero" | "footer" | null.
+  const [imgBusy, setImgBusy] = useState(null);
   // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
   // and an effect rather than a render-time set: the empty check would have been true
   // forever for a tenant with no saved copy, so setting state on it during render was an
@@ -805,6 +811,33 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     // A server from before Preview existed answers "Unrecognised action".
     if (e2 && /unrecognised action/i.test(e2)) e2 = "Preview isn't available on this server yet. Tell CSM Synergy.";
     setPv(e2 ? { kind, err: e2 } : { kind, subject: r.subject || "", html: r.html, photo: r.photo || null });
+  };
+
+  // The photo design's two pictures. Upload-only (email_upload_image): the URL comes back into
+  // the open tab's boxes and is stored by "Save wording" like every other field, so an upload the
+  // builder abandons changes nothing a customer sees. The tab is fixed at click time: switching
+  // tabs while it uploads must not drop the picture into the other kind.
+  const uploadEmailImage = (which) => (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const kind = tplKind;
+    if (f.size > 3_000_000) { setTplMsg({ err: "That picture is over 3 MB. Save it smaller (about 1200 pixels wide is plenty for an email) and try again." }); return; }
+    const r = new FileReader();
+    r.onload = async () => {
+      setImgBusy(which); setTplMsg(null);
+      const { data, error: err } = await sb.functions.invoke("portal-settings", {
+        body: { action: "email_upload_image", which, imageBase64: r.result, imageContentType: f.type || "image/jpeg" },
+      });
+      setImgBusy(null);
+      let e2 = (data && data.error) || (err && err.message);
+      if (!e2 && !(data && data.url)) e2 = "The upload didn't finish. Try again.";
+      if (e2 && /unrecognised action/i.test(e2)) e2 = "Picture upload isn't available on this server yet. Tell CSM Synergy.";
+      if (e2) { setTplMsg({ err: e2 }); return; }
+      setTpl((p) => ({ ...p, [kind]: { ...(p[kind] || {}), [which]: data.url } }));
+    };
+    r.onerror = () => setTplMsg({ err: "That picture couldn't be read. Try saving it again as a JPG or PNG." });
+    r.readAsDataURL(f);
   };
 
   const fmtWhen = (iso) => {
@@ -1546,7 +1579,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             <div data-ss-email-wording style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
-                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name) and they fill in automatically.
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name), {"{first}"} (their first name) and they fill in automatically.
                 {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
                     email no longer prints the total, so the customer meets the price on the
                     quote itself. {total} still fills in — saved wording must never print a
@@ -1569,36 +1602,156 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 // StructureStudio's own paperwork), but every document is an estimate to the
                 // person reading (Carolyn Q12, 2026-10-06).
                 const docWord = tplKind === "invoice" ? "invoice" : "estimate";
+                // THE PHOTO DESIGN (Carolyn 2026-10-14: "I really want that template inside
+                // Structure Studio"): her CRM email's big photo, heading, message, wide button,
+                // slogan and signature. Estimates only; the invoice keeps one design. Switching
+                // back to Classic keeps what was typed here, it just isn't drawn.
+                const photo = tplKind !== "invoice" && cur.layout === "photo";
+                const hintLbl = { fontWeight: 500, color: "#94A3B8" };
+                const imgBox = (which, label, hint) => (
+                  <div data-ss-email-image={which} style={{ marginTop: 6 }}>
+                    <div style={fieldLbl}>{label}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      {cur[which]
+                        ? <img src={cur[which]} alt="" style={{ height: 48, maxWidth: 160, objectFit: "cover", borderRadius: 6, border: "1px solid #E2E8F0" }} />
+                        : <span style={{ fontSize: 12, color: "#94A3B8" }}>None yet</span>}
+                      <label style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: imgBusy ? "default" : "pointer", opacity: imgBusy ? 0.6 : 1 }}>
+                        {imgBusy === which ? "Uploading…" : cur[which] ? "Replace" : "Upload"}
+                        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadEmailImage(which)} disabled={!!imgBusy} style={{ display: "none" }} />
+                      </label>
+                      {cur[which] && (
+                        <button type="button" onClick={() => setField(which, "")}
+                          style={{ background: "none", border: "none", color: "#B91C1C", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 3 }}>{hint}</div>
+                  </div>
+                );
+                const colorBox = (which, label, dflt) => (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155" }}>
+                    <input data-ss-wording={which} type="color" aria-label={label} value={cur[which] || dflt}
+                      onChange={(e) => setField(which, e.target.value)}
+                      style={{ width: 34, height: 26, padding: 0, border: "1px solid #E2E8F0", borderRadius: 6, cursor: "pointer" }} />
+                    {label}
+                    {cur[which] && (
+                      <button type="button" onClick={() => setField(which, "")}
+                        style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
+                    )}
+                  </label>
+                );
+                const closingBox = () => (
+                  <>
+                    <div style={fieldLbl}>{photo
+                      ? <>Sign-off <span style={hintLbl}>(above your name, e.g. “Thanks,”)</span></>
+                      : <>Closing message <span style={hintLbl}>(under the button)</span></>}</div>
+                    <textarea data-ss-wording="closing" aria-label={photo ? "Sign-off" : "Closing message"} maxLength={1000}
+                      value={cur.closing || ""}
+                      onChange={(e) => setField("closing", e.target.value)}
+                      rows={photo ? 2 : 3}
+                      placeholder={photo ? "Thanks," : "e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                  </>
+                );
                 return (
                   <>
+                    {tplKind !== "invoice" && (
+                      <div data-ss-email-design style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", margin: "0 0 6px" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#475569", marginRight: 2 }}>Design</span>
+                        {[["", "Classic"], ["photo", "Photo header"]].map(([v, label]) => {
+                          const on = (cur.layout || "") === v;
+                          return (
+                            <button key={label} type="button" data-ss-wording-layout={v || "classic"} onClick={() => setField("layout", v)}
+                              style={{ background: on ? "#0F172A" : "#FFF", color: on ? "#FFF" : "#334155", border: "1px solid " + (on ? "#0F172A" : "#E2E8F0"), borderRadius: 999, padding: "3px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                          );
+                        })}
+                        <span style={{ fontSize: 12, color: "#64748B", flexBasis: "100%" }}>
+                          {photo
+                            ? "A big photo across the top, your heading and message, one wide button, a slogan and your signature."
+                            : "Your logo and name on a card, your opening line, the details, then the button."}
+                        </span>
+                      </div>
+                    )}
                     <div style={fieldLbl}>Subject</div>
                     <input data-ss-wording="subject" aria-label="Subject" maxLength={300}
                       value={cur.subject || ""}
                       onChange={(e) => setField("subject", e.target.value)}
-                      placeholder={"e.g. Your " + docWord + " {number} from {business}"}
+                      placeholder={photo ? "e.g. Your shed " + docWord + " is here!" : "e.g. Your " + docWord + " {number} from {business}"}
                       style={S.input} />
-                    <div style={fieldLbl}>Opening line</div>
-                    <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
-                      value={cur.intro || ""}
-                      onChange={(e) => setField("intro", e.target.value)}
-                      rows={3}
-                      placeholder={tplKind === "quote"
-                        ? "e.g. Thanks for designing with {business}! Your estimate {number} is ready."
-                        : "e.g. Thanks for designing with {business}! Your {total} estimate is ready."}
-                      style={{ ...S.input, resize: "vertical" }} />
-                    <div style={fieldLbl}>Closing message <span style={{ fontWeight: 500, color: "#94A3B8" }}>(under the button)</span></div>
-                    <textarea data-ss-wording="closing" aria-label="Closing message" maxLength={1000}
-                      value={cur.closing || ""}
-                      onChange={(e) => setField("closing", e.target.value)}
-                      rows={3}
-                      placeholder={"e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
-                      style={{ ...S.input, resize: "vertical" }} />
+                    {photo && (
+                      <>
+                        {imgBox("hero", "Top photo", "Across the top of the email; about 1200 pixels wide looks sharp. With none, the building photo goes there (when it shows), else your logo.")}
+                        <div style={fieldLbl}>Heading</div>
+                        <input data-ss-wording="heading" aria-label="Heading" maxLength={150}
+                          value={cur.heading || ""}
+                          onChange={(e) => setField("heading", e.target.value)}
+                          placeholder={"We're getting closer, {first}"}
+                          style={S.input} />
+                        <div style={fieldLbl}>Message <span style={hintLbl}>(above the button; a blank line starts a new paragraph; **bold**, *italic*)</span></div>
+                        <textarea data-ss-wording="message" aria-label="Message" maxLength={1500}
+                          value={cur.message || ""}
+                          onChange={(e) => setField("message", e.target.value)}
+                          rows={7}
+                          placeholder={"Hi {first},\n\nHere is the " + docWord + " for your new building! Please click the button below to review and approve it."}
+                          style={{ ...S.input, resize: "vertical" }} />
+                      </>
+                    )}
+                    {!photo && (
+                      <>
+                        <div style={fieldLbl}>Opening line</div>
+                        <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
+                          value={cur.intro || ""}
+                          onChange={(e) => setField("intro", e.target.value)}
+                          rows={3}
+                          placeholder={tplKind === "quote"
+                            ? "e.g. Thanks for designing with {business}! Your estimate {number} is ready."
+                            : "e.g. Thanks for designing with {business}! Your {total} estimate is ready."}
+                          style={{ ...S.input, resize: "vertical" }} />
+                        {closingBox()}
+                      </>
+                    )}
                     <div style={fieldLbl}>Button text</div>
                     <input data-ss-wording="button" aria-label="Button text" maxLength={40}
                       value={cur.button || ""}
                       onChange={(e) => setField("button", e.target.value)}
-                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Estimate" : "e.g. View Your Estimate"}
+                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : photo ? "e.g. VIEW SHED ESTIMATE" : tplKind === "quote" ? "e.g. View Shed Estimate" : "e.g. View Your Estimate"}
                       style={{ ...S.input, maxWidth: 340 }} />
+                    {photo && (
+                      <>
+                        <div style={fieldLbl}>Slogan <span style={hintLbl}>(under the button; *words* in a script font)</span></div>
+                        <input data-ss-wording="tagline" aria-label="Slogan" maxLength={150}
+                          value={cur.tagline || ""}
+                          onChange={(e) => setField("tagline", e.target.value)}
+                          placeholder={"e.g. EVERYONE NEEDS *a little space* IN THEIR LIFE"}
+                          style={S.input} />
+                        {closingBox()}
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                            <div style={fieldLbl}>Signature name</div>
+                            <input data-ss-wording="signName" aria-label="Signature name" maxLength={80}
+                              value={cur.signName || ""}
+                              onChange={(e) => setField("signName", e.target.value)}
+                              placeholder="e.g. Pat Miller"
+                              style={S.input} />
+                          </div>
+                          <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                            <div style={fieldLbl}>Signature title</div>
+                            <input data-ss-wording="signTitle" aria-label="Signature title" maxLength={80}
+                              value={cur.signTitle || ""}
+                              onChange={(e) => setField("signTitle", e.target.value)}
+                              placeholder="e.g. Owner/Manager"
+                              style={S.input} />
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 3 }}>
+                          Under the name come your company name, logo, address, website and phone from your business settings.
+                        </div>
+                        {imgBox("footer", "Bottom banner", "Optional. A strip across the bottom; with none, a thin line in your accent colour.")}
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10 }}>
+                          {colorBox("accent", "Accent colour", "#f47b2a")}
+                          {colorBox("buttonColor", "Button colour", "#2cab05")}
+                        </div>
+                      </>
+                    )}
                     {tplKind !== "invoice" && (
                       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
                         <input data-ss-wording="picture" type="checkbox" checked={cur.picture !== false}
@@ -1607,7 +1760,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                         <span>
                           <b>Show the building photo</b>
                           <span style={{ display: "block", color: "#64748B", fontSize: 12, marginTop: 1 }}>
-                            The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures.
+                            {photo
+                              ? "The photo of the style they picked goes across the top when you haven't uploaded a top photo. It shows only for styles with “Image on estimate” ticked under Structures."
+                              : "The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures."}
                           </span>
                         </span>
                       </label>
@@ -1616,10 +1771,12 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 );
               })()}
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                <button type="button" disabled={tplBusy} onClick={saveWording}
-                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: tplBusy ? 0.6 : 1 }}>{tplBusy ? "Saving…" : "Save wording"}</button>
-                <button type="button" disabled={pvBusy} onClick={previewWording}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: pvBusy ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
+                {/* Not while a picture uploads: its address only reaches the boxes when the upload
+                    answers, so a save in between would say "Saved." without the photo. */}
+                <button type="button" disabled={tplBusy || !!imgBusy} onClick={saveWording}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: (tplBusy || imgBusy) ? 0.6 : 1 }}>{tplBusy ? "Saving…" : imgBusy ? "Uploading picture…" : "Save wording"}</button>
+                <button type="button" disabled={pvBusy || !!imgBusy} onClick={previewWording}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: (pvBusy || imgBusy) ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
                 {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
                 {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
               </div>
