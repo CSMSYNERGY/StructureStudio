@@ -1792,7 +1792,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 6, wordBreak: "break-word" }}>
                         <span style={{ color: "#64748B", fontWeight: 700 }}>Subject:</span> <b data-ss-preview-subject>{pv.subject}</b>
                       </div>
-                      {pv.photo === "none" && (
+                      {/* A photo design with its own top photo needs no building photo, so neither note applies. */}
+                      {pv.photo === "none" && !((tpl[tplKind] || {}).layout === "photo" && (tpl[tplKind] || {}).hero) && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
                           No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
                         </div>
@@ -1801,7 +1802,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                           account's catalog, so they live in that account's folder and no email (or
                           estimate) may show them. The "none" sentence would send them to a screen
                           where every tick is already on. */}
-                      {pv.photo === "not_own" && (
+                      {pv.photo === "not_own" && !((tpl[tplKind] || {}).layout === "photo" && (tpl[tplKind] || {}).hero) && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
                           No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
                         </div>
