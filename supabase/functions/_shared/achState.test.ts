@@ -6,13 +6,14 @@
 // integrations), 2026-10-14, says every UAT bank payment comes back R03 and the return shows in
 // the FUNDING data. Nobody has seen a funding answer yet, so the funding shapes below are
 // invented, and they pin how NARROW the reader is: a return only when one object holds both
-// this payment's retref and an R-code.
+// this payment's retref and an R-code, and funded only when nothing on its rows looks like a return.
 //
 // The rule everything here serves: a bank payment is not money until it funds.
 //
 // Dependency-free (no jsr:/npm: imports), the house rule for _shared tests.
 
 import {
+  achFundingRead,
   achReturnCode,
   achReturnFromFunding,
   fundingAnswerShape,
@@ -21,6 +22,7 @@ import {
   returnIsRetryable,
   returnTextForBuilder,
   returnTextForCustomer,
+  settlementStatuses,
 } from "./achState.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
@@ -201,10 +203,16 @@ Deno.test("fundingAnswerShape: retrefs or an empty day are recognised; anything 
   check("its key paths", JSON.stringify([...s.keyPaths].sort()) === JSON.stringify(["detail", "detail.acct", "detail.rows", "resptext"]), JSON.stringify(s.keyPaths));
   check("never a value", !JSON.stringify(s).includes("Invalid") && !JSON.stringify(s).includes("9876543210"), JSON.stringify(s));
 
-  const rowsNoRetref = fundingAnswerShape({ fundings: [{ fundingid: 7, netsales: "10.00" }], txns: [] });
-  check("rows with no retref anywhere are NOT recognised", !rowsNoRetref.recognised);
-  check("their paths, list items as []", rowsNoRetref.keyPaths.includes("fundings[].fundingid") && rowsNoRetref.keyPaths.includes("txns"),
+  // A fee-only day: a deposit summary and an adjustment, no transaction. Recognised (2026-10-14): it
+  // used to file an "unrecognised" row for an ordinary day.
+  check("a fee-only day is recognised",
+    fundingAnswerShape({ fundings: [{ fundingid: 7, netsales: "10.00" }], adjustments: [{ type: "FEE", amount: "-1.00" }], txns: [] }).recognised);
+  const rowsNoRetref = fundingAnswerShape({ fundings: [{ fundingid: 7 }], txns: [{ fundingid: 7, netsales: "10.00" }] });
+  check("transaction rows with no retref anywhere are NOT recognised", !rowsNoRetref.recognised);
+  check("their paths, list items as []", rowsNoRetref.keyPaths.includes("txns[].fundingid") && rowsNoRetref.keyPaths.includes("fundings"),
     JSON.stringify(rowsNoRetref.keyPaths));
+  check("rows in a list of another name are NOT recognised either", !fundingAnswerShape({ data: [{ ref: "x" }] }).recognised);
+  check("a bare list of rows with no retref is NOT recognised", !fundingAnswerShape([{ ref: "x" }]).recognised);
 
   check("a bare string is not recognised", !fundingAnswerShape("R03").recognised && fundingAnswerShape("R03").keyPaths[0] === "(string)");
   check("null", fundingAnswerShape(null).keyPaths[0] === "(null)");
@@ -214,4 +222,93 @@ Deno.test("fundingAnswerShape: retrefs or an empty day are recognised; anything 
   // Capped.
   const wide = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`k${i}`, i]));
   check("at most 60 paths", fundingAnswerShape(wide).keyPaths.length === 60);
+});
+
+// ── achFundingRead: funded, returned, a return it cannot read, or nothing (2026-10-14) ───────────
+// Fiserv (CardPointe integrations), 2026-10-14, named the funding data as where a bank payment's
+// fate shows, so a payment listed CLEANLY there is what moves it out of pending. "Cleanly" is the
+// whole question, and every shape below is invented.
+
+Deno.test("achFundingRead: listed with nothing else on its row is FUNDED", () => {
+  const day = { fundingdate: "20261014", txns: [{ retref: RETREF, type: "SALE", status: "Funded", amount: "1854.00", reversalflag: "N" }] };
+  check("funded", achFundingRead(day, RETREF).kind === "funded", JSON.stringify(achFundingRead(day, RETREF)));
+  check("a number retref", achFundingRead({ txns: [{ retref: Number(RETREF), amount: "1.00" }] }, RETREF).kind === "funded");
+  check("absent", achFundingRead({ txns: [{ retref: "100200300999", amount: "1.00" }] }, RETREF).kind === "absent");
+  check("an empty day", achFundingRead({ txns: [] }, RETREF).kind === "absent");
+  check("no retref to look for", achFundingRead(day, "").kind === "absent" && achFundingRead(day, null).kind === "absent");
+});
+
+Deno.test("achFundingRead: an R-code it reads is RETURNED, and wins over anything else on the day", () => {
+  const day = { txns: [{ retref: RETREF, type: "SALE" }, { retref: RETREF, type: "RETURN", returncode: "R03" }] };
+  const r = achFundingRead(day, RETREF);
+  check("returned R03", r.kind === "returned" && r.code === "R03", JSON.stringify(r));
+});
+
+Deno.test("achFundingRead: a sign of a return it cannot read is RETURN_UNREAD, with field names only", () => {
+  // The finding: an R03 under a field the narrow reader does not take, or with words after it, used
+  // to read as "not a return" AND as funded-looking. Now it holds the payment and names the field.
+  const cases: [string, unknown, string][] = [
+    ["status R03", { txns: [{ retref: RETREF, status: "R03" }] }, "status"],
+    ["code with words", { txns: [{ retref: RETREF, returncode: "R03 - No Account/Unable to Locate" }] }, "returncode"],
+    ["a word", { txns: [{ retref: RETREF, type: "ACH Return" }] }, "type"],
+    ["rejected", { txns: [{ retref: RETREF, setlstat: "Rejected" }] }, "setlstat"],
+    ["a reversal flag that is a yes", { txns: [{ retref: RETREF, reversalflag: "Y" }] }, "reversalflag"],
+    ["a negative amount", { txns: [{ retref: RETREF, amount: "-1854.00" }] }, "amount"],
+    ["filed under adjustments", { adjustments: [{ retref: RETREF, amount: "1854.00" }] }, "adjustments[]"],
+  ];
+  for (const [label, answer, key] of cases) {
+    const r = achFundingRead(answer, RETREF);
+    check(`${label}: unread`, r.kind === "return_unread", JSON.stringify(r));
+    if (r.kind !== "return_unread") continue;
+    check(`${label}: names ${key}`, r.keys.includes(key), JSON.stringify(r.keys));
+    check(`${label}: never a value`, !JSON.stringify(r).includes("R03") && !JSON.stringify(r).includes("1854") && !JSON.stringify(r).includes(RETREF),
+      JSON.stringify(r));
+  }
+  // The retref field itself is never the sign, and neither is a "no".
+  check("reversalflag N is a no", achFundingRead({ txns: [{ retref: RETREF, reversalflag: "N", returncode: "" }] }, RETREF).kind === "funded");
+  // A digit-run key is masked, as in fundingAnswerShape.
+  const masked = achFundingRead({ txns: [{ retref: RETREF, "123456789012": "R03" }] }, RETREF);
+  check("masked key", masked.kind === "return_unread" && !JSON.stringify(masked).includes("123456789012"), JSON.stringify(masked));
+});
+
+Deno.test("achFundingRead: listed as not-yet money (pending, held, refund, void) is LISTED, never funded", () => {
+  for (const v of ["Pending", "Queued", "On Hold", "In Process", "Refund", "VOID"]) {
+    const r = achFundingRead({ txns: [{ retref: RETREF, status: v }] }, RETREF);
+    check(v, r.kind === "listed", JSON.stringify(r));
+  }
+  // A return sign on one row and a clean row beside it: the sign wins.
+  const both = achFundingRead({ txns: [{ retref: RETREF, type: "SALE" }, { retref: RETREF, status: "R03" }] }, RETREF);
+  check("a sign beside a clean row", both.kind === "return_unread", JSON.stringify(both));
+});
+
+Deno.test("achFundingRead: the guards. Nothing that walks, nothing that throws", () => {
+  for (const a of [null, undefined, "R03", 42, true, [], {}]) {
+    check(`answer ${JSON.stringify(a)}`, achFundingRead(a, RETREF).kind === "absent");
+  }
+  const loop: Record<string, unknown> = { txns: [] };
+  (loop.txns as unknown[]).push(loop);
+  check("a cycle ends", achFundingRead(loop, RETREF).kind === "absent");
+});
+
+// ── settlementStatuses: settlestat's answer, whatever it is wrapped in (2026-10-14) ──────────────
+Deno.test("settlementStatuses: a LIST of batches, a list of rows and one object are all read", () => {
+  // Reconcile used to read `txns` off the top level, so a list (what a copy of Fiserv's reference
+  // says settlestat answers) read as nothing at all.
+  const batches = [
+    { merchid: "x", hoststat: "GB", txns: [{ retref: "rt-1", setlstat: "Accepted" }, { retref: "rt-2", setlstat: "Queued for Capture" }] },
+    { merchid: "x", txns: [{ retref: "rt-3", setlstat: "Rejected" }] },
+  ];
+  const a = settlementStatuses(batches);
+  check("batches", a.get("rt-1") === "Accepted" && a.get("rt-2") === "Queued for Capture" && a.get("rt-3") === "Rejected", JSON.stringify([...a]));
+  const rows = settlementStatuses([{ merchid: "x", retref: "rt-1", setlstat: "Accepted", amount: "1.00" }]);
+  check("flat rows", rows.get("rt-1") === "Accepted", JSON.stringify([...rows]));
+  const one = settlementStatuses({ txns: [{ retref: "rt-1", status: "Accepted" }] });
+  check("one object, status for setlstat", one.get("rt-1") === "Accepted", JSON.stringify([...one]));
+  check("a batch has no retref, so it is no row", !settlementStatuses(batches).has(""));
+});
+
+Deno.test("settlementStatuses: a return word is never hidden by a later word for the same retref", () => {
+  const m = settlementStatuses([{ txns: [{ retref: "rt-1", setlstat: "Rejected" }] }, { txns: [{ retref: "rt-1", setlstat: "Accepted" }] }]);
+  check("rejected stands", m.get("rt-1") === "Rejected", JSON.stringify([...m]));
+  for (const a of [null, undefined, "x", 3, [], {}]) check(`answer ${JSON.stringify(a)}`, settlementStatuses(a).size === 0);
 });

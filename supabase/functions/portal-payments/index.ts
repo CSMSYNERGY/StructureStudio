@@ -55,10 +55,11 @@ import {
 } from "../_shared/cardpointe.ts";
 import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import {
-  achReturnFromFunding,
+  achFundingRead,
   fundingAnswerShape,
   fundingStateFromSetlstat,
   returnedPaymentPatch,
+  settlementStatuses,
 } from "../_shared/achState.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 
@@ -110,17 +111,46 @@ const MAX_SETTLESTAT_DAYS = 5;
 const ACH_RETURN_WINDOW_DAYS = 60;
 
 /** /funding calls one reconcile may spend, across every merchant and day. Fiserv (CardPointe
- *  integrations), 2026-10-14: a bank payment's return (every UAT one comes back R03) shows in the
- *  FUNDING data, which settlestat does not carry. Like settlestat it is one call per merchant and
- *  day, and it shares the 40 TPM per-MID quota with live charges: with MAX_SETTLESTAT_DAYS and the
- *  10 recovery inquires, one reconcile asks the gateway at most 23 times. Spent NEWEST payment
- *  first, each from its sale day forward, so a fresh bank payment is read before an old one. */
+ *  integrations), 2026-10-14: a bank payment's fate (and its return: every UAT one comes back R03)
+ *  shows in the FUNDING data, which settlestat does not carry. Like settlestat it is one call per
+ *  merchant and day, and it shares the 40 TPM per-MID quota with live charges: with
+ *  MAX_SETTLESTAT_DAYS and the 10 recovery inquires, one reconcile asks the gateway at most 23
+ *  times. Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 308)
+ *  remembers how far each bank payment has been read, so a sweep starts where the last one stopped
+ *  and a day already read is never asked for again. Spent on the days a payment still clearing
+ *  needs before the days a settled one needs, and each payment's oldest unread day first. */
 const MAX_FUNDING_CALLS = 8;
 
-/** A pending bank payment cannot be refunded: refunding a debit that has not funded pays the
- *  customer back money that may never arrive, and if the debit is then returned, reconcile skips
- *  the voided row and nobody sees it. A same-day void is still allowed (void_payment). */
+/** A funding day is read once it is over: through the day before yesterday (UTC). By then the
+ *  US day it names ended over 40 hours ago, so a day still filling up is never read and then
+ *  remembered as done. The cost is that a bank payment reads as funded two or three days after the
+ *  money moved, not on the day. */
+const FUNDING_DAY_READABLE_AFTER_MS = 2 * 86400000;
+
+/** How long a bank payment nobody has heard back about is held as clearing. The portal tells the
+ *  customer 2-3 business days, and most NACHA returns land within two banking days of settlement;
+ *  seven calendar days covers five banking days across any weekend. After it:
+ *    * settlestat's "Accepted" may move it to settled (before it, only the funding data may: a
+ *      debit the processor has accepted can still come back R03 before it funds), and
+ *    * refund_payment no longer refuses it as clearing, so an order whose bank payment no reader
+ *      ever moves (an answer we cannot read) is never frozen for good.
+ *  A return after that is still caught (the funding pass reads settled bank payments for
+ *  ACH_RETURN_WINDOW_DAYS) but a refund already sent is money the builder has to chase. */
+const ACH_CLEARED_AFTER_DAYS = 7;
+
+/** A pending bank payment cannot be refunded while it is clearing (ACH_CLEARED_AFTER_DAYS):
+ *  refunding a debit that has not funded pays the customer back money that may never arrive, and if
+ *  the debit is then returned, reconcile skips the voided row and nobody sees it. A same-day void is
+ *  still allowed (void_payment). */
 const ACH_PENDING_REFUND_TEXT = "This bank payment is still clearing. It can be refunded once it clears.";
+
+/** Whether a bank payment is still inside its clearing hold: pending, and either younger than
+ *  ACH_CLEARED_AFTER_DAYS or of an age we cannot read (held, never let through on a guess). */
+function achClearing(p: { method?: unknown; funding_state?: unknown; received_at?: unknown }, nowMs = Date.now()): boolean {
+  if (p.method !== "ach" || p.funding_state !== "pending") return false;
+  const age = nowMs - Date.parse(String(p.received_at ?? ""));
+  return !(age >= ACH_CLEARED_AFTER_DAYS * 86400000);
+}
 
 /** A failed charge as the modal reads it: the sentence, whether a human must look first, and
  *  `newCardNeeded: true` ONLY when invoicePayment set it, i.e. the attempt reached /auth and did not
@@ -212,19 +242,22 @@ async function recentDeclines(
 }
 
 /**
- * Whether reconcile has already filed EVERY one of these orphaned payments (no merchant of
- * record) for this tenant in the last 24 hours. Reconcile runs on each Orders visit while a bank
- * payment is pending, and an orphan never stops being pending on its own, so without this one
- * stuck payment filed an error row per visit. A NEW orphan is not in the earlier row's
- * paymentIds and is filed at once. Any read failure answers false: a doubtful check files again
- * rather than staying quiet. void_payment / refund_payment file their own refusal every time,
- * since a person pressed something.
+ * Whether reconcile has already filed a row under `code` for this tenant in the last 24 hours that
+ * names EVERY one of `values` in its context[`field`]. Reconcile runs on each Orders visit while a
+ * bank payment is pending, and what it files (an orphan, a gateway call it could not read, a funding
+ * shape it does not know) usually stays true until a human acts, so without this one problem filed
+ * a row per visit, and info rows are never deleted. Something NEW (an orphan, a merchant, a class of
+ * failure the earlier row did not name) is filed at once. Any read failure answers false: a
+ * doubtful check files again rather than staying quiet. void_payment / refund_payment file their own
+ * refusal every time, since a person pressed something.
  */
-async function orphansFiledToday(
+async function filedToday(
   // deno-lint-ignore no-explicit-any
   admin: any,
   clientId: string,
-  paymentIds: string[],
+  code: string,
+  field: string,
+  values: string[],
 ): Promise<boolean> {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -232,19 +265,24 @@ async function orphansFiledToday(
       .select("context")
       .eq("client_id", clientId)
       .eq("source", "edge:portal-payments")
-      .eq("code", "payment_no_merchant_of_record")
+      .eq("code", code)
       .gt("created_at", since)
       .order("created_at", { ascending: false })
       .limit(20);
     if (error || !Array.isArray(data)) return false;
     return data.some((row: Record<string, unknown>) => {
-      const seen = (row?.context as Record<string, unknown> | null)?.paymentIds;
-      return Array.isArray(seen) && paymentIds.every((id) => seen.map(String).includes(id));
+      const seen = (row?.context as Record<string, unknown> | null)?.[field];
+      return Array.isArray(seen) && values.every((v) => seen.map(String).includes(v));
     });
   } catch {
     return false;
   }
 }
+
+/** The orphaned payments (no merchant of record) of filedToday: one row a day names them all. */
+// deno-lint-ignore no-explicit-any
+const orphansFiledToday = (admin: any, clientId: string, paymentIds: string[]) =>
+  filedToday(admin, clientId, "payment_no_merchant_of_record", "paymentIds", paymentIds);
 
 Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -655,7 +693,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (!paymentId) return json({ error: "paymentId is required." }, 400);
 
     const { data: p, error: pErr } = await admin.from("payments")
-      .select("id, order_id, amount_cents, note, method, gateway, gateway_txn_id, voided_at, funding_state, attempt_id")
+      .select("id, order_id, amount_cents, note, method, gateway, gateway_txn_id, voided_at, funding_state, attempt_id, received_at")
       .eq("client_id", clientId).eq("id", paymentId).maybeSingle();
     if (pErr) return dbFail(req, clientId, "load that payment", pErr);
     if (!p) return json({ error: "Payment not found." }, 404);
@@ -668,7 +706,12 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // (every UAT one returns R03), the builder has paid out twice and reconcile skips the voided row,
     // so nobody sees it. Refused before the gateway is asked. A same-day VOID stays allowed below:
     // it cancels the debit itself, if the gateway still can.
-    const achPending = p.method === "ach" && p.funding_state === "pending";
+    //
+    // HELD FOR ACH_CLEARED_AFTER_DAYS, NOT FOREVER. Only reconcile moves a bank payment out of
+    // pending, and neither of its readers has been seen answering live (the funding shape, the date
+    // format). Refused for good, a payment no reader ever moved would leave its order impossible to
+    // refund from the portal. After the hold, it refunds like a settled one.
+    const achPending = achClearing(p);
     if (action === "refund_payment" && achPending) {
       return json({ error: ACH_PENDING_REFUND_TEXT, reason: "ach_pending" }, 409);
     }
@@ -719,11 +762,18 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         // A bank payment still clearing has no next step yet: it cannot be refunded until it clears
         // (above). So NO `settled: true` here, which is what makes the portal chain straight to
         // refund_payment (04-orders.jsx, voidGatewayPayment); a page that predates the refusal then
-        // shows this sentence instead of sending a refund that would be refused anyway.
+        // shows this sentence instead of sending a refund that would be refused anyway. Past its hold
+        // it falls through to `settled: true`, and the refund that follows is allowed.
         if (achPending) return json({ error: ACH_PENDING_REFUND_TEXT, reason: "ach_pending" }, 409);
         // Almost always "already settled". A refund is the honest next step, and the UI
-        // switches to it rather than pretending the void worked.
-        return json({ error: "That payment has already settled — refund it instead.", settled: true }, 409);
+        // switches to it rather than pretending the void worked. A bank payment past its hold may
+        // still read pending, so it is not told it "settled".
+        return json({
+          error: p.method === "ach" && p.funding_state === "pending"
+            ? "That bank payment can't be cancelled any more — refund it instead."
+            : "That payment has already settled — refund it instead.",
+          settled: true,
+        }, 409);
       }
       const nowIso = new Date().toISOString();
       const { error: uErr } = await admin.from("payments")
@@ -777,7 +827,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   // Two jobs in one action, because both are "go and ask the gateway what really happened":
   //   * resolve any attempt whose response we never saw (the closed_unknown recovery)
   //   * move pending ACH forward, or mark it returned, or bring back a late return: /funding for
-  //     the R-code of a pending one (since 2026-10-14), settlestat for its status word
+  //     whether a bank payment funded or came back (since 2026-10-14), settlestat for its status word
   //
   // ⚠️ THIS ACTION ONLY WORKS IF SOMETHING CALLS IT. There is no pg_cron on this project, so
   //    nothing self-heals on a schedule: bank money stays `pending` and an unresolved attempt
@@ -797,6 +847,23 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       resolved.push({ attemptId: a.id, ...out });
     }
 
+    // Both payment lists below are read WITH payments.funding_checked_through (migration 308), how
+    // far the funding pass has read each bank payment. A database without that column refuses the
+    // whole select (42703); the lists are then read without it, the funding pass is skipped (filed
+    // once a day), and the rest of reconcile works as it did before 308.
+    let cursorsOn = true;
+    // deno-lint-ignore no-explicit-any
+    const cursorMissing = (e: any) => String(e?.code ?? "") === "42703" || /funding_checked_through/.test(String(e?.message ?? ""));
+    // deno-lint-ignore no-explicit-any
+    const readWithCursor = async (make: (cols: string) => PromiseLike<any>, cols: string): Promise<{ data: any }> => {
+      if (cursorsOn) {
+        const r = await make(`${cols}, funding_checked_through`);
+        if (!r?.error || !cursorMissing(r.error)) return r;
+        cursorsOn = false;
+      }
+      return await make(cols);
+    };
+
     // Pending bank payments. settlestat returns a whole batch in ONE call, which is the only
     // shape that survives the 40 TPM per-MID cap — a per-payment inquire loop would 429
     // itself into uselessness and starve real customer charges of the same quota.
@@ -805,13 +872,15 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // an unordered slice of days could ask about today's batch on every sweep and never once
     // about the payment that has been stuck since last week. Oldest received first means the
     // oldest money is always inside the day budget.
-    let pq = admin.from("payments")
-      .select("id, order_id, method, gateway_txn_id, received_at, attempt_id")
-      .eq("client_id", clientId).eq("gateway", "cardpointe")
-      .eq("funding_state", "pending").is("voided_at", null)
-      .order("received_at", { ascending: true });
-    if (orderId) pq = pq.eq("order_id", orderId);
-    const { data: pending } = await pq.limit(200);
+    const { data: pending } = await readWithCursor((cols) => {
+      let pq = admin.from("payments")
+        .select(cols)
+        .eq("client_id", clientId).eq("gateway", "cardpointe")
+        .eq("funding_state", "pending").is("voided_at", null)
+        .order("received_at", { ascending: true });
+      if (orderId) pq = pq.eq("order_id", orderId);
+      return pq.limit(200);
+    }, "id, order_id, method, funding_state, gateway_txn_id, received_at, attempt_id");
 
     // Bank payments that already funded but are still inside the return window. Settled is
     // NOT final for ACH: a debit can be sent back days later, and without this pass the only
@@ -822,14 +891,16 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     //    historical hand-recorded payments at the mercy of a gateway batch that has never
     //    heard of them.
     const returnSince = new Date(Date.now() - ACH_RETURN_WINDOW_DAYS * 86400000).toISOString();
-    let rq = admin.from("payments")
-      .select("id, order_id, gateway_txn_id, received_at, attempt_id")
-      .eq("client_id", clientId).eq("gateway", "cardpointe").eq("method", "ach")
-      .eq("funding_state", "settled").is("voided_at", null)
-      .gt("funding_updated_at", returnSince)
-      .order("funding_updated_at", { ascending: false });
-    if (orderId) rq = rq.eq("order_id", orderId);
-    const { data: settledAch } = await rq.limit(200);
+    const { data: settledAch } = await readWithCursor((cols) => {
+      let rq = admin.from("payments")
+        .select(cols)
+        .eq("client_id", clientId).eq("gateway", "cardpointe").eq("method", "ach")
+        .eq("funding_state", "settled").is("voided_at", null)
+        .gt("funding_updated_at", returnSince)
+        .order("funding_updated_at", { ascending: false });
+      if (orderId) rq = rq.eq("order_id", orderId);
+      return rq.limit(200);
+    }, "id, order_id, method, gateway_txn_id, received_at, attempt_id");
 
     const nowIso = new Date().toISOString();
     const updated: unknown[] = [];
@@ -841,26 +912,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const fetchedDays = new Set<string>();
     const skippedDays = new Set<string>();
     const dayOf = (v: unknown) => String(v ?? "").slice(0, 10).replace(/-/g, "");
-    /** Every day from the one `v` falls on (UTC, as dayOf reads it) to today, oldest first, never
-     *  more than the return window: the funding days a bank payment's return can be on. */
-    const daysSince = (v: unknown): string[] => {
-      const t = Date.parse(String(v ?? ""));
-      if (!Number.isFinite(t)) return [];
-      const out: string[] = [];
-      const first = new Date(t);
-      for (
-        let d = Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), first.getUTCDate());
-        d <= Date.now() && out.length <= ACH_RETURN_WINDOW_DAYS;
-        d += 86400000
-      ) out.push(new Date(d).toISOString().slice(0, 10).replace(/-/g, ""));
-      return out;
-    };
 
-    // Gateway calls this sweep could not read, settlestat and funding alike, filed ONCE per sweep
-    // (below) with the merchant's last four and the class of failure, never a body (a 4xx carries
-    // the gateway's own text). Until 2026-10-14 a settlestat failure was swallowed whole, so "the
-    // call failed" and "nothing moved" looked the same, and a date refused on every sweep was
-    // invisible.
+    // Gateway calls this sweep could not read, settlestat and funding alike, filed ONCE a day (below)
+    // with the merchant's last four and the class of failure, never a body (a 4xx carries the
+    // gateway's own text). Until 2026-10-14 a settlestat failure was swallowed whole, so "the call
+    // failed" and "nothing moved" looked the same, and a date refused on every sweep was invisible.
     const gatewayFailures: { call: "settlestat" | "funding"; merchant: string; env: string; day: string; kind: string }[] = [];
     // Once the limiter says no, this sweep asks nothing more: the 40 TPM quota is shared with live
     // charges, and every further call would only be refused too. What is left waits for the next sweep.
@@ -897,7 +953,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const orphans = merchantsRead ? sweep.filter((row) => !merchantOf(row)) : [];
     // ONCE A DAY, not once a sweep: the Orders tab fires this on every visit while a bank payment
     // is pending, and an orphan stays pending until a human acts, so a row per sweep would bury
-    // the queue under one problem (see orphansFiledToday).
+    // the queue under one problem (see filedToday).
     if (orphans.length && !(await orphansFiledToday(admin, clientId, orphans.slice(0, 50).map((r) => String(r.id))))) {
       await logEdgeError({
         fn: "portal-payments",
@@ -925,12 +981,10 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         if (fetchedDays.size >= MAX_SETTLESTAT_DAYS || limited) { skippedDays.add(key); continue; }
         fetchedDays.add(key);
         try {
-          const batch = await cpSettleStat(m, d) as Record<string, unknown>;
-          const rs = (batch?.txns ?? batch?.transactions ?? []) as Record<string, unknown>[];
-          for (const t of Array.isArray(rs) ? rs : []) {
-            const rr = String(t.retref ?? "");
-            if (rr) byRetref.set(`${m.env}|${m.merchid}|${rr}`, String(t.setlstat ?? t.status ?? ""));
-          }
+          // Whatever the answer is wrapped in (a list of batches, a list of rows, one batch):
+          // settlementStatuses walks it. Reading `txns` off the top level found nothing in a list.
+          const answer = await cpSettleStat(m, d);
+          for (const [rr, st] of settlementStatuses(answer)) byRetref.set(`${m.env}|${m.merchid}|${rr}`, st);
         } catch (e) {
           // One bad day must not stop the rest, but it is no longer silent (gatewayFailures).
           noteFailure("settlestat", m, d, e);
@@ -961,78 +1015,178 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       }).catch(() => {});
     };
 
-    // ── bank returns in the FUNDING data (2026-10-14) ───────────────────────────────────
-    // Fiserv (CardPointe integrations), 2026-10-14: a bank payment's return shows in the funding
-    // data, and every UAT one comes back R03. Nothing read /funding before, so a return was only seen
-    // if settlestat happened to say so in words.
+    // ── bank payments in the FUNDING data (2026-10-14) ──────────────────────────────────
+    // Fiserv (CardPointe integrations), 2026-10-14: a bank payment's fate shows in the funding data,
+    // and every UAT one comes back R03. achFundingRead says, per payment, what one day's answer
+    // shows: funded (pending becomes settled), an R-code (returned and voided), a sign of a return
+    // it cannot read (nothing changes; filed, field names only), or nothing at all.
     //
-    // BEFORE the settlestat pass, so a return found here is booked before settlestat can call the
-    // same payment settled. Each pending bank payment needs every funding day from its sale day to
-    // today, on its own merchant: one call per (merchant, day), NEWEST payment first, never more
-    // than MAX_FUNDING_CALLS a sweep (a failed call counts too). A day read for one payment is read
-    // for every payment it covers. achReturnFromFunding decides, narrowly: only an R-code on the
-    // same object as this payment's exact retref is a return; anything else leaves it pending. An
-    // answer in a shape it cannot read is filed once a sweep, key paths only, never a value.
+    // WHICH PAYMENTS: every pending bank payment, and every settled one still inside its return
+    // window. Settled is not final for a bank payment: a debit can fund and still come back, and
+    // only the funding data carries the code (settlestat's "Accepted" comes before it).
+    //
+    // WHICH DAYS: every funding day from the sale day to the end of its return window, and only
+    // days that are over (FUNDING_DAY_READABLE_AFTER_MS). funding_checked_through says how far each
+    // payment has already been read, so a day is asked for once, and one call per (merchant, day)
+    // serves every payment on that merchant. Days a payment still clearing needs come first, then
+    // each payment's oldest unread day before its next, so a fresh payment is not starved by an old
+    // one and every payment's reading only moves forward. At most MAX_FUNDING_CALLS a sweep (a
+    // failed call counts). BEFORE the settlestat pass, so a return found here is booked before
+    // settlestat can say anything about the same payment.
+    const DAY_MS = 86400000;
+    const dayStart = (v: unknown): number | null => {
+      const t = Date.parse(String(v ?? ""));
+      return Number.isFinite(t) ? Math.floor(t / DAY_MS) * DAY_MS : null;
+    };
+    const ymdOf = (ms: number) => new Date(ms).toISOString().slice(0, 10).replace(/-/g, "");
+    const lastReadable = Math.floor((Date.now() - FUNDING_DAY_READABLE_AFTER_MS) / DAY_MS) * DAY_MS;
+    type Watched = { row: Record<string, unknown>; m: MerchantOfRecord; pending: boolean; cursor: number | null; days: number[] };
+    const watched: Watched[] = [];
+    const watch = (row: Record<string, unknown>, isPending: boolean) => {
+      const m = merchantOf(row);
+      const sale = dayStart(row.received_at);
+      if (!m || sale === null || !cardpointeConfigured(m.env)) return;
+      const cursor = dayStart(row.funding_checked_through);
+      const last = Math.min(lastReadable, sale + (ACH_RETURN_WINDOW_DAYS + ACH_CLEARED_AFTER_DAYS) * DAY_MS);
+      const days: number[] = [];
+      for (let d = cursor === null ? sale : Math.max(sale, cursor + DAY_MS); d <= last; d += DAY_MS) days.push(d);
+      watched.push({ row, m, pending: isPending, cursor, days });
+    };
+    if (cursorsOn) {
+      for (const p of (pending ?? []) as Record<string, unknown>[]) if (p.method === "ach") watch(p, true);
+      for (const p of (settledAch ?? []) as Record<string, unknown>[]) watch(p, false);
+    }
+    const fundingKey = (m: MerchantOfRecord, d: number) => `${m.env}|${m.merchid}|${ymdOf(d)}`;
+    /** Every (merchant, day) some payment still needs: whether a payment still clearing needs it,
+     *  and the lowest place it holds in the unread days of a payment of that kind. */
+    const wanted = new Map<string, { m: MerchantOfRecord; day: number; clearing: boolean; rank: number }>();
+    for (const w of watched) {
+      w.days.forEach((d, rank) => {
+        const k = fundingKey(w.m, d);
+        const prior = wanted.get(k);
+        if (!prior || (w.pending && !prior.clearing)) wanted.set(k, { m: w.m, day: d, clearing: w.pending, rank });
+        else if (w.pending === prior.clearing) prior.rank = Math.min(prior.rank, rank);
+      });
+    }
+    const fundingOrder = [...wanted.entries()].sort(([, a], [, b]) =>
+      Number(b.clearing) - Number(a.clearing) || a.rank - b.rank || a.day - b.day
+    );
+    // Only answers in a shape achFundingRead can read; a day that failed, or came back in a shape it
+    // does not know, is not here, so no payment is read past it.
     const fundingAnswers = new Map<string, unknown>();
-    const fundingSkipped = new Set<string>();
+    let fundingCalls = 0;
+    let fundingLeft = 0;
+    // A refusal (a 4xx: a date the gateway does not take, a login it will not accept) would be the
+    // same refusal on every call after it, so the first one ends the funding pass for this sweep,
+    // the way the limiter ends every call.
+    let fundingRefused = false;
     const unrecognised: { merchant: string; env: string; day: string; keyPaths: string[] }[] = [];
-    const moved = new Set<string>();
-    const pendingAch = ((pending ?? []) as Record<string, unknown>[])
-      .filter((p) => p.method === "ach" && merchantOf(p))
-      .sort((a, b) => (Date.parse(String(b.received_at ?? "")) || 0) - (Date.parse(String(a.received_at ?? "")) || 0));
-    for (const row of pendingAch) {
-      const m = merchantOf(row)!;
-      if (!cardpointeConfigured(m.env)) continue;
-      for (const d of daysSince(row.received_at)) {
-        const key = `${m.env}|${m.merchid}|${d}`;
-        if (fundingAnswers.has(key) || fundingSkipped.has(key)) continue;
-        if (fundingAnswers.size >= MAX_FUNDING_CALLS || limited) { fundingSkipped.add(key); continue; }
-        let answer: unknown = undefined;
-        try {
-          answer = await cpFunding(m, d);
-          const shape = fundingAnswerShape(answer);
-          if (!shape.recognised) unrecognised.push({ merchant: "…" + m.merchid.slice(-4), env: m.env, day: d, keyPaths: shape.keyPaths });
-        } catch (e) {
-          noteFailure("funding", m, d, e);
-        }
-        // Set even when the call failed: it was spent, and an unread day is read as nothing.
-        fundingAnswers.set(key, answer);
+    for (const [key, w] of fundingOrder) {
+      if (fundingCalls >= MAX_FUNDING_CALLS || limited || fundingRefused) { fundingLeft++; continue; }
+      fundingCalls++;
+      const day = ymdOf(w.day);
+      try {
+        const answer = await cpFunding(w.m, day);
+        const shape = fundingAnswerShape(answer);
+        if (shape.recognised) fundingAnswers.set(key, answer);
+        else unrecognised.push({ merchant: "…" + w.m.merchid.slice(-4), env: w.m.env, day, keyPaths: shape.keyPaths });
+      } catch (e) {
+        noteFailure("funding", w.m, day, e);
+        if (isGatewayConfig(e)) fundingRefused = true;
       }
     }
-    for (const row of pendingAch) {
-      const m = merchantOf(row)!;
+
+    const moved = new Set<string>();
+    /** Payments the funding data shows something like a return for that it could not read. They are
+     *  not settled on settlestat's word either, however old. */
+    const unreadReturn = new Set<string>();
+    const unreadHints: { paymentId: unknown; env: string; merchant: string; keys: string[] }[] = [];
+    for (const w of watched) {
+      const id = String(w.row.id);
       let code: string | null = null;
-      for (const d of daysSince(row.received_at)) {
-        const answer = fundingAnswers.get(`${m.env}|${m.merchid}|${d}`);
-        if (answer === undefined) continue;
-        code = achReturnFromFunding(answer, row.gateway_txn_id);
-        if (code) break;
+      let unreadKeys: string[] | null = null;
+      let funded = false;
+      // How far this payment has now been read: the unbroken run of days from its first unread one
+      // that came back readable and held nothing unread for it. A day not read this sweep (the
+      // budget, a failure, a shape we do not know) or one with a return we cannot read ends the run,
+      // and the next sweep starts there.
+      let through: number | null = null;
+      let unbroken = true;
+      for (const d of w.days) {
+        const answer = fundingAnswers.get(fundingKey(w.m, d));
+        if (answer === undefined) { unbroken = false; continue; }
+        const read = achFundingRead(answer, w.row.gateway_txn_id);
+        if (read.kind === "returned") { code = read.code; break; }
+        if (read.kind === "return_unread") { unreadKeys ??= read.keys; unbroken = false; continue; }
+        if (read.kind === "funded") funded = true;
+        if (unbroken) through = d;
       }
-      if (!code) continue;
-      // The same guards as every write below: still pending, still not voided (a builder may have
-      // voided it since the SELECT), and `.select` says whether a row really moved.
-      const { data: hit, error: wErr } = await admin.from("payments")
-        .update(returnedPaymentPatch(code, nowIso))
-        .eq("client_id", clientId).eq("id", row.id)
-        .eq("funding_state", "pending").is("voided_at", null)
-        .select("id");
-      if (wErr) { writeFailures.push({ paymentId: row.id, pgCode: wErr.code ?? null }); continue; }
-      if (!hit || !hit.length) continue;
-      moved.add(String(row.id));
-      updated.push({ paymentId: row.id, to: "returned", returnCode: code });
-      noteReturned(row, code);
+      const cursorPatch: Record<string, string> = through !== null && (w.cursor === null || through > w.cursor)
+        ? { funding_checked_through: new Date(through).toISOString().slice(0, 10) }
+        : {};
+
+      if (code) {
+        // Guarded like every write here: still in the state it was read in, still not voided (a
+        // builder may have voided or refunded it since the SELECT), and `.select` says whether a
+        // row really moved. A settled one is a late return: the money funded and came back.
+        const { data: hit, error: wErr } = await admin.from("payments")
+          .update(returnedPaymentPatch(code, nowIso))
+          .eq("client_id", clientId).eq("id", w.row.id)
+          .eq("funding_state", w.pending ? "pending" : "settled").is("voided_at", null)
+          .select("id");
+        if (wErr) { writeFailures.push({ paymentId: w.row.id, pgCode: wErr.code ?? null }); continue; }
+        if (!hit || !hit.length) continue;
+        moved.add(id);
+        updated.push({ paymentId: w.row.id, to: "returned", returnCode: code });
+        noteReturned(w.row, code);
+        continue;
+      }
+      if (unreadKeys) {
+        unreadReturn.add(id);
+        unreadHints.push({ paymentId: w.row.id, env: w.m.env, merchant: "…" + w.m.merchid.slice(-4), keys: unreadKeys });
+      } else if (funded && w.pending) {
+        // FUNDED: the money is in, so the payment is no longer clearing. This is what lets
+        // Payment Received fire (migration 308 counts a bank payment once it stops being pending).
+        // A return after this is still read: the payment is now on the settled list, inside its
+        // return window, and its reading carries on from where it stopped.
+        const { data: hit, error: wErr } = await admin.from("payments")
+          .update({ funding_state: "settled", funding_updated_at: nowIso, ...cursorPatch })
+          .eq("client_id", clientId).eq("id", w.row.id)
+          .eq("funding_state", "pending").is("voided_at", null)
+          .select("id");
+        if (wErr) { writeFailures.push({ paymentId: w.row.id, pgCode: wErr.code ?? null }); continue; }
+        if (!hit || !hit.length) continue;
+        moved.add(id);
+        updated.push({ paymentId: w.row.id, to: "settled" });
+        continue;
+      }
+      // Nothing to decide: only remember how far it has been read. Bookkeeping, so a failed write is
+      // not filed; the next sweep reads those days again, which costs calls and changes nothing.
+      if (cursorPatch.funding_checked_through) {
+        try {
+          await admin.from("payments").update(cursorPatch).eq("client_id", clientId).eq("id", w.row.id);
+        } catch { /* see above */ }
+      }
     }
 
     if (pending && pending.length) {
-      // A payment the funding pass already returned spends none of the settlestat budget.
-      await loadDays((pending as Record<string, unknown>[]).filter((p) => !moved.has(String(p.id))));
-      for (const p of pending) {
-        if (moved.has(String(p.id))) continue;
+      // A payment the funding pass already moved spends none of the settlestat budget.
+      const rest = (pending as Record<string, unknown>[]).filter((p) => !moved.has(String(p.id)));
+      await loadDays(rest);
+      for (const p of rest) {
         const raw = statusOf(p);
         const next = fundingStateFromSetlstat(raw);
         // null means "we do not recognise that status" — LEAVE IT PENDING. Never guess a
         // bank payment into being money.
         if (!next || next === "pending") continue;
+        // ⛔ NOT SETTLED ON SETTLESTAT'S WORD WHILE IT IS CLEARING (2026-10-14). For a bank payment
+        // "Accepted" is the processor taking the debit, which comes BEFORE the R03 Fiserv says posts
+        // in the funding data, so settling on it fired Payment Received (migration 308) on money
+        // about to come back. The funding pass settles it when the money is in. Only after
+        // ACH_CLEARED_AFTER_DAYS may "Accepted" settle it, so a bank payment the funding data never
+        // mentions (or that we cannot read) does not stay pending, its order frozen, for good. A
+        // return the funding pass saw but could not read holds it however old it is.
+        if (next === "settled" && p.method === "ach" && (achClearing(p) || unreadReturn.has(String(p.id)))) continue;
         // settlestat says a status WORD ("Rejected"), never a NACHA code, so a return booked from
         // it has no return_code. It used to store the word there.
         const patch = next === "returned"
@@ -1056,13 +1210,15 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // The ONLY transition allowed out of settled is 'returned', and only when the gateway
     // says so in as many words. An unrecognised status, a blank one, or a retref that is not
     // in any batch we managed to read all mean the same thing they mean above: leave it
-    // alone. Un-paying an invoice on a guess is worse than a late return going unseen.
+    // alone. Un-paying an invoice on a guess is worse than a late return going unseen. A late
+    // return with a CODE is the funding pass's (above); this one reads settlestat's words.
     //
     // ⚠️ Voiding a returned payment does NOT release the inventory unit (migration 105). A
     //    transfer sent back is a collections problem, not an un-sale.
     if (settledAch && settledAch.length) {
-      await loadDays(settledAch as Record<string, unknown>[]);
-      for (const p of settledAch) {
+      const rest = (settledAch as Record<string, unknown>[]).filter((p) => !moved.has(String(p.id)));
+      await loadDays(rest);
+      for (const p of rest) {
         const raw = statusOf(p);
         if (raw === undefined) continue;
         if (fundingStateFromSetlstat(raw) !== "returned") continue;
@@ -1082,31 +1238,75 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       }
     }
 
-    // ONE row per sweep for each kind of trouble, so an Orders visit can never file a row per day.
+    // ONE row a DAY for each kind of trouble (filedToday), never one per day read nor one per
+    // Orders visit: info rows are never deleted, and the Orders tab fires this on every visit while a
+    // bank payment is pending. Something the earlier row did not name (another merchant, another
+    // class of failure, another payment) is filed at once.
     if (gatewayFailures.length) {
-      await logEdgeError({
-        fn: "portal-payments",
-        req,
-        clientId,
-        code: "reconcile_gateway_failed",
-        severity: "info",
-        message:
-          `${clientId}: reconcile could not read ${gatewayFailures.length} settlement/funding answer(s); the payments they cover were left as they were.`,
-        context: { failures: gatewayFailures.slice(0, 20) },
-      });
+      const signatures = [...new Set(gatewayFailures.map((f) => `${f.call}|${f.env}|${f.merchant}|${f.kind}`))];
+      if (!(await filedToday(admin, clientId, "reconcile_gateway_failed", "signatures", signatures))) {
+        await logEdgeError({
+          fn: "portal-payments",
+          req,
+          clientId,
+          code: "reconcile_gateway_failed",
+          severity: "info",
+          message:
+            `${clientId}: reconcile could not read ${gatewayFailures.length} settlement/funding answer(s); the payments they cover were left as they were.`,
+          context: { failures: gatewayFailures.slice(0, 20), signatures },
+        });
+      }
     }
     if (unrecognised.length) {
-      const keyPaths = [...new Set(unrecognised.flatMap((u) => u.keyPaths))].slice(0, 50);
-      await logEdgeError({
-        fn: "portal-payments",
-        req,
-        clientId,
-        code: "reconcile_funding_unrecognised",
-        severity: "info",
-        message:
-          `${clientId}: reconcile read ${unrecognised.length} funding answer(s) in a shape it does not know, so no bank return could be read from them. Key paths only, no values.`,
-        context: { answers: unrecognised.slice(0, 8).map(({ keyPaths: _k, ...where }) => where), keyPaths },
-      });
+      const signatures = [...new Set(unrecognised.map((u) => `${u.env}|${u.merchant}`))];
+      if (!(await filedToday(admin, clientId, "reconcile_funding_unrecognised", "signatures", signatures))) {
+        const keyPaths = [...new Set(unrecognised.flatMap((u) => u.keyPaths))].slice(0, 50);
+        await logEdgeError({
+          fn: "portal-payments",
+          req,
+          clientId,
+          code: "reconcile_funding_unrecognised",
+          severity: "info",
+          message:
+            `${clientId}: reconcile read ${unrecognised.length} funding answer(s) in a shape it does not know, so no bank payment could be read from them. Key paths only, no values.`,
+          context: { answers: unrecognised.slice(0, 8).map(({ keyPaths: _k, ...where }) => where), keyPaths, signatures },
+        });
+      }
+    }
+    // The first live return in a shape the reader does not take files here: which fields looked like
+    // it, never what they held. On the live system it is a fault: a real bank payment is sitting
+    // pending (or settled) on a return nobody has booked.
+    if (unreadHints.length) {
+      const signatures = [...new Set(unreadHints.map((h) => `${h.paymentId}|${h.keys.join(",")}`))];
+      if (!(await filedToday(admin, clientId, "reconcile_funding_return_unread", "signatures", signatures))) {
+        await logEdgeError({
+          fn: "portal-payments",
+          req,
+          clientId,
+          code: "reconcile_funding_return_unread",
+          severity: unreadHints.some((h) => h.env !== "uat") ? "error" : "info",
+          message:
+            `${clientId}: the funding data shows something like a return for ${unreadHints.length} bank payment(s) that reconcile cannot read as a return code, so they were left as they were. ` +
+            `Field names only, no values: achState.ts achReturnFromFunding needs to read them.`,
+          context: { payments: unreadHints.slice(0, 20), signatures },
+        });
+      }
+    }
+    const bankPaymentsToRead = ((pending ?? []) as Record<string, unknown>[]).some((p) => p.method === "ach") || (settledAch ?? []).length > 0;
+    if (!cursorsOn && bankPaymentsToRead) {
+      if (!(await filedToday(admin, clientId, "reconcile_funding_needs_migration", "signatures", ["funding_checked_through"]))) {
+        await logEdgeError({
+          fn: "portal-payments",
+          req,
+          clientId,
+          code: "reconcile_funding_needs_migration",
+          severity: "info",
+          message:
+            `${clientId}: reconcile read no funding data, because payments.funding_checked_through is missing (migration 308 is not applied). ` +
+            `Bank payments move only on settlestat's word until it is.`,
+          context: { signatures: ["funding_checked_through"] },
+        });
+      }
     }
     if (writeFailures.length) {
       await logEdgeError({
@@ -1124,15 +1324,17 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // pending, which is the difference between "nothing has changed" and "we did not look".
     // daysChecked stays a list of days (one per day, whichever merchants were asked about it);
     // daysSkipped counts the (merchant, day) calls the budget left for the next sweep. The funding
-    // pair says the same for /funding: calls made, and (merchant, day) pairs left for a later sweep.
+    // pair says the same for /funding: the calls this sweep made, and the (merchant, day) pairs some
+    // bank payment still needs that it did not ask; funding_checked_through keeps the place, so the
+    // next sweep starts with those.
     return json({
       ok: true,
       resolved,
       updated,
       daysChecked: [...new Set([...fetchedDays].map((k) => k.split("|")[2]))],
       daysSkipped: skippedDays.size,
-      fundingChecked: fundingAnswers.size,
-      fundingSkipped: fundingSkipped.size,
+      fundingChecked: fundingCalls,
+      fundingSkipped: fundingLeft,
     });
   }
 

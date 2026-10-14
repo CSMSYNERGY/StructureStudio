@@ -936,6 +936,40 @@ Deno.test("a BANK payment posted with entry 'swipe' still sends ecomind E and is
   check("entry_mode ECommerce, not Swipe", row?.entry_mode === "ECommerce", JSON.stringify(row?.entry_mode));
 });
 
+Deno.test("a bank DECLINE naming the routing number is masked on the attempt, in the error, everywhere", async () => {
+  // Fiserv (CardPointe integrations), 2026-10-14: an invalid routing number declines with resptext
+  // "The RoutingNumber (<bankaba>) is not a valid routing number." That sentence is the attempt's
+  // detail and the 402 body, which withErrorLog files into app_errors. 999999999 is made up.
+  const log: Call[] = [];
+  stubGateway(() =>
+    new Response(JSON.stringify({ respstat: "C", respcode: "500", resptext: "The RoutingNumber (999999999) is not a valid routing number." }), { status: 200 })
+  );
+  const admin = makeAdmin(defaultAnswer(), log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, rail: "ach", account: "9413948780281111" });
+  restore();
+  check("402", !r.ok && r.status === 402, JSON.stringify(r));
+  if (r.ok) return;
+  check("the error keeps the sentence and the last four", r.error === "The RoutingNumber (…9999) is not a valid routing number.", r.error);
+  check("still asks for new details", r.newCardNeeded === true);
+  const all = JSON.stringify(log);
+  check("the number is nowhere in what was written", !all.includes("999999999"), all);
+  check("the detail is masked too", lastAttemptUpdate(log)?.detail === "The RoutingNumber (…9999) is not a valid routing number.", JSON.stringify(lastAttemptUpdate(log)));
+  // A gateway refusal (4xx) carrying it is masked the same way before it is filed.
+  const log2: Call[] = [];
+  stubGateway(() => new Response(JSON.stringify({ resptext: "Invalid account 12345678901" }), { status: 400 }));
+  const r2 = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log2), { ...OPTS, rail: "ach" });
+  restore();
+  check("503", !r2.ok && r2.status === 503, JSON.stringify(r2));
+  check("not in the fault or the attempt", !JSON.stringify(log2).includes("12345678901") && JSON.stringify(log2).includes("…8901"), JSON.stringify(log2));
+});
+
+Deno.test("maskDigitRuns: five or more digits keep only their last four; shorter runs and words stand", () => {
+  check("routing", ip.maskDigitRuns("RoutingNumber (222222226)") === "RoutingNumber (…2226)", ip.maskDigitRuns("RoutingNumber (222222226)"));
+  check("two runs", ip.maskDigitRuns("12345 and 1234567890123456") === "…2345 and …3456");
+  check("short runs stand", ip.maskDigitRuns("HTTP 400, retry after 30 seconds, $1854.00") === "HTTP 400, retry after 30 seconds, $1854.00");
+  check("nothing to mask", ip.maskDigitRuns("Not sufficient funds") === "Not sufficient funds");
+});
+
 Deno.test("a DECLINE keeps its AVS/CVV answer on the attempt (there is no payments row to hold it)", async () => {
   const log: Call[] = [];
   recordingGateway({ respstat: "C", respcode: "82", resptext: "CVV mismatch", avsresp: "N", cvvresp: "N" }, []);

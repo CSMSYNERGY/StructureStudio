@@ -399,11 +399,15 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
     id, order_id: `o-${id}`, amount_cents: 50000, gateway: "cardpointe", gateway_txn_id: retref, attempt_id: attempt,
     funding_state: "pending", method: "ach", received_at: "2026-10-01T15:00:00Z",
   });
-  // The SAME MID on both systems, same day: two calls, each batch read for its own system.
+  // The SAME MID on both systems, same day: two calls, each batch read for its own system. The
+  // funding days list nothing (an empty day), so settlestat decides; the sale is over seven days old,
+  // so its "Accepted" may settle a bank payment (ACH_CLEARED_AFTER_DAYS).
   const world: World = {
     payments: [ach("a1", 41, "rt-a1"), ach("a2", 42, "rt-a2")],
     attempts: [{ id: 41, merchid: MID, cp_env: null }, { id: 42, merchid: MID, cp_env: "prod" }],
-    gateway: (system) => ({ txns: [{ retref: system === "uat" ? "rt-a1" : "rt-a2", setlstat: system === "uat" ? "Accepted" : "Rejected" }] }),
+    gateway: (system, path) => path === "/funding"
+      ? { txns: [] }
+      : { txns: [{ retref: system === "uat" ? "rt-a1" : "rt-a2", setlstat: system === "uat" ? "Accepted" : "Rejected" }] },
   };
   const both = await payments({ action: "reconcile" }, world, { live: true });
   assertEquals(both.status, 200, both.text);
@@ -413,7 +417,7 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
   assertEquals(Object.fromEntries((both.body.updated as any[]).map((u) => [u.paymentId, u.to])), { a1: "settled", a2: "returned" });
   assertEquals(both.body.daysChecked, ["20261001"]);
   // The funding pass (2026-10-14) also asks each system about its own payment, from the sale day on,
-  // never more than 8 calls a sweep. These answers carry no R-code, so it moves nothing itself.
+  // never more than 8 calls a sweep. These answers list nothing, so it moves nothing itself.
   const funding = both.trace.gateway.filter((g) => g.path === "/funding");
   assert(funding.length > 0 && funding.length <= 8, `funding calls: ${funding.length}`);
   assertEquals(both.body.fundingChecked, funding.length);

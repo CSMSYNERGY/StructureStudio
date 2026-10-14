@@ -681,21 +681,31 @@ export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyRe
   }
 }
 
-/** Settlement status for a date (YYYYMMDD). ONE call returns the whole batch — always
- *  preferred over a per-payment inquire loop, which would 429 itself into uselessness and
- *  starve real customer charges of the shared per-MID quota. */
+/** Settlement status for a date (sent YYYYMMDD; see cpFunding on why that is unproven). ONE call
+ *  returns the whole batch — always preferred over a per-payment inquire loop, which would 429
+ *  itself into uselessness and starve real customer charges of the shared per-MID quota. The answer
+ *  is read by achState.ts settlementStatuses, whatever it is wrapped in: a copy of Fiserv's API
+ *  reference says it is a list, which the code used to read as an object and so read nothing. */
 export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<unknown> {
   return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }
 
 /** Funding detail — the final word on whether an ACH debit actually funded. Fiserv (CardPointe
  *  integrations), 2026-10-14: every UAT bank payment comes back R03, and the return shows in the
- *  FUNDING data, which settlestat does not carry. portal-payments reconcile reads it for pending bank
- *  payments and achState.ts achReturnFromFunding reads the answer. The date goes out YYYYMMDD, the
- *  spelling settlestat has always been sent; a copy of Fiserv's API reference says MMDD for both and
- *  neither has been seen answered live, so a refused date files reconcile's info row
- *  (reconcile_gateway_failed, kind "config"), and a 200 that is not a funding answer files
- *  reconcile_funding_unrecognised, rather than either passing for "nothing funded". */
+ *  FUNDING data, which settlestat does not carry. portal-payments reconcile reads it for bank
+ *  payments still clearing and for settled ones inside their return window, and achState.ts
+ *  achFundingRead reads the answer.
+ *
+ *  ⚠️ THE DATE FORMAT IS UNPROVEN. It goes out YYYYMMDD, the spelling settlestat has always been
+ *  sent; a copy of Fiserv's API reference says MMDD for both, and neither has been seen answered
+ *  live. One read-only UAT call settles it, and should be made before this ships. What a wrong date
+ *  looks like depends on the gateway: a 4xx files reconcile_gateway_failed (kind "config") and ends
+ *  that sweep's funding calls; a 200 that is not a funding answer files
+ *  reconcile_funding_unrecognised. But a 200 with EMPTY lists for a date it misread looks exactly
+ *  like a day with nothing funded, and nothing can tell the two apart from here. Reconcile
+ *  remembers every day it has read (payments.funding_checked_through, migration 308), so days read
+ *  under a wrong format stay read: after changing the format, set that column back to null on the
+ *  cardpointe bank payments and every day is read again. */
 export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {
   return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
 }

@@ -365,6 +365,21 @@ export function partialApprovalText(
 }
 
 /**
+ * Gateway text with every run of five or more digits cut to its last four ("…1808").
+ *
+ * Fiserv (CardPointe integrations), 2026-10-14: a bank payment with a routing number that is not a
+ * bank's declines with resptext "The RoutingNumber (<bankaba>) is not a valid routing number.", so
+ * a decline's sentence can carry the number the payer typed. That sentence is stored on the attempt,
+ * shown to the payer, and, as the 4xx body, filed into app_errors by withErrorLog; a routing or
+ * account number may be in none of those. Five digits is the floor because a routing number is
+ * nine, a card thirteen to nineteen and most account numbers longer than four; a ZIP masked on the
+ * way is the cost. The last four are what the payer needs to see which number it meant.
+ */
+export function maskDigitRuns(s: string): string {
+  return s.replace(/[0-9]{5,}/g, (run) => "…" + run.slice(-4));
+}
+
+/**
  * The billing name, street and ZIP for a charge, from the request body and the design's contact.
  *
  *   body `name` / `address` / `postal`   what was typed, through cpBillingFields
@@ -600,7 +615,10 @@ export async function chargeInvoicePayment(
   try {
     auth = await cpAuth(authReq);
   } catch (se) {
-    const msg = String((se as Error).message ?? "");
+    // Masked before it goes ANYWHERE (the attempt's detail, a fault row, the decline sentence, which
+    // the caller returns as a 4xx body that withErrorLog files): gateway text can carry a number the
+    // payer typed (maskDigitRuns).
+    const msg = maskDigitRuns(String((se as Error).message ?? ""));
 
     if (isGatewayUnknown(se)) {
       // The card MAY have been charged and we cannot know. Do not record, do not retry.
