@@ -443,12 +443,12 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
   // does — drop the credential, drop the pipeline/stage mapping, move quotes to Structure
   // Studio paperwork — because the last one changes what customers receive.
   const disconnectGhl = async () => {
-    if (!window.confirm("Disconnect your CRM?\n\n• The saved Location ID and API key are removed — reconnecting means pasting a key again.\n• Your pipeline & stage mapping is cleared.\n• Quotes and invoices go out through Structure Studio paperwork from now on.\n\nContacts already in your CRM are not touched.")) return;
+    if (!window.confirm("Disconnect your CRM?\n\n• The saved Location ID and API key are removed — reconnecting means pasting a key again.\n• Your pipeline & stage mapping is cleared.\n• Estimates and invoices go out through Structure Studio paperwork from now on.\n\nContacts already in your CRM are not touched.")) return;
     setGhlMsg(null); setGhlBusy(true);
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "disconnect_ghl" } });
     setGhlBusy(false);
     if (err || (data && data.error)) { setGhlMsg({ err: (data && data.error) || (err && err.message) || "Couldn't disconnect." }); return; }
-    setGhlMsg({ ok: data.movedToSs ? "CRM disconnected. Quotes and invoices now go out through Structure Studio paperwork." : "CRM disconnected." });
+    setGhlMsg({ ok: data.movedToSs ? "CRM disconnected. Estimates and invoices now go out through Structure Studio paperwork." : "CRM disconnected." });
     setGhlApiKey(""); setGhlLocationId(""); setPipelines([]);
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
