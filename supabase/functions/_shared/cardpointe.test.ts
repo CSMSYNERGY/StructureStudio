@@ -270,6 +270,46 @@ Deno.test("the tokenizer URL carries the mobile-critical parameters", () => {
   check("origin", cp.cpTokenizerOrigin(UAT_M) === "https://isv-uat.example.invalid", cp.cpTokenizerOrigin(UAT_M));
 });
 
+Deno.test("the SWIPE tokenizer is its own parameter set, so the reader's letters and Shift keys reach the box", () => {
+  // The card reader is a USB keyboard typing uppercase hex plus % ^ ; = ? with Shift held. Until
+  // 2026-10-13 the swipe frame was the card URL + "&swipeonly=true", and on CardPointe's real UAT
+  // iframe that lost every swipe: cardnumbernumericonly cancelled each letter and Shift key (the
+  // digits-only remainder got HTTP 500 errorcode 39), usecvv posted "CVV is Required" before every
+  // read, and nothing focused the box. cpTokenizerUrl's docblock has the rest.
+  const card = cp.cpTokenizerUrl(UAT_M, "card");
+  const swipe = cp.cpTokenizerUrl(UAT_M, "swipe");
+  const q = new URL(swipe).searchParams;
+  check("same tokenizer page as card", swipe.split("?")[0] === card.split("?")[0], swipe);
+  check("same origin the page checks postMessage against", new URL(swipe).origin === cp.cpTokenizerOrigin(UAT_M), swipe);
+  for (const p of ["swipeonly", "autofocus", "invalidinputevent", "sendcardtypingevent", "enhancedresponse", "unique", "tokenizewheninactive"]) {
+    check(`swipe has ${p}=true`, q.get(p) === "true", swipe);
+  }
+  check("swipe keeps the 2 s quiet", q.get("inactivityto") === "2000", swipe);
+  check("swipe keeps the card css", q.get("css") === new URL(card).searchParams.get("css"));
+  check("swipe says what the box is for", q.get("cardlabel") === "Card reader" && q.get("placeholder") === "Swipe the card", swipe);
+  // Each of these loses or garbles a real swipe. Not one may come back, under any value.
+  for (const p of ["cardnumbernumericonly", "formatinput", "useexpiry", "useexpiryfield", "usecvv", "invalidcreditcardevent", "invalidexpiryevent", "invalidcvvevent"]) {
+    check(`swipe has NO ${p}`, !q.has(p) && !swipe.includes(`${p}=`), swipe);
+  }
+  // The box and its margin end at 60px (measured on the UAT iframe). Any taller is the frame's own
+  // blank page, where a click leaves the focus on its body and the next swipe vanishes.
+  check("sized to its one box: clears the measured 60px, not much more", cp.cpTokenizerHeight("swipe") >= 60 && cp.cpTokenizerHeight("swipe") <= 76, String(cp.cpTokenizerHeight("swipe")));
+});
+
+Deno.test("adding the swipe rail left the card and ach URLs byte-for-byte as they were", async () => {
+  // SHA-256 of cpTokenizerUrl(UAT_M, rail) with this file's tokenizer base, taken from c84ace9b
+  // before the swipe rail existed. A changed hash is a changed iframe for every customer paying by
+  // card on my-quotes.html; if that is the intent, re-pin it from the new output on purpose.
+  const sha = async (s: string) =>
+    Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const card = cp.cpTokenizerUrl(UAT_M, "card");
+  const ach = cp.cpTokenizerUrl(UAT_M, "ach");
+  check("card unchanged", await sha(card) === "573969f4a5985bb6282096fae0a6da7519c6aaaf17f2568c6bf935ddd0524b03", card);
+  check("ach unchanged", await sha(ach) === "bde10ab0f99acec8a23c6d6fb57482244fe4772827ad31a603eecff1c65c6d54", ach);
+  check("card height unchanged", cp.cpTokenizerHeight("card") === 265);
+  check("ach height unchanged", cp.cpTokenizerHeight("ach") === 130);
+});
+
 Deno.test("the tokenizer css resets CardPointe's body margin and sets a REAL font", () => {
   // Both are fixes for defects seen on a real phone (2026-09-02), and both are invisible
   // in the markup — the only way they regress is silently.
@@ -478,7 +518,7 @@ Deno.test("a LIVE merchant with the production secrets unset is refused with a c
   check("every operation threw a CONFIG error", errs.every((e) => cp.isGatewayConfig(e)), errs.map((e) => String((e as Error)?.message)).join(" | "));
   check("the error names the live system", /live is not configured/.test(String((errs[0] as Error)?.message)), String((errs[0] as Error)?.message));
   check("not one request (never the test system instead)", seen.length === 0, JSON.stringify(seen.map((s) => s.url)));
-  check("no tokenizer for it either", cp.cpTokenizerUrl(PROD_M, "card") === "" && cp.cpTokenizerOrigin(PROD_M) === "");
+  check("no tokenizer for it either", cp.cpTokenizerUrl(PROD_M, "card") === "" && cp.cpTokenizerUrl(PROD_M, "swipe") === "" && cp.cpTokenizerOrigin(PROD_M) === "");
 });
 
 Deno.test("NO DEFAULT MERCHANT: a blank MID is refused even with CARDPOINTE_MERCHID set, and an unknown system goes nowhere", async () => {
@@ -509,6 +549,8 @@ Deno.test("the tokenizer is the one on the merchant's own system", async () => {
     check("live tokenizer", cp.cpTokenizerUrl(PROD_M, "card").startsWith("https://live.example.invalid/itoke/ajax-tokenizer.html?"), cp.cpTokenizerUrl(PROD_M, "card"));
     check("live origin", cp.cpTokenizerOrigin(PROD_M) === "https://live.example.invalid", cp.cpTokenizerOrigin(PROD_M));
     check("same parameters on both", cp.cpTokenizerUrl(PROD_M, "card").split("?")[1] === cp.cpTokenizerUrl(UAT_M, "card").split("?")[1]);
+    check("live swipe tokenizer", cp.cpTokenizerUrl(PROD_M, "swipe").startsWith("https://live.example.invalid/itoke/ajax-tokenizer.html?"), cp.cpTokenizerUrl(PROD_M, "swipe"));
+    check("same swipe parameters on both", cp.cpTokenizerUrl(PROD_M, "swipe").split("?")[1] === cp.cpTokenizerUrl(UAT_M, "swipe").split("?")[1]);
   });
 });
 

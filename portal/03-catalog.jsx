@@ -439,6 +439,21 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
     loadPipelines();   // now connected → load pipelines/stages for the dropdowns
   };
 
+  // Disconnect (Carolyn 2026-10-14). The confirm spells out the three things the server
+  // does — drop the credential, drop the pipeline/stage mapping, move quotes to Structure
+  // Studio paperwork — because the last one changes what customers receive.
+  const disconnectGhl = async () => {
+    if (!window.confirm("Disconnect your CRM?\n\n• The saved Location ID and API key are removed — reconnecting means pasting a key again.\n• Your pipeline & stage mapping is cleared.\n• Estimates and invoices go out through Structure Studio paperwork from now on.\n\nContacts already in your CRM are not touched.")) return;
+    setGhlMsg(null); setGhlBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "disconnect_ghl" } });
+    setGhlBusy(false);
+    if (err || (data && data.error)) { setGhlMsg({ err: (data && data.error) || (err && err.message) || "Couldn't disconnect." }); return; }
+    setGhlMsg({ ok: data.movedToSs ? "CRM disconnected. Estimates and invoices now go out through Structure Studio paperwork." : "CRM disconnected." });
+    setGhlApiKey(""); setGhlLocationId(""); setPipelines([]);
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
   // Fetch this tenant's CRM (GoHighLevel) pipelines + stages (server-side, using the
   // stored key) to populate the dropdowns. Re-run by the "Refresh" button.
   const loadPipelines = async () => {
@@ -583,7 +598,12 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
           <div><span style={S.lbl}>CRM API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
         </div>
-        <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+          <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
+          {status && status.configured && (
+            <button type="button" onClick={disconnectGhl} disabled={ghlBusy} style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", opacity: ghlBusy ? 0.6 : 1 }}>Disconnect CRM</button>
+          )}
+        </div>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
       </div>
 

@@ -756,8 +756,38 @@ export async function cpSurchargeProbe(
  * on cpTokenizerOrigin() (CORS checked 2026-10-06: Access-Control-Allow-Origin: *). The URL
  * is still served so a page cached from before keeps working; it can go once nothing that
  * old can still be open.
+ *
+ * ⚠️ THE SWIPE RAIL IS ITS OWN PARAMETER SET (2026-10-13), not the card URL + "&swipeonly=true".
+ * The card reader is a USB KEYBOARD that types an encrypted blob: uppercase hex plus % ^ ; = ?,
+ * with Shift held for every letter and symbol. Three card parameters each lost the swipe on
+ * CardPointe's real UAT iframe (itoke.js, probed headless with a synthetic blob):
+ *   cardnumbernumericonly  cancels every keystroke that is not a digit or that has Shift held,
+ *                          so the hex letters and the track symbols never reach the field. What
+ *                          is left still looks like a reader frame (02…03), goes to CardSecure,
+ *                          and is refused: HTTP 500, errorcode 39 "Wrong message length". The
+ *                          iframe posts nothing at all on a non-200, so the page heard nothing.
+ *   usecvv (+invalidcvvevent)
+ *                          itoke checks for an empty CVV before tokenizing even a swipe, so EVERY
+ *                          swipe first posted "CVV is Required", and that message stayed on
+ *                          screen whenever CardSecure then refused the read.
+ *   useexpiry              with expiry/CVV on, the first keystroke after a token clears the
+ *                          field, eating the first character of the next swipe.
+ * formatinput (it inserts spaces into the blob) and the invalidcreditcard/expiry events go with
+ * them. What the swipe rail adds:
+ *   autofocus              the ONLY way the card box gets focus from inside the frame (itoke's
+ *                          onLoad calls input.focus()). Focusing the iframe ELEMENT from the page
+ *                          leaves the frame's activeElement on BODY, where the reader's keys
+ *                          vanish without a message. The portal reloads the frame on every
+ *                          "Ready" press so this runs each time.
+ *   invalidinputevent      a half or garbled read says "Invalid Account Number" instead of nothing
+ *   sendcardtypingevent    {cardTyping:true} on the reader's first character, so the page can say
+ *                          so when no token follows (a refused read posts nothing else)
+ *   swipeonly              kept for what it says; it does nothing next to tokenizewheninactive,
+ *                          which stays because the rate test that replaces it has never been
+ *                          measured against this reader. The portal refuses a token whose
+ *                          `entry` is not "swipe" instead (a card typed by hand into this frame).
  */
-export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach"): string {
+export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach" | "swipe"): string {
   const base = cpConfig(merchant?.env).tokenizerBase;
   if (!base) return "";
   // ⚠️ THREE THINGS HERE ARE FIXES FOR DEFECTS SEEN ON A REAL PHONE (2026-09-02), not
@@ -817,6 +847,18 @@ export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach"): stri
       "cardlabel=" + encodeURIComponent("Routing / account number"),
       "placeholder=" + encodeURIComponent("031201360/0000000000"),
     ]
+    : rail === "swipe"
+    ? [
+      // See the docblock: no cardnumbernumericonly, formatinput, useexpiry, useexpiryfield,
+      // usecvv or invalidcreditcard/expiry/cvv events. Each one loses or garbles a real swipe.
+      ...common,
+      "swipeonly=true",
+      "autofocus=true",
+      "invalidinputevent=true",
+      "sendcardtypingevent=true",
+      "cardlabel=" + encodeURIComponent("Card reader"),
+      "placeholder=" + encodeURIComponent("Swipe the card"),
+    ]
     : [
       ...common,
       "useexpiry=true",
@@ -845,14 +887,20 @@ export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach"): stri
  * non-scrolling frame. A customer could not complete a payment, and nothing errored.
  * Generous on purpose: an over-tall frame is whitespace, an under-tall one is a dead form.
  */
-export function cpTokenizerHeight(rail: "card" | "ach"): number {
+export function cpTokenizerHeight(rail: "card" | "ach" | "swipe"): number {
   // MEASURED at a 283px frame against the live tokenizer, not estimated. With the CSS above
   // — labels inline, month/year sharing one row — the card rail's content is 243px with the
   // CVV's bottom edge at 231. It was 357px before, purely because the first CSS forced the
   // expiry fields onto separate lines and doubled every label gap.
   // Generous by ~20px: an over-tall frame is whitespace, an under-tall one is a form the
   // customer cannot finish, and nothing errors when it happens.
-  return rail === "ach" ? 130 : 265;
+  // The swipe rail is ONE box and no label (itoke draws cardlabel only beside an expiry or CVV
+  // box). MEASURED 2026-10-13 on the UAT iframe with the CSS above: the box spans 5-48px and
+  // the form ends at 60px. It was 130 (ach's): 70px of the frame's own blank page under the box,
+  // and a click there left the frame's focus on its body, where a swipe vanished. The portal now
+  // covers this frame with a click target of its own; the height is kept to the box anyway.
+  if (rail === "swipe") return 64;
+  return rail === "card" ? 265 : 130;
 }
 
 /** The origin the browser must check every postMessage against, and where the pages tokenize a bank
