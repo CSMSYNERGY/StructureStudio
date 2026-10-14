@@ -966,6 +966,23 @@ Deno.test("reconcile: a funding answer in a shape it cannot read is filed ONCE a
   assertEquals(again.trace.errors.filter((e) => e.code === "reconcile_funding_unrecognised"), []);
 });
 
+Deno.test("reconcile: a 200 that is only the gateway's error message is filed WITH that message, and ends the funding pass", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(9))],
+    attempts: ATTEMPTS,
+    gateway: (path) => path === "/funding" ? { errormsg: "No funding data for merchant 100200300400" } : { errormsg: "Invalid date" },
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(fundingDays(r.trace).length, 1, "the first refusal ends the funding pass");
+  const rows = r.trace.errors.filter((e) => e.code === "reconcile_gateway_failed");
+  assertEquals(rows.length, 1, JSON.stringify(r.trace.errors));
+  const failures = (rows[0].context as any).failures.map((f: any) => [f.call, f.kind, f.message]);
+  assertEquals(failures.sort(), [["funding", "answered_error", "No funding data for merchant …0400"], ["settlestat", "answered_error", "Invalid date"]].sort());
+  assertEquals(r.trace.errors.filter((e) => e.code === "reconcile_funding_unrecognised"), []);
+  assertEquals(cursorsWritten(r.trace, ["a1"]), {}, "a refused day is read again, never passed");
+  assertEquals(r.body.updated, []);
+});
+
 Deno.test("reconcile: once the limiter says no, the sweep asks the gateway nothing more", async () => {
   const r = await call({ action: "reconcile" }, {
     payments: [ACH("a1", 41, "rt-a1", daysAgo(8))],

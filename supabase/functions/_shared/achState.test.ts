@@ -23,6 +23,7 @@ import {
   returnTextForBuilder,
   returnTextForCustomer,
   settlementStatuses,
+  gatewayErrorText,
 } from "./achState.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
@@ -318,4 +319,14 @@ Deno.test("settlementStatuses: a return word is never hidden by a later word for
   const m = settlementStatuses([{ txns: [{ retref: "rt-1", setlstat: "Rejected" }] }, { txns: [{ retref: "rt-1", setlstat: "Accepted" }] }]);
   check("rejected stands", m.get("rt-1") === "Rejected", JSON.stringify([...m]));
   for (const a of [null, undefined, "x", 3, [], {}]) check(`answer ${JSON.stringify(a)}`, settlementStatuses(a).size === 0);
+});
+
+Deno.test("gatewayErrorText: an answer that is only the gateway's error message is read, digits masked", () => {
+  check("errormsg", gatewayErrorText({ errormsg: "Invalid date" }) === "Invalid date");
+  check("resptext", gatewayErrorText({ resptext: "Merchant 496160873888 not found" }) === "Merchant …3888 not found");
+  check("capped", (gatewayErrorText({ errormsg: "x".repeat(400) }) ?? "").length === 160);
+  // A data answer, or one that carries more than scalars, is not a refusal.
+  for (const a of [{ txns: [] }, [{ errormsg: "x" }], { errormsg: "x", txns: [] }, { resptext: "x", detail: { a: 1 } }, {}, null, "Invalid date", { errormsg: "  " }, { errormsg: 42 }]) {
+    check(JSON.stringify(a), gatewayErrorText(a) === null);
+  }
 });
