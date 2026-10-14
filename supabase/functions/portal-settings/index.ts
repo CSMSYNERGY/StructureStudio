@@ -383,6 +383,7 @@ const GATES: GateTable = {
 
   // ── CRM ──────────────────────────────────────────────────────────────────
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
+  disconnect_ghl:      { area: "settings_crm", level: "edit" },
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
 
   // ── Sales tax (migrations 244-245) ───────────────────────────────────────
@@ -3319,6 +3320,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // pipeline/stage dropdowns. Uses the STORED creds (the browser never holds the
   // API key), so it only works once the connection is saved. Owner/admin only
   // (settings config) — deliberately NOT in READ_ACTIONS. Never returns the key.
+  // Disconnect the CRM (Carolyn 2026-10-14: "There is also no feature to simply disconnect
+  // GHL"). Until now the only way out was a hand edit: the key is write-only and an empty
+  // save deliberately never blanks it. This clears the credential AND the pipeline/stage
+  // mapping (a mapping with no location behind it would resurface wrong on the next
+  // connect), and moves quotes to Structure Studio paperwork — with no CRM, invoice_in_ghl
+  // = true is a state submit-estimate refuses outright ("isn't set up to send quotes yet").
+  // The browser's confirm dialog says all three of those before the click lands.
+  // Idempotent: a second call on an already-disconnected tenant is an ok, not an error.
+  if (action === "disconnect_ghl") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("ghl_location_id, ghl_api_key, invoice_in_ghl")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
+    const wasConnected = Boolean(cur?.ghl_location_id && cur?.ghl_api_key);
+    const movedToSs = cur ? cur.invoice_in_ghl !== false : false;
+    const { error: upErr } = await admin.from("client_settings").upsert({
+      client_id: clientId,
+      ghl_api_key: null, ghl_location_id: null, ghl_pipeline_id: null,
+      ghl_stage_send_quote_id: null, ghl_stage_accepted_id: null, ghl_stage_invoiced_id: null, ghl_stage_delivered_id: null,
+      invoice_in_ghl: false,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (upErr) return dbFail(req, clientId, "disconnect your CRM", upErr);
+    return json({ ok: true, wasConnected, movedToSs });
+  }
+
   if (action === "list_ghl_pipelines") {
     const { data: cur, error: curErr } = await admin
       .from("client_settings")
