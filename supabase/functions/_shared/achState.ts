@@ -1,10 +1,12 @@
 // _shared/achState.ts — what a bank payment's gateway status MEANS to us, and what we tell
 // the customer when it comes back.
 //
-// PURE on purpose. The UAT emulator only ever walks an ACH to "Accepted" — it will not
-// produce a return — so this module is the permanent, reproducible evidence that the
-// returned path is handled at all. It runs in the pre-push gate on every push, which a
-// one-time screenshot never would.
+// PURE on purpose. It runs in the pre-push gate on every push, which a one-time screenshot
+// never would. This header used to say the UAT emulator only ever walks an ACH to "Accepted";
+// Fiserv (CardPointe integrations), 2026-10-14, says the opposite: EVERY UAT bank payment comes
+// back R03, and the return shows in the FUNDING data, not in settlestat. achReturnFromFunding
+// below is the reader for that answer, and the tests are still the evidence for every shape we
+// have not yet seen live.
 //
 // THE RULE EVERYTHING HERE SERVES: a bank payment is not money until it funds. `pending`
 // counts toward NOTHING. Showing a customer "paid" on the day they submit, then discovering
@@ -91,11 +93,136 @@ export function returnIsRetryable(code: unknown): boolean {
  * problem, not an un-sale, and releasing a unit is a separate audited act.
  */
 export function returnedPaymentPatch(code: unknown, nowIso: string) {
+  // ONLY A NACHA CODE IS STORED (2026-10-14). Reconcile used to hand this the settlestat status
+  // word, so return_code read "REJECTED" and the builder's reason "Bank transfer returned
+  // (REJECTED)". A word that is not an R-code is no code: return_code NULL and the generic reason.
+  const c = achReturnCode(code);
   return {
     funding_state: "returned" as const,
     funding_updated_at: nowIso,
-    return_code: String(code ?? "").trim().toUpperCase() || null,
+    return_code: c,
     voided_at: nowIso,
-    void_reason: returnTextForBuilder(code),
+    void_reason: returnTextForBuilder(c),
   };
+}
+
+/** A NACHA return code ("R" and two digits, e.g. "R03"), upper-cased, or null for anything else. */
+export function achReturnCode(v: unknown): string | null {
+  const c = String(v ?? "").trim().toUpperCase();
+  return /^R[0-9]{2}$/.test(c) ? c : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Reading a return out of the /funding answer.
+//
+// Fiserv (CardPointe integrations), 2026-10-14: every UAT bank payment returns R03 and the return
+// is visible in the FUNDING data. She did not say which list or field holds it, and no funding
+// answer has been seen live, so this reader is deliberately NARROW: it calls something a return
+// only when ONE object carries BOTH this payment's exact retref AND an R-code, in a field whose
+// name says return, reason or code. A code on another object, a retref with no code, and a code-
+// like value that is not R plus two digits are all "not a return", and a bank payment stays
+// pending rather than being un-paid on a guess. fundingAnswerShape is how we learn the real shape
+// without logging a value.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** How far the walk goes. A funding day is a few lists of a few hundred rows; anything deeper or
+ *  bigger than this is not an answer we read. */
+const FUNDING_WALK_MAX_DEPTH = 8;
+const FUNDING_WALK_MAX_NODES = 20000;
+
+type Walked = { obj: Record<string, unknown>; path: string };
+
+/** Every plain object in the answer, with its key path ("txns[]", "fundings[].detail"). */
+function fundingObjects(answer: unknown): Walked[] {
+  const out: Walked[] = [];
+  const stack: { v: unknown; path: string; depth: number }[] = [{ v: answer, path: "", depth: 0 }];
+  let nodes = 0;
+  while (stack.length && nodes < FUNDING_WALK_MAX_NODES) {
+    const { v, path, depth } = stack.pop()!;
+    nodes++;
+    if (!v || typeof v !== "object" || depth > FUNDING_WALK_MAX_DEPTH) continue;
+    if (Array.isArray(v)) {
+      for (let i = v.length - 1; i >= 0; i--) stack.push({ v: v[i], path: `${path}[]`, depth: depth + 1 });
+      continue;
+    }
+    const obj = v as Record<string, unknown>;
+    out.push({ obj, path });
+    const keys = Object.keys(obj);
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const child = obj[keys[i]];
+      if (child && typeof child === "object") {
+        stack.push({ v: child, path: path ? `${path}.${keyLabel(keys[i])}` : keyLabel(keys[i]), depth: depth + 1 });
+      }
+    }
+  }
+  return out;
+}
+
+/** A key as it may appear in a log: digit runs masked (a key could itself be a reference or an
+ *  account number), capped. Never a value. */
+function keyLabel(k: string): string {
+  return k.replace(/[^\w.-]/g, "_").replace(/[0-9]{4,}/g, "#").slice(0, 40);
+}
+
+/** The text of a scalar, for comparing; objects and arrays have none. */
+function scalarText(v: unknown): string | null {
+  return typeof v === "string" || typeof v === "number" ? String(v).trim() : null;
+}
+
+/**
+ * The NACHA return code /funding reports for THIS payment, or null.
+ *
+ * A return only when one object holds BOTH a field whose name contains "retref" equal to this
+ * payment's retref exactly, AND a field whose name mentions return, reason or code holding a value
+ * that is exactly R plus two digits. Anything else is not a return. Never throws.
+ */
+export function achReturnFromFunding(answer: unknown, retref: unknown): string | null {
+  const want = scalarText(retref);
+  if (!want) return null;
+  for (const { obj } of fundingObjects(answer)) {
+    const keys = Object.keys(obj);
+    const ours = keys.some((k) => /retref/i.test(k) && scalarText(obj[k]) === want);
+    if (!ours) continue;
+    for (const k of keys) {
+      if (!/return|reason|code/i.test(k)) continue;
+      const v = scalarText(obj[k]);
+      if (v && /^R[0-9]{2}$/.test(v)) return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether achReturnFromFunding can read this answer at all, and its key paths for a log line.
+ *
+ * Recognised: an answer that carries retrefs (some object has a `retref`-named field holding a
+ * value), or one with nothing in it (an empty list, or an object whose lists are all empty: a day
+ * with nothing funded). Anything else (a bare string, an object of scalars only, lists of rows with
+ * no retref anywhere) is a shape we do not know, and `keyPaths` says what it looked like: key names
+ * and nesting only, never a value, digit runs masked, capped at 60 paths.
+ */
+export function fundingAnswerShape(answer: unknown): { recognised: boolean; keyPaths: string[] } {
+  if (!answer || typeof answer !== "object") {
+    return { recognised: false, keyPaths: [`(${answer === null ? "null" : typeof answer})`] };
+  }
+  const walked = fundingObjects(answer);
+  const paths = new Set<string>();
+  let hasRetref = false;
+  // A list anywhere, and whether any list has something in it. A day with nothing funded is lists
+  // that are all empty; an object with no list at all (a bare error sentence) is not that.
+  let hasLists = Array.isArray(answer);
+  let hasRows = Array.isArray(answer) && answer.length > 0;
+  for (const { obj, path } of walked) {
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (/retref/i.test(k) && scalarText(v)) hasRetref = true;
+      if (Array.isArray(v)) {
+        hasLists = true;
+        if (v.length > 0) hasRows = true;
+      }
+      if (paths.size < 60) paths.add((path ? `${path}.${keyLabel(k)}` : keyLabel(k)).slice(0, 120));
+    }
+  }
+  const empty = !hasRows && (hasLists || walked.every(({ obj }) => Object.keys(obj).length === 0));
+  return { recognised: hasRetref || empty, keyPaths: [...paths] };
 }

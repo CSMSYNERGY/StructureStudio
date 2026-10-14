@@ -21,8 +21,19 @@
 //      another tenant is no merchant of record.
 //   6. The billing fields on the shipped handler (phase 1): pay_options hands billingPrefill to a
 //      member who can take the card and to nobody else; a keyed `charge` sends the typed name,
-//      street and ZIP with ecomind "E"; a swipe sends no ecomind; a page that sends nothing gets
-//      the auth it always got.
+//      street and ZIP with ecomind "T" (a builder keyed it: Fiserv (CardPointe integrations),
+//      2026-10-14), read back as entry_mode "Moto"; a swipe sends no ecomind; a page that sends
+//      nothing gets its contact's name and, since 2026-10-14, T as well.
+//   7. Fiserv's 2026-10-14 answers on the handler (one change set, 2026-10-14):
+//      a. a BANK payment is never a swipe, on charge and charge_adhoc alike: ecomind E, never Swipe;
+//      b. `newCardNeeded: true` on a failure that reached /auth and did not stand (a decline, a voided
+//         partial), and on nothing refused before it or blocked;
+//      c. a pending bank payment cannot be refunded; a same-day void still goes to the gateway, and a
+//         void it refuses does not tell the page to refund instead;
+//      d. reconcile reads /funding for pending bank payments (newest first, at most 8 calls), books
+//         an R-code as return_code, files a return on the test system as info, never stores a
+//         settlestat word as the code, files its gateway failures and an unknown funding shape once
+//         per sweep (no bodies, no values), and only counts a row its guarded UPDATE handed back.
 //
 // HOW. deleteDesignWiring_test's idiom: Deno.serve is stubbed while portal-payments/index.ts is
 // imported, and the import map swaps supabase-js for supabase_stub.ts, whose stubDb hook routes every
@@ -88,6 +99,12 @@ type World = {
   priorErrors?: Record<string, unknown>[];
   /** The gateway's answer per path ("/void", "/refund", "/settlestat"): a body, or a status. */
   gateway?: (path: string, body: any, url: URL) => unknown;
+  /** Declines this member made in the last hour (the charge throttle's count). */
+  declines?: number;
+  /** Payment ids whose guarded UPDATE matches no row (voided or refunded since the read). */
+  updateMisses?: string[];
+  /** Payment ids whose UPDATE fails outright. */
+  updateFails?: string[];
 };
 type Trace = {
   gateway: { path: string; body: any; url: URL }[];
@@ -126,6 +143,8 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
       };
     }
     case "orders":
+      // charge_adhoc's counter sale.
+      if (verb === "insert") { trace.writes.push({ table, verb, row: argOf(ops, verb)[0] }); return { data: { id: "o-adhoc" }, error: null }; }
       return { data: world.order && world.order.id === eqOf(ops, "id") ? { ...world.order } : null, error: null };
     case "designs":
       // The charge path reads the contact; readOrderMoney reads the lines (none: the order total stands).
@@ -141,6 +160,8 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
         trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });
         return { data: verb === "insert" ? { id: 501 } : null, error: null };
       }
+      // The decline throttle's head count.
+      if ((argOf(ops, "select")[1] as any)?.count) return { data: null, count: world.declines ?? 0, error: null };
       const ids = argOf(ops, "in")[1];
       if (ids) {
         if (world.attemptsFail) return { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } };
@@ -157,9 +178,12 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     }
     case "payments": {
       if (verb) {
+        const id = eqOf(ops, "id");
+        if (verb === "update" && (world.updateFails ?? []).includes(id)) return { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } };
+        if (verb === "update" && (world.updateMisses ?? []).includes(id)) return { data: [], error: null };
         trace.writes.push({ table, verb, row: argOf(ops, verb)[0] });
         if (verb === "insert") return { data: { id: "pay-new" }, error: null };
-        return { data: has(ops, "select") ? [{ id: eqOf(ops, "id") }] : null, error: null };
+        return { data: has(ops, "select") ? [{ id }] : null, error: null };
       }
       const all = world.payments ?? [];
       const id = eqOf(ops, "id");
@@ -205,6 +229,8 @@ async function call(body: Record<string, unknown>, world: World) {
     const sent = init?.body ? JSON.parse(String(init.body)) : null;
     trace.gateway.push({ path, body: sent, url });
     const out = world.gateway ? world.gateway(path, sent, url) : { respstat: "A", respcode: "00", retref: "rf-1" };
+    // A Response is sent as it is (a 429 with the limiter's header); a number is a bare status.
+    if (out instanceof Response) return Promise.resolve(out);
     return Promise.resolve(typeof out === "number" ? new Response("", { status: out }) : new Response(JSON.stringify(out), { status: 200 }));
   }) as typeof fetch;
   try {
@@ -344,11 +370,20 @@ Deno.test("reconcile asks settlestat once per (merchant, day), each on the MID t
     },
   });
   assertEquals(r.status, 200, JSON.stringify(r.body));
-  const asked = r.trace.gateway.map((g) => `${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort();
+  const asked = r.trace.gateway.filter((g) => g.path === "/settlestat")
+    .map((g) => `${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort();
   assertEquals(asked, [`/settlestat ${OLD_MID} 20261001`, `/settlestat ${NEW_MID} 20261001`].sort());
   const moved = Object.fromEntries((r.body.updated as any[]).map((u) => [u.paymentId, u.to]));
   assertEquals(moved, { a1: "settled", a2: "settled", a3: "returned" });
   assertEquals(r.body.daysChecked, ["20261001"]);
+  // /funding is asked on the payments' own MIDs too, and never the current one or the default.
+  for (const g of r.trace.gateway) assert([OLD_MID, NEW_MID].includes(String(g.url.searchParams.get("merchid"))), g.url.href);
+  // A settlestat "Rejected" is a status WORD: the return is booked with no code, never "REJECTED".
+  const ret = r.trace.writes.find((w) => w.table === "payments" && w.verb === "update" && w.row.funding_state === "returned");
+  assertEquals(ret?.row.return_code, null);
+  // A return on the TEST system is expected (every UAT bank payment comes back R03): info, not a fault.
+  const filed = r.trace.errors.filter((e) => e.code === "ach_returned");
+  assertEquals(filed.map((e) => e.severity), ["info"]);
 });
 
 Deno.test("reconcile skips (and logs) a pending bank payment with no merchant of record — never the current MID", async () => {
@@ -358,9 +393,13 @@ Deno.test("reconcile skips (and logs) a pending bank payment with no merchant of
     gateway: () => ({ txns: [{ retref: "rt-a1", setlstat: "Accepted" }, { retref: "rt-orphan", setlstat: "Accepted" }] }),
   });
   assertEquals(r.status, 200, JSON.stringify(r.body));
-  const mids = r.trace.gateway.map((g) => g.url.searchParams.get("merchid"));
+  const mids = [...new Set(r.trace.gateway.map((g) => g.url.searchParams.get("merchid")))];
   assertEquals(mids, [OLD_MID], "only the payment with a merchant of record is asked about");
-  assertEquals(r.trace.gateway[0].url.searchParams.get("date"), "20261001", "the orphan's day is never fetched");
+  const settle = r.trace.gateway.filter((g) => g.path === "/settlestat");
+  assertEquals(settle.map((g) => g.url.searchParams.get("date")), ["20261001"], "the orphan's day is never fetched");
+  // The funding pass starts at a1's own sale day; the orphan (received the day after) spends nothing.
+  const funding = r.trace.gateway.filter((g) => g.path === "/funding").map((g) => g.url.searchParams.get("date"));
+  assertEquals(funding[0], "20261001");
   assertEquals((r.body.updated as any[]).map((u) => u.paymentId), ["a1"]);
   assert(faultCodes(r.trace).includes("payment_no_merchant_of_record"), JSON.stringify(r.trace.errors));
 });
@@ -440,21 +479,23 @@ Deno.test("pay_options: NO billingPrefill for an orders:view member or an operat
   }
 });
 
-Deno.test("charge, keyed: the typed name, street and ZIP reach /auth with ecomind E, and the attempt records the names", async () => {
+Deno.test("charge, keyed: the typed name, street and ZIP reach /auth with ecomind T, and the attempt records the names", async () => {
+  // Fiserv (CardPointe integrations), 2026-10-14: a card the builder keys is T, not E.
   const r = await call({
     action: "charge", orderId: "o-1", payToken: "9413948780281111", entry: "keyed", confirmChargeCents: 100000,
     name: " Card Holder ", address: "9 Elm Rd", postal: "54321-0001",
   }, { order: ORDER, contact: CONTACT, gateway: APPROVED });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const b = authBody(r.trace);
-  assertEquals([b.name, b.address, b.postal, b.ecomind, b.merchid], ["Card Holder", "9 Elm Rd", "543210001", "E", NEW_MID]);
+  assertEquals([b.name, b.address, b.postal, b.ecomind, b.merchid], ["Card Holder", "9 Elm Rd", "543210001", "T", NEW_MID]);
   for (const k of ["cvv2", "profile", "cof", "cofscheduled", "track"]) assert(!(k in b), `${k} sent`);
   const att = attemptInsert(r.trace);
-  assertEquals(att.ecomind, "E");
+  assertEquals(att.ecomind, "T");
   assertEquals(att.sent_fields, Object.keys(b).sort(), "sent_fields are the keys /auth was sent");
   for (const k of ["address", "name", "postal"]) assert(att.sent_fields.includes(k), String(att.sent_fields));
   const pay = r.trace.writes.find((w) => w.table === "payments" && w.verb === "insert");
-  assertEquals(pay?.row.entry_mode, "ECommerce");
+  // The gateway gave no entrymode: what we sent, a mail/telephone order.
+  assertEquals(pay?.row.entry_mode, "Moto");
 });
 
 Deno.test("charge, swipe: NO ecomind on /auth (R is recurring), recorded as none, entry_mode Swipe", async () => {
@@ -475,11 +516,258 @@ Deno.test("charge, swipe: NO ecomind on /auth (R is recurring), recorded as none
   assertEquals(pay?.row.entry_mode, "Swipe");
 });
 
-Deno.test("charge from production's page (no billing fields): the auth it always got, contact name and ecomind E", async () => {
+Deno.test("charge from production's page (no billing fields, no entry): the contact's name, and T, since it is still a builder keying", async () => {
+  // It used to get E, the silent default. A page that sends no `entry` is a builder keying a card all
+  // the same, so it gets the same T as the new page (ecomindFor).
   const r = await call({ action: "charge", orderId: "o-1", payToken: "9413948780281111", confirmChargeCents: 100000 }, {
     order: ORDER, contact: CONTACT, gateway: APPROVED,
   });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const b = authBody(r.trace);
-  assertEquals([b.name, b.ecomind, "address" in b, "postal" in b], ["Pat Example", "E", false, false]);
+  assertEquals([b.name, b.ecomind, "address" in b, "postal" in b], ["Pat Example", "T", false, false]);
+});
+
+// ─── 7a. A bank payment is never a swipe; charge_adhoc keys T too ─────────────────────────────
+const ADHOC = { action: "charge_adhoc", amountCents: 5000, confirmChargeCents: 5000, payToken: "9413948780281111" };
+const APPROVED_50 = (path: string) =>
+  path === "/auth" ? { respstat: "A", respcode: "000", retref: "rt-adhoc", amount: "50.00", token: "9413948780281111" } : APPROVED(path);
+
+Deno.test("charge_adhoc, keyed: T on the wire, T on the attempt, Moto on the payment", async () => {
+  const r = await call({ ...ADHOC, entry: "keyed", name: "Walk In" }, { gateway: APPROVED_50 });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(authBody(r.trace).ecomind, "T");
+  assertEquals(attemptInsert(r.trace).ecomind, "T");
+  const pay = r.trace.writes.find((w) => w.table === "payments" && w.verb === "insert");
+  assertEquals(pay?.row.entry_mode, "Moto");
+});
+
+Deno.test("Card > Swipe > Bank: a BANK payment posted with entry 'swipe' sends ecomind E and is never labelled Swipe", async () => {
+  // The modal never reset `entry` when the method changed. charge and charge_adhoc both honour the
+  // swipe flag only on a card now, and invoicePayment ignores it on a bank payment as well.
+  const onOrder = await call({ action: "charge", orderId: "o-1", rail: "ach", payToken: "9413948780281111", entry: "swipe", confirmChargeCents: 100000 }, {
+    order: ORDER, contact: CONTACT, gateway: APPROVED,
+  });
+  const counter = await call({ ...ADHOC, rail: "ach", entry: "swipe", name: "Walk In" }, { gateway: APPROVED_50 });
+  for (const [label, r] of [["charge", onOrder], ["charge_adhoc", counter]] as const) {
+    assertEquals(r.status, 200, `${label}: ${JSON.stringify(r.body)}`);
+    const b = authBody(r.trace);
+    assertEquals([b.accttype, b.ecomind], ["ECHK", "E"], `${label}: ${JSON.stringify(b)}`);
+    assertEquals(attemptInsert(r.trace).ecomind, "E", label);
+    const pay = r.trace.writes.find((w) => w.table === "payments" && w.verb === "insert");
+    assertEquals(pay?.row.entry_mode, "ECommerce", label);
+    assertEquals(pay?.row.funding_state, "pending", label);
+  }
+});
+
+// ─── 7b. newCardNeeded: only a failure that reached /auth and did not stand ───────────────────
+const DECLINED = (path: string) => path === "/auth" ? { respstat: "C", respcode: "05", resptext: "Do not honor" } : APPROVED(path);
+const PARTIAL = (path: string) =>
+  path === "/auth" ? { respstat: "A", respcode: "000", retref: "rt-part", amount: "400.00" } : { respstat: "A", respcode: "00", retref: "rt-part" };
+const CHARGE = { action: "charge", orderId: "o-1", payToken: "9413948780281111", entry: "keyed", confirmChargeCents: 100000 };
+
+Deno.test("newCardNeeded: a decline and a voided partial carry it, on charge and charge_adhoc", async () => {
+  const decline = await call(CHARGE, { order: ORDER, contact: CONTACT, gateway: DECLINED });
+  assertEquals(decline.status, 402, JSON.stringify(decline.body));
+  assertEquals(decline.body, { error: "Do not honor", blocking: false, newCardNeeded: true });
+
+  const partial = await call(CHARGE, { order: ORDER, contact: CONTACT, gateway: PARTIAL });
+  assertEquals(partial.status, 402, JSON.stringify(partial.body));
+  assertEquals(partial.body.newCardNeeded, true);
+  assertEquals(partial.trace.gateway.map((g) => g.path), ["/auth", "/void"]);
+  // The builder reads about the card and the cardholder, and is promised no release of the hold.
+  assert(/^The card only approved \$400\.00 of \$1000\.00/.test(partial.body.error), partial.body.error);
+  assert(!/your card|released/i.test(partial.body.error), partial.body.error);
+
+  const adhoc = await call({ ...ADHOC, entry: "keyed" }, { gateway: DECLINED });
+  assertEquals(adhoc.status, 402, JSON.stringify(adhoc.body));
+  // The counter sale's order stays (nothing was collected on it), and the modal is told to re-key.
+  assertEquals([adhoc.body.newCardNeeded, adhoc.body.orderId], [true, "o-adhoc"]);
+});
+
+Deno.test("newCardNeeded: never on a refusal before /auth, nor on an unknown (a blocked order)", async () => {
+  // The amount changed: refused before the card is touched.
+  const amount = await call({ ...CHARGE, confirmChargeCents: 99999 }, { order: ORDER, contact: CONTACT, gateway: DECLINED });
+  assertEquals(amount.status, 400, JSON.stringify(amount.body));
+  // Five declines this hour: the throttle refuses before /auth.
+  const throttled = await call(CHARGE, { order: ORDER, contact: CONTACT, gateway: DECLINED, declines: 5 });
+  assertEquals(throttled.status, 429, JSON.stringify(throttled.body));
+  // The gateway fell over: we do not know whether the card was charged, so the order is blocked.
+  const unknown = await call(CHARGE, { order: ORDER, contact: CONTACT, gateway: (p) => p === "/auth" ? 502 : APPROVED(p) });
+  assertEquals(unknown.status, 409, JSON.stringify(unknown.body));
+  assertEquals(unknown.body.blocking, true);
+  for (const r of [amount, throttled, unknown]) {
+    assert(!("newCardNeeded" in r.body), JSON.stringify(r.body));
+  }
+  assertEquals(amount.trace.gateway, [], "nothing reached the gateway");
+  assertEquals(throttled.trace.gateway, [], "nothing reached the gateway");
+});
+
+// ─── 7c. A pending bank payment: no refund, a void still tried ────────────────────────────────
+const PENDING_ACH: Pay = { ...CARD, id: "p-ach", gateway_txn_id: "rt-ach", method: "ach", funding_state: "pending" };
+
+Deno.test("refund_payment on a bank payment still clearing: refused with the clearing sentence, nothing sent, nothing written", async () => {
+  const r = await call({ action: "refund_payment", paymentId: "p-ach" }, { payments: [PENDING_ACH], attempts: ATTEMPTS });
+  assertEquals(r.status, 409, JSON.stringify(r.body));
+  assertEquals(r.body, { error: "This bank payment is still clearing. It can be refunded once it clears.", reason: "ach_pending" });
+  assertEquals(r.trace.gateway, [], "the gateway is never asked");
+  assertEquals(r.trace.writes.filter((w) => w.table === "payments"), [], "nothing is marked refunded");
+  // A bank payment that has CLEARED refunds as before, and so does a card.
+  const cleared = await call({ action: "refund_payment", paymentId: "p-ach" }, { payments: [{ ...PENDING_ACH, funding_state: "settled" }], attempts: ATTEMPTS });
+  assertEquals(cleared.status, 200, JSON.stringify(cleared.body));
+  assertEquals(cleared.trace.gateway.map((g) => g.path), ["/refund"]);
+});
+
+Deno.test("void_payment on a bank payment still clearing still goes to the gateway; a void it refuses never says 'refund it instead'", async () => {
+  const ok = await call({ action: "void_payment", paymentId: "p-ach" }, { payments: [PENDING_ACH], attempts: ATTEMPTS });
+  assertEquals(ok.status, 200, JSON.stringify(ok.body));
+  assertEquals(ok.trace.gateway.map((g) => g.path), ["/void"]);
+  assertEquals(ok.body, { ok: true, voided: true });
+  // Past the void window: the portal chains to refund_payment on `settled: true`, and that refund
+  // would be refused, so the answer carries the clearing sentence instead.
+  const late = await call({ action: "void_payment", paymentId: "p-ach" }, {
+    payments: [PENDING_ACH], attempts: ATTEMPTS, gateway: () => ({ respstat: "C", respcode: "00", resptext: "Txn not voidable" }),
+  });
+  assertEquals(late.status, 409, JSON.stringify(late.body));
+  assertEquals(late.body, { error: "This bank payment is still clearing. It can be refunded once it clears.", reason: "ach_pending" });
+  assertEquals(late.trace.writes.filter((w) => w.table === "payments"), []);
+  // A CARD the gateway will not void still says settled, as it always did.
+  const card = await call({ action: "void_payment", paymentId: "p-card" }, {
+    payments: [CARD], attempts: ATTEMPTS, gateway: () => ({ respstat: "C", respcode: "00", resptext: "Txn not voidable" }),
+  });
+  assertEquals(card.status, 409, JSON.stringify(card.body));
+  assertEquals(card.body.settled, true);
+});
+
+// ─── 7d. reconcile reads /funding ─────────────────────────────────────────────────────────────
+/** A UTC day `n` days before today, as YYYY-MM-DD. */
+const daysAgo = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+const ymd = (iso: string) => iso.replace(/-/g, "");
+/** The funding answer for a day that carries this retref's R03: an INVENTED shape (none seen live). */
+const FUNDED_R03 = (retref: string) => ({ fundingdate: "x", txns: [{ retref: "100200300999", type: "SALE" }, { retref, type: "RETURN", returncode: "R03" }] });
+
+Deno.test("reconcile: an R03 in the funding data returns the payment with return_code R03, before settlestat can settle it", async () => {
+  const p = ACH("a1", 41, "rt-a1", daysAgo(2));
+  const r = await call({ action: "reconcile" }, {
+    payments: [p],
+    attempts: ATTEMPTS,
+    // settlestat would call it settled; the funding data says it came back.
+    gateway: (path, _b, url) =>
+      path === "/funding"
+        ? (url.searchParams.get("date") === ymd(daysAgo(1)) ? FUNDED_R03("rt-a1") : { txns: [] })
+        : { txns: [{ retref: "rt-a1", setlstat: "Accepted" }] },
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body.updated, [{ paymentId: "a1", to: "returned", returnCode: "R03" }]);
+  const writes = r.trace.writes.filter((w) => w.table === "payments" && w.verb === "update");
+  assertEquals(writes.length, 1, "returned once, never then settled");
+  assertEquals([writes[0].row.funding_state, writes[0].row.return_code], ["returned", "R03"]);
+  assert(String(writes[0].row.void_reason).includes("R03"), String(writes[0].row.void_reason));
+  // The funding days asked: the sale day to today, on the payment's own MID, YYYYMMDD.
+  const asked = r.trace.gateway.filter((g) => g.path === "/funding");
+  assertEquals(asked.map((g) => g.url.searchParams.get("date")), [daysAgo(2), daysAgo(1), daysAgo(0)].map(ymd));
+  for (const g of asked) assertEquals(g.url.searchParams.get("merchid"), OLD_MID);
+  assertEquals(r.body.fundingChecked, 3);
+  // A UAT return is info; nothing else was filed, and nothing was emailed (no other fetch exists).
+  const filed = r.trace.errors.filter((e) => e.code === "ach_returned");
+  assertEquals(filed.map((e) => [e.severity, (e.context as any).returnCode]), [["info", "R03"]]);
+  assertEquals(r.trace.errors.filter((e) => e.code !== "ach_returned"), []);
+});
+
+Deno.test("reconcile: at most 8 funding calls a sweep, NEWEST payment first, the rest left for later", async () => {
+  const fresh = ACH("new", 41, "rt-new", daysAgo(0));
+  const old = ACH("old", 42, "rt-old", daysAgo(20));
+  const r = await call({ action: "reconcile" }, { payments: [old, fresh], attempts: ATTEMPTS, gateway: () => ({ txns: [] }) });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const days = r.trace.gateway.filter((g) => g.path === "/funding").map((g) => g.url.searchParams.get("date"));
+  assertEquals(days.length, 8);
+  // Today's payment first (its one day), then the old one from ITS sale day forward.
+  assertEquals(days[0], ymd(daysAgo(0)));
+  assertEquals(days.slice(1), Array.from({ length: 7 }, (_, i) => ymd(daysAgo(20 - i))));
+  assertEquals(r.body.fundingChecked, 8);
+  assert(r.body.fundingSkipped > 0, JSON.stringify(r.body));
+  assertEquals(r.body.updated, [], "an empty day returns nothing");
+});
+
+Deno.test("reconcile: a return found for a payment voided since the read is NOT counted (the guarded UPDATE handed nothing back)", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(1))],
+    attempts: ATTEMPTS,
+    updateMisses: ["a1"],
+    gateway: (path) => path === "/funding" ? FUNDED_R03("rt-a1") : { txns: [{ retref: "rt-a1", setlstat: "Accepted" }] },
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body.updated, [], JSON.stringify(r.body.updated));
+  assertEquals(r.trace.errors.filter((e) => e.code === "ach_returned"), [], "no return is filed for a row that did not move");
+});
+
+Deno.test("reconcile: the settlestat pass is guarded too: still pending, still not voided, counted only when the row comes back", async () => {
+  const p = ACH("a1", 41, "rt-a1", "2026-10-01");
+  const settle = (path: string) => path === "/settlestat" ? { txns: [{ retref: "rt-a1", setlstat: "Accepted" }] } : { txns: [] };
+  const missed = await call({ action: "reconcile" }, { payments: [p], attempts: ATTEMPTS, updateMisses: ["a1"], gateway: settle });
+  assertEquals(missed.body.updated, [], "a row voided since the read is not reported as moved");
+  // A write that FAILS is filed once, as a fault, and is not reported as moved either.
+  const failed = await call({ action: "reconcile" }, { payments: [p], attempts: ATTEMPTS, updateFails: ["a1"], gateway: settle });
+  assertEquals(failed.body.updated, []);
+  const rows = failed.trace.errors.filter((e) => e.code === "reconcile_write_failed");
+  assertEquals(rows.length, 1, JSON.stringify(failed.trace.errors));
+  assertEquals(rows[0].severity, "error");
+  assertEquals((rows[0].context as any).failures, [{ paymentId: "a1", pgCode: "57014" }]);
+  // And the guard is on the UPDATE itself (the fake answers what PostgREST would; the row moved here).
+  const ok = await call({ action: "reconcile" }, { payments: [p], attempts: ATTEMPTS, gateway: settle });
+  assertEquals(ok.body.updated, [{ paymentId: "a1", to: "settled" }]);
+});
+
+Deno.test("reconcile: gateway failures are filed ONCE a sweep, at info, with the MID's last four and the class only, never a body", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(1)), ACH("a3", 43, "rt-a3", daysAgo(1))],
+    attempts: ATTEMPTS,
+    // settlestat refuses the date with a body; funding falls over.
+    gateway: (path) => path === "/settlestat" ? 400 : 500,
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const rows = r.trace.errors.filter((e) => e.code === "reconcile_gateway_failed");
+  assertEquals(rows.length, 1, JSON.stringify(r.trace.errors));
+  assertEquals(rows[0].severity, "info");
+  const failures = (rows[0].context as any).failures as Record<string, string>[];
+  const settle = failures.filter((f) => f.call === "settlestat");
+  assertEquals(settle.map((f) => [f.merchant, f.kind]).sort(), [["…" + OLD_MID.slice(-4), "config"], ["…" + NEW_MID.slice(-4), "config"]].sort());
+  assert(failures.some((f) => f.call === "funding" && f.kind === "unknown"), JSON.stringify(failures));
+  const text = JSON.stringify(rows[0]);
+  for (const mid of [OLD_MID, NEW_MID]) assert(!text.includes(mid), `a whole MID was filed: ${text}`);
+  assertEquals(r.body.updated, []);
+});
+
+Deno.test("reconcile: a funding answer in a shape it cannot read is filed ONCE a sweep, key paths only, and moves nothing", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(2))],
+    attempts: ATTEMPTS,
+    gateway: (path) => path === "/funding"
+      ? { resptext: "Invalid date rt-a1", detail: { acct: "9876543210", code: "R03" } }
+      : { txns: [] },
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const rows = r.trace.errors.filter((e) => e.code === "reconcile_funding_unrecognised");
+  assertEquals(rows.length, 1, JSON.stringify(r.trace.errors));
+  assertEquals(rows[0].severity, "info");
+  const ctx = rows[0].context as any;
+  assertEquals([...ctx.keyPaths].sort(), ["detail", "detail.acct", "detail.code", "resptext"]);
+  assertEquals(ctx.answers.length, 3, "one entry per day read, in the one row");
+  const text = JSON.stringify(rows[0]);
+  for (const v of ["Invalid date", "9876543210", "R03", "rt-a1"]) assert(!text.includes(v), `${v} was filed: ${text}`);
+  assertEquals(r.body.updated, [], "a code on an object without this retref is not a return");
+});
+
+Deno.test("reconcile: once the limiter says no, the sweep asks the gateway nothing more", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(5))],
+    attempts: ATTEMPTS,
+    gateway: () => new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "X-Rate-Limit-Retry-After-Seconds": "30" } }),
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.trace.gateway.length, 1, r.trace.gateway.map((g) => g.path).join(","));
+  assertEquals(r.body.fundingChecked, 1);
+  assert(r.body.fundingSkipped >= 5 && r.body.daysSkipped === 1, JSON.stringify(r.body));
+  const rows = r.trace.errors.filter((e) => e.code === "reconcile_gateway_failed");
+  assertEquals(rows.length, 1);
+  assertEquals((rows[0].context as any).failures.map((f: any) => [f.call, f.kind]), [["funding", "throttled"]]);
 });

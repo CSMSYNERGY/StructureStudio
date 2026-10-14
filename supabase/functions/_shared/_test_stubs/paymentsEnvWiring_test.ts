@@ -15,7 +15,8 @@
 //     4. a charge goes to the builder's system, and its attempt records cp_env;
 //     5. void and refund go to the system the charge was TAKEN on (cp_env, NULL = uat), whatever the
 //        builder is on now; reconcile asks settlestat once per (system, merchant, day), and never for
-//        a system with no credentials;
+//        a system with no credentials (nor /funding, since 2026-10-14); a return on the test system
+//        files as info, on live as a fault;
 //     6. a database WITHOUT 296 (no cardpointe_env, no cp_env): charges still go through, on UAT,
 //        which is what every charge was before it;
 //     7. neither system configured: every action refused as it always was.
@@ -406,13 +407,23 @@ Deno.test("5c. reconcile asks settlestat once per (system, merchant, day), and n
   };
   const both = await payments({ action: "reconcile" }, world, { live: true });
   assertEquals(both.status, 200, both.text);
-  assertEquals(both.trace.gateway.map((g) => `${g.system} ${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort(),
+  const settlestat = (t: Trace) => t.gateway.filter((g) => g.path === "/settlestat");
+  assertEquals(settlestat(both.trace).map((g) => `${g.system} ${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort(),
     [`live /settlestat ${MID} 20261001`, `uat /settlestat ${MID} 20261001`]);
   assertEquals(Object.fromEntries((both.body.updated as any[]).map((u) => [u.paymentId, u.to])), { a1: "settled", a2: "returned" });
   assertEquals(both.body.daysChecked, ["20261001"]);
-  // Production unset: only the test batch is asked for, and the live payment stays as it is.
+  // The funding pass (2026-10-14) also asks each system about its own payment, from the sale day on,
+  // never more than 8 calls a sweep. These answers carry no R-code, so it moves nothing itself.
+  const funding = both.trace.gateway.filter((g) => g.path === "/funding");
+  assert(funding.length > 0 && funding.length <= 8, `funding calls: ${funding.length}`);
+  assertEquals(both.body.fundingChecked, funding.length);
+  for (const g of funding) assert(String(g.url.searchParams.get("date")) >= "20261001", g.url.href);
+  // The LIVE return is a fault for us; on the test system every bank payment returns, so it is info.
+  const returned = both.trace.faults.filter((f) => f.code === "ach_returned");
+  assertEquals(returned.map((f) => [(f.context as any).paymentId, f.severity]), [["a2", "error"]]);
+  // Production unset: only the test system is asked, and the live payment stays as it is.
   const one = await payments({ action: "reconcile" }, world);
-  assertEquals(one.trace.gateway.map((g) => g.system), ["uat"]);
+  assertEquals([...new Set(one.trace.gateway.map((g) => g.system))], ["uat"]);
   assertEquals((one.body.updated as any[]).map((u) => u.paymentId), ["a1"]);
 });
 

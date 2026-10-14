@@ -1,16 +1,21 @@
 // Unit tests for ACH state (migration 174).
 //
-// WHY THESE EXIST, and they are the whole reason achState.ts is a pure module. The UAT
-// emulator only ever walks a bank payment to "Accepted" — it will NOT produce a return —
-// so no amount of sandbox testing can demonstrate that the returned path works. These
-// tests are the compensating evidence, and unlike a one-time screenshot they run in the
-// pre-push gate on every push forever.
+// WHY THESE EXIST, and they are the whole reason achState.ts is a pure module. They run in
+// the pre-push gate on every push forever, which a one-time screenshot never would. This
+// header used to say the UAT emulator never produces a return; Fiserv (CardPointe
+// integrations), 2026-10-14, says every UAT bank payment comes back R03 and the return shows in
+// the FUNDING data. Nobody has seen a funding answer yet, so the funding shapes below are
+// invented, and they pin how NARROW the reader is: a return only when one object holds both
+// this payment's retref and an R-code.
 //
 // The rule everything here serves: a bank payment is not money until it funds.
 //
 // Dependency-free (no jsr:/npm: imports), the house rule for _shared tests.
 
 import {
+  achReturnCode,
+  achReturnFromFunding,
+  fundingAnswerShape,
   fundingStateFromSetlstat,
   returnedPaymentPatch,
   returnIsRetryable,
@@ -103,4 +108,110 @@ Deno.test("a blank return code still produces a usable patch", () => {
   check("state", patch.funding_state === "returned");
   check("null code rather than empty string", patch.return_code === null);
   check("reason still readable", String(patch.void_reason).length > 10, String(patch.void_reason));
+});
+
+Deno.test("a settlestat status WORD is never stored as the return code", () => {
+  // Reconcile handed returnedPaymentPatch the settlestat word until 2026-10-14, so return_code read
+  // "REJECTED" and the builder's reason "Bank transfer returned (REJECTED)".
+  for (const word of ["Rejected", "REJECTED", "Returned by bank", "NSF", "R3", "R003"]) {
+    const patch = returnedPaymentPatch(word, "2026-10-14T12:00:00.000Z");
+    check(`${word}: no code`, patch.return_code === null, String(patch.return_code));
+    check(`${word}: generic reason`, !String(patch.void_reason).includes(word), String(patch.void_reason));
+    check(`${word}: still returned and voided`, patch.funding_state === "returned" && patch.voided_at !== null);
+  }
+  check("an R-code is kept, upper-cased", returnedPaymentPatch(" r03 ", "2026-10-14T12:00:00.000Z").return_code === "R03");
+  check("achReturnCode R03", achReturnCode("R03") === "R03");
+  check("achReturnCode rejects a word", achReturnCode("Rejected") === null);
+  check("achReturnCode rejects nothing", achReturnCode(null) === null && achReturnCode(undefined) === null);
+});
+
+// ── Reading a return out of /funding. Every shape here is INVENTED (none seen live yet). ─────────
+const RETREF = "100200300123";
+
+Deno.test("funding: ONE object with this payment's exact retref AND an R-code is a return", () => {
+  const answer = {
+    fundingdate: "20261014",
+    txns: [
+      { retref: "100200300999", type: "SALE", amount: "50.00" },
+      { retref: RETREF, type: "RETURN", returncode: "R03", amount: "-1854.00" },
+    ],
+  };
+  check("R03", achReturnFromFunding(answer, RETREF) === "R03", String(achReturnFromFunding(answer, RETREF)));
+  // Other field names that mention a reason or a code, and a retref field under another name.
+  check("reasonCode", achReturnFromFunding([{ origRetref: RETREF, reasonCode: "R01" }], RETREF) === "R01");
+  check("achreturn", achReturnFromFunding({ adjustments: [{ retref: RETREF, achreturn: "R10" }] }, RETREF) === "R10");
+  check("deep but the same object", achReturnFromFunding({ a: { b: { rows: [{ retref: RETREF, code: "R16" }] } } }, RETREF) === "R16");
+  // A number retref compares as its text.
+  check("number retref", achReturnFromFunding({ txns: [{ retref: Number(RETREF), returnCode: "R02" }] }, RETREF) === "R02");
+});
+
+Deno.test("funding: the retref on one object and the code on ANOTHER is not a return", () => {
+  const answer = {
+    txns: [{ retref: RETREF, type: "SALE", amount: "1854.00" }],
+    returns: [{ retref: "100200300999", returncode: "R03" }],
+    summary: { reasoncode: "R03" },
+  };
+  check("not a return", achReturnFromFunding(answer, RETREF) === null);
+  // Nor a code on a PARENT of the object that carries the retref.
+  check("parent code", achReturnFromFunding({ returncode: "R03", txns: [{ retref: RETREF }] }, RETREF) === null);
+});
+
+Deno.test("funding: a code with no retref, or a retref with no code, is not a return", () => {
+  check("code alone", achReturnFromFunding({ txns: [{ returncode: "R03", amount: "1854.00" }] }, RETREF) === null);
+  check("retref alone", achReturnFromFunding({ txns: [{ retref: RETREF, status: "Funded" }] }, RETREF) === null);
+  // A retref that only CONTAINS ours, or ours with something added, is not ours.
+  check("not exact (longer)", achReturnFromFunding([{ retref: RETREF + "9", returncode: "R03" }], RETREF) === null);
+  check("not exact (shorter)", achReturnFromFunding([{ retref: RETREF.slice(1), returncode: "R03" }], RETREF) === null);
+});
+
+Deno.test("funding: look-alike values that are not R plus two digits are not a return", () => {
+  for (const v of ["R3", "R003", "r03", "RO3", "AR03", "R03X", "Rejected", "R", "03", "R03 - No account", 3]) {
+    check(`${String(v)}`, achReturnFromFunding([{ retref: RETREF, returncode: v }], RETREF) === null, String(v));
+  }
+  // An R-code in a field whose name says nothing about a return, reason or code.
+  check("wrong field name", achReturnFromFunding([{ retref: RETREF, status: "R03", note: "R03" }], RETREF) === null);
+});
+
+Deno.test("funding: the guards. Nothing to match, nothing that walks, nothing that throws", () => {
+  check("blank retref never matches", achReturnFromFunding([{ retref: "", returncode: "R03" }], "") === null);
+  check("null retref", achReturnFromFunding([{ retref: RETREF, returncode: "R03" }], null) === null);
+  for (const a of [null, undefined, "R03", 42, true, [], {}]) {
+    check(`answer ${JSON.stringify(a)}`, achReturnFromFunding(a, RETREF) === null);
+  }
+  // Too deep is not read (the walk stops at its depth limit), and a cycle cannot loop forever.
+  let deep: Record<string, unknown> = { retref: RETREF, returncode: "R03" };
+  for (let i = 0; i < 20; i++) deep = { next: deep };
+  check("beyond the depth limit", achReturnFromFunding(deep, RETREF) === null);
+  const loop: Record<string, unknown> = { txns: [] };
+  (loop.txns as unknown[]).push(loop);
+  check("a cycle ends", achReturnFromFunding(loop, RETREF) === null);
+});
+
+Deno.test("fundingAnswerShape: retrefs or an empty day are recognised; anything else gives key paths, never a value", () => {
+  check("rows with retrefs", fundingAnswerShape({ txns: [{ retref: RETREF, amount: "1.00" }] }).recognised);
+  check("a bare list of rows", fundingAnswerShape([{ retref: RETREF }]).recognised);
+  check("empty list", fundingAnswerShape([]).recognised);
+  check("an empty day", fundingAnswerShape({ merchid: "x", fundingdate: "20261014", fundings: [], txns: [] }).recognised);
+  check("an empty object", fundingAnswerShape({}).recognised);
+  check("nested empty lists", fundingAnswerShape({ data: { txns: [] } }).recognised);
+
+  const odd = { resptext: "Invalid date", detail: { acct: "9876543210", rows: 3 } };
+  const s = fundingAnswerShape(odd);
+  check("an object of scalars is NOT recognised", !s.recognised);
+  check("its key paths", JSON.stringify([...s.keyPaths].sort()) === JSON.stringify(["detail", "detail.acct", "detail.rows", "resptext"]), JSON.stringify(s.keyPaths));
+  check("never a value", !JSON.stringify(s).includes("Invalid") && !JSON.stringify(s).includes("9876543210"), JSON.stringify(s));
+
+  const rowsNoRetref = fundingAnswerShape({ fundings: [{ fundingid: 7, netsales: "10.00" }], txns: [] });
+  check("rows with no retref anywhere are NOT recognised", !rowsNoRetref.recognised);
+  check("their paths, list items as []", rowsNoRetref.keyPaths.includes("fundings[].fundingid") && rowsNoRetref.keyPaths.includes("txns"),
+    JSON.stringify(rowsNoRetref.keyPaths));
+
+  check("a bare string is not recognised", !fundingAnswerShape("R03").recognised && fundingAnswerShape("R03").keyPaths[0] === "(string)");
+  check("null", fundingAnswerShape(null).keyPaths[0] === "(null)");
+  // A key that is itself a long number (a reference, an account) is masked.
+  const keyed = fundingAnswerShape({ "123456789012": { amount: "1.00" } });
+  check("digit runs in keys are masked", !JSON.stringify(keyed).includes("123456789012") && keyed.keyPaths.includes("#"), JSON.stringify(keyed));
+  // Capped.
+  const wide = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`k${i}`, i]));
+  check("at most 60 paths", fundingAnswerShape(wide).keyPaths.length === 60);
 });
