@@ -3150,6 +3150,239 @@ function CommissionsReport({ clientId }) {
   );
 }
 
+// ── CALL RECORDING & AI TRANSCRIPTS — your own answer (2026-10-14) ─────────────────────────
+// Ahsan: "so people (Carolyn especially) can say yes or no on the web today, without waiting for
+// the app updates." The phone app (build 9) and the Chrome extension (0.1.4) ask each person
+// whether recordings of calls they're on may go to Cloudflare Workers AI for a transcript and the
+// transcript to Anthropic's Claude for a summary. This card asks the SAME question with the same
+// substance, and saves the SAME answer: one per account (phone_user_settings.ai_transcripts,
+// migration 307), which the phone-api Worker reads before it sends any call, and only when
+// everyone from the team on the call allowed it.
+//
+//   * The words follow phone-core's (structure-studio-phone packages/phone-core/src/aiTranscripts.ts:
+//     noticeSections, settingsStatusLines, choiceText, AI_WORDS), with "the phone app and the
+//     Chrome extension" where the apps name themselves. This card claims nothing about what
+//     Structure Studio's own screens show: it doesn't hide summaries, so it never says it does.
+//   * The full notice shows BEFORE the first answer (App Store guideline 5.1.2(i): say where the
+//     data goes first). After a yes the button is "Stop sending my calls"; after a no, "Review and
+//     allow" opens the notice again before Allow.
+//   * "Saved." only when the server's answer (what the database now holds) is the one asked for;
+//     anything else is an error and the card keeps showing the answer that really is saved.
+//   * View-as: the person signed in is CSM Synergy staff, so there are no buttons (the server
+//     refuses the save anyway), and no answer is read.
+// portal-settings ai_transcripts_get / ai_transcripts_save; the rules are _shared/aiConsent.ts.
+// tests/phone/aiTranscripts_test.ts lifts the helpers below out of this file and pins the version
+// and the words; tests/harness/myProfileAiConsent.mjs drives the card on the compiled portal.
+const SS_AI_NOTICE_VERSION = 1; // _shared/aiConsent.ts AI_NOTICE_VERSION = phone-core's; raise them together
+const SS_AI_PRIVACY_URL = "https://csmsynergy.com/my-synergy-phone/privacy";
+const SS_AI_WORDS = {
+  title: "Call recording & AI transcripts",
+  noticeTitle: "Transcripts and summaries",
+  allow: "Allow",
+  allowLabel: "Allow: send your calls for transcripts and summaries",
+  decline: "Don't allow",
+  declineLabel: "Don't allow: your calls aren't sent, and transcripts stay hidden",
+  stop: "Stop sending my calls",
+  stopLabel: "Stop sending your calls for transcripts and summaries, and hide them",
+  show: "Review and allow",
+  review: "Review the notice",
+  hide: "Hide the notice",
+  privacy: "Privacy policy",
+  saveFailed: "Your answer couldn't be saved. Check your connection and try again.",
+  notKept: "The server didn't keep your answer, so nothing has changed. Try again, or tell CSM Synergy.",
+  same: "The same answer counts in the My Synergy Phone app and the Chrome extension: change it in any of them and it changes everywhere.",
+  ownerLine: "You're the business owner, so you can also turn call transcripts off for everyone, under Settings › Phone.",
+  viewAs: "You're viewing another account. Each person answers this for themselves in My Profile, signed in as themselves, so there are no buttons here.",
+  noPhone: "You don't make or take calls with My Synergy Phone on this account right now, so none of your calls are sent either way. Your answer is kept for if you do.",
+};
+
+/** What happens to this business's calls now, in plain lines (phone-core settingsStatusLines, for the web). */
+function ssAiStatusLines(d) {
+  const lines = [];
+  lines.push(d && d.callRecording
+    ? "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. Callers hear an announcement first."
+    : "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them, and callers hear an announcement first.");
+  lines.push(d && d.businessTranscribes
+    ? "Recorded calls are transcribed by Cloudflare Workers AI and summarized by Anthropic's Claude, but only when everyone from your team on the call allowed it."
+    : "Recorded calls aren't transcribed or summarized right now. When your business has call transcripts on, Cloudflare Workers AI transcribes them and Anthropic's Claude summarizes them, only when everyone from your team on the call allowed it.");
+  lines.push("Voicemails are turned into text by Twilio.");
+  return lines;
+}
+
+/** The line on this person's own answer (phone-core choiceText, naming both apps). */
+function ssAiChoiceText(answer) {
+  if (answer === "allowed") return "You allowed it. Calls you're on are sent for transcripts and summaries, and the phone app and the Chrome extension show them.";
+  if (answer === "declined") return "You said no. Calls you're on aren't sent, and transcripts and summaries are hidden in the phone app and the Chrome extension.";
+  return "You haven't chosen yet. Until you allow it, calls you're on aren't sent, and transcripts and summaries stay hidden.";
+}
+
+/** The notice (phone-core noticeSections, naming both apps): a heading and its sentences, each part. */
+function ssAiNoticeSections(businessTranscribes) {
+  const calls =
+    "a minute or two after a recorded call you were on ends, our phone service sends the recording, with what you and the " +
+    "customer said, to Cloudflare Workers AI, which writes a transcript. Then it sends the transcript to Anthropic, whose " +
+    "Claude AI writes a short summary with any action items.";
+  return [
+    {
+      heading: "What's sent, and to whom",
+      lines: [
+        "Recordings: Twilio, our calling provider, makes and keeps every call recording and voicemail.",
+        businessTranscribes === false
+          ? "Transcripts and summaries, only if you allow them: when your business has call transcripts on, " + calls
+          : "Transcripts and summaries, only if you allow them: " + calls,
+        "Under their terms, Cloudflare and Anthropic don't train AI models on what we send them.",
+        "Voicemails: Twilio also turns each voicemail into text.",
+      ],
+    },
+    { heading: "Why", lines: ["So your team can read what was said without playing the recording, and find a voicemail by searching."] },
+    { heading: "Who sees them", lines: ["People at your business who can see a call can read its transcript and summary."] },
+    {
+      heading: "How long they're kept",
+      lines: [
+        "A call's transcript is deleted with its recording, after the time your business keeps recordings: one year unless your " +
+          "owner chose another. A voicemail's transcript is deleted with the voicemail after 12 months. A call's short summary stays " +
+          "with the call history.",
+      ],
+    },
+    {
+      heading: "Your choice",
+      lines: [
+        "Allow: recordings of calls you're on are sent for transcripts and summaries, and the phone app and the Chrome extension show them.",
+        "Don't allow: calls you're on aren't sent to Cloudflare or Anthropic, and the phone app and the Chrome extension hide transcripts " +
+          "and summaries, voicemail text included. A call is only sent if everyone from your team who was on it allowed it.",
+        "Your answer is saved with your account, so it's the same here, in the My Synergy Phone app and in the Chrome extension. You can " +
+          "change it here at any time; it counts for calls from then on. Calls, recordings and voicemails work the same either way.",
+      ],
+    },
+  ];
+}
+window.__ssAiConsent = { SS_AI_NOTICE_VERSION, ssAiStatusLines, ssAiChoiceText, ssAiNoticeSections };
+
+function AiTranscriptsCard({ viewing = false, onOpenPhone = null }) {
+  // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN (React #310).
+  const [data, setData] = useState(null);      // ai_transcripts_get's answer
+  const [loadErr, setLoadErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);        // { ok } | { err } after a save
+  const [open, setOpen] = useState(false);     // the notice opened by "Review…" (it is always open before a first answer)
+  const load = useCallback(async () => {
+    setLoadErr(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "ai_transcripts_get" } });
+      if (error) throw new Error(await fnError(error));
+      if (d && d.error && d.available !== false) throw new Error(d.error);
+      setData(d || {});
+    } catch (e) { setLoadErr(e.message || "Couldn't load your answer."); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // Save, then believe only the server: the answer it sends back is what the database now holds.
+  const save = async (answer) => {
+    if (busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "ai_transcripts_save", answer, version: SS_AI_NOTICE_VERSION },
+      });
+      if (error) {
+        // A sentence the server wrote is shown as it is; a dropped connection (or an error page
+        // with no sentence in it) gets ours, never supabase-js's "non-2xx status code".
+        const m = await fnError(error);
+        throw new Error(!m || /non-2xx|failed to (send|fetch)|networkerror|load failed/i.test(m) ? SS_AI_WORDS.saveFailed : m);
+      }
+      if (d && d.error) throw new Error(d.error);
+      if (!d || d.answer !== answer) throw new Error(SS_AI_WORDS.notKept);
+      setData((x) => ({ ...(x || {}), answer: d.answer, version: d.version, at: d.at || null }));
+      setOpen(false);
+      setMsg({ ok: "Saved." });
+    } catch (e) {
+      setMsg({ err: e.message || SS_AI_WORDS.saveFailed });
+    }
+    setBusy(false);
+  };
+
+  const card = (body) => (
+    <div style={S.card} data-ss-ai-card={data ? (data.available === false ? "unavailable" : (data.answer || "none")) : (loadErr ? "error" : "loading")}>
+      <div style={S.h2}>{SS_AI_WORDS.title}</div>
+      {body}
+    </div>
+  );
+  if (!data && loadErr) {
+    return card(<>
+      <div style={S.err}>{loadErr}</div>
+      <button type="button" onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Try again</button>
+    </>);
+  }
+  if (!data) return card(<p style={{ fontSize: 13, color: "#94A3B8", margin: 0 }}>Loading your answer…</p>);
+  if (data.available === false) {
+    return card(<p style={{ fontSize: 13, color: "#64748B", margin: 0, lineHeight: 1.5 }}>{data.error || "Choosing AI transcripts isn't set up on this server yet."}</p>);
+  }
+
+  const answer = data.answer === "allowed" || data.answer === "declined" ? data.answer : null;
+  const viewAs = viewing || data.viewAs === true;
+  // Open before the first answer (the notice comes before the question), and whenever "Review…" opened it.
+  const showNotice = viewAs ? open : (answer === null || open);
+  const when = answer && data.at ? new Date(data.at) : null;
+  const whenText = when && !isNaN(when) ? when.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : null;
+  const line = { fontSize: 13, color: "#475569", margin: "0 0 8px", lineHeight: 1.55 };
+  const choiceBtn = (value, label, aria, primary) => (
+    <button type="button" key={value} data-ss-ai-choice={value} aria-label={aria} onClick={() => save(value)}
+      style={{ ...S.btn(primary ? ACCENT : "#F1F5F9", primary ? "#FFF" : "#334155"), ...(primary ? {} : { border: "1px solid #E2E8F0" }), opacity: busy ? 0.6 : 1 }}>
+      {label}
+    </button>
+  );
+  const linkBtn = { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" };
+
+  return card(<>
+    <div data-ss-ai-status>
+      {ssAiStatusLines(data).map((t, i) => <p key={i} style={line}>{t}</p>)}
+    </div>
+    {data.canChangeRecording && (
+      <p data-ss-ai-owner style={{ ...line, color: "#334155" }}>
+        {onOpenPhone
+          ? <>You&rsquo;re the business owner, so you can also turn call transcripts off for everyone, under{" "}
+              <button type="button" onClick={onOpenPhone} style={linkBtn}>Settings › Phone</button>.</>
+          : SS_AI_WORDS.ownerLine}
+      </p>
+    )}
+    {viewAs
+      ? <div data-ss-ai-viewas style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", margin: "4px 0 10px", lineHeight: 1.55 }}>{SS_AI_WORDS.viewAs}</div>
+      : <div data-ss-ai-answer style={{ fontSize: 13, color: "#1E293B", fontWeight: 600, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", margin: "4px 0 10px", lineHeight: 1.55 }}>
+          {ssAiChoiceText(answer)}{whenText ? ` (since ${whenText})` : ""}
+        </div>}
+    {!viewAs && data.phoneAccess === false && <p data-ss-ai-nophone style={line}>{SS_AI_WORDS.noPhone}</p>}
+    {showNotice && (
+      <div data-ss-ai-notice style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", margin: "4px 0 12px", background: "#FFF" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>{SS_AI_WORDS.noticeTitle}</div>
+        {ssAiNoticeSections(data.businessTranscribes === true).map((s) => (
+          <div key={s.heading} style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#334155", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 3 }}>{s.heading}</div>
+            {s.lines.map((t, i) => <p key={i} style={{ fontSize: 12.5, color: "#475569", margin: "0 0 5px", lineHeight: 1.55 }}>{t}</p>)}
+          </div>
+        ))}
+      </div>
+    )}
+    {!viewAs && (
+      <div data-ss-ai-buttons style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {showNotice
+          ? [choiceBtn("allowed", SS_AI_WORDS.allow, SS_AI_WORDS.allowLabel, true), choiceBtn("declined", SS_AI_WORDS.decline, SS_AI_WORDS.declineLabel, false)]
+          : answer === "allowed"
+          ? choiceBtn("declined", SS_AI_WORDS.stop, SS_AI_WORDS.stopLabel, false)
+          : <button type="button" data-ss-ai-review onClick={() => { setOpen(true); setMsg(null); }} style={S.btn(ACCENT, "#FFF")}>{SS_AI_WORDS.show}</button>}
+        {busy && <span style={{ fontSize: 12, color: "#64748B" }}>Saving…</span>}
+      </div>
+    )}
+    {msg && <div data-ss-ai-msg={msg.err ? "err" : "ok"} style={{ marginTop: 10, fontSize: 12.5, color: msg.err ? "#DC2626" : "#15803D", fontWeight: 600 }}>{msg.err || msg.ok}</div>}
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 12, fontSize: 12.5 }}>
+      {(answer !== null || viewAs) && (
+        <button type="button" data-ss-ai-toggle onClick={() => setOpen((o) => !o)} style={linkBtn}>{open ? SS_AI_WORDS.hide : SS_AI_WORDS.review}</button>
+      )}
+      <a href={SS_AI_PRIVACY_URL} target="_blank" rel="noopener noreferrer" data-ss-ai-privacy style={{ color: ACCENT, fontWeight: 700 }}>{SS_AI_WORDS.privacy}</a>
+    </div>
+    <p data-ss-ai-same style={{ fontSize: 12, color: "#64748B", margin: "10px 0 0", lineHeight: 1.5 }}>{SS_AI_WORDS.same}</p>
+  </>);
+}
+
 // ── MY VIEW — the settings that configure the PERSON, not the business ───────────
 // Carolyn, 2026-08-28 @42:00: "I'm trying to think which I want to have the default. I want
 // them to be able to decide if they want the default. I don't want it to always be list.
@@ -3181,7 +3414,7 @@ function CommissionsReport({ clientId }) {
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
 // _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
 const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
-function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null }) {
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null, aiCard = false, viewing = false, onOpenPhone = null }) {
   // WHICH TAB CONTACTS OPENS ON (Carolyn 2026-10-12, C25): "we need them to set the default of
   // what they want the default to be." Contacts, the Design list, or any one pipeline. `picked` is
   // what this person chose (ssSavedHubView: contactsView, or the old Pipeline tab's choice), or
@@ -3496,6 +3729,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
+
+      {/* ── CALL RECORDING & AI TRANSCRIPTS (2026-10-14) — your own answer, the one the phone
+          app and the extension ask for (AiTranscriptsCard above). Wherever the Phone tab is
+          offered (ssPhoneOffered: calling on for this business, a beta host, or view-as), so a
+          builder without My Synergy Phone isn't asked about calls they don't have. */}
+      {aiCard && <AiTranscriptsCard viewing={viewing} onOpenPhone={onOpenPhone} />}
 
       {/* ── RECORD CARD ORDER — Carolyn 2026-08-28 @39:00 ──────────────────────────────
           Next to the Pipeline default because Ahsan put the two together on that call ("all of
@@ -4774,8 +5013,13 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
+      {/* aiCard / viewing / onOpenPhone: the Call recording & AI transcripts card (2026-10-14). It
+          shows where the Phone tab is offered, has no buttons in view-as, and its owner line links
+          to Settings › Phone only when that tab is in this person's list. */}
       {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
         profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
+        aiCard={phoneOffered} viewing={!!viewingLabel}
+        onOpenPhone={TABS.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
         clientId={clientId} hubReach={hubReach} />}
     </div>
   );

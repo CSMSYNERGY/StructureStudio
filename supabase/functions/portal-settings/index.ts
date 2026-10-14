@@ -226,6 +226,10 @@ import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 // Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
 import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
+// Your own answer on AI transcripts in My Profile (migration 307, 2026-10-14): the Worker's rules
+// mirrored in _shared/aiConsent.ts, the reads and the save in ./aiTranscripts.ts.
+import { AI_NOTICE_VERSION, currentAnswer, parseAiAnswer } from "../_shared/aiConsent.ts";
+import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, saveAiTranscripts } from "./aiTranscripts.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
   DESIGN_FEED_STAYS, isUuidLike, parseDealPatch, parseIdOrder, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder,
@@ -267,6 +271,17 @@ const GATES: GateTable = {
   // refused too; the branch refuses every operator in view-as (see QUICK SENDS below).
   quick_sends_list: "self",
   quick_send_used: "self",
+  // Your own answer on AI transcripts (migration 307, My Profile since 2026-10-14): the same answer
+  // the phone app and the extension save through the phone-api Worker, one per account. Per
+  // person, so neither is an area gate: anyone on the team answers for their own calls, and the
+  // handlers key strictly off the session's userId (portal-settings/aiTranscripts.ts).
+  //   get  "open": a READ, so a read-only operator in view-as still sees the card's facts. In
+  //        view-as it never reads the operator's own row (the branch answers viewAs instead), and
+  //        what it does read is the caller's own row and two on/off facts about their business.
+  //   save "self": a write to the caller's own row only. A read-only operator is refused by
+  //        resolveTenant, and the branch refuses every operator in view-as in words.
+  ai_transcripts_get: "open",
+  ai_transcripts_save: "self",
 
   // ── Structures ───────────────────────────────────────────────────────────
   // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
@@ -1650,6 +1665,54 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
       .eq("user_id", userId);        // own row only
     if (error) return dbFail(req, clientId, "save your name and phone", error);
     return json({ ok: true, fullName, phone });
+  }
+
+  // ── YOUR ANSWER ON AI TRANSCRIPTS (migration 307, My Profile since 2026-10-14) ────────────
+  // The phone app's and the extension's question, asked on the web too: may recordings of calls
+  // you're on go to Cloudflare Workers AI for a transcript, and the transcript to Anthropic's Claude
+  // for a summary? ONE answer per account (phone_user_settings.ai_transcripts), which the phone-api
+  // Worker reads before it sends a call, and only when everyone from the team on the call allowed
+  // it. The rules are _shared/aiConsent.ts (the Worker's, mirrored and pinned by
+  // tests/phone/aiTranscripts_test.ts), the reads and the write ./aiTranscripts.ts.
+  //
+  // Both keyed strictly off the session: the JWT's user and the tenant resolveTenant settled on.
+  // Nothing in the body names a person. In view-as the person signed in is CSM Synergy staff, so:
+  //   * the read answers the business's facts and `viewAs: true`, and never reads their own row;
+  //   * the save is REFUSED in words (their answer would be filed under the viewed builder), a
+  //     refusal marked as one so the browser doesn't file it as a fault. The card hides its buttons.
+  // `canChangeRecording` is phone_recording_save's own rule (the business owner with phone edit),
+  // so the card's pointer to Settings › Phone shows only to the person who can use it.
+  if (action === "ai_transcripts_get" || action === "ai_transcripts_save") {
+    const who = { userId: String(userId ?? ""), clientId };
+    const refusal = (sentence: string, status: number) => {
+      const r = json({ error: sentence }, status);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    };
+    if (action === "ai_transcripts_save") {
+      if (operator) return refusal(AI_TRANSCRIPTS_VIEW_AS, 403);
+      const parsed = parseAiAnswer((payload ?? {}) as Record<string, unknown>);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const saved = await saveAiTranscripts(admin, who, parsed);
+      if ("notReady" in saved) return refusal(AI_TRANSCRIPTS_NOT_READY, 503);
+      if ("dbError" in saved) return dbFail(req, clientId, "save your answer on AI transcripts", saved.dbError);
+      audit(`ai_transcripts_${saved.consent.choice ?? "unread"}`, 1, `version=${saved.consent.version ?? "none"}`).catch(() => {});
+      const answer = currentAnswer(saved.consent);
+      return json({ ok: true, answer, version: saved.consent.version, at: answer ? saved.consent.at : null });
+    }
+    const rails = { recording: recordingServerOn((k) => Deno.env.get(k)), transcribe: transcribeServerOn((k) => Deno.env.get(k)) };
+    const read = await readAiTranscripts(admin, who, rails, !operator);
+    if ("notReady" in read) return json({ ok: true, available: false, error: AI_TRANSCRIPTS_NOT_READY });
+    if ("dbError" in read) return dbFail(req, clientId, "load your answer on AI transcripts", read.dbError);
+    const answer = currentAnswer(read.consent);
+    return json({
+      ok: true, available: true, viewAs: !!operator, noticeVersion: AI_NOTICE_VERSION,
+      answer, version: read.consent?.version ?? null, at: answer ? read.consent?.at ?? null : null,
+      callRecording: read.callRecording, businessTranscribes: read.businessTranscribes,
+      canChangeRecording: role === "owner" && canEdit("phone"),
+      phoneAccess: canRead("phone"),
+    });
   }
 
 // ── WHAT A COLOUR SAVE ACTUALLY FAILED ON ────────────────────────────────────────────
