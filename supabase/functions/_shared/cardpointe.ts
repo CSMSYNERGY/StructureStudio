@@ -681,13 +681,24 @@ export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyRe
   }
 }
 
-/** Settlement status for a date (sent YYYYMMDD; see cpFunding on why that is unproven). ONE call
+/** The day the gateway's reporting calls (settlestat, funding) take: MMDD, the format Fiserv's API
+ *  reference gives for both. Reconcile keys its days YYYYMMDD (or YYYY-MM-DD); this turns one into the
+ *  wire form and leaves anything else as it came, so a caller already sending MMDD is unchanged.
+ *  Until 2026-10-14 both calls were sent YYYYMMDD, an assumption from 2026-09-02 that no live answer
+ *  ever confirmed (settlestat failures were swallowed whole). Still unproven live: if
+ *  reconcile_gateway_failed rows appear with kind "config" for these calls, this is the first suspect. */
+export function cpReportDay(day: string): string {
+  const d = String(day ?? "").replace(/-/g, "");
+  return /^[0-9]{8}$/.test(d) ? d.slice(4) : String(day ?? "");
+}
+
+/** Settlement status for a date (sent MMDD, cpReportDay; unproven live, see cpFunding). ONE call
  *  returns the whole batch — always preferred over a per-payment inquire loop, which would 429
  *  itself into uselessness and starve real customer charges of the shared per-MID quota. The answer
  *  is read by achState.ts settlementStatuses, whatever it is wrapped in: a copy of Fiserv's API
  *  reference says it is a list, which the code used to read as an object and so read nothing. */
 export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<unknown> {
-  return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
+  return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(cpReportDay(date))}`);
 }
 
 /** Funding detail — the final word on whether an ACH debit actually funded. Fiserv (CardPointe
@@ -696,9 +707,9 @@ export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<
  *  payments still clearing and for settled ones inside their return window, and achState.ts
  *  achFundingRead reads the answer.
  *
- *  ⚠️ THE DATE FORMAT IS UNPROVEN. It goes out YYYYMMDD, the spelling settlestat has always been
- *  sent; a copy of Fiserv's API reference says MMDD for both, and neither has been seen answered
- *  live. One read-only UAT call settles it, and should be made before this ships. What a wrong date
+ *  ⚠️ THE DATE FORMAT IS UNPROVEN LIVE. It goes out MMDD (cpReportDay), the format a copy of Fiserv's
+ *  API reference gives for both funding and settlestat; until 2026-10-14 both went out YYYYMMDD,
+ *  which nothing had confirmed either. One read-only UAT call settles it. What a wrong date
  *  looks like depends on the gateway: a 4xx files reconcile_gateway_failed (kind "config") and ends
  *  that sweep's funding calls; a 200 that is not a funding answer files
  *  reconcile_funding_unrecognised. But a 200 with EMPTY lists for a date it misread looks exactly
@@ -707,7 +718,7 @@ export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<
  *  under a wrong format stay read: after changing the format, set that column back to null on the
  *  cardpointe bank payments and every day is read again. */
 export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {
-  return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(date)}`);
+  return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(cpReportDay(date))}`);
 }
 
 /**

@@ -752,3 +752,20 @@ Deno.test("a DECLINE carries its AVS/CVV answer; anything else carries none", as
   check("nothing carries none", cp.cpDeclineVerification(null) === null);
   check("cpVerification reads blanks as null", JSON.stringify(cp.cpVerification({ avsresp: " ", cvvresp: 3 })) === JSON.stringify({ respcode: null, avsresp: null, cvvresp: null }));
 });
+
+Deno.test("settlestat and funding ask the gateway for the day as MMDD (cpReportDay)", async () => {
+  check("YYYYMMDD", cp.cpReportDay("20261009") === "1009");
+  check("YYYY-MM-DD", cp.cpReportDay("2026-01-03") === "0103");
+  check("MMDD passes through", cp.cpReportDay("1009") === "1009");
+  check("anything else passes through", cp.cpReportDay("x") === "x");
+  const seen: Seen[] = [];
+  recordAll({ txns: [] }, seen);
+  try {
+    await cp.cpSettleStat(UAT_M, "20261009");
+    await cp.cpFunding(UAT_M, "2026-10-09");
+  } finally {
+    restore();
+  }
+  check("two calls", seen.length === 2, String(seen.length));
+  for (const s of seen) check(`${s.url} asks date=1009`, new URL(s.url).searchParams.get("date") === "1009", s.url);
+});

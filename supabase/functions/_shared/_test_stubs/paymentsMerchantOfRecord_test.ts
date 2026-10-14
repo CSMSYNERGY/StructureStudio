@@ -389,7 +389,8 @@ Deno.test("reconcile asks settlestat once per (merchant, day), each on the MID t
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const asked = r.trace.gateway.filter((g) => g.path === "/settlestat")
     .map((g) => `${g.path} ${g.url.searchParams.get("merchid")} ${g.url.searchParams.get("date")}`).sort();
-  assertEquals(asked, [`/settlestat ${OLD_MID} 20261001`, `/settlestat ${NEW_MID} 20261001`].sort());
+  // The gateway is asked MMDD (cardpointe.ts cpReportDay); reconcile's own day keys stay YYYYMMDD.
+  assertEquals(asked, [`/settlestat ${OLD_MID} 1001`, `/settlestat ${NEW_MID} 1001`].sort());
   const moved = Object.fromEntries((r.body.updated as any[]).map((u) => [u.paymentId, u.to]));
   assertEquals(moved, { a1: "settled", a2: "settled", a3: "returned" });
   assertEquals(r.body.daysChecked, ["20261001"]);
@@ -415,10 +416,10 @@ Deno.test("reconcile skips (and logs) a pending bank payment with no merchant of
   const mids = [...new Set(r.trace.gateway.map((g) => g.url.searchParams.get("merchid")))];
   assertEquals(mids, [OLD_MID], "only the payment with a merchant of record is asked about");
   const settle = r.trace.gateway.filter((g) => g.path === "/settlestat");
-  assertEquals(settle.map((g) => g.url.searchParams.get("date")), ["20261001"], "the orphan's day is never fetched");
+  assertEquals(settle.map((g) => g.url.searchParams.get("date")), ["1001"], "the orphan's day is never fetched");
   // The funding pass starts at a1's own sale day; the orphan (received the day after) spends nothing.
   const funding = r.trace.gateway.filter((g) => g.path === "/funding").map((g) => g.url.searchParams.get("date"));
-  assertEquals(funding[0], "20261001");
+  assertEquals(funding[0], "1001");
   assertEquals((r.body.updated as any[]).map((u) => u.paymentId), ["a1"]);
   assert(faultCodes(r.trace).includes("payment_no_merchant_of_record"), JSON.stringify(r.trace.errors));
 });
@@ -681,7 +682,8 @@ Deno.test("a bank payment past its seven-day hold that still reads pending: refu
 /** A UTC day `n` days before today, as YYYY-MM-DD. Day 2 and older are always readable funding days
  *  (FUNDING_DAY_READABLE_AFTER_MS); yesterday and today never are. */
 const daysAgo = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-const ymd = (iso: string) => iso.replace(/-/g, "");
+/** A day as the gateway is asked for it: MMDD (cardpointe.ts cpReportDay). */
+const ymd = (iso: string) => iso.replace(/-/g, "").slice(4);
 /** The funding answer for a day that carries this retref's R03: an INVENTED shape (none seen live). */
 const FUNDED_R03 = (retref: string) => ({ fundingdate: "x", txns: [{ retref: "100200300999", type: "SALE" }, { retref, type: "RETURN", returncode: "R03" }] });
 /** A day that lists this retref as funded, cleanly. Invented too. */

@@ -181,8 +181,9 @@ function carriesRetref(obj: Record<string, unknown>, want: string): boolean {
  * The NACHA return code /funding reports for THIS payment, or null.
  *
  * A return only when one object holds BOTH a field whose name contains "retref" equal to this
- * payment's retref exactly, AND a field whose name mentions return, reason or code holding a value
- * that is exactly R plus two digits. Anything else is not a return. Never throws.
+ * payment's retref exactly, AND a field whose name mentions return, reason or code whose value STARTS
+ * with R plus two digits, alone or followed by words ("R03", "R03 - No Account/Unable to Locate").
+ * Anything else is not a return. Never throws.
  */
 export function achReturnFromFunding(answer: unknown, retref: unknown): string | null {
   const want = scalarText(retref);
@@ -192,7 +193,8 @@ export function achReturnFromFunding(answer: unknown, retref: unknown): string |
     for (const k of Object.keys(obj)) {
       if (!/return|reason|code/i.test(k)) continue;
       const v = scalarText(obj[k]);
-      if (v && /^R[0-9]{2}$/.test(v)) return v;
+      const m = v ? /^(R[0-9]{2})(?![0-9A-Za-z])/.exec(v) : null;
+      if (m) return m[1];
     }
   }
   return null;

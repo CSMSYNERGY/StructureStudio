@@ -167,11 +167,19 @@ Deno.test("funding: a code with no retref, or a retref with no code, is not a re
 });
 
 Deno.test("funding: look-alike values that are not R plus two digits are not a return", () => {
-  for (const v of ["R3", "R003", "r03", "RO3", "AR03", "R03X", "Rejected", "R", "03", "R03 - No account", 3]) {
+  for (const v of ["R3", "R003", "r03", "RO3", "AR03", "R03X", "R033", "Rejected", "R", "03", "XR03", 3]) {
     check(`${String(v)}`, achReturnFromFunding([{ retref: RETREF, returncode: v }], RETREF) === null, String(v));
   }
   // An R-code in a field whose name says nothing about a return, reason or code.
   check("wrong field name", achReturnFromFunding([{ retref: RETREF, status: "R03", note: "R03" }], RETREF) === null);
+});
+
+Deno.test("funding: a code followed by words is read as its code (the first live answer may spell it out)", () => {
+  for (const [v, want] of [["R03 - No Account/Unable to Locate", "R03"], ["R01 Insufficient funds", "R01"], ["R10-Not authorized", "R10"]]) {
+    check(v, achReturnFromFunding([{ retref: RETREF, returncode: v }], RETREF) === want, v);
+  }
+  const r = achFundingRead({ txns: [{ retref: RETREF, returncode: "R03 - No Account/Unable to Locate" }] }, RETREF);
+  check("achFundingRead: returned R03", r.kind === "returned" && r.code === "R03", JSON.stringify(r));
 });
 
 Deno.test("funding: the guards. Nothing to match, nothing that walks, nothing that throws", () => {
@@ -249,7 +257,6 @@ Deno.test("achFundingRead: a sign of a return it cannot read is RETURN_UNREAD, w
   // to read as "not a return" AND as funded-looking. Now it holds the payment and names the field.
   const cases: [string, unknown, string][] = [
     ["status R03", { txns: [{ retref: RETREF, status: "R03" }] }, "status"],
-    ["code with words", { txns: [{ retref: RETREF, returncode: "R03 - No Account/Unable to Locate" }] }, "returncode"],
     ["a word", { txns: [{ retref: RETREF, type: "ACH Return" }] }, "type"],
     ["rejected", { txns: [{ retref: RETREF, setlstat: "Rejected" }] }, "setlstat"],
     ["a reversal flag that is a yes", { txns: [{ retref: RETREF, reversalflag: "Y" }] }, "reversalflag"],
