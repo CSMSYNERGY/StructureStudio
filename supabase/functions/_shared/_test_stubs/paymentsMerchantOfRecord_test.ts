@@ -983,6 +983,20 @@ Deno.test("reconcile: a 200 that is only the gateway's error message is filed WI
   assertEquals(r.body.updated, []);
 });
 
+Deno.test("reconcile: 'No deposits match your request' is an empty day: read past, and the return on a later day is still found", async () => {
+  const r = await call({ action: "reconcile" }, {
+    payments: [ACH("a1", 41, "rt-a1", daysAgo(4))],
+    attempts: ATTEMPTS,
+    gateway: (path, _b, url) => path === "/funding"
+      ? (url.searchParams.get("date") === ymd(daysAgo(2)) ? FUNDED_R03("rt-a1") : { errormsg: "No deposits match your request" })
+      : { txns: [] },
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(fundingDays(r.trace), [daysAgo(4), daysAgo(3), daysAgo(2)].map(ymd));
+  assertEquals((r.body.updated as any[]).map((u) => [u.paymentId, u.to, u.returnCode]), [["a1", "returned", "R03"]]);
+  assertEquals(r.trace.errors.filter((e) => e.code === "reconcile_gateway_failed"), []);
+});
+
 Deno.test("reconcile: once the limiter says no, the sweep asks the gateway nothing more", async () => {
   const r = await call({ action: "reconcile" }, {
     payments: [ACH("a1", 41, "rt-a1", daysAgo(8))],

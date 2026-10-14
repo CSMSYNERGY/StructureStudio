@@ -24,6 +24,7 @@ import {
   returnTextForCustomer,
   settlementStatuses,
   gatewayErrorText,
+  fundingDayIsEmpty,
 } from "./achState.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
@@ -328,5 +329,12 @@ Deno.test("gatewayErrorText: an answer that is only the gateway's error message 
   // A data answer, or one that carries more than scalars, is not a refusal.
   for (const a of [{ txns: [] }, [{ errormsg: "x" }], { errormsg: "x", txns: [] }, { resptext: "x", detail: { a: 1 } }, {}, null, "Invalid date", { errormsg: "  " }, { errormsg: 42 }]) {
     check(JSON.stringify(a), gatewayErrorText(a) === null);
+  }
+});
+
+Deno.test("fundingDayIsEmpty: the gateway's 'No deposits match your request' is an empty day, nothing else is", () => {
+  check("live wording", fundingDayIsEmpty({ errormsg: "No deposits match your request" }));
+  for (const a of [{ errormsg: "Invalid date" }, { txns: [] }, { errormsg: "No deposits match", txns: [{ retref: "1" }] }, null]) {
+    check(JSON.stringify(a), !fundingDayIsEmpty(a));
   }
 });

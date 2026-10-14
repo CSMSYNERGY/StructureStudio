@@ -306,6 +306,16 @@ export function gatewayErrorText(answer: unknown): string | null {
   return null;
 }
 
+/**
+ * A funding day with nothing on it. The live UAT gateway, 2026-10-14, asked about a day the merchant
+ * had no deposit: a 200 with {errormsg: "No deposits match your request"}. That is the gateway
+ * understanding the date and finding nothing, the same fact as an empty list, so reconcile reads it as
+ * an empty day and moves past it, rather than as a refusal it would retry on every sweep.
+ */
+export function fundingDayIsEmpty(answer: unknown): boolean {
+  return /^no deposits match/i.test(gatewayErrorText(answer) ?? "");
+}
+
 export function fundingAnswerShape(answer: unknown): { recognised: boolean; keyPaths: string[] } {
   if (!answer || typeof answer !== "object") {
     return { recognised: false, keyPaths: [`(${answer === null ? "null" : typeof answer})`] };

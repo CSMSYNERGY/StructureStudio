@@ -57,6 +57,7 @@ import { type CpMerchant, cpMerchant, readPaymentSettings, testModeNeedsExempt }
 import {
   achFundingRead,
   fundingAnswerShape,
+  fundingDayIsEmpty,
   gatewayErrorText,
   fundingStateFromSetlstat,
   returnedPaymentPatch,
@@ -1097,6 +1098,8 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         const answer = await cpFunding(w.m, day);
         // A 200 that is only the gateway's error message is a refusal like a 4xx: filed with its
         // words, and the funding pass stops for this sweep (the same words would come back again).
+        // "No deposits match your request" is an empty day (fundingDayIsEmpty), not a refusal.
+        if (fundingDayIsEmpty(answer)) { fundingAnswers.set(key, { txns: [] }); continue; }
         const said = gatewayErrorText(answer);
         if (said) {
           gatewayFailures.push({ call: "funding", merchant: "…" + w.m.merchid.slice(-4), env: w.m.env, day, kind: "answered_error", message: said });
