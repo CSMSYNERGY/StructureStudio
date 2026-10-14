@@ -1,17 +1,17 @@
--- 308_ach_pending_not_paid.sql — a bank payment that is still clearing is not "Payment Received":
+-- 309_ach_pending_not_paid.sql — a bank payment that is still clearing is not "Payment Received":
 -- the CRM pipeline's paid_in_full event waits until the bank payment stops being pending. It also
 -- adds the column portal-payments reconcile uses to keep its place in the funding data.
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT. Pipe this file to `supabase db query --linked`
 --    (stdin; NOT `--file`, see 270's header), then record it:
---      insert into supabase_migrations.schema_migrations (version, name) values ('308', '308_ach_pending_not_paid') returning version, name;
+--      insert into supabase_migrations.schema_migrations (version, name) values ('309', '309_ach_pending_not_paid') returning version, name;
 --    NEVER `supabase db push`. The file carries its own begin;/commit;, so a failed check takes the
 --    whole file with it. What the apply shows is THE RECORD at the end; no row printed means the
 --    file did not run.
 --
 --    REHEARSAL (changes nothing): pipe it with the last `commit;` swapped for `rollback;`. From
 --    Main Apps/StructureStudio, in Git Bash:
---      sed 's/^commit;\r\{0,1\}$/rollback;/' supabase/migrations/308_ach_pending_not_paid.sql | npx supabase db query --linked -o csv
+--      sed 's/^commit;\r\{0,1\}$/rollback;/' supabase/migrations/309_ach_pending_not_paid.sql | npx supabase db query --linked -o csv
 --    It prints the same RECORD row and leaves the 302 definition in place.
 --
 -- ⚠️ BEFORE OR WITH portal-payments. Its reconcile reads payments.funding_checked_through (part 2).
@@ -19,8 +19,9 @@
 --    funding pass and files `reconcile_funding_needs_migration` (info) once a day until this lands.
 --
 -- ── NUMBERING (TENTATIVE: RENUMBER AT APPLY) ─────────────────────────────────────────────
--- 306 is held by ss/c1012-csv-import and 307 by the phone AI-consent branch, so this is 308. Take
--- the next free number at apply time, renaming this file and every '308' below; record the ledger
+-- 306 is held by ss/c1012-csv-import, 307 by the phone AI-consent branch and 308 by the contact
+-- company edit (applied 2026-10-14), so this is 309. Take the next free number at apply time, renaming
+-- this file and every '309' below; record the ledger
 -- row with `returning`: no row back means the number was taken.
 --
 -- ── WHY (2026-10-14) ─────────────────────────────────────────────────────────────────────
@@ -91,7 +92,7 @@
 --   create trigger payments_pipeline_sync after insert or update of amount_cents, voided_at on public.payments
 --     for each row execute function public.payments_pipeline_sync();
 --   alter table public.payments drop column if exists funding_checked_through;
---   delete from supabase_migrations.schema_migrations where version = '308';
+--   delete from supabase_migrations.schema_migrations where version = '309';
 --   commit;
 --   (portal-payments keeps working without the column: it skips the funding pass, see above.)
 
@@ -106,17 +107,17 @@ begin
   select p.prosrc into v_src from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and p.proname = 'payments_pipeline_sync';
   if v_src is null then
-    raise exception '308: public.payments_pipeline_sync is missing (migration 302 not applied?)';
+    raise exception '309: public.payments_pipeline_sync is missing (migration 302 not applied?)';
   end if;
   -- 302's line, or this file's own (a re-apply); anything else is a definition nobody here has read.
   if position('where order_id = new.order_id and voided_at is null;' in v_src) = 0
      and position('where order_id = new.order_id and voided_at is null and funding_state <> ''pending'';' in v_src) = 0 then
-    raise exception '308: payments_pipeline_sync is not the 302 definition this file replaces; read the live one before applying';
+    raise exception '309: payments_pipeline_sync is not the 302 definition this file replaces; read the live one before applying';
   end if;
   if not exists (select 1 from information_schema.columns
                   where table_schema = 'public' and table_name = 'payments' and column_name = 'funding_state'
                     and is_nullable = 'NO') then
-    raise exception '308: payments.funding_state is missing or nullable (migration 174)';
+    raise exception '309: payments.funding_state is missing or nullable (migration 174)';
   end if;
 end;
 $pre$;
@@ -156,7 +157,7 @@ alter table public.payments
   add column if not exists funding_checked_through date;
 
 comment on column public.payments.funding_checked_through is
-  'CardPointe bank payments: the last funding day (inclusive) portal-payments reconcile has read for this payment, from its sale day on, finding no return it could not read. NULL = nothing read yet, start at the sale day. Bookkeeping only (migration 308): it lets each funding day be asked for once. If the date format sent to /funding ever changes, set it back to NULL so every day is read again.';
+  'CardPointe bank payments: the last funding day (inclusive) portal-payments reconcile has read for this payment, from its sale day on, finding no return it could not read. NULL = nothing read yet, start at the sale day. Bookkeeping only (migration 309): it lets each funding day be asked for once. If the date format sent to /funding ever changes, set it back to NULL so every day is read again.';
 
 -- ── After: the new rule is the live one, the trigger watches funding_state, the column is there ──
 do $chk$
@@ -165,12 +166,12 @@ begin
   if not exists (select 1 from information_schema.columns
                   where table_schema = 'public' and table_name = 'payments'
                     and column_name = 'funding_checked_through' and data_type = 'date' and is_nullable = 'YES') then
-    raise exception '308: payments.funding_checked_through is missing, or not a nullable date';
+    raise exception '309: payments.funding_checked_through is missing, or not a nullable date';
   end if;
   select p.prosrc into v_src from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and p.proname = 'payments_pipeline_sync';
   if position('voided_at is null and funding_state <> ''pending'';' in coalesce(v_src, '')) = 0 then
-    raise exception '308: payments_pipeline_sync does not leave pending payments out';
+    raise exception '309: payments_pipeline_sync does not leave pending payments out';
   end if;
   select string_agg(a.attname, ',' order by a.attname) into v_cols
     from pg_trigger t
@@ -178,7 +179,7 @@ begin
      and a.attnum = any (string_to_array(t.tgattr::text, ' ')::int2[])
    where t.tgrelid = 'public.payments'::regclass and t.tgname = 'payments_pipeline_sync' and not t.tgisinternal;
   if v_cols is distinct from 'amount_cents,funding_state,voided_at' then
-    raise exception '308: payments_pipeline_sync should fire on amount_cents, funding_state, voided_at; it fires on %', coalesce(v_cols, 'nothing');
+    raise exception '309: payments_pipeline_sync should fire on amount_cents, funding_state, voided_at; it fires on %', coalesce(v_cols, 'nothing');
   end if;
 end;
 $chk$;
@@ -189,7 +190,7 @@ $chk$;
 -- still clearing (on 2026-10-14, one on the test system), which no longer count toward Payment
 -- Received.
 select
-  '308' as migration,
+  '309' as migration,
   (select position('funding_state <> ''pending''' in p.prosrc) > 0
      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.proname = 'payments_pipeline_sync') as pending_rule,

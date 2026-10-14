@@ -714,7 +714,7 @@ export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<
  *  that sweep's funding calls; a 200 that is not a funding answer files
  *  reconcile_funding_unrecognised. But a 200 with EMPTY lists for a date it misread looks exactly
  *  like a day with nothing funded, and nothing can tell the two apart from here. Reconcile
- *  remembers every day it has read (payments.funding_checked_through, migration 308), so days read
+ *  remembers every day it has read (payments.funding_checked_through, migration 309), so days read
  *  under a wrong format stay read: after changing the format, set that column back to null on the
  *  cardpointe bank payments and every day is read again. */
 export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {

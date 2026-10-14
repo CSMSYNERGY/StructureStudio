@@ -115,7 +115,7 @@ const ACH_RETURN_WINDOW_DAYS = 60;
  *  shows in the FUNDING data, which settlestat does not carry. Like settlestat it is one call per
  *  merchant and day, and it shares the 40 TPM per-MID quota with live charges: with
  *  MAX_SETTLESTAT_DAYS and the 10 recovery inquires, one reconcile asks the gateway at most 23
- *  times. Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 308)
+ *  times. Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 309)
  *  remembers how far each bank payment has been read, so a sweep starts where the last one stopped
  *  and a day already read is never asked for again. Spent on the days a payment still clearing
  *  needs before the days a settled one needs, and each payment's oldest unread day first. */
@@ -847,10 +847,10 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       resolved.push({ attemptId: a.id, ...out });
     }
 
-    // Both payment lists below are read WITH payments.funding_checked_through (migration 308), how
+    // Both payment lists below are read WITH payments.funding_checked_through (migration 309), how
     // far the funding pass has read each bank payment. A database without that column refuses the
     // whole select (42703); the lists are then read without it, the funding pass is skipped (filed
-    // once a day), and the rest of reconcile works as it did before 308.
+    // once a day), and the rest of reconcile works as it did before 309.
     let cursorsOn = true;
     // deno-lint-ignore no-explicit-any
     const cursorMissing = (e: any) => String(e?.code ?? "") === "42703" || /funding_checked_through/.test(String(e?.message ?? ""));
@@ -1146,7 +1146,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         unreadHints.push({ paymentId: w.row.id, env: w.m.env, merchant: "…" + w.m.merchid.slice(-4), keys: unreadKeys });
       } else if (funded && w.pending) {
         // FUNDED: the money is in, so the payment is no longer clearing. This is what lets
-        // Payment Received fire (migration 308 counts a bank payment once it stops being pending).
+        // Payment Received fire (migration 309 counts a bank payment once it stops being pending).
         // A return after this is still read: the payment is now on the settled list, inside its
         // return window, and its reading carries on from where it stopped.
         const { data: hit, error: wErr } = await admin.from("payments")
@@ -1181,7 +1181,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         if (!next || next === "pending") continue;
         // ⛔ NOT SETTLED ON SETTLESTAT'S WORD WHILE IT IS CLEARING (2026-10-14). For a bank payment
         // "Accepted" is the processor taking the debit, which comes BEFORE the R03 Fiserv says posts
-        // in the funding data, so settling on it fired Payment Received (migration 308) on money
+        // in the funding data, so settling on it fired Payment Received (migration 309) on money
         // about to come back. The funding pass settles it when the money is in. Only after
         // ACH_CLEARED_AFTER_DAYS may "Accepted" settle it, so a bank payment the funding data never
         // mentions (or that we cannot read) does not stay pending, its order frozen, for good. A
@@ -1302,7 +1302,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
           code: "reconcile_funding_needs_migration",
           severity: "info",
           message:
-            `${clientId}: reconcile read no funding data, because payments.funding_checked_through is missing (migration 308 is not applied). ` +
+            `${clientId}: reconcile read no funding data, because payments.funding_checked_through is missing (migration 309 is not applied). ` +
             `Bank payments move only on settlestat's word until it is.`,
           context: { signatures: ["funding_checked_through"] },
         });

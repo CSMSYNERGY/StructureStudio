@@ -113,7 +113,7 @@ type World = {
   updateMisses?: string[];
   /** Payment ids whose UPDATE fails outright. */
   updateFails?: string[];
-  /** A database without migration 308: a payments select naming funding_checked_through is refused. */
+  /** A database without migration 309: a payments select naming funding_checked_through is refused. */
   noCursorColumn?: boolean;
 };
 type Trace = {
@@ -981,7 +981,7 @@ Deno.test("reconcile: once the limiter says no, the sweep asks the gateway nothi
   assertEquals((rows[0].context as any).failures.map((f: any) => [f.call, f.kind]), [["funding", "throttled"]]);
 });
 
-Deno.test("reconcile on a database WITHOUT 308's column: the lists are read without it, no funding is read, settlestat still works, and it says so once a day", async () => {
+Deno.test("reconcile on a database WITHOUT 309's column: the lists are read without it, no funding is read, settlestat still works, and it says so once a day", async () => {
   const world: World = {
     noCursorColumn: true,
     payments: [ACH("a1", 41, "rt-a1", "2026-10-01")],
