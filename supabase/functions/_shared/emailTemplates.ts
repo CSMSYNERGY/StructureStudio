@@ -36,13 +36,16 @@ export interface EstimateEmailInput {
    *  closing message, button text and the photo switch. Untyped jsonb by nature; tenantCopy()
    *  validates and drops anything unusable. */
   templateCopy?: unknown;
-  /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
+  /** Used only by the {customer} and {first} tokens in tenant copy: the name on the design's contact. */
   customerName?: string;
   /** The building's photo: the builder's own style photo, and only when that style's "show on
    *  estimate" switch is on (callers use tenantStylePhotoUrl). Drawn above the detail rows when
    *  it is an https:// address and the builder hasn't switched the photo off in their wording.
    *  Absent renders nothing, so a caller that passes none sends exactly what it always did. */
   pictureUrl?: string | null;
+  /** The business address: client_settings.business_address (jsonb) or a line of text. Only the
+   *  photo design's signature draws it; the classic card never has. */
+  address?: unknown;
 
   businessName: string;
   logoUrl?: string | null;
@@ -313,6 +316,35 @@ export type TemplateCopy = {
   button?: string;
   /** false = leave the building photo out. Absent = show it (when there is one). */
   picture?: boolean;
+
+  // ── The PHOTO-HEADER design (Carolyn, 2026-10-14) ───────────────────────────────────────
+  // "I really want that template inside Structure Studio for sending out the quote. It has a
+  // nice truck on it." Her GHL quote email: a big photo across the top, an orange rule, "We're
+  // getting closer, Ahsan", a few short paragraphs, one wide green "VIEW SHED QUOTE" button, a
+  // slogan, and a signature (name, company, title, logo card, address, phone). layout "photo"
+  // switches a quote or estimate to that shape; everything below is only read while it is on, so
+  // a builder can flip back to the classic card without losing what they typed. Estimate and
+  // quote only: the invoice keeps one design.
+  /** "photo" = the photo-header design. Absent = the classic card. */
+  layout?: "photo";
+  /** The photo across the top (https://). Absent = the building photo when there is one, else
+   *  the logo and name the classic card opens with. */
+  hero?: string;
+  /** The big line under the photo, e.g. "We're getting closer, {first}". */
+  heading?: string;
+  /** The paragraphs above the button. Blank lines split paragraphs; **bold** and *italic*. */
+  message?: string;
+  /** A slogan between the button and the signature. *words* draw in a script face. */
+  tagline?: string;
+  /** The signature: the person's name (large) and their title (under the company name). */
+  signName?: string;
+  signTitle?: string;
+  /** A banner across the bottom (https://). Absent = a thin rule in the accent colour. */
+  footer?: string;
+  /** #rrggbb. The rules either side of the heading (and the bottom rule). */
+  accent?: string;
+  /** #rrggbb. The button. Its words turn dark on a light colour so they stay readable. */
+  buttonColor?: string;
 };
 
 /** The three kinds the wording screen has a tab for. */
@@ -321,16 +353,37 @@ export type TemplateKind = typeof TEMPLATE_KINDS[number];
 
 /** The longest each field may be, in characters (code points). The editor's boxes stop at the
  *  same lengths, so what is saved is what was typed. */
-export const TEMPLATE_LIMITS = { subject: 300, intro: 300, closing: 1000, button: 40 } as const;
+export const TEMPLATE_LIMITS = {
+  subject: 300, intro: 300, closing: 1000, button: 40,
+  heading: 150, message: 1500, tagline: 150, signName: 80, signTitle: 80,
+} as const;
 type CopyField = keyof typeof TEMPLATE_LIMITS;
-const COPY_FIELDS: CopyField[] = ["subject", "intro", "closing", "button"];
+const COPY_FIELDS: CopyField[] = ["subject", "intro", "closing", "button", "heading", "message", "tagline", "signName", "signTitle"];
+/** The photo design's words: estimate and quote only, never the invoice. */
+const PHOTO_FIELDS: CopyField[] = ["heading", "message", "tagline", "signName", "signTitle"];
+/** Fields that keep their line breaks (the rest are one line). */
+const MULTILINE_FIELDS: CopyField[] = ["closing", "message"];
 /** How a refusal names each field, in the editor's own words. */
 const FIELD_WORDS: Record<CopyField, string> = {
   subject: "subject",
   intro: "opening line",
   closing: "closing message",
   button: "button text",
+  heading: "heading",
+  message: "message",
+  tagline: "slogan",
+  signName: "signature name",
+  signTitle: "signature title",
 };
+/** The photo design's two pictures, as a refusal names them. */
+const PHOTO_IMAGES = [["hero", "top photo"], ["footer", "bottom banner"]] as const;
+/** The photo design's two colours, as a refusal names them. */
+const PHOTO_COLORS = [["accent", "accent colour"], ["buttonColor", "button colour"]] as const;
+/** A colour the photo design accepts: #rrggbb, nothing else (no names, no gradients, no url()). */
+function hexColor(v: unknown): string {
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^#[0-9a-f]{6}$/i.test(s) ? s.toLowerCase() : "";
+}
 
 /**
  * One field as it is stored and sent: "" when there is nothing usable. Control characters go
@@ -342,7 +395,7 @@ const FIELD_WORDS: Record<CopyField, string> = {
 function copyField(field: CopyField, v: unknown): string {
   if (typeof v !== "string") return "";
   let s = v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
-  if (field === "closing") {
+  if (MULTILINE_FIELDS.includes(field)) {
     s = s.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "").trim();
   } else {
     s = s.replace(/[\u0000-\u0008\u000E-\u001F\u007F]/g, "").replace(/\s+/g, " ").trim();
@@ -360,13 +413,30 @@ export function tenantCopy(raw: unknown, kind: string): TemplateCopy {
   const o = byKind as Record<string, unknown>;
   const out: TemplateCopy = {};
   for (const f of COPY_FIELDS) {
+    if (kind === "invoice" && PHOTO_FIELDS.includes(f)) continue;
     const t = copyField(f, o[f]);
     // Anything with a tag in it is a builder pasting HTML in; drop the whole field rather
     // than half-escaping it into gibberish, so the shipped wording shows instead.
     if (t && !/[<>]/.test(t)) out[f] = t;
   }
   if (o.picture === false && kind !== "invoice") out.picture = false;
+  if (kind !== "invoice") photoDesign(o, out);
   return out;
+}
+
+/** The photo design's switch, pictures and colours onto `out`, keeping only usable values. The
+ *  words went through copyField with the rest. Shared by tenantCopy (quietly drops what it can't
+ *  use) and cleanTemplateCopy (which has already refused anything unusable out loud). */
+function photoDesign(o: Record<string, unknown>, out: TemplateCopy): void {
+  if (o.layout === "photo") out.layout = "photo";
+  for (const [f] of PHOTO_IMAGES) {
+    const u = emailPictureUrl(o[f]);
+    if (u) out[f] = u;
+  }
+  for (const [f] of PHOTO_COLORS) {
+    const c = hexColor(o[f]);
+    if (c) out[f] = c;
+  }
 }
 
 /**
@@ -386,12 +456,26 @@ export function cleanTemplateCopy(raw: unknown): { copy: Partial<Record<Template
     const o = v as Record<string, unknown>;
     const out: TemplateCopy = {};
     for (const f of COPY_FIELDS) {
+      if (kind === "invoice" && PHOTO_FIELDS.includes(f)) continue;
       const t = copyField(f, o[f]);
       if (!t) continue;
       if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${kind} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
       out[f] = t;
     }
     if (o.picture === false && kind !== "invoice") out.picture = false;
+    if (kind !== "invoice") {
+      // A picture or colour that was given but can't be used is refused, not dropped: the
+      // builder would otherwise see "Saved." and a design without the photo they just chose.
+      for (const [f, words] of PHOTO_IMAGES) {
+        const v = typeof o[f] === "string" ? String(o[f]).trim() : "";
+        if (v && !emailPictureUrl(v)) return { error: `The ${kind} ${words} must be an https:// web address (upload the picture instead).` };
+      }
+      for (const [f, words] of PHOTO_COLORS) {
+        const v = typeof o[f] === "string" ? String(o[f]).trim() : "";
+        if (v && !hexColor(v)) return { error: `The ${kind} ${words} must be a colour like #2cab05.` };
+      }
+      photoDesign(o, out);
+    }
     if (Object.keys(out).length) copy[kind] = out;
   }
   return { copy };
@@ -456,6 +540,278 @@ export function fillTokens(tpl: string, vals: Record<string, string>): string {
     Object.prototype.hasOwnProperty.call(vals, k) ? String(vals[k] ?? "") : whole);
 }
 
+// ── THE PHOTO-HEADER DESIGN (Carolyn, 2026-10-14) ──────────────────────────────────────────
+// Her GHL quote email, rebuilt from the bytes it sent (Junior Barns' "Your shed quote is
+// here!", 2026-07-08): photo, orange rule, heading, rule, paragraphs, a full-width green button,
+// a slogan, then "Thanks," and a signature card. Same email-client rules as the classic card:
+// nested tables and inline styles only, explicit bgcolor everywhere, 600px wide.
+
+const PHOTO_ACCENT = "#f47b2a";
+const PHOTO_BUTTON = "#2cab05";
+/** Her GHL email's body face. */
+const PHOTO_FONT = "Arial,Helvetica,sans-serif";
+
+/** The first word of the customer's name, for {first}. "" when there is none. */
+function firstName(customerName: unknown): string {
+  return oneLine(customerName).split(" ")[0] || "";
+}
+
+/** The business address on one line ("1645 Bethany Rd, Cottage Grove, TN 38224"), from the
+ *  client_settings.business_address jsonb or a plain string. Anything else is "". */
+function addressLine(a: unknown): string {
+  if (typeof a === "string") return oneLine(a);
+  if (!a || typeof a !== "object") return "";
+  const o = a as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" ? oneLine(v) : "");
+  const stateZip = [s(o.state), s(o.postalCode)].filter(Boolean).join(" ");
+  return [s(o.addressLine1), s(o.city), stateZip].filter(Boolean).join(", ");
+}
+
+/** Wording that used {first} or {customer} when the design has no name on it leaves "Hi ," or
+ *  "We're getting closer, " behind. Close the gap. Only run on such wording. */
+function tidyGap(s: string): string {
+  return s.replace(/[ \t]+([,.!?;:])/g, "$1").replace(/,([.!?])/g, "$1").replace(/^[,\s]+/, "").replace(/[,\s]+$/, "");
+}
+
+/** Escaped text with the builder's **bold** and *italic*; line breaks become <br>. */
+function richText(s: string): string {
+  return esc(s)
+    .replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+?)\*/g, "<em>$1</em>")
+    .replace(/\n/g, "<br>");
+}
+
+/** The same text as the plain-text half reads it: the markers dropped. */
+function plainText(s: string): string {
+  return s.replace(/\*\*([^*\n]+?)\*\*/g, "$1").replace(/\*([^*\n]+?)\*/g, "$1");
+}
+
+/** Paragraphs: split on blank lines. */
+function paragraphs(s: string): string[] {
+  return s.split(/\n[ \t]*\n+/).map((p) => p.trim()).filter(Boolean);
+}
+
+/** The slogan: *words* in a script face, the rest bold capitals' size — her "EVERYONE NEEDS
+ *  *a little space* IN THEIR LIFE". Mail apps without the face fall back to a cursive one. */
+function taglineHtml(t: string): string {
+  return esc(t).split(/(\*[^*\n]+?\*)/).map((part) =>
+    /^\*[^*\n]+\*$/.test(part)
+      ? `<span style="font-family:Lobster,'Brush Script MT','Segoe Script',cursive;font-size:26px;font-weight:400;color:#000000;">${part.slice(1, -1)}</span>`
+      : part
+  ).join("");
+}
+
+/** Readable words on the builder's button colour: white, or near-black on a light colour. */
+function inkOn(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.6 ? "#111111" : "#FFFFFF";
+}
+
+/** The rule either side of the heading: a 2px cell in the accent colour (a border would be
+ *  dropped by some mail apps; a filled cell never is). */
+function accentRule(color: string, px: number): string {
+  return `<tr>
+          <td style="padding:0 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="${px}" bgcolor="${color}" style="background-color:${color};height:${px}px;line-height:${px}px;font-size:1px;">&nbsp;</td></tr></table>
+          </td>
+        </tr>`;
+}
+
+/** Her GHL wording, the floor plan sentence only when there is a floor plan to point at. Her
+ *  email said the drawing was ATTACHED; ours links it, so the sentence says so. */
+function defaultPhotoMessage(word: string, first: string, hasPlan: boolean): string {
+  return [
+    `Hi ${first || "there"},`,
+    `Here is the ${word} for your new building! Please click the button below to review and approve it.`,
+    ...(hasPlan ? [`Your floor plan, with everything we discussed, is linked below. *If you have any changes or questions, please let me know so we can get it dialed in for you.*`] : []),
+    `**View your ${word} below, and click "Accept" to move this order forward!**`,
+  ].join("\n\n");
+}
+
+interface PhotoParts {
+  name: string;
+  num: string;
+  word: "quote" | "estimate";
+  Word: string;
+  building: string;
+  money: string;
+  showTotal: boolean;
+  tokens: Record<string, string>;
+  /** The building photo the classic card would show, already allowed (or null). */
+  picture: string | null;
+  /** The builder's button words, filled ("" = ours). */
+  buttonText: string;
+  /** The builder's closing message, filled ("" = "Thanks,"). */
+  closing: string;
+  preheader: string;
+  subject: string;
+}
+
+function photoEstimateEmail(input: EstimateEmailInput, copy: TemplateCopy, p: PhotoParts): EmailContent {
+  const { name, num, word, Word, building, tokens } = p;
+  const accent = copy.accent || PHOTO_ACCENT;
+  const btnBg = copy.buttonColor || PHOTO_BUTTON;
+  const noName = !tokens.first;
+  const fill = (tpl: string) => {
+    const out = fillTokens(tpl, tokens);
+    return noName && /\{(first|customer)\}/.test(tpl) ? tidyGap(out) : out;
+  };
+
+  const hero = copy.hero || p.picture || null;
+  const heading = oneLine(fill(copy.heading || "We're getting closer, {first}"));
+  const message = copy.message ? fill(copy.message) : defaultPhotoMessage(word, tokens.first, Boolean(input.pdfUrl));
+  const paras = paragraphs(message);
+  const ctaLabel = p.buttonText || `VIEW YOUR ${word.toUpperCase()}`;
+  const tagline = copy.tagline ? oneLine(fill(copy.tagline)) : "";
+  const signName = copy.signName ? oneLine(fill(copy.signName)) : "";
+  const signTitle = copy.signTitle ? oneLine(fill(copy.signTitle)) : "";
+  const closing = p.closing || "Thanks,";
+  const address = addressLine(input.address);
+  const phone = oneLine(input.phone ?? "");
+  const website = oneLine(input.website ?? "");
+  const terms = input.quoteTerms ? String(input.quoteTerms).replace(/\r\n/g, "\n").trim() : "";
+  const year = new Date().getUTCFullYear();
+
+  const details = [`${Word} #${num}`];
+  if (building) details.push(building);
+  if (p.showTotal) details.push(p.money);
+  const links: string[] = [];
+  if (input.pdfUrl) links.push(`<a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a>`);
+  if (input.formalPdfUrl) links.push(`<a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your ${word} (PDF)</a>`);
+
+  // ── Top: the photo, linked to the quote the way hers is; without one, the logo and name. ──
+  const heroImg = hero
+    ? `<img src="${esc(hero)}" alt="${esc(name)}" width="560" style="display:block;width:100%;max-width:560px;height:auto;border:0;" />`
+    : "";
+  const logo = input.logoUrl
+    ? `<img src="${esc(input.logoUrl)}" alt="${esc(name)}" width="170" style="display:block;max-width:170px;max-height:64px;width:auto;height:auto;border:0;margin:0 auto 10px auto;" />`
+    : "";
+  const top = hero
+    ? `<tr>
+          <td style="padding:20px 20px 12px 20px;">${input.estimateUrl ? `<a href="${esc(input.estimateUrl)}" target="_blank" style="text-decoration:none;">${heroImg}</a>` : heroImg}</td>
+        </tr>`
+    : `<tr>
+          <td align="center" style="padding:28px 20px 16px 20px;">
+            ${logo}<div style="font-family:${FONT};font-size:20px;font-weight:800;color:#1F2937;line-height:1.3;">${esc(name)}</div>
+          </td>
+        </tr>`;
+
+  const bodyParas = paras.map((t) =>
+    `<p style="margin:0 0 14px 0;font-family:${PHOTO_FONT};font-size:16px;line-height:1.5;color:#000000;">${richText(t)}</p>`
+  ).join("\n            ");
+
+  const button = input.estimateUrl
+    ? `<tr>
+          <td style="padding:6px 20px 4px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td align="center" bgcolor="${btnBg}" style="background-color:${btnBg};padding:14px 25px;">
+                  <a href="${esc(input.estimateUrl)}" target="_blank" style="display:block;font-family:${PHOTO_FONT};font-size:16px;font-weight:700;line-height:1.25;color:${inkOn(btnBg)};text-decoration:none;">${esc(ctaLabel)}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>`
+    : "";
+
+  const detailRowHtml = `<tr>
+          <td align="center" style="padding:10px 20px 4px 20px;">
+            <p style="margin:0;font-family:${FONT};font-size:13px;line-height:1.7;color:#475569;">${esc(details.join(" · "))}${links.length ? `<br>${links.join(" &middot; ")}` : ""}</p>
+          </td>
+        </tr>`;
+
+  const taglineRow = tagline
+    ? `<tr>
+          <td align="center" style="padding:22px 24px 4px 24px;">
+            <p style="margin:0;font-family:${PHOTO_FONT};font-size:16px;font-weight:700;line-height:1.3;color:#000000;">${taglineHtml(tagline)}</p>
+          </td>
+        </tr>`
+    : "";
+
+  // ── The signature: hers is "Thanks," then the owner's name large, the company in bold grey,
+  // the title in italics, the logo card, then address, email and phone. ──
+  const sig: string[] = [
+    `<p style="margin:0 0 6px 0;font-family:${PHOTO_FONT};font-size:14px;line-height:1.4;color:#000000;">${esc(closing).replace(/\n/g, "<br>")}</p>`,
+  ];
+  if (signName) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:26px;font-weight:700;line-height:1.15;color:#000000;">${esc(signName)}</p>`);
+  sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:18px;font-weight:700;line-height:1.2;color:#595959;">${esc(name)}</p>`);
+  if (signTitle) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:18px;font-style:italic;text-decoration:underline;line-height:1.2;color:#7F7F7F;">${esc(signTitle)}</p>`);
+  if (input.logoUrl) sig.push(`<img src="${esc(input.logoUrl)}" alt="${esc(name)}" width="203" style="display:block;max-width:203px;max-height:130px;width:auto;height:auto;border:0;margin:12px 0 10px 0;" />`);
+  if (address) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:14px;font-weight:700;line-height:1.3;color:#000000;">${esc(address)}</p>`);
+  if (website) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:14px;line-height:1.3;"><a href="${esc(websiteHref(website))}" target="_blank" style="color:#0000EE;text-decoration:underline;">${esc(website)}</a></p>`);
+  if (phone) sig.push(`<p style="margin:0;font-family:${PHOTO_FONT};font-size:20px;line-height:1.3;color:#000000;">${esc(phone)}</p>`);
+
+  const footerRow = copy.footer
+    ? `<tr>
+          <td style="padding:10px 20px 0 20px;"><img src="${esc(copy.footer)}" alt="" width="560" style="display:block;width:100%;max-width:560px;height:auto;border:0;" /></td>
+        </tr>`
+    : accentRule(accent, 6);
+
+  const termsHtml = terms
+    ? `<p style="margin:10px 0 0 0;font-family:${FONT};font-size:11px;line-height:1.6;color:#94A3B8;">${esc(terms).replace(/\n/g, "<br>")}</p>`
+    : "";
+
+  // width="600" is for Outlook on the desktop; everything else reads the CSS, which lets the
+  // card shrink to a phone's width (the classic card scrolls sideways there; hers didn't).
+  const html = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#EAF0F6" style="background-color:#EAF0F6;margin:0;padding:0;">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <div style="display:none;font-size:1px;color:#EAF0F6;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${esc(p.preheader)}</div>
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="width:100%;max-width:600px;background-color:#FFFFFF;">
+        ${top}
+        ${accentRule(accent, 2)}
+        <tr>
+          <td style="padding:4px 20px;">
+            <h2 style="margin:10px 0;font-family:${PHOTO_FONT};font-size:22px;font-weight:700;line-height:1.4;color:#000000;">${esc(heading)}</h2>
+          </td>
+        </tr>
+        ${accentRule(accent, 2)}
+        <tr>
+          <td style="padding:16px 20px 2px 20px;">
+            ${bodyParas}
+          </td>
+        </tr>
+        ${button}
+        ${detailRowHtml}
+        ${taglineRow}
+        <tr>
+          <td style="padding:20px 24px 12px 24px;">
+            ${sig.join("\n            ")}
+          </td>
+        </tr>
+        ${footerRow}
+        <tr>
+          <td style="padding:12px 20px 20px 20px;">
+            <p style="margin:0;font-family:${PHOTO_FONT};font-size:12px;line-height:1.6;color:#000000;"><em>Copyright &copy; ${year} ${esc(name)}. All rights reserved.</em></p>${termsHtml}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>`;
+
+  const text: string[] = [heading, ""];
+  for (const t of paras) text.push(plainText(t), "");
+  if (input.estimateUrl) text.push(`${ctaLabel}: ${input.estimateUrl}`);
+  text.push(`${Word} #: ${num}`);
+  if (building) text.push(`Building: ${building}`);
+  if (p.showTotal) text.push(`${Word} total: ${p.money}`);
+  if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
+  if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
+  if (tagline) text.push("", plainText(tagline));
+  text.push("", closing);
+  if (signName) text.push(signName);
+  text.push(name);
+  if (signTitle) text.push(signTitle);
+  if (address) text.push(address);
+  const contact = [phone, website].filter(Boolean).join(" | ");
+  if (contact) text.push(contact);
+  if (terms) text.push("", terms);
+
+  return { subject: p.subject, html, text: text.join("\n") + "\n" };
+}
+
 export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const num = oneLine(input.estimateNumber);
@@ -489,7 +845,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // a Subject header — the one thing tenantCopy() already strips from the template. The
   // detail row and the plain-text line keep the raw value; a break there is only ugly.
   const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
-  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
+  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? ""), first: firstName(input.customerName) };
   // The builder's button words, filled. Blank once filled (a lone {customer} with no name on the
   // design) falls back to ours rather than drawing an empty button.
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
@@ -497,6 +853,16 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // The building photo: above the details, the way her GHL quote email has it. Absent unless the
   // caller passed a usable https:// address AND the builder hasn't switched it off.
   const picture = copy.picture === false ? null : emailPictureUrl(input.pictureUrl);
+
+  // The photo-header design, when the builder switched it on for this kind. Nothing below this
+  // line runs for it, so the classic card is byte-for-byte what it was (the golden test).
+  if (copy.layout === "photo") {
+    return photoEstimateEmail(input, copy, {
+      name, num, word, Word, building, money, showTotal, tokens, picture, buttonText, closing,
+      preheader: showTotal ? `Your ${word} from ${name} is ready - ${money}.` : `Your ${word} from ${name} is ready.`,
+      subject: copy.subject ? fillTokens(copy.subject, tokens) : `Your ${word} ${num} from ${name}`,
+    });
+  }
   const pictureHtml = picture
     ? `
             <img src="${esc(picture)}" alt="${esc(building || name)}" width="536" style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:8px;margin:0 0 16px 0;" />`
@@ -707,7 +1073,7 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   // has no value for: fillTokens leaves an UNKNOWN token verbatim on purpose, so omitting
   // {building} here would ship a literal "{building}" to a customer's inbox.
   const copy = tenantCopy(input.templateCopy, "invoice");
-  const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? "") };
+  const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? ""), first: firstName(input.customerName) };
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
   const closing = copy.closing ? fillTokens(copy.closing, tokens).trim() : "";
   const cta = toSign
@@ -856,6 +1222,8 @@ export interface TemplatePreviewInput {
   pictureUrl?: string | null;
   /** That style's name, so the photo and the Building row agree. */
   styleLabel?: string | null;
+  /** client_settings.business_address, for the photo design's signature. */
+  address?: unknown;
   /** True when invoices are signed on the customer page (StructureStudio invoicing): the button
    *  then asks for a signature, as the real email does. False: it opens the invoice. */
   invoiceToSign?: boolean;
@@ -898,6 +1266,7 @@ export function templatePreviewEmail(p: TemplatePreviewInput): EmailContent {
     formalPdfUrl: "#",
     docWord: p.kind === "quote" ? "quote" : "estimate",
     pictureUrl: p.pictureUrl ?? null,
+    address: p.address ?? null,
   });
 }
 

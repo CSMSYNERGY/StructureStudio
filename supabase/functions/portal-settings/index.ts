@@ -454,6 +454,9 @@ const GATES: GateTable = {
   email_status:         { area: "settings_email", level: "view" },
   email_connect_domain: { area: "settings_email", level: "edit" },
   email_save_template: { area: "settings_email", level: "edit" },
+  // The photo design's two pictures (top photo, bottom banner): upload-only, returns a URL the
+  // wording boxes hold until "Save wording". Same edit grant as saving the wording it serves.
+  email_upload_image:  { area: "settings_email", level: "edit" },
   // The wording screen's Preview: draws the wording in the boxes (saved or not) around sample
   // data and the builder's own header and footer. A read: it writes nothing and sends nothing.
   email_preview_template: { area: "settings_email", level: "view" },
@@ -12542,6 +12545,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, copy: clean });
   }
 
+  // ── The photo design's pictures (Carolyn 2026-10-14, her GHL quote email's top photo) ──
+  // Upload-only, like upload_logo: the picture goes into this builder's own folder in the public
+  // `branding` bucket under an unguessable name, and the URL comes back for the wording box to
+  // hold. Nothing is written to the database until "Save wording", which runs it through
+  // cleanTemplateCopy (https:// only) like any other address. 3 MB, the style photo's limit: a
+  // photo across the top of an email is a photo, not a logo.
+  if (action === "email_upload_image") {
+    const which = payload?.which === "footer" ? "footer" : payload?.which === "hero" ? "hero" : "";
+    if (!which) return json({ error: "Say which picture: the top photo or the bottom banner." }, 400);
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB). Save it smaller, about 1200 pixels wide is plenty for an email." }, 400);
+    const path = `${clientId}/email-${which}-${crypto.randomUUID()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return dbFail(req, clientId, "upload that picture", up.error);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
   // ── The building photo on a quote email (2026-10-04) ──────────────────────────────
   // A style's own photo, behind that style's own "Image on estimate" switch, and only an
   // upload in this builder's own storage folder (tenantStylePhotoUrl): submit-estimate's rule
@@ -12583,7 +12611,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("error" in cleaned) return json({ error: cleaned.error }, 400);
     const copy = cleaned.copy[k] ?? {};
     const { data: cs, error: csErr } = await admin.from("client_settings")
-      .select("business_name, business_logo_url, business_phone, business_website, quote_terms, invoice_in_ghl")
+      .select("business_name, business_logo_url, business_phone, business_website, business_address, quote_terms, invoice_in_ghl")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return dbFail(req, clientId, "read your business details for the preview", csErr);
     let pictureUrl: string | null = null;
@@ -12611,6 +12639,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       quoteTerms: cs?.quote_terms || null,
       pictureUrl,
       styleLabel,
+      address: cs?.business_address ?? null,
       // StructureStudio invoicing (invoice_in_ghl = false) sends the sign-on-the-quote-page
       // invoice; the CRM path sends the hosted one. Preview the one this builder's customers get.
       invoiceToSign: cs?.invoice_in_ghl === false,
@@ -13213,7 +13242,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
-      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
@@ -13249,6 +13278,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       formalPdfUrl: d.ss_quote_pdf_url || null,
       quoteTerms: cs.quote_terms || null,
       docWord: "quote",
+      // The photo design's signature carries the address, as the first send's does.
+      address: cs.business_address ?? null,
     });
     const replyTo = await replyCopy(sender, { shortCode, recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
