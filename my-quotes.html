@@ -1203,6 +1203,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     errEl.hidden = true;
     errEl.style.cssText = "margin-top:8px";
     var payToken = null, payExpiry = null;
+    // ⚠️ A CARD TOKEN HOLDS THE CVV FOR 2 MINUTES, AND FOR ONE AUTH. Fiserv (CardPointe
+    // integrations), 2026-10-14: the CVV stays linked to the CardSecure token for 2 minutes. Counted
+    // here from the moment the iFrame posts the token (payTokenAt, on the wall clock: a phone's
+    // monotonic clock can stop while it is locked), and treated as used up by the first auth,
+    // approved or not. So Pay checks the age before anything is sent, 100 s leaving the upload, a
+    // cold start and the database writes inside the 2 minutes, and an answer saying the gateway saw
+    // the token (newCardNeeded) asks for the card again. A bank token carries no CVV and is never
+    // timed. scripts/preflight.mjs (checkCardTokenMaxAge) holds this number equal to the portal's.
+    var payTokenAt = 0, CARD_TOKEN_MAX_MS = 100000;
 
     var payBtn = document.createElement("button");
     payBtn.type = "button";
@@ -1425,7 +1434,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var tok = m && (m.token || m.message);
       if (!tok) return;
       setError(errEl, "");
-      payToken = String(tok); payExpiry = m.expiry || null; payBtn.disabled = false;
+      payToken = String(tok); payExpiry = m.expiry || null; payTokenAt = Date.now(); payBtn.disabled = false;
       if (rail === "card") probeSurcharge();
     };
     window.addEventListener("message", onMsg, false);
@@ -1518,6 +1527,21 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         check.done.then(function () { clearTimeout(t); resolve(); });
       });
     }
+    // A card token past CARD_TOKEN_MAX_MS: its CVV may be gone. Never a bank token.
+    function cardTokenStale() {
+      return rail === "card" && !!payToken && Date.now() - payTokenAt > CARD_TOKEN_MAX_MS;
+    }
+    // A NEW, empty card frame. The fee line, the answer it matches and any check still out were all
+    // for the old card, so they go with it, and the next token asks afresh (no stale feeAnsweredKey
+    // can send Pay round "The amount to pay has changed"). mountFrame clears the error, so the
+    // sentence is set AFTER it.
+    function askForCardAgain(msg) {
+      probeSeq++; clearTimeout(probeTimer); feeAnsweredKey = null; feeInflight = null; feeReset();
+      frame = mountFrame();
+      payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+      setError(errEl, msg);
+    }
+    var CARD_EXPIRED = "For your security, card details are only kept for 2 minutes. Enter the card again, then tap Pay.";
     // Ticking the box hides the street and ZIP: the server fills them in from the estimate.
     billSameBox.addEventListener("change", function () {
       billStreet.wrap.hidden = billSameBox.checked;
@@ -1568,6 +1592,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 
     payBtn.addEventListener("click", function () {
       if (!payToken) { setError(errEl, "Enter your details above first."); return; }
+      // Before the billing check and the fee wait: neither is worth doing for a card that is gone.
+      if (cardTokenStale()) { askForCardAgain(CARD_EXPIRED); return; }
       // Required here, optional on the server: production's page sends none of these yet.
       var billErr = rail === "card" ? billingProblem() : "";
       if (billErr) { setError(errEl, billErr); return; }
@@ -1594,6 +1620,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 
     // The charge itself. Card numbers never pass through here: payToken is the tokenizer's.
     function sendPayment() {
+      // Asked again here, at the moment of sending: the fee wait above can hold the tap for up to
+      // FEE_WAIT_MS, and the second tap after a fee change can come at any time.
+      if (cardTokenStale()) { askForCardAgain(CARD_EXPIRED); return; }
       setError(errEl, "");
       payBtn.disabled = true;
       var was = payBtn.textContent;
@@ -1620,9 +1649,19 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
             return;
           }
           if (r.ok && r.data && r.data.ok) { loadQuotes(); return; }
-          payBtn.disabled = false; payBtn.textContent = was;
           window.addEventListener("message", onMsg, false);
-          setError(errEl, errText(r, "That payment didn't go through. Check the details and try again."));
+          var why = errText(r, "That payment didn't go through. Check the details and try again.");
+          // The gateway SAW this card (a decline, or a partial approval that was voided), so its
+          // CVV is spent: the same token again would go out with none. customer-pay says so with
+          // newCardNeeded; a 402 is the same thing from a server older than that flag. A refusal
+          // before the gateway (amount changed, busy, a business rule) keeps the card as typed.
+          // Card only: a remount on the bank tab would empty the Routing and Checking boxes.
+          if (rail === "card" && ((r.data && r.data.newCardNeeded === true) || r.status === 402)) {
+            askForCardAgain(why + " Enter the card details again to retry.");
+            return;
+          }
+          payBtn.disabled = false; payBtn.textContent = was;
+          setError(errEl, why);
         })
         .catch(function () {
           payBtn.disabled = false; payBtn.textContent = was;

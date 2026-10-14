@@ -12,6 +12,10 @@
 //   3. `pay` with a typed street and ZIP sends those (ZIP+4 as nine digits), ecomind "E".
 //   4. `pay` from production's page (no billing keys): the contact's name, no street, no ZIP, the
 //      auth it always got.
+//   5. `newCardNeeded: true` on a `pay` that reached /auth and did not stand (a decline, a voided
+//      partial), so the page asks for the card again; never on a refusal before /auth or on an
+//      unknown (a blocked order). Fiserv (CardPointe integrations), 2026-10-14: the CVV stays with
+//      the token for 2 minutes, and the first auth very likely uses it up. The shopper stays on E.
 //
 // HOW. paymentsMerchantOfRecord_test's idiom: Deno.serve is stubbed while customer-pay/index.ts is
 // imported, the import map swaps supabase-js for supabase_stub.ts, stubDb routes every table call
@@ -95,8 +99,8 @@ function answer(trace: Trace, table: string, ops: any[][]): any {
     case "payments":
       return { data: [], error: null };
     case "payment_attempts":
-      // No unknown or open attempt, no declines this hour.
-      return { data: [], error: null, count: 0 };
+      // No unknown or open attempt, and (unless a test says otherwise) no declines this hour.
+      return { data: [], error: null, count: declinesThisHour };
     case "app_errors":
       return { data: null, error: null };
   }
@@ -119,6 +123,11 @@ const ENV: Record<string, string> = {
   SUPABASE_SERVICE_ROLE_KEY: "stub-service",
 };
 
+/** The /auth answer, when a test needs another: a body, or an HTTP status. Default: approved. */
+let authAnswer: unknown = null;
+/** Declines on this order in the last hour (the pay throttle's count). */
+let declinesThisHour = 0;
+
 async function call(body: Record<string, unknown>) {
   const trace: Trace = { gateway: [], writes: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
@@ -133,8 +142,11 @@ async function call(body: Record<string, unknown>) {
     const sent = init?.body ? JSON.parse(String(init.body)) : null;
     trace.gateway.push({ path, body: sent, url });
     const out = path === "/auth"
-      ? { respstat: "A", respcode: "000", retref: "rt-new", amount: "1000.00", token: "9413948780281111", authcode: "123456", avsresp: "Y", cvvresp: "M" }
+      ? authAnswer ?? { respstat: "A", respcode: "000", retref: "rt-new", amount: "1000.00", token: "9413948780281111", authcode: "123456", avsresp: "Y", cvvresp: "M" }
+      : path === "/void"
+      ? { respstat: "A", respcode: "00", retref: "rt-new" }
       : { surcharge: "N" };
+    if (typeof out === "number") return Promise.resolve(new Response("", { status: out }));
     return Promise.resolve(new Response(JSON.stringify(out), { status: 200 }));
   }) as typeof fetch;
   try {
@@ -199,4 +211,49 @@ Deno.test("pay from production's page (no billing keys): the contact's name, no 
   assertEquals(r.status, 200, r.text);
   const b = authBody(r.trace);
   assertEquals([b.name, "address" in b, "postal" in b, b.ecomind], ["Pat Example", false, false, "E"]);
+});
+
+Deno.test("pay: a decline and a voided partial carry newCardNeeded; the shopper still sends E", async () => {
+  try {
+    authAnswer = { respstat: "C", respcode: "05", resptext: "Do not honor" };
+    const decline = await call(PAY_BODY);
+    assertEquals(decline.status, 402, decline.text);
+    assertEquals(decline.body, { error: "Do not honor", blocking: false, newCardNeeded: true });
+    assertEquals(authBody(decline.trace).ecomind, "E");
+
+    authAnswer = { respstat: "A", respcode: "000", retref: "rt-part", amount: "400.00" };
+    const partial = await call(PAY_BODY);
+    assertEquals(partial.status, 402, partial.text);
+    assertEquals(partial.body.newCardNeeded, true);
+    assertEquals(partial.trace.gateway.map((g) => g.path), ["/auth", "/void"]);
+    // The shopper's own words, and no promise that the hold is released.
+    assert(/^Your card only approved \$400\.00 of \$1000\.00/.test(partial.body.error), partial.body.error);
+    assert(/drops off on its own/.test(partial.body.error) && !/released/i.test(partial.body.error), partial.body.error);
+  } finally {
+    authAnswer = null;
+  }
+});
+
+Deno.test("pay: never newCardNeeded on a refusal before /auth, nor on an unknown", async () => {
+  try {
+    // The amount changed under the page: refused before the card is touched.
+    const amount = await call({ ...PAY_BODY, confirmChargeCents: 99999 });
+    assertEquals(amount.status, 400, amount.text);
+    assertEquals(amount.trace.gateway, []);
+    // Five declines on this order this hour.
+    declinesThisHour = 5;
+    const throttled = await call(PAY_BODY);
+    assertEquals(throttled.status, 429, throttled.text);
+    assertEquals(throttled.trace.gateway, []);
+    declinesThisHour = 0;
+    // The gateway fell over: the order is blocked, not retried.
+    authAnswer = 502;
+    const unknown = await call(PAY_BODY);
+    assertEquals(unknown.status, 409, unknown.text);
+    assertEquals(unknown.body.blocking, true);
+    for (const r of [amount, throttled, unknown]) assert(!("newCardNeeded" in r.body), r.text);
+  } finally {
+    authAnswer = null;
+    declinesThisHour = 0;
+  }
 });

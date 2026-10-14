@@ -279,6 +279,7 @@ Deno.test("a prior closed_unknown REFUSES, and the gateway is never called", asy
   check("409", r.status === 409);
   check("ZERO gateway calls", fetchCount === 0, String(fetchCount));
   check("no attempt row written", !log.some((c) => c.table === "payment_attempts" && c.op === "insert"));
+  check("a refusal before /auth never asks for a new card", !("newCardNeeded" in r), JSON.stringify(r));
 });
 
 Deno.test("the attempt row is written BEFORE the gateway is called, and payments AFTER", async () => {
@@ -340,6 +341,8 @@ Deno.test("a DECLINE closes declined, writes no payment, and issues no void or r
   check("402", r.status === 402, String(r.status));
   check("not blocking", r.blocking === false);
   check("carries the reason", r.error.includes("Not sufficient funds"), r.error);
+  // The token reached /auth: its CVV is spent, so the page must ask for the card again.
+  check("newCardNeeded", r.newCardNeeded === true, JSON.stringify(r));
   check("no payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
   check("exactly one gateway call — no void, no retry", fetchCount === 1, fetchLog.join(","));
   const close = log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()
@@ -358,6 +361,8 @@ Deno.test("an UNKNOWN outcome blocks, logs a fault, and writes no payment", asyn
   check("blocking", r.blocking === true);
   check("409", r.status === 409);
   check("tells them NOT to retry", /do not try again/i.test(r.error), r.error);
+  // A blocked order is not a retry: no newCardNeeded on an unknown.
+  check("no newCardNeeded", !("newCardNeeded" in r), JSON.stringify(r));
   check("no payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
   check("app_errors written", log.some((c) => c.table === "app_errors" && c.op === "insert"));
   const close = log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()
@@ -385,6 +390,8 @@ Deno.test("THROTTLED is known-not-charged: a 429, not a block", async () => {
   check("429", r.status === 429, String(r.status));
   check("NOT blocking", r.blocking === false);
   check("mentions the wait", /42/.test(r.error), r.error);
+  // The limiter refuses upstream of the processor: the token was never used, so it is kept.
+  check("no newCardNeeded", !("newCardNeeded" in r), JSON.stringify(r));
 });
 
 Deno.test("a PARTIAL approval is voided, closes declined, and never becomes a payment", async () => {
@@ -407,8 +414,32 @@ Deno.test("a PARTIAL approval is voided, closes declined, and never becomes a pa
   if (r.ok) return;
   check("the void was issued", sawVoid);
   check("402", r.status === 402);
-  check("tells them the hold was released", /released/i.test(r.error), r.error);
+  // It says the sale was cancelled and a pending amount drops off on its own. It no longer promises
+  // the hold "has been released": only the card's bank decides when a pending amount goes.
+  check("says it was cancelled", /cancelled/i.test(r.error), r.error);
+  check("says a pending amount drops off", /pending/i.test(r.error) && /drops off on its own/i.test(r.error), r.error);
+  check("promises no release", !/released/i.test(r.error), r.error);
+  check("speaks to the shopper", /^Your card only approved \$500\.00 of \$1000\.00/.test(r.error), r.error);
+  check("the token reached /auth: newCardNeeded", r.newCardNeeded === true, JSON.stringify(r));
   check("NO payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
+});
+
+Deno.test("a voided partial taken by a BUILDER speaks of the card and the cardholder, not 'your card'", async () => {
+  stubGateway((url) =>
+    new Response(
+      JSON.stringify(url.endsWith("/void") ? { respstat: "A", respcode: "000", retref: "r5" } : { respstat: "A", respcode: "000", retref: "r5", amount: "500.00" }),
+      { status: 200 },
+    )
+  );
+  const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), []), { ...OPTS, actorKind: "staff" });
+  restore();
+  check("refused 402", !r.ok && r.status === 402, JSON.stringify(r));
+  if (r.ok) return;
+  check("the card", /^The card only approved \$500\.00 of \$1000\.00/.test(r.error), r.error);
+  check("the cardholder's bank", /cardholder's bank/.test(r.error), r.error);
+  check("never 'your'", !/\byour\b/i.test(r.error), r.error);
+  check("promises no release", !/released/i.test(r.error), r.error);
+  check("newCardNeeded", r.newCardNeeded === true, JSON.stringify(r));
 });
 
 Deno.test("a partial whose VOID fails blocks and shouts", async () => {
@@ -427,6 +458,24 @@ Deno.test("a partial whose VOID fails blocks and shouts", async () => {
   if (r.ok) return;
   check("blocking", r.blocking === true);
   check("app_errors written", log.some((c) => c.table === "app_errors" && c.op === "insert"));
+  // The shopper keeps "contact your builder"; a blocked order never asks for a new card.
+  check("shopper: contact your builder", /contact your builder/.test(r.error), r.error);
+  check("no newCardNeeded on a blocking failure", !("newCardNeeded" in r), JSON.stringify(r));
+
+  // A builder reads: don't run it again, CSM Synergy has been alerted, and nothing about a builder.
+  stubGateway((url) => {
+    if (url.endsWith("/void")) return new Response("nope", { status: 500 });
+    return new Response(JSON.stringify({ respstat: "A", respcode: "000", retref: "r6", amount: "500.00" }), { status: 200 });
+  });
+  const s = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), []), { ...OPTS, actorKind: "staff" });
+  restore();
+  check("staff: blocking 409", !s.ok && s.blocking && s.status === 409, JSON.stringify(s));
+  if (s.ok) return;
+  check("staff: the card", /^The card only approved part/.test(s.error), s.error);
+  check("staff: don't run it again", /Don't run it again/.test(s.error), s.error);
+  check("staff: CSM Synergy has been alerted", /CSM Synergy has been alerted/.test(s.error), s.error);
+  check("staff: never 'contact your builder'", !/contact your builder/i.test(s.error), s.error);
+  check("staff: no newCardNeeded", !("newCardNeeded" in s), JSON.stringify(s));
 });
 
 Deno.test("charged but NOT recorded: blocks, shouts, and issues NO reversal", async () => {
@@ -453,6 +502,7 @@ Deno.test("charged but NOT recorded: blocks, shouts, and issues NO reversal", as
   if (r.ok) return;
   check("500", r.status === 500, String(r.status));
   check("blocking", r.blocking === true);
+  check("charged: no newCardNeeded", !("newCardNeeded" in r), JSON.stringify(r));
   check("NO void and NO refund was issued", !fetchLog.some((u) => /\/(void|refund)$/.test(u)), fetchLog.join(","));
   const fault = log.find((c) => c.table === "app_errors")?.payload as Record<string, unknown>;
   check("fault names the retref", String(fault?.message ?? "").includes("r7"), String(fault?.message));
@@ -713,6 +763,49 @@ Deno.test("recovery of a PARTIAL approval records nothing and keeps the block", 
   check("names the retref and the attempt", /rp/.test(String(fault?.message)) && /42/.test(String(fault?.message)), String(fault?.message));
 });
 
+Deno.test("recovery with an UNREADABLE amount records nothing and keeps the block (it used to book the whole ask)", async () => {
+  // A partial approval found by an inquire with no readable amount used to fall back to
+  // att.amount_cents, skip the partial guard, and mark the order paid in full.
+  for (const amount of [undefined, "", "n/a"]) {
+    const log: Call[] = [];
+    const answer: Record<string, unknown> = { respstat: "A", respcode: "000", retref: "ru" };
+    if (amount !== undefined) answer.amount = amount;
+    stubGateway(() => new Response(JSON.stringify(answer), { status: 200 }));
+    const r = await ip.resolveUnknownAttempt(makeAdmin(attemptAnswer(UNKNOWN_ATT), log), "t1", 42);
+    restore();
+    check(`${String(amount)}: not resolved`, !r.resolved && r.reason === "amount_unreadable", JSON.stringify(r));
+    check(`${String(amount)}: NO payments row`, !log.some((c) => c.table === "payments" && c.op === "insert"), JSON.stringify(log));
+    check(`${String(amount)}: the block stands`, !log.some((c) => c.table === "payment_attempts" && c.op === "update"), JSON.stringify(log));
+    const fault = log.find((c) => c.table === "app_errors")?.payload as Record<string, unknown>;
+    check(`${String(amount)}: filed`, fault?.code === "payment_recovery_amount_unreadable" && /ru/.test(String(fault?.message)) && /42/.test(String(fault?.message)),
+      JSON.stringify(fault));
+  }
+});
+
+Deno.test("recovery of a record that is NOT approved (respstat C, or none) records nothing and keeps the block", async () => {
+  // If inquireByOrderid also answers with a declined transaction, a decline whose answer was lost
+  // must never be booked as the payment, even at the full amount.
+  for (const respstat of ["C", "B", undefined]) {
+    const log: Call[] = [];
+    const answer: Record<string, unknown> = { respcode: "05", retref: "rd", amount: "1000.00" };
+    if (respstat !== undefined) answer.respstat = respstat;
+    stubGateway(() => new Response(JSON.stringify(answer), { status: 200 }));
+    const r = await ip.resolveUnknownAttempt(makeAdmin(attemptAnswer(UNKNOWN_ATT), log), "t1", 42);
+    restore();
+    check(`${String(respstat)}: not resolved`, !r.resolved && r.reason === "not_approved", JSON.stringify(r));
+    check(`${String(respstat)}: NO payments row`, !log.some((c) => c.table === "payments" && c.op === "insert"), JSON.stringify(log));
+    check(`${String(respstat)}: the block stands`, !log.some((c) => c.table === "payment_attempts" && c.op === "update"), JSON.stringify(log));
+    const fault = log.find((c) => c.table === "app_errors")?.payload as Record<string, unknown>;
+    check(`${String(respstat)}: filed`, fault?.code === "payment_recovery_not_approved", JSON.stringify(fault));
+  }
+  // A lower-case "a" is still an approval: respstat is read case-insensitively, as cpAuth reads it.
+  const log: Call[] = [];
+  stubGateway(() => new Response(JSON.stringify({ respstat: "a", retref: "rz", amount: "1000.00" }), { status: 200 }));
+  const ok = await ip.resolveUnknownAttempt(makeAdmin(attemptAnswer(UNKNOWN_ATT), log), "t1", 42);
+  restore();
+  check("lower-case a: resolved and charged", ok.resolved && ok.outcome === "charged", JSON.stringify(ok));
+});
+
 // ─────────────────────────────────────────────────────────────────────────────────────
 // Part 4 — what the sale sends and what the ledger keeps (2026-10, migration 291).
 //
@@ -734,7 +827,7 @@ const attemptInsert = (log: Call[]) =>
 const lastAttemptUpdate = (log: Call[]) =>
   log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()?.payload as Record<string, unknown>;
 
-Deno.test("a KEYED sale sends ecomind E with name, street and ZIP, and the attempt names exactly what was sent", async () => {
+Deno.test("a CUSTOMER-keyed sale sends ecomind E with name, street and ZIP, and the attempt names exactly what was sent", async () => {
   const log: Call[] = [];
   const bodies: Record<string, unknown>[] = [];
   recordingGateway(APPROVED, bodies);
@@ -763,8 +856,8 @@ Deno.test("a SWIPE sends NO ecomind, records none, and the payment still says it
   const bodies: Record<string, unknown>[] = [];
   recordingGateway(APPROVED, bodies);
   const admin = makeAdmin(defaultAnswer(), log);
-  // ecomind "E" passed on purpose: a swipe overrides it, whatever a caller says.
-  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, actorKind: "staff", entry: "swipe", ecomind: "E" });
+  // No caller can pass an ecomind any more (ChargeOpts has none since 2026-10-14): ecomindFor decides.
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, actorKind: "staff", entry: "swipe" });
   restore();
   check("succeeded", r.ok, r.ok ? "" : r.error);
   const sent = bodies[0] ?? {};
@@ -784,6 +877,97 @@ Deno.test("a SWIPE sends NO ecomind, records none, and the payment still says it
   restore();
   const row2 = log2.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
   check("the gateway's entrymode is kept", row2?.entry_mode === "Track", JSON.stringify(row2?.entry_mode));
+});
+
+Deno.test("ecomindFor: the shopper's card E, a card anyone else keys T, a swipe none, a bank payment E", () => {
+  // Fiserv (CardPointe integrations), 2026-10-14: a builder keying the card with the customer not
+  // present is T; a swipe may leave ecomind out. Bank payments keep E until the SEC-code work.
+  const cases: [string, Parameters<typeof ip.ecomindFor>[0], "E" | "T" | null][] = [
+    ["customer, card, keyed", { rail: "card", entry: "keyed", actorKind: "customer" }, "E"],
+    ["customer, card, no entry (my-quotes)", { rail: "card", actorKind: "customer" }, "E"],
+    ["staff, card, keyed", { rail: "card", entry: "keyed", actorKind: "staff" }, "T"],
+    ["staff, card, no entry (production's old page)", { rail: "card", actorKind: "staff" }, "T"],
+    ["operator, card, keyed", { rail: "card", entry: "keyed", actorKind: "operator" }, "T"],
+    ["staff, card, swipe", { rail: "card", entry: "swipe", actorKind: "staff" }, null],
+    ["staff, ach, keyed", { rail: "ach", entry: "keyed", actorKind: "staff" }, "E"],
+    ["staff, ach, entry swipe (Card > Swipe > Bank)", { rail: "ach", entry: "swipe", actorKind: "staff" }, "E"],
+    ["customer, ach", { rail: "ach", actorKind: "customer" }, "E"],
+  ];
+  for (const [label, o, want] of cases) check(label, ip.ecomindFor(o) === want, String(ip.ecomindFor(o)));
+});
+
+Deno.test("entryModeFor: read from what was SENT and the rail, never Swipe or Moto for a bank payment", () => {
+  check("card swipe", ip.entryModeFor("card", null) === "Swipe");
+  check("card T is a mail/telephone order", ip.entryModeFor("card", "T") === "Moto");
+  check("card E", ip.entryModeFor("card", "E") === "ECommerce");
+  for (const e of ["E", "T", null] as const) check(`ach ${e}`, ip.entryModeFor("ach", e) === "ECommerce", ip.entryModeFor("ach", e));
+});
+
+Deno.test("a card a BUILDER keys goes out as T, records T, and reads Moto when the gateway is silent", async () => {
+  const log: Call[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  recordingGateway(APPROVED, bodies);
+  const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log), { ...OPTS, actorKind: "staff", entry: "keyed" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const sent = bodies[0] ?? {};
+  check("T on the wire", sent.ecomind === "T", JSON.stringify(sent));
+  const ins = attemptInsert(log);
+  check("attempt records T", ins?.ecomind === "T", JSON.stringify(ins));
+  check("sent_fields names ecomind", (ins?.sent_fields as string[]).includes("ecomind"), JSON.stringify(ins?.sent_fields));
+  const row = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("entry_mode Moto", row?.entry_mode === "Moto", JSON.stringify(row?.entry_mode));
+});
+
+Deno.test("a BANK payment posted with entry 'swipe' still sends ecomind E and is never labelled Swipe", async () => {
+  // The Record-a-payment modal never reset `entry` when the method changed, so Card > Swipe > Bank
+  // posted a bank payment tagged as a swipe: the ECHK auth lost its ecomind and read "Swipe".
+  const log: Call[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  recordingGateway(APPROVED, bodies);
+  const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log), { ...OPTS, rail: "ach", actorKind: "staff", entry: "swipe" });
+  restore();
+  check("succeeded", r.ok, r.ok ? "" : r.error);
+  const sent = bodies[0] ?? {};
+  check("ECHK", sent.accttype === "ECHK", JSON.stringify(sent));
+  check("ecomind E on the wire", sent.ecomind === "E", JSON.stringify(sent));
+  check("attempt records E", attemptInsert(log)?.ecomind === "E", JSON.stringify(attemptInsert(log)));
+  const row = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("entry_mode ECommerce, not Swipe", row?.entry_mode === "ECommerce", JSON.stringify(row?.entry_mode));
+});
+
+Deno.test("a bank DECLINE naming the routing number is masked on the attempt, in the error, everywhere", async () => {
+  // Fiserv (CardPointe integrations), 2026-10-14: an invalid routing number declines with resptext
+  // "The RoutingNumber (<bankaba>) is not a valid routing number." That sentence is the attempt's
+  // detail and the 402 body, which withErrorLog files into app_errors. 999999999 is made up.
+  const log: Call[] = [];
+  stubGateway(() =>
+    new Response(JSON.stringify({ respstat: "C", respcode: "500", resptext: "The RoutingNumber (999999999) is not a valid routing number." }), { status: 200 })
+  );
+  const admin = makeAdmin(defaultAnswer(), log);
+  const r = await ip.chargeInvoicePayment(admin, { ...OPTS, rail: "ach", account: "9413948780281111" });
+  restore();
+  check("402", !r.ok && r.status === 402, JSON.stringify(r));
+  if (r.ok) return;
+  check("the error keeps the sentence and the last four", r.error === "The RoutingNumber (…9999) is not a valid routing number.", r.error);
+  check("still asks for new details", r.newCardNeeded === true);
+  const all = JSON.stringify(log);
+  check("the number is nowhere in what was written", !all.includes("999999999"), all);
+  check("the detail is masked too", lastAttemptUpdate(log)?.detail === "The RoutingNumber (…9999) is not a valid routing number.", JSON.stringify(lastAttemptUpdate(log)));
+  // A gateway refusal (4xx) carrying it is masked the same way before it is filed.
+  const log2: Call[] = [];
+  stubGateway(() => new Response(JSON.stringify({ resptext: "Invalid account 12345678901" }), { status: 400 }));
+  const r2 = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log2), { ...OPTS, rail: "ach" });
+  restore();
+  check("503", !r2.ok && r2.status === 503, JSON.stringify(r2));
+  check("not in the fault or the attempt", !JSON.stringify(log2).includes("12345678901") && JSON.stringify(log2).includes("…8901"), JSON.stringify(log2));
+});
+
+Deno.test("maskDigitRuns: five or more digits keep only their last four; shorter runs and words stand", () => {
+  check("routing", ip.maskDigitRuns("RoutingNumber (222222226)") === "RoutingNumber (…2226)", ip.maskDigitRuns("RoutingNumber (222222226)"));
+  check("two runs", ip.maskDigitRuns("12345 and 1234567890123456") === "…2345 and …3456");
+  check("short runs stand", ip.maskDigitRuns("HTTP 400, retry after 30 seconds, $1854.00") === "HTTP 400, retry after 30 seconds, $1854.00");
+  check("nothing to mask", ip.maskDigitRuns("Not sufficient funds") === "Not sufficient funds");
 });
 
 Deno.test("a DECLINE keeps its AVS/CVV answer on the attempt (there is no payments row to hold it)", async () => {
@@ -890,6 +1074,7 @@ Deno.test("a LIVE merchant with the production secrets unset: closed as a config
   const r = await ip.chargeInvoicePayment(makeAdmin(defaultAnswer(), log), { ...OPTS, merchant: { merchid: "100200300500", env: "prod" } });
   restore();
   check("refused 503, not a decline", !r.ok && r.status === 503 && !r.blocking, JSON.stringify(r));
+  check("a configuration refusal never asks for a new card", !r.ok && !("newCardNeeded" in r), JSON.stringify(r));
   check("ZERO gateway calls (the UAT base is never tried)", fetchCount === 0, String(fetchCount));
   const close = lastAttemptUpdate(log);
   check("the attempt is closed as a configuration refusal (so the decline throttle skips it)",
