@@ -3990,9 +3990,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         rail: method === "ach" ? "ach" : "card",
         payToken,
         expiry: payExpiry || undefined,
-        // A card only. `entry` outlives a switch to Bank / ACH, and a bank payment marked "swipe"
-        // went out with no ecomind (Card, then Swipe, then Bank / ACH); the server ignores it off
-        // the card rail too, so this is the page not saying a false thing in the first place.
+        // A card only. The method chip resets `entry` to keyed on leaving Card, and this is the
+        // second guard; the server ignores it off the card rail too. Before 2026-10-14 Card, then
+        // Swipe, then Bank / ACH sent a bank payment marked "swipe" with no ecomind.
         ...(method === "card" ? { entry } : {}),
         // A keyed card only: a swipe carries its own name, and a bank payment's holder is named
         // by the server from the estimate.

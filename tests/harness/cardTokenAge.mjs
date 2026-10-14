@@ -14,27 +14,37 @@
 //     M1 a card token 60 s old is charged, and it is that token
 //     M2 at 101 s Pay sends nothing: the card frame is loaded again, the panel says card details are
 //        only kept for 2 minutes, and Pay is off; the new frame's token then goes in one tap
-//     M3 a pay answered 402 with newCardNeeded: the card frame is loaded again, the server's
-//        sentence shows with "Enter the card details again", Pay is off and nothing more is sent;
-//        the next tap sends the NEW token, with no "The amount to pay has changed" on the way
+//     M3 a pay answered 503 with newCardNeeded (not a 402, so the flag alone decides it): the card
+//        frame is loaded again, the server's sentence shows with "Enter the card details again",
+//        Pay is off and nothing more is sent; the next tap sends the NEW token, with no "The amount
+//        to pay has changed" on the way
 //     M4 the same for a bare 402 (a customer-pay older than newCardNeeded)
-//     M5 a 429 (busy: it never reached the gateway): the same frame, Pay back on, and the next tap
-//        sends the same token
+//     M5 a 429 (busy) and a 409 (a business rule), neither flagged nor a 402: they never reached
+//        the gateway, so the same frame, Pay back on, and the next tap sends the same token
 //     M6 the Bank account tab: a bank token 300 s old is still charged (bank tokens are not timed)
+//     M7 the Bank account tab answered 402 with newCardNeeded: the flag is a card's, so the
+//        Routing and Checking boxes keep what was typed, no card frame is loaded and Pay comes
+//        back on
 //   P  the portal's Record-a-payment modal
 //     P1 keyed, 60 s: charged, with that token
 //     P2 keyed, 101 s: no charge; the keyed frame is loaded again (empty), the modal says the
 //        security code is only kept for 2 minutes, Charge is off; the new token is then charged
-//     P3 keyed, a charge answered 402 with newCardNeeded: the frame is loaded again, the server's
-//        sentence shows with "Key the card in again"; the new token is then charged
+//     P3 keyed, a charge answered 503 with newCardNeeded (not a 402, so the flag alone decides
+//        it): the frame is loaded again, the server's sentence shows with "Key the card in
+//        again"; the new token is then charged
 //     P4 swipe, 60 s: charged, entry swipe
 //     P5 swipe, 101 s: no charge; "That card read has expired. Press Ready and swipe the card
 //        again." with Ready on offer; Ready and a new swipe are then charged
 //     P6 Card, then Swipe, then Bank / ACH, then Card: Key it in again; then Swipe and Bank / ACH,
 //        and the bank charge, 300 s after its token, carries rail ach and NO entry
+//     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
+//        frame is NOT loaded again and the server's sentence shows without "Key the card in
+//        again"; that same frame's next token is then charged
 //   R  a payment row's Refund (window.confirm accepted)
 //     R1 a bank payment still clearing whose void answers "already settled": no refund_payment is
-//        sent, and the server's "This bank payment is still clearing…" is what shows
+//        sent, and the page's OWN sentence "This bank payment is still clearing. It can be
+//        refunded once it clears." shows, not the void's "already settled" (the server's
+//        refund_payment refusal has to match that wording; this check cannot see it)
 //     R2 a card payment whose void answers "already settled": refunded, as before
 //   X  no uncaught page errors; nothing went anywhere but the stubs
 //
@@ -289,11 +299,14 @@ try {
     await until(() => callsOf("customer-pay", "pay").length > pays, 6000) && lastOf("customer-pay", "pay").payToken === tok2 && tok2 !== tok,
     sent(lastOf("customer-pay", "pay"), tok2));
 
-  // M3 / M4: the gateway saw the card. newCardNeeded, then a bare 402 from an older server.
+  // M3 / M4: the gateway saw the card. newCardNeeded on a status that is NOT 402 (the page also
+  // treats a bare 402 as spent, so a 402 here would pass with the flag ignored), then a bare 402
+  // from an older server.
   for (const [tag, answer] of [
-    ["M3", { status: 402, body: { error: "Insufficient funds.", blocking: false, newCardNeeded: true } }],
+    ["M3", { status: 503, body: { error: "The card network did not finish this payment.", blocking: false, newCardNeeded: true } }],
     ["M4", { status: 402, body: { error: "Insufficient funds.", blocking: false } }],
   ]) {
+    const why = answer.body.error;
     panel = await openPanel();
     tok = await cardReady(panel);
     before = loads.card;
@@ -305,7 +318,7 @@ try {
     ok(`${tag}: the panel says why, and to enter the card again`,
       await until(async () => {
         const t = await textOf(panel);
-        return t.includes("Insufficient funds.") && t.includes("Enter the card details again");
+        return t.includes(why) && t.includes("Enter the card details again");
       }, 4000), await brief(panel));
     ok(`${tag}: …the card frame is loaded again`, await until(async () => loads.card === before + 1, 4000), `${loads.card - before} new frame(s)`);
     await page.waitForTimeout(500);
@@ -320,20 +333,27 @@ try {
       sent(lastOf("customer-pay", "pay"), tok2));
   }
 
-  // M5: a refusal before the gateway keeps the card as typed.
-  panel = await openPanel();
-  tok = await cardReady(panel);
-  before = loads.card;
-  pays = callsOf("customer-pay", "pay").length;
-  S.payNext = { status: 429, body: { error: "The payment system is busy. Try again in a moment.", blocking: false } };
-  await tap(mqPay(panel));
-  ok("M5: a 429 says so, and Pay comes back on",
-    await until(async () => (await textOf(panel)).includes("The payment system is busy.") && !(await offOf(mqPay(panel))), 5000), await brief(panel));
-  ok("M5: …the card frame is NOT loaded again", loads.card === before, `${loads.card - before} new frame(s)`);
-  await tap(mqPay(panel));
-  ok("M5: …and the next tap sends the same token",
-    await until(() => callsOf("customer-pay", "pay").length > pays + 1, 6000) && lastOf("customer-pay", "pay").payToken === tok,
-    sent(lastOf("customer-pay", "pay"), tok));
+  // M5: a refusal before the gateway keeps the card as typed: busy, then a business rule.
+  for (const answer of [
+    { status: 429, body: { error: "The payment system is busy. Try again in a moment.", blocking: false } },
+    { status: 409, body: { error: "This invoice is waiting on a change to be signed first.", blocking: false } },
+  ]) {
+    const tag = `M5 (${answer.status})`;
+    panel = await openPanel();
+    tok = await cardReady(panel);
+    before = loads.card;
+    pays = callsOf("customer-pay", "pay").length;
+    S.payNext = answer;
+    await tap(mqPay(panel));
+    ok(`${tag}: it says so, and Pay comes back on`,
+      await until(async () => (await textOf(panel)).includes(answer.body.error) && !(await offOf(mqPay(panel))), 5000), await brief(panel));
+    ok(`${tag}: …the card frame is NOT loaded again, nor the card asked for`,
+      loads.card === before && !(await textOf(panel)).includes("Enter the card details again"), `${loads.card - before} new frame(s)`);
+    await tap(mqPay(panel));
+    ok(`${tag}: …and the next tap sends the same token`,
+      await until(() => callsOf("customer-pay", "pay").length > pays + 1, 6000) && lastOf("customer-pay", "pay").payToken === tok,
+      sent(lastOf("customer-pay", "pay"), tok));
+  }
 
   // M6: the bank tab is not timed.
   await until(async () => (await outerPay().count()) > 0, 8000);
@@ -350,6 +370,31 @@ try {
   ok("M6: 300 s on, the bank payment still goes, rail ach",
     await until(() => callsOf("customer-pay", "pay").length > pays, 6000) && lastOf("customer-pay", "pay").rail === "ach" && !(await textOf(page.locator("body"))).includes(EXPIRED),
     sent(lastOf("customer-pay", "pay")));
+
+  // M7: newCardNeeded on the bank tab is ignored: a new card frame would empty the bank boxes.
+  await until(async () => (await outerPay().count()) > 0, 8000);
+  await outerPay().first().click();
+  panel = page.locator(".sign-panel");
+  await panel.waitFor({ timeout: 10000 });
+  await panel.getByRole("button", { name: "Bank account" }).click();
+  await panel.getByLabel("Routing number").fill(ROUTING);
+  await panel.getByLabel("Checking account number").fill(ACCOUNT);
+  ok("M7: the bank details are checked", await until(async () => (await textOf(panel)).includes("Bank details ready"), 8000));
+  before = loads.card;
+  pays = callsOf("customer-pay", "pay").length;
+  S.payNext = { status: 402, body: { error: "The bank turned this debit down.", blocking: false, newCardNeeded: true } };
+  await tap(mqPay(panel));
+  ok("M7: the declined bank pay went out, rail ach",
+    await until(() => callsOf("customer-pay", "pay").length > pays, 6000) && lastOf("customer-pay", "pay").rail === "ach",
+    sent(lastOf("customer-pay", "pay")));
+  ok("M7: …the panel says why, Pay comes back on, and it does not ask for a card",
+    await until(async () => (await textOf(panel)).includes("The bank turned this debit down.") && !(await offOf(mqPay(panel))), 5000)
+    && !(await textOf(panel)).includes("Enter the card details again"), await brief(panel));
+  // Compared as digits, never printed.
+  const boxDigits = async (label) => (await panel.getByLabel(label).inputValue({ timeout: 1000 }).catch(() => "")).replace(/\D/g, "");
+  ok("M7: …the Routing and Checking boxes still hold what was typed, and no card frame was loaded",
+    await boxDigits("Routing number") === ROUTING && await boxDigits("Checking account number") === ACCOUNT && loads.card === before,
+    `${loads.card - before} new frame(s)`);
 
   // ── P: the portal's Record-a-payment modal ────────────────────────────────────────────────────
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
@@ -407,18 +452,18 @@ try {
     await until(() => callsOf("portal-payments", "charge").length > charges, 6000) && lastOf("portal-payments", "charge").payToken === tok2 && tok2 !== tok,
     sent(lastOf("portal-payments", "charge"), tok2));
 
-  // P3: keyed, the gateway declined it.
+  // P3: keyed, the gateway saw it. A 503, not a 402, so only newCardNeeded can say the card is spent.
   modal = await openModal();
   tok = await postToken();
   ok("P3: a keyed token arms Charge", !!tok && await armedCharge(modal));
   before = loads.card;
   charges = callsOf("portal-payments", "charge").length;
-  S.chargeNext = { status: 402, body: { error: "Insufficient funds.", blocking: false, newCardNeeded: true } };
+  S.chargeNext = { status: 503, body: { error: "The card network did not finish this payment.", blocking: false, newCardNeeded: true } };
   await tap(chargeBtn(modal));
-  ok("P3: the declined charge went out with the token",
+  ok("P3: the failed charge went out with the token",
     await until(() => callsOf("portal-payments", "charge").length > charges, 6000) && lastOf("portal-payments", "charge").payToken === tok);
   ok("P3: the modal says why, and to key the card in again",
-    await until(async () => (await textOf(modal)).includes("Insufficient funds. Key the card in again, then press Charge."), 4000), await brief(modal));
+    await until(async () => (await textOf(modal)).includes("The card network did not finish this payment. Key the card in again, then press Charge."), 4000), await brief(modal));
   ok("P3: …the keyed frame is loaded again", await until(async () => loads.card === before + 1, 4000), `${loads.card - before} new frame(s)`);
   ok("P3: …and Charge is off", await offOf(chargeBtn(modal)));
   tok2 = await postToken();
@@ -488,6 +533,29 @@ try {
     && lastOf("portal-payments", "charge").rail === "ach" && !has(lastOf("portal-payments", "charge"), "entry"),
     sent(lastOf("portal-payments", "charge")));
 
+  // P7: keyed, a 429 with no flag: refused before the gateway, so the keyed frame stays.
+  modal = await openModal();
+  tok = await postToken();
+  ok("P7: a keyed token arms Charge", !!tok && await armedCharge(modal));
+  before = loads.card;
+  charges = callsOf("portal-payments", "charge").length;
+  S.chargeNext = { status: 429, body: { error: "The payment system is busy. Try again in a moment.", blocking: false } };
+  await tap(chargeBtn(modal));
+  ok("P7: the refused charge went out with the token",
+    await until(() => callsOf("portal-payments", "charge").length > charges, 6000) && lastOf("portal-payments", "charge").payToken === tok);
+  ok("P7: the modal says why, and does not ask for the card to be keyed in again",
+    await until(async () => (await textOf(modal)).includes("The payment system is busy."), 4000)
+    && !(await textOf(modal)).includes("Key the card in again"), await brief(modal));
+  await page.waitForTimeout(500);
+  ok("P7: …the keyed frame is NOT loaded again", loads.card === before, `${loads.card - before} new frame(s)`);
+  tok2 = await postToken();
+  ok("P7: that same frame's next token re-arms Charge", !!tok2 && await armedCharge(modal));
+  await tap(chargeBtn(modal));
+  ok("P7: …and Charge sends it, still from the first frame",
+    await until(() => callsOf("portal-payments", "charge").length > charges + 1, 6000)
+    && lastOf("portal-payments", "charge").payToken === tok2 && tok2 !== tok && loads.card === before,
+    sent(lastOf("portal-payments", "charge"), tok2));
+
   // ── R: Refund on a payment row ────────────────────────────────────────────────────────────────
   const now = await page.evaluate(() => new Date().toISOString());
   S.payments = [
@@ -506,9 +574,12 @@ try {
   await refunds.nth(0).click();
   ok("R1: a bank payment still clearing: the void is asked",
     await until(() => callsOf("portal-payments", "void_payment").length > voids, 6000) && lastOf("portal-payments", "void_payment").paymentId === S.payments[0].id);
-  ok("R1: …its \"already settled\" is NOT chained into a refund, and the server's sentence shows",
+  // The sentence is the PAGE's own (04-orders.jsx), not passed through from the server: the void
+  // answers "already settled", and that must not be what shows.
+  ok("R1: …its \"already settled\" is NOT chained into a refund, and the page's own \"still clearing\" sentence shows instead of it",
     await waitText("This bank payment is still clearing. It can be refunded once it clears.", 4000)
-    && callsOf("portal-payments", "refund_payment").length === refunded);
+    && callsOf("portal-payments", "refund_payment").length === refunded
+    && !(await page.evaluate(() => document.body.innerText.includes("That payment has already settled"))));
   voids = callsOf("portal-payments", "void_payment").length;
   refunded = callsOf("portal-payments", "refund_payment").length;   // an older page chained one in R1
   await refunds.nth(1).click();
