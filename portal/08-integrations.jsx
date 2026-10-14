@@ -799,6 +799,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // Preview draws the wording in the boxes for the open tab, saved or not, so a builder can try
   // words before committing them. The server renders the real email (their own header, footer
   // and photo, a sample customer); it sends nothing.
+  // The open tab's photo design has a top photo of its own, so the Preview's "no building photo"
+  // notes don't apply to it.
+  const ownHero = tplKind !== "invoice" && (tpl[tplKind] || {}).layout === "photo" && !!(tpl[tplKind] || {}).hero;
   const previewWording = async () => {
     const kind = tplKind;
     setPvBusy(true); setPv(null);
@@ -1792,8 +1795,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 6, wordBreak: "break-word" }}>
                         <span style={{ color: "#64748B", fontWeight: 700 }}>Subject:</span> <b data-ss-preview-subject>{pv.subject}</b>
                       </div>
-                      {/* A photo design with its own top photo needs no building photo, so neither note applies. */}
-                      {pv.photo === "none" && !((tpl[tplKind] || {}).layout === "photo" && (tpl[tplKind] || {}).hero) && (
+                      {pv.photo === "none" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
                           No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
                         </div>
@@ -1802,7 +1804,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                           account's catalog, so they live in that account's folder and no email (or
                           estimate) may show them. The "none" sentence would send them to a screen
                           where every tick is already on. */}
-                      {pv.photo === "not_own" && !((tpl[tplKind] || {}).layout === "photo" && (tpl[tplKind] || {}).hero) && (
+                      {pv.photo === "not_own" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
                           No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
                         </div>
