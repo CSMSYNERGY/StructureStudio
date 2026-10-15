@@ -1,14 +1,71 @@
 // Public designer smoke on a TEST tenant: boot, one placement of each wall item, the
 // collision refusals, and the window-overlap rule. Real mouse clicks (the app snaps by the
 // click's client coordinates, so a synthetic click with the wrong CTM lands elsewhere).
+//
+// ── WHAT THE TENANT MUST OFFER (tests 1-6) ───────────────────────────────────────────────────
+// The first six tests are NOT routed. They drive the LIVE catalog of CLIENT (PW_CLIENT, default
+// support-demo; see helpers.mjs) on the designer's boot plan, 10 x 12 ft with no style picked, and
+// every clickPlan() coordinate is in feet on that plan. When one fails, check the tenant before
+// the product. By name, they need:
+//   1 "boots and places every wall item"  door style "Single Barn Door" and window style "Double
+//       Hung Window", each with exactly ONE size (picking the card then places it; a second size
+//       would need a size click); a "Workbench" (its own palette button, or a card under
+//       "Shelving" when the tenant offers two or more slabs, which arm() handles); "Loft Area";
+//       and a SIMPLE ramp (get_fixtures ramp.mode "simple", enabled), so "Ramp" places on click.
+//       A custom-mode ramp opens "Choose a ramp" instead and the ramp step fails.
+//   2 "door and window rough openings"    the "Rough opening" tile in BOTH pickers: layout items
+//       roughOpeningDoor and roughOpeningWindow.
+//   3 "a door dropped onto an existing window"  "Single Barn Door" and "Double Hung Window", as in 1.
+//   4 "phone viewport"                    nothing beyond booting.
+//   5 "selecting a wall item ... stretched"  a Workbench, as in 1.
+//   6 "selecting ... no dimension chips"  a Workbench, as in 1.
+// support-demo offered all of it on 2026-10-16 (three slabs, so its Workbench sits behind
+// Shelving). The tests after these route Supabase and rewrite what they need (routeLayout).
+//
+// NO TEST HERE MAY WRITE A DESIGN. The unrouted tests never complete the contact gate (bypassGate
+// sets a name and no phone), so autosave never arms. The unload draft save goes to the page's own
+// origin and is answered locally (keepUnloadSaveLocal, helpers.mjs): the beforeEach below installs
+// it on the fixture `page`, and routeLayout installs it again. It is per PAGE, so a page the test
+// makes itself (browser.newContext, like the phone-viewport test) is not covered by the beforeEach
+// and must call keepUnloadSaveLocal on that page, as the phone-viewport test does. routeLayout
+// answers every other write.
 import { expect } from "@playwright/test";
 // `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
-import { test, guardLogError, CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool } from "./helpers.mjs";
+import { test, guardLogError, CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool, keepUnloadSaveLocal } from "./helpers.mjs";
+
+// The routed tests are the ones that complete the contact gate, and a complete contact arms the
+// unload save, which no route on the Supabase host can hold (helpers.mjs says why). Installed on
+// every test's fixture `page` anyway, so a test using that page cannot forget it. It does NOT reach
+// a page from the test's own browser.newContext(): that test calls keepUnloadSaveLocal itself.
+test.beforeEach(async ({ page }) => { await keepUnloadSaveLocal(page); });
 
 async function arm(page, label) {
   // revealTool opens the option tab the tool lives on (section 03 is tabbed since 2026-09-16).
-  await (await revealTool(page, label)).click();
+  const btn = await revealTool(page, label);
+  if (!(await btn.isVisible().catch(() => false)) && await armFromShelving(page, label)) return;
+  await btn.click();
   await page.waitForTimeout(250); // React commit; a click in the same tick places the previous tool
+}
+// A tenant that offers MORE than one slab (Single Shelf, Double Shelf, Workbench) gets ONE
+// "Shelving" tool instead of a button each (SHELF_PICKER_CFG, Carolyn 2026-09-02): it opens
+// "Choose shelving", and a card there arms the real tool. pw-demo-barns offered the workbench
+// alone, so it kept its own button; support-demo offers all three, and every /Workbench/ arm
+// timed out on a button that is correctly not there. Same tool either way once armed.
+async function armFromShelving(page, label) {
+  const shelving = await revealTool(page, /^\W*Shelving wall$/u);
+  if (!(await shelving.isVisible().catch(() => false))) return false;
+  await shelving.click();
+  const picker = page.getByText("Choose shelving", { exact: true }).locator("..");
+  await expect(picker).toBeVisible();
+  const card = picker.getByText(label).first();
+  if (!(await card.isVisible().catch(() => false))) {
+    await picker.getByRole("button", { name: "Cancel" }).click();
+    return false;
+  }
+  await card.click();
+  await expect(picker).toHaveCount(0);
+  await page.waitForTimeout(250);
+  return true;
 }
 async function clickPlan(page, fx, fy) {
   const p = await planPoint(page, fx, fy);
@@ -169,6 +226,8 @@ test("designer on a phone viewport has no horizontal scroll", async ({ browser }
   const logs = await guardLogError(ctx);
   try {
     const page = await ctx.newPage();
+    // …and the beforeEach's unload-save redirect does not either (it is per page): install it here.
+    await keepUnloadSaveLocal(page);
     await bypassGate(page, CLIENT);
     await page.goto(`/?client=${CLIENT}`);
     await page.waitForFunction(() => window.__ssAppBooted === true);
@@ -301,9 +360,15 @@ test("selecting a wall item draws no dimension chips on the plan", async ({ page
 // whatever someone last saved); the design-version RPCs are FAKED; and every other call (a
 // save_design, a log row, an edge function) is answered locally, so nothing is written to the
 // tenant. `o` is mutable: a case sets o.rewrite / o.design before its goto.
+//
+// ⚠️ EXCEPT THE ONE WRITE A ROUTE HERE CANNOT HOLD: the designer's unload draft save, a keepalive
+// POST to the Supabase host sent as the page goes away. Cross-origin, page.route aborts it and
+// context.route lets it through to the live project, and a case that completes the contact (the
+// Delivery one) arms it. keepUnloadSaveLocal sends it to the page's own origin and answers it there,
+// the same mechanism customer-login's stubBackend uses; o.unloadSaves is what it answered.
 const LAYOUT_READS = /\/rest\/v1\/rpc\/(get_config|get_catalog|get_fixtures)\b/;
 async function routeLayout(page) {
-  const o = { rewrite: null, design: null, versions: [], cfg: null };
+  const o = { rewrite: null, design: null, versions: [], cfg: null, unloadSaves: await keepUnloadSaveLocal(page) };
   await page.route(`${SUPABASE_URL}/**`, async (route) => {
     const req = route.request(); const u = req.url();
     const json = (body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
@@ -543,6 +608,13 @@ test("Services › Delivery: priced from the address, and Details charges the sa
   await page.getByPlaceholder("(555) 555-5555").fill("5550104477");
   await expect(panel).toContainText("12 mi from Main Lot");
   await expect(panel).toContainText("$150.00");
+  // The contact is complete, so autosave is armed and leaving now would send the unload draft save.
+  // Fire that flush (pagehide, what closing the tab does) with the contact just changed, so there is
+  // something unsaved: the save must land on the local stub, never on the live project.
+  await page.getByPlaceholder("Full Name").fill("Pat Tester Unload");
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await expect.poll(() => o.unloadSaves.length, { message: "the unload draft save was answered locally" }).toBeGreaterThan(0);
+  expect(o.unloadSaves.at(-1)).toMatchObject({ p_client_id: CLIENT, p_status: "draft", p_contact: expect.objectContaining({ name: "Pat Tester Unload" }) });
   await page.getByRole("button", { name: /See your estimate details/ }).click();
   const row = page.locator(".ssd-dt-row").filter({ hasText: "12 mi from Main Lot" });
   await expect(row).toContainText("$150.00");

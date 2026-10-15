@@ -8,7 +8,8 @@
 // PW_MAGIC_TOKEN is a one-time Supabase magic-link `hashed_token` for a TEST tenant's owner
 // (minted outside the suite with the service-role key: POST /auth/v1/admin/generate_link
 // {type:"magiclink", email:...}). No password and no service key ever lives in this repo.
-// PW_BASE_URL defaults to beta; PW_CLIENT is the public designer tenant (a test tenant).
+// PW_BASE_URL defaults to beta; PW_CLIENT is the public designer tenant (a test tenant), and
+// defaults to support-demo (tests/e2e/helpers.mjs; pw-demo-barns until it was deleted 2026-09-28).
 //
 // Everything under tests/, this file, test-results/ and playwright-report/ is excluded from
 // the Workers assets upload by .assetsignore - the host serves the repo root.

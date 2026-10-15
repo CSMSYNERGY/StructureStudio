@@ -19,7 +19,7 @@
 import { expect } from "@playwright/test";
 // `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
 // stubBackend's page.route still matches log_error first, so logRows() below sees what it always did.
-import { test, CLIENT, watchConsole, revealTool } from "./helpers.mjs";
+import { test, CLIENT, watchConsole, revealTool, keepUnloadSaveLocal } from "./helpers.mjs";
 
 // 555-01xx is reserved for fiction, so even a stub that leaked could never reach a person.
 const PHONE10 = "5550104477";
@@ -58,16 +58,12 @@ async function stubBackend(page, o = {}) {
   // document that is going away: page.route aborted it, and context.route let it straight past to
   // the network. Left alone, a reload test would write a draft to the LIVE project. So every
   // keepalive save_design is sent to a same-origin path instead: page.route does catch a
-  // same-origin unload keepalive, the rpc stub below matches it (its pattern has no host), and a
-  // miss can only reach the local static server. Only the destination changes; the body, headers
-  // and timing are the product's own.
-  await page.addInitScript(() => {
-    const realFetch = window.fetch;
-    window.fetch = function (u, opts) {
-      if (opts && opts.keepalive && /\/rest\/v1\/rpc\/save_design$/.test(String(u))) return realFetch.call(this, "/__e2e/rest/v1/rpc/save_design", opts);
-      return realFetch.apply(this, arguments);
-    };
-  });
+  // same-origin unload keepalive, the rpc stub below matches it (its pattern has no host, and it is
+  // registered after keepUnloadSaveLocal's own route, so it answers first and records the call), and
+  // a miss can only reach the local static server. Only the destination changes; the body, headers
+  // and timing are the product's own. The mechanism lives in helpers.mjs so designer.spec's routed
+  // tests use the very same one.
+  await keepUnloadSaveLocal(page);
   await page.route(/\/functions\/v1\/[a-z0-9-]+/, async (route) => {
     const req = route.request();
     if (req.method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });

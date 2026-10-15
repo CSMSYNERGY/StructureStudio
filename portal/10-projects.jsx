@@ -1309,6 +1309,11 @@ function ProjectsTab({ sub, onSub }) {
     if (setupMode || !boards || !boards.length) return null;
     return boards.find((b) => b.slug === sub) || boards[0];
   }, [boards, sub, setupMode]);
+  // NO BOARDS AT ALL: list_boards answered an empty list (a fresh project, or the last board was
+  // just archived). There is no board to open, so get_board is never asked and `data` never
+  // arrives; "Loading board…" used to wait for it forever. The board body is gated on this too:
+  // for the one render before the effect below clears it, `data` still holds the archived board.
+  const noBoards = !setupMode && !!boards && boards.length === 0;
 
   // ONLY THE LATEST get_board MAY LAND. Responses do not come back in the order they were
   // asked for — opening Roadmap runs the roadmap sync first, so it is routinely the slow one —
@@ -1338,8 +1343,17 @@ function ProjectsTab({ sub, onSub }) {
     }).catch((e) => { if (latest()) setErr(e.message); }).finally(() => { if (latest()) setLoading(false); });
   }, []);
   useEffect(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard && activeBoard.id]);
+  // An empty list also lets go of the board that was on screen. Kept, the archived board came
+  // back the moment a new one was made: its table and ⚙ Board settings sat under the new tab
+  // until the new get_board answered (for good if that failed), and "＋ Add item" filed into the
+  // archived board meanwhile. A get_board still out for it is retired too, so it cannot land later.
+  useEffect(() => {
+    if (!noBoards) return;
+    boardReq.current.seq++; boardReq.current.boardId = null;
+    setData(null); setLoading(false);
+  }, [noBoards]);
 
-  const reload = useCallback(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard, loadBoard]);
+  const reload =useCallback(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard, loadBoard]);
 
   const setViewPart = (p) => setView((v) => {
     const next = { ...v, ...p };
@@ -1646,7 +1660,7 @@ function ProjectsTab({ sub, onSub }) {
               color: setupMode ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
             Client Setup
           </button>
-          {canWrite && data && !setupMode && (
+          {canWrite && data && !setupMode && !noBoards && (
             <button type="button" onClick={() => setSettingsOpen(true)}
               style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
@@ -1672,9 +1686,25 @@ function ProjectsTab({ sub, onSub }) {
         {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
-        {!setupMode && boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {!setupMode && boards && !noBoards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {/* Not hidden behind `err`: a create_board that fails shows its message above, and this
+            stays, so there is still a way to try again. The button opens the strip's own ＋ input,
+            the one place boards are created. */}
+        {noBoards && (
+          <div data-ss-projects-empty="" style={{ padding: "28px 4px", fontSize: 13, color: "#64748B", lineHeight: 1.5 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#334155", marginBottom: 4 }}>No boards yet</div>
+            {canWrite ? (
+              <>
+                <div style={{ marginBottom: 12 }}>A board is a list of work with an owner. Make the first one and it opens here.</div>
+                <button type="button" onClick={() => setNewBoardOpen(true)} style={S.btn("#EEF2FF", ACCENT)}>＋ New board</button>
+              </>
+            ) : (
+              <div>Nobody has made a board yet. Someone who can edit Projects can add the first one.</div>
+            )}
+          </div>
+        )}
 
-        {!setupMode && data && (
+        {!setupMode && !noBoards && data && (
           <>
             {/* ONE ROW, and it stays one row (Carolyn 2026-09-12: "condense the top… fit the
                 filter options into one single row"). What used to wrap — a separate saved-views
