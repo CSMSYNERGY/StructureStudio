@@ -25,6 +25,20 @@
 //   G  a browsing visit linked to a contact that no longer exists does not hide the last unread
 //      contacts: "Show more" stays while the server has rows left, and brings them in.
 //   H  "Show more" pressed while the GoHighLevel status sync is running keeps the synced statuses.
+//   I  THE COMPANY (Carolyn 2026-10-14: a lead entered with a company was listed under the person's
+//      name alone). Every row kind leads with its contact's company, the person under it: a contact
+//      with no design, a design (from crm_contacts by contact_id, never the design's blob), a browsing
+//      visit, a design whose contact sits on a page not read yet. Search finds a row by company and a
+//      search that matches nothing hides it; sorting by Customer sorts on what the cell shows; the
+//      second line sits under the head at desktop and phone widths. The control (the artifact before
+//      this change) shows none of it. THE COMPANY READ IS BOUNDED BY THE ROWS THAT NEED IT: none when
+//      every linked contact is on the page; with 1200 imported contacts that ALL have a company, one
+//      request for the one design contact the page lacks; it never holds up the first paint (the row
+//      shows the name, then its company); and a Refresh keeps the company on screen while the read
+//      runs, then shows the read's answer.
+//   J  view-as: the companies come with get_portal's first page (crmContactCompanies: those of the
+//      linked contacts the page lacks), and an operator-portal from before them (no companies
+//      anywhere) still lists every row by name.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
 // skeleton is crmContactDeal.mjs's and the cold deep links supportConsoles.mjs's.
@@ -138,6 +152,9 @@ function restAnswer(url, req, S) {
   let rows = (S.tables[table] || []).filter((r) => !client || r.client_id === client);
   if (table === "crm_contacts") {
     if (u.searchParams.get("merged_into") === "is.null") rows = rows.filter((r) => !r.merged_into);
+    if (u.searchParams.get("company") === "not.is.null") rows = rows.filter((r) => r.company != null);
+    const inIds = /^in\.\((.*)\)$/.exec(u.searchParams.get("id") || "");
+    if (inIds) { const want = new Set(inIds[1].split(",").map((x) => x.replace(/^"|"$/g, ""))); rows = rows.filter((r) => want.has(r.id)); }
     // RLS for a contacts:'own' caller (193): unassigned, theirs, or followed (no follows here).
     if (S.ownScope) rows = rows.filter((r) => !r.owner_user_id || r.owner_user_id === USER.id);
     rows = [...rows].sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
@@ -186,6 +203,11 @@ async function run(label, S) {
       // H: a later page of contacts that comes back slowly (after the GoHighLevel sync).
       if (S.pageDelay && /\/rest\/v1\/crm_contacts/.test(url) && Number(new URL(url).searchParams.get("offset") || 0) > 0) {
         await new Promise((res) => setTimeout(res, S.pageDelay));
+      }
+      // I: a company read (any shape: the targeted one, or a read of every contact that has one),
+      // answered late.
+      if (S.companyDelay && isCompanyRead({ url })) {
+        await new Promise((res) => setTimeout(res, S.companyDelay));
       }
       const { page: rows, headers } = restAnswer(url, req, S);
       return json(route, rows, 200, headers);
@@ -251,11 +273,14 @@ async function run(label, S) {
 const snapshot = (page) => page.evaluate(() => {
   const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
   const rows = t ? [...t.tBodies[0].rows].map((r) => [...r.cells].map((c) => c.innerText.trim())) : null;
+  // The Customer cell's two lines: what it leads with, and the person under it (null when none).
+  const heads = t ? [...t.tBodies[0].rows].map((r) => (r.cells[0] ? r.cells[0].innerText.trim().split("\n")[0] : "")) : null;
+  const persons = t ? [...t.tBodies[0].rows].map((r) => { const p = r.cells[0] && r.cells[0].querySelector("[data-ss-contact-person]"); return p ? p.innerText.trim() : null; }) : null;
   const chips = [...document.querySelectorAll('[role="group"][aria-label="Filter by status"] button')].map((b) => b.innerText.replace(/\s+/g, " ").trim());
   const title = [...document.querySelectorAll("div")].find((d) => d.innerText === "Contacts" && d.nextElementSibling && d.nextElementSibling.tagName === "SPAN");
   const more = document.querySelector("[data-ss-contacts-more]");
   return {
-    rows, chips, count: title ? title.nextElementSibling.innerText.trim() : null,
+    rows, heads, persons, chips, count: title ? title.nextElementSibling.innerText.trim() : null,
     tableHtml: t ? t.outerHTML : null, more: more ? more.innerText.replace(/\s+/g, " ").trim() : null,
   };
 });
@@ -264,8 +289,13 @@ const search = async (page, q) => {
   await page.fill('input[aria-label^="Search contacts"]', q);
   await page.waitForTimeout(400);
 };
-const crmReads = (calls) => calls.rest.filter((c) => /\/rest\/v1\/crm_contacts/.test(c.url));
 const qp = (url) => Object.fromEntries(new URL(url).searchParams);
+// The list's pages of contacts, and (I) the company reads: `id, company` of named contacts only.
+const isCompanyRead = (c) => /\/rest\/v1\/crm_contacts/.test(c.url) && (qp(c.url).company === "not.is.null" || /^in\./.test(qp(c.url).id || ""));
+const crmReads = (calls) => calls.rest.filter((c) => /\/rest\/v1\/crm_contacts/.test(c.url) && !isCompanyRead(c));
+const companyReads = (calls) => calls.rest.filter(isCompanyRead);
+// The ids a company read asked for.
+const askedIds = (c) => { const m = /^in\.\((.*)\)$/.exec(qp(c.url).id || ""); return m ? m[1].split(",").map((x) => x.replace(/^"|"$/g, "")) : []; };
 
 const baseTables = (extra = {}) => ({
   designs: DESIGNS, captured_leads: LEADS, crm_contacts: [...LINKED, ...ONLY, MERGED], ...extra,
@@ -304,6 +334,8 @@ try {
     ok("A9 one bounded read: client_id, live only, first_seen_at desc then id, offset 0 limit 500, exact count",
       reads.length === 1 && q.client_id === `eq.${TENANT}` && q.merged_into === "is.null" && q.order === "first_seen_at.desc,id.desc"
       && q.offset === "0" && q.limit === "500" && /count=exact/.test(reads[0].prefer), JSON.stringify(reads.map((c) => ({ q: qp(c.url), prefer: c.prefer }))));
+    ok("A9b and NO company read: every contact a design or a visit links to is on that page",
+      companyReads(r.calls).length === 0, JSON.stringify(companyReads(r.calls).map((c) => qp(c.url))));
     ok("A10 under the caller's own token, and no operator route", reads.every((c) => c.auth === `Bearer ${SESSION.access_token}`)
       && !r.calls.fns.some((c) => c.fn === "operator-portal"), JSON.stringify(r.calls.fns.map((c) => c.fn)));
     // Search, the chip, and the name link.
@@ -381,6 +413,7 @@ try {
     ok("C2 the unassigned ones they can open are", ["Gale Imported", NAMELESS, "Phoebe Caller", "Max Manual", "Dee Deleted"].every((n) => rowsNamed(s, n).length === 1), JSON.stringify(names));
     const reads = crmReads(r.calls);
     ok("C3 read from PostgREST with their own token, no other route", reads.length === 1 && reads[0].auth === `Bearer ${SESSION.access_token}`
+      && companyReads(r.calls).every((c) => c.auth === `Bearer ${SESSION.access_token}`)
       && !r.calls.fns.some((c) => c.fn === "operator-portal" || (c.fn === "portal-settings" && /contact/.test(String(c.body.action || "")))),
       JSON.stringify(r.calls.fns.map((c) => `${c.fn}:${c.body.action || ""}`)));
     ok("C4 nothing more to show (RLS's total, not the tenant's)", s.more === null && s.count === "9", `count=${s.count} more=${s.more}`);
@@ -414,7 +447,7 @@ try {
     const gp = r.calls.fns.filter((c) => c.fn === "operator-portal" && c.body.action === "get_portal" && c.body.clientId === TENANT);
     ok("D2 Show more asked get_portal for contactsFrom 500", gp.some((c) => c.body.contactsFrom === 500) && s2.count === "1001",
       `count=${s2.count} calls=${JSON.stringify(gp.map((c) => c.body.contactsFrom ?? null))}`);
-    ok("D3 the tenant's contacts were never read from PostgREST", !crmReads(r.calls).some((c) => qp(c.url).client_id === `eq.${TENANT}`),
+    ok("D3 the tenant's contacts were never read from PostgREST", ![...crmReads(r.calls), ...companyReads(r.calls)].some((c) => qp(c.url).client_id === `eq.${TENANT}`),
       JSON.stringify(crmReads(r.calls).map((c) => qp(c.url).client_id)));
     // The Pipeline reads get_portal too and shows no contacts, so only the Contacts list asks.
     ok("D5 the first page was asked for by name (withContacts), Show more by page alone",
@@ -505,6 +538,291 @@ try {
     ok("H2 after Show more Quinn keeps the synced status, and the page was added", after === "Accepted" && s2.count === "1001", `after=${after} count=${s2.count} more=${s2.more}`);
     ok("H3 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
     await r.ctx.close();
+  }
+
+  // ── I. the company leads the row ────────────────────────────────────────────────────────
+  // Fictional companies only (the repo is public). Pat's newer design blob carries a company of its
+  // own that crm_contacts does not: the list must show crm_contacts' and never the blob's.
+  const COMPANY = {
+    [cid(204)]: "Example Barn Co.",         // Max Manual: added by hand, no design (Carolyn's case)
+    [CP]: "Sample Shed Works",              // Pat: two designs
+    [CL]: "Example Outbuildings",           // Lee: a browsing visit
+    [cid(202)]: "Nameless Barn Supply",     // the nameless import: the company, no second line
+    [CQ]: "   ",                            // Quinn: spaces are no company
+    [cid(10700)]: "Faraway Barn Co.",       // Bulk 0700: a design whose contact is on page two
+  };
+  const withCompanies = (rows) => rows.map((c) => (COMPANY[c.id] !== undefined ? { ...c, company: COMPANY[c.id] } : c));
+  const STALE = "Stale Blob Barns";
+  const designsWithBlob = DESIGNS.map((d) => (d.short_code === "SS-PAT0002A" ? { ...d, contact: { ...d.contact, company: STALE } } : d));
+  const companyTables = (extra = {}) => baseTables({ designs: designsWithBlob, crm_contacts: withCompanies([...LINKED, ...ONLY, MERGED]), ...extra });
+  let phoneScroll = null;   // I's sideways page scroll at phone width, for I26
+  const rowOf = (snap, head) => {
+    const i = (snap.heads || []).indexOf(head);
+    return i < 0 ? null : { head, person: snap.persons[i], cells: snap.rows[i], n: snap.heads.filter((h) => h === head).length };
+  };
+  {
+    const r = await run("I", { tables: companyTables(), pageSize: 100 });
+    if (!ok("I0 the list rendered", r.rendered)) throw new Error("I: the list never rendered");
+    const s = await snapshot(r.page);
+    await r.page.screenshot({ path: join(shots, "I-company.png"), fullPage: true });
+    const max = rowOf(s, "Example Barn Co.");
+    ok("I1 a contact added by hand with a company: the company leads, the person under it, still Added by hand",
+      max && max.n === 1 && max.person === "Max Manual" && max.cells[5] === "Added by hand" && !s.heads.includes("Max Manual"),
+      JSON.stringify(max));
+    const pat = rowOf(s, "Sample Shed Works");
+    ok("I2 a design's row takes its contact's company (crm_contacts by contact_id), never the design's blob",
+      pat && pat.n === 1 && pat.person === "Pat Example" && pat.cells[2] === "2" && !s.tableHtml.includes(STALE),
+      JSON.stringify(pat));
+    const lee = rowOf(s, "Example Outbuildings");
+    ok("I3 a browsing visit's row takes its contact's company",
+      lee && lee.n === 1 && lee.person === "Lee Browser" && /^Browsing/.test(lee.cells[5]), JSON.stringify(lee));
+    const nameless = rowOf(s, "Nameless Barn Supply");
+    ok("I4 a company with no person: the company alone (no second line), the phone stays in Contact",
+      nameless && nameless.person === null && /\(512\) 555-0202/.test(nameless.cells[1]) && !s.heads.includes(NAMELESS), JSON.stringify(nameless));
+    const quinn = rowOf(s, "Quinn Example");
+    ok("I5 a company of only spaces is no company: the name leads, no second line", quinn && quinn.person === null, JSON.stringify(quinn));
+    const plain = rowOf(s, "Gale Imported");
+    ok("I6 a contact with no company is unchanged: the name, no second line", plain && plain.person === null, JSON.stringify(plain));
+    ok("I7 the same ten rows as A, no row added or lost", s.rows.length === 10 && s.count === "10", `${s.rows.length} rows, count ${s.count}: ${JSON.stringify(s.heads)}`);
+    // The head is still the record link.
+    const link = await r.page.locator("table button", { hasText: "Example Barn Co." }).count();
+    ok("I8 the company is the link to the record", link === 1, `buttons=${link}`);
+    // Search.
+    const ph = await r.page.getAttribute('input[aria-label^="Search contacts"]', "placeholder");
+    ok("I9 the search box says it searches company", /company/i.test(ph || ""), ph);
+    await search(r.page, "example barn");
+    const s1 = await snapshot(r.page);
+    ok("I10 search by company finds the row", s1.rows && s1.rows.length === 1 && s1.heads[0] === "Example Barn Co." && s1.persons[0] === "Max Manual", JSON.stringify(s1.heads));
+    await search(r.page, "sample shed");
+    const s2 = await snapshot(r.page);
+    ok("I11 search by a design row's company finds that person's row", s2.rows && s2.rows.length === 1 && s2.heads[0] === "Sample Shed Works", JSON.stringify(s2.heads));
+    await search(r.page, "Max Manual");
+    const s3 = await snapshot(r.page);
+    ok("I12 search by the person under a company still finds the row", s3.rows && s3.rows.length === 1 && s3.heads[0] === "Example Barn Co.", JSON.stringify(s3.heads));
+    await search(r.page, "Zzyzx Barns");
+    const s4 = await snapshot(r.page);
+    const none = await r.page.evaluate(() => /No contacts match/.test(document.body.innerText));
+    ok("I13 a search no company or name matches hides every row", s4.rows === null && none, `rows=${JSON.stringify(s4.rows)} message=${none}`);
+    await search(r.page, STALE);
+    const s5 = await snapshot(r.page);
+    ok("I14 the design blob's stale company finds nothing", s5.rows === null, JSON.stringify(s5.heads));
+    await search(r.page, "");
+    // Sorting by Customer sorts on what the cell shows: companies among names, blanks last.
+    const th = r.page.locator("table thead th", { hasText: "Customer" });
+    await th.click(); await r.page.waitForTimeout(300);
+    const asc = (await snapshot(r.page)).heads;
+    const want = ["Dee Deleted", "Example Barn Co.", "Example Outbuildings", "Gale Imported", "Nameless Barn Supply", "Oscar Other", "Phoebe Caller", "Quinn Example", "Sample Shed Works", "—"];
+    ok("I15 Customer A to Z sorts by the company where one leads", JSON.stringify(asc) === JSON.stringify(want), JSON.stringify(asc));
+    await th.click(); await r.page.waitForTimeout(300);
+    const desc = (await snapshot(r.page)).heads;
+    ok("I16 Customer Z to A is the reverse, the blank row still last",
+      JSON.stringify(desc) === JSON.stringify([...want.slice(0, -1)].reverse().concat("—")), JSON.stringify(desc));
+    // The second line sits under the company, where the company starts, at desktop and at phone
+    // width; the dot is level with the company; nothing spills out of the cell.
+    const geometry = () => r.page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll("[data-ss-contact-person]").forEach((p) => {
+        const cell = p.closest("td");
+        const btn = cell && cell.querySelector("button");
+        const dot = cell && cell.querySelector("span[title]");
+        if (!btn || !btn.firstChild || btn.firstChild.nodeType !== 3) { out.push(null); return; }
+        const range = document.createRange();
+        range.selectNodeContents(btn.firstChild);
+        const lines = [...range.getClientRects()];
+        const head = range.getBoundingClientRect();
+        const pr = p.getBoundingClientRect();
+        const dr = dot ? dot.getBoundingClientRect() : null;
+        const dotMid = dr ? (dr.top + dr.bottom) / 2 : null;
+        out.push({
+          person: p.innerText.trim(),
+          leftGap: Math.round(Math.abs(pr.left - head.left)),
+          below: pr.top >= head.bottom - 1,
+          // On the company's first line, or (narrow) on a line of its own above it.
+          dotLevel: dotMid !== null && lines.length > 0 && ((dotMid >= lines[0].top && dotMid <= lines[0].bottom) || dr.bottom <= lines[0].top + 1),
+          dotBeside: dotMid !== null && lines.length > 0 && dotMid >= lines[0].top && dotMid <= lines[0].bottom,
+          spill: cell.scrollWidth - cell.clientWidth,
+        });
+      });
+      return { cells: out, pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    });
+    const g1 = await geometry();
+    ok("I17 desktop: each person line starts under its company, below it, the dot beside the company, nothing spills",
+      g1.cells.length === 3 && g1.cells.every((c) => c && c.leftGap <= 1 && c.below && c.dotBeside && c.spill <= 0) && g1.pageScroll <= 0,
+      JSON.stringify(g1));
+    await r.page.setViewportSize({ width: 375, height: 800 });
+    await r.page.waitForTimeout(500);
+    const g2 = await geometry();
+    phoneScroll = g2.pageScroll;
+    await r.page.screenshot({ path: join(shots, "I-company-375.png"), fullPage: false });
+    ok("I18 phone width: still under the company where it starts, the dot level with it or above, nothing spills",
+      g2.cells.length === 3 && g2.cells.every((c) => c && c.leftGap <= 1 && c.below && c.dotLevel && c.spill <= 0),
+      JSON.stringify(g2));
+    ok("I19 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // A design whose contact is on a page the list has not read: the company is there on first load.
+  // Every one of the 1200 bulk contacts has a company too, as an imported call list (Pipelines'
+  // Import CSV) would give them: the company read must still ask for the ONE contact it needs, not
+  // page through every contact that has a company.
+  const importedCompanies = (rows) => rows.map((c) => (/^Bulk Lead/.test(c.name || "") && c.id !== cid(10700) ? { ...c, company: `Prospect Barns ${c.name.slice(10)}` } : c));
+  const laterTables = () => companyTables({ designs: [...designsWithBlob, BULK_DESIGN], crm_contacts: importedCompanies(withCompanies([...LINKED, ...ONLY, MERGED, ...BULK])) });
+  const faraway = async (page, q = "Faraway") => { await search(page, q); const x = await snapshot(page); await search(page, ""); return x; };
+  {
+    const r = await run("I-later-page", { tables: laterTables() });
+    if (!ok("I20 the list rendered", r.rendered)) throw new Error("I-later-page: the list never rendered");
+    const s1 = await snapshot(r.page);
+    const s2 = await faraway(r.page);
+    ok("I21 before Show more, Bulk 0700's design row leads with its company (its contact is on page two)",
+      /^708 older/.test(s1.more || "") && s2.rows && s2.rows.length === 1 && s2.heads[0] === "Faraway Barn Co." && s2.persons[0] === "Bulk Lead 0700" && s2.rows[0][2] === "1",
+      `more=${s1.more} rows=${JSON.stringify(s2.rows)}`);
+    const co = companyReads(r.calls);
+    const cq = co[0] ? qp(co[0].url) : {};
+    ok("I22 1200 contacts with a company, ONE company read, for the ONE linked contact the page lacks",
+      crmReads(r.calls).length === 1 && co.length === 1 && JSON.stringify(askedIds(co[0])) === JSON.stringify([cid(10700)]),
+      `pages=${crmReads(r.calls).length} companies=${JSON.stringify(co.map(askedIds))}`);
+    ok("I22b that read is id and company only, this tenant's live contacts that have one, under the caller's token",
+      cq.select === "id,company" && cq.client_id === `eq.${TENANT}` && cq.merged_into === "is.null" && cq.company === "not.is.null"
+      && !("offset" in cq) && co[0].auth === `Bearer ${SESSION.access_token}`, JSON.stringify(cq));
+    // (Searched by company, then picked out by its head: a four-digit number also matches the ids
+    // and phones of other bulk rows, so the search alone does not narrow to one.)
+    const imported = rowOf(await faraway(r.page, "Prospect Barns 0001"), "Prospect Barns 0001");
+    ok("I22c an imported contact on the page leads with its own row's company",
+      imported && imported.n === 1 && imported.person === "Bulk Lead 0001", JSON.stringify(imported));
+    ok("I23 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // The company read never holds up the first paint: answered 5 s late, the list is on screen with
+  // the person's name, and the company arrives with the read.
+  {
+    const S = { tables: laterTables(), companyDelay: 5000 };
+    const r = await run("I-paint-first", S);
+    if (!ok("I27 the list rendered", r.rendered)) throw new Error("I-paint-first: the list never rendered");
+    await search(r.page, "Bulk Lead 0700");
+    const early = await snapshot(r.page);
+    const asked = companyReads(r.calls).length;
+    // Then the read answers, and the row takes its company without a reload.
+    const arrived = await r.page.waitForFunction(() => {
+      const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
+      const row = t && t.tBodies[0] && t.tBodies[0].rows[0];
+      return !!(row && row.cells[0] && row.cells[0].innerText.trim().split("\n")[0] === "Faraway Barn Co.");
+    }, null, { timeout: 15000 }).then(() => true, () => false);
+    const late = await snapshot(r.page);
+    await search(r.page, "");
+    ok("I28 painted before the company read answered: the row shows the name, then its company",
+      asked === 1 && early.heads && early.heads[0] === "Bulk Lead 0700" && early.persons[0] === null
+      && arrived && late.heads[0] === "Faraway Barn Co." && late.persons[0] === "Bulk Lead 0700",
+      `asked=${asked} early=${JSON.stringify(early.heads)} arrived=${arrived} late=${JSON.stringify(late.heads)}`);
+    ok("I29 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // A Refresh keeps the company on screen while its read runs (no drop back to the name), then
+  // shows what the read answered: a company renamed since is shown renamed.
+  {
+    const S = { tables: laterTables() };
+    const r = await run("I-refresh", S);
+    if (!ok("I30 the list rendered", r.rendered)) throw new Error("I-refresh: the list never rendered");
+    await search(r.page, "Bulk Lead 0700");
+    const head = () => r.page.evaluate(() => {
+      const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
+      const row = t && t.tBodies[0] && t.tBodies[0].rows[0];
+      return row && row.cells[0] ? row.cells[0].innerText.trim().split("\n")[0] : null;
+    });
+    const first = await head();
+    S.companyDelay = 4000;
+    S.tables.crm_contacts = S.tables.crm_contacts.map((c) => (c.id === cid(10700) ? { ...c, company: "Renamed Barn Co." } : c));
+    const refresh = r.page.locator("button", { hasText: "↻ Refresh" });
+    const n = await refresh.count();
+    const readsBefore = companyReads(r.calls).length;
+    await refresh.first().click();
+    const seen = [];
+    for (let i = 0; i < 30; i++) { seen.push(await head()); await r.page.waitForTimeout(100); }
+    await r.page.waitForTimeout(4000);
+    const last = await head();
+    ok("I31 during the Refresh's company read the row kept its company, never the bare name",
+      n === 1 && first === "Faraway Barn Co." && companyReads(r.calls).length === readsBefore + 1
+      && seen.every((h) => h === "Faraway Barn Co." || h === null) && seen.includes("Faraway Barn Co."),
+      `refresh buttons=${n} first=${first} seen=${JSON.stringify([...new Set(seen)])}`);
+    ok("I32 then the read's answer: the renamed company", last === "Renamed Barn Co.", String(last));
+    ok("I33 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // The control: the artifact before this change shows none of the companies, so I1 to I4 can fail.
+  {
+    const r = await run("I-control", { tables: companyTables(), artifact: BEFORE, pageSize: 100 });
+    if (!ok("I24 the old list rendered", r.rendered)) throw new Error("I-control: the old list never rendered");
+    const s = await snapshot(r.page);
+    ok("I25 before this change no company was shown", !["Example Barn Co.", "Sample Shed Works", "Example Outbuildings", "Nameless Barn Supply"].some((c) => s.tableHtml.includes(c)),
+      JSON.stringify(s.heads));
+    // The page's own sideways scroll at phone width (the date filter is wider than a phone) is the
+    // same before and after: the company line adds none.
+    await r.page.setViewportSize({ width: 375, height: 800 });
+    await r.page.waitForTimeout(500);
+    const beforeScroll = await r.page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    ok("I26 phone width: the page scrolls sideways no further than before this change",
+      phoneScroll !== null && phoneScroll <= beforeScroll, `after=${phoneScroll} before=${beforeScroll}`);
+    await r.ctx.close();
+  }
+
+  // ── J. view-as: the companies come with get_portal; an older operator-portal degrades ────
+  {
+    const contacts = withCompanies([...LINKED, ...ONLY]).sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
+    // As operator-portal answers: the companies of the linked contacts the page lacks. Every one is
+    // on this page, so none (the rows take their companies from the page's own rows).
+    const companies = [];
+    const portal = (withCo) => (body) => ({
+      ok: true, clientId: TENANT, companyName: "Acme Sheds",
+      designs: designsWithBlob, versions: [], capturedLeads: LEADS,
+      ...(body.withContacts === true ? {
+        // An operator-portal from before this change sends neither the column nor the list.
+        crmContacts: withCo ? contacts : contacts.map(({ company: _c, ...rest }) => rest),
+        crmContactsTotal: contacts.length,
+        ...(withCo ? { crmContactCompanies: companies } : {}),
+      } : {}),
+    });
+    const r = await run("J", { tables: { designs: [], captured_leads: [], crm_contacts: [] }, operator: true, query: `?view=${TENANT}`, getPortal: portal(true), pageSize: 100 });
+    if (!ok("J0 the view-as list rendered", r.rendered)) throw new Error("J: the view-as list never rendered");
+    const s = await snapshot(r.page);
+    const pat = rowOf(s, "Sample Shed Works"), max = rowOf(s, "Example Barn Co."), lee = rowOf(s, "Example Outbuildings");
+    ok("J1 view-as: design, visit and contact-only rows lead with their companies",
+      pat && pat.person === "Pat Example" && max && max.person === "Max Manual" && lee && lee.person === "Lee Browser" && !s.tableHtml.includes(STALE),
+      JSON.stringify(s.heads));
+    ok("J2 view-as never read the tenant's contacts from PostgREST",
+      ![...crmReads(r.calls), ...companyReads(r.calls)].some((c) => qp(c.url).client_id === `eq.${TENANT}`));
+    await r.page.screenshot({ path: join(shots, "J-view-as-company.png") });
+    ok("J3 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+    const old = await run("J-old", { tables: { designs: [], captured_leads: [], crm_contacts: [] }, operator: true, query: `?view=${TENANT}`, getPortal: portal(false), pageSize: 100 });
+    if (!ok("J4 the view-as list rendered against an older operator-portal", old.rendered)) throw new Error("J-old: the view-as list never rendered");
+    const so = await snapshot(old.page);
+    ok("J5 older operator-portal: every row listed by name, no company, no second line",
+      so.rows.length === 10 && ["Pat Example", "Max Manual", "Lee Browser", NAMELESS].every((n) => so.heads.includes(n)) && so.persons.every((p) => p === null),
+      JSON.stringify(so.heads));
+    ok("J6 no uncaught page errors", old.pageErrors.length === 0, old.pageErrors.join(" | "));
+    await old.ctx.close();
+    // View-as with a design whose contact is past the first page: get_portal sends that contact's
+    // company (and only that one), and the design row leads with it.
+    const all = importedCompanies(withCompanies([...LINKED, ...ONLY, ...BULK]))
+      .sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
+    const designsLater = [...designsWithBlob, BULK_DESIGN];
+    const getPortal = (body) => {
+      const from = body.contactsFrom || 0;
+      const pageRows = all.slice(from, from + 500);
+      if (from > 0) return { ok: true, clientId: TENANT, crmContacts: pageRows, crmContactsTotal: all.length };
+      const onPage = new Set(pageRows.map((c) => c.id));
+      const need = [...new Set([...designsLater.map((d) => d.contact_id), ...LEADS.map((l) => l.contact_id)].filter((id) => id && !onPage.has(id)))];
+      return {
+        ok: true, clientId: TENANT, companyName: "Acme Sheds", designs: designsLater, versions: [], capturedLeads: LEADS,
+        crmContacts: pageRows, crmContactsTotal: all.length,
+        crmContactCompanies: all.filter((c) => need.includes(c.id) && c.company).map((c) => ({ id: c.id, company: c.company })),
+      };
+    };
+    const later = await run("J-later", { tables: { designs: [], captured_leads: [], crm_contacts: [] }, operator: true, query: `?view=${TENANT}`, getPortal });
+    if (!ok("J7 the view-as list rendered with a contact past the first page", later.rendered)) throw new Error("J-later: the view-as list never rendered");
+    const sl = await faraway(later.page);
+    ok("J8 view-as: the design row whose contact is past the first page leads with its company",
+      sl.rows && sl.rows.length === 1 && sl.heads[0] === "Faraway Barn Co." && sl.persons[0] === "Bulk Lead 0700", JSON.stringify(sl.heads));
+    ok("J9 no uncaught page errors", later.pageErrors.length === 0, later.pageErrors.join(" | "));
+    await later.ctx.close();
   }
 } finally {
   await browser.close();

@@ -1161,7 +1161,9 @@ function Dashboard({ session }) {
   // The Contacts list's contacts, on the same audited route as the rest: `withContacts` adds the
   // first page of the tenant's contacts (crmContacts + crmContactsTotal) to get_portal's answer, and
   // `contactsFrom` is its "Show more", answered with that page alone. The Pipeline sends neither,
-  // so its get_portal carries no contacts at all.
+  // so its get_portal carries no contacts at all. The first page also brings crmContactCompanies,
+  // the companies of the contacts a design or a visit links to that the page does not carry; null
+  // when the answer has none (a failed read, or an operator-portal from before it).
   const viewingFetch = useCallback(async (opts = null) => {
     const contactsFrom = opts && opts.contactsFrom > 0 ? opts.contactsFrom : undefined;
     const withContacts = opts && opts.withContacts ? true : undefined;
@@ -1174,7 +1176,8 @@ function Dashboard({ session }) {
     // Backfill the real company name (a ?view= deep link seeds it with the slug).
     if (data.companyName) setViewing((cur) => (cur && cur.clientId === data.clientId && cur.companyName !== data.companyName) ? { ...cur, companyName: data.companyName } : cur);
     return { designs: data.designs || [], versions: data.versions || [], capturedLeads: data.capturedLeads || [],
-      crmContacts: data.crmContacts || [], crmContactsTotal: data.crmContactsTotal || 0 };
+      crmContacts: data.crmContacts || [], crmContactsTotal: data.crmContactsTotal || 0,
+      crmContactCompanies: Array.isArray(data.crmContactCompanies) ? data.crmContactCompanies : null };
   }, [viewing && viewing.clientId]);
   // GHL-subaccounts-style deep link: /contacts?view=<clientId> (e.g. from the
   // admin console's "Open portal ↗") auto-opens that account once the operator

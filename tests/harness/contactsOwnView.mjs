@@ -188,7 +188,7 @@ async function repView(label, accessMap, artifact = null, role = "user") {
     const b = [...document.querySelectorAll("button")].find((x) => (x.innerText || "").trim() === t);
     return [t, b ? { disabled: b.disabled, title: b.getAttribute("title") || "" } : null];
   })));
-  out.editOffered = await r.page.locator('button[title="Edit this contact\'s name, email and phone"]').count() > 0;
+  out.editOffered = await r.page.locator('button[title="Edit this contact\'s company, name, email and phone"]').count() > 0;
   out.focusBox = await r.page.evaluate(() => {
     const row = [...document.querySelectorAll("span")].find((s) => s.innerText === "Call about the door");
     const box = row && row.parentElement ? row.parentElement.querySelector('input[type="checkbox"]') : null;

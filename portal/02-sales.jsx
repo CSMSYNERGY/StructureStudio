@@ -1215,7 +1215,61 @@ function buildContactTimeline(act) {
 // whole import would otherwise sit above every real customer. Page size and columns are
 // _shared/contactListPage.ts's, which the operator path reads with; its test fails on drift.
 const SS_CONTACT_LIST_PAGE = 500;
-const SS_CONTACT_LIST_COLS = "id, name, phone, email, source, first_seen_at, created_at";
+const SS_CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at";
+// THE COMPANY (Carolyn, 2026-10-14). A lead she entered with a company was listed under the
+// person's name alone, as "Added by hand": "It should show" the company. Every row now carries the
+// company of the contact its name opens, from crm_contacts (301; editable since 308) and nowhere
+// else: a design's contact blob has no company field, so it can never put back a company that was
+// changed or cleared. A design's or a visit's contact can sit on a page not read yet, so for
+// EXACTLY those contacts (linked by a design or a visit, not on a page in hand) the list reads
+// `id, company` on its own, AFTER the first paint, and repaints when it lands. Not every contact
+// that has a company: an imported call list (Pipelines' Import CSV) gives every row one, and that
+// read would be the whole contact list again on every load. A tenant whose linked contacts are all
+// on the first page reads nothing more. Columns, chunk, lanes and bound are contactListPage.ts's
+// (contactIdsNeedingCompany, readContactCompanies: the operator path's copy); its test fails on drift.
+const SS_CONTACT_COMPANY_COLS = "id, company";
+const SS_CONTACT_COMPANY_CHUNK = 100;     // ids per request: they ride in the URL
+const SS_CONTACT_COMPANY_LANES = 4;       // requests in flight at once
+const SS_CONTACT_COMPANY_MAX_IDS = 5000;  // per load, the newest rows' first; the same on both paths
+// The contacts whose company has to be read on its own: each id in `linked` (designs', then visits'
+// contact_id, newest first) that `have` (the contacts read so far) does not hold, once, in order.
+function ssContactIdsNeedingCompany(linked, have) {
+  const out = [];
+  const seen = new Set();
+  for (const id of linked) {
+    if (out.length >= SS_CONTACT_COMPANY_MAX_IDS) break;
+    if (typeof id !== "string" || !id || seen.has(id) || have.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+// Those contacts' companies, under RLS with the caller's own token: Map id -> company for every id
+// asked ("" for none, so the answer outranks what the last load showed). Throws on a failed chunk.
+async function ssReadContactCompanies(clientId, ids) {
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += SS_CONTACT_COMPANY_CHUNK) chunks.push(ids.slice(i, i + SS_CONTACT_COMPANY_CHUNK));
+  const out = new Map(ids.map((id) => [id, ""]));
+  let next = 0;
+  let failed = false;
+  const lane = async () => {
+    while (!failed && next < chunks.length) {
+      const part = chunks[next++];
+      const { data, error } = await sb.from("crm_contacts").select(SS_CONTACT_COMPANY_COLS)
+        .eq("client_id", clientId).is("merged_into", null).not("company", "is", null).in("id", part);
+      if (error) { failed = true; throw error; }
+      (data || []).forEach((c) => { if (c && out.has(c.id) && typeof c.company === "string") out.set(c.id, c.company.trim()); });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SS_CONTACT_COMPANY_LANES, chunks.length) }, lane));
+  return out;
+}
+// What a row's Customer cell leads with, and so what sorting by Customer sorts on: the company
+// when there is one (the pipeline card's rule), else the person's name; a contact with no design
+// and no name shows its phone or email, so the one link to its record is never a dash.
+function ssContactRowHead(g) {
+  return g.company || g.name || (g.contactOnly ? (g.phone ? phoneDisplay(g.phone) : g.email) : "") || "";
+}
 // "Show more" keeps reading pages until it has this many new rows to show, so a press never
 // comes back empty because the next page held only people who already have a design. Bounded,
 // so one press is never the whole table.
@@ -1256,8 +1310,14 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // `fetched` how many rows the pages have answered (the next page's offset), `total` how many live
   // contacts the tenant has for this person. `lastPaint` is the last paint's inputs, so "Show more"
   // can add rows without reading the designs again. `loadGen` lets a Refresh outrank a Show more
-  // that is still in flight.
-  const contactsRef = useRef({ byId: new Map(), fetched: 0, total: 0 });
+  // that is still in flight. `companies` is contact id -> company for the linked contacts no page
+  // carries (SS_CONTACT_COMPANY_COLS), or null until that read answers (or when it fails). `hint`
+  // is what the last paint showed for each contact, used only until then, so a Refresh or a return
+  // to the list never drops a company back to the name for the moment the read takes.
+  const contactsRef = useRef({ byId: new Map(), fetched: 0, total: 0, companies: null, hint: null });
+  // contact id -> the company the last paint showed (the cached rows' before the first one). The
+  // builder's own list only: view-as gets its companies with the rows, before its one paint.
+  const companyHintRef = useRef(null);
   const lastPaintRef = useRef(null);
   const loadGenRef = useRef(0);
   // The rows the last "Show more" added, so the table can go to the page they start on (below).
@@ -1297,11 +1357,26 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     cr.fetched = from + page.rows.length;
     cr.total = page.rows.length ? Math.max(page.total, cr.fetched) : cr.fetched;
   };
+  // View-as's companies (get_portal's crmContactCompanies): id -> company, or null when the answer
+  // has none (a failed read, an operator-portal from before it), so each row falls back to the
+  // company its own contact row carries, if read, and to the name otherwise.
+  const takeCompanies = (list) => {
+    contactsRef.current.companies = Array.isArray(list)
+      ? new Map(list.filter((c) => c && c.id && typeof c.company === "string" && c.company.trim()).map((c) => [c.id, c.company.trim()]))
+      : null;
+  };
 
   const load = useCallback(async () => {
     setError(null);
     loadGenRef.current += 1;
-    contactsRef.current = { byId: new Map(), fetched: 0, total: 0 };
+    if (!fetchDesigns && !companyHintRef.current) {
+      // The first load: what the cached rows (on screen now) show. Rows cached before companies
+      // were shown carry none, and add none.
+      const cached = ssCacheGet("rest", "contacts", clientId);
+      companyHintRef.current = new Map();
+      (Array.isArray(cached) ? cached : []).forEach((g) => { if (g && g.contactId && g.company) companyHintRef.current.set(g.contactId, g.company); });
+    }
+    contactsRef.current = { byId: new Map(), fetched: 0, total: 0, companies: null, hint: fetchDesigns ? null : companyHintRef.current };
     setMoreErr(null); setMoreBusy(false);   // a Show more still in flight is dropped (loadGen)
     // And none can start until this load paints: the previous paint's designs are not this load's,
     // and a failed Refresh must not leave a Show more that repaints the list from before it.
@@ -1422,6 +1497,21 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       rowsIn.forEach((r) => { if (r.contact_id) linked.add(r.contact_id); });
       browsingIn.forEach((l) => { if (l.contact_id) linked.add(l.contact_id); });
       const cr = contactsRef.current;
+      // THE COMPANY of the contact a row's name opens. The contact's own row when a page has brought
+      // it in (the newest read of it), else the companies read of the linked contacts no page holds,
+      // else, until that read answers, what the last paint showed. Never a design's blob, which has
+      // no company. A row with no contact has none.
+      const companyOf = (id) => {
+        if (!id) return "";
+        const row = cr.byId.get(id);
+        const v = row && Object.prototype.hasOwnProperty.call(row, "company") ? row.company
+          : cr.companies && cr.companies.has(id) ? cr.companies.get(id)
+          : cr.hint ? cr.hint.get(id) : null;
+        return typeof v === "string" ? v.trim() : "";
+      };
+      // Every design and browsing row so far, by the contact id its name opens. Rows with no
+      // contact id (a design saved before its contact existed) have no company.
+      groups.forEach((g) => { g.company = companyOf(g.contactId); });
       cr.byId.forEach((c) => {
         if (linked.has(c.id)) return;
         // First seen for both dates: the import's own run time is not activity (see the header).
@@ -1429,7 +1519,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         groups.set("contact-" + c.id, {
           key: "contact-" + c.id, contactOnly: true, source: c.source || "",
           contactId: c.id,
-          name: c.name || "", email: c.email || "", phone: c.phone || "",
+          name: c.name || "", company: companyOf(c.id), email: c.email || "", phone: c.phone || "",
           count: 0, firstSeen: seen, lastActivity: seen,
           latestCode: null, topStatus: "contact",
           search: " " + ssContactSourceLabel(c.source) + " no design yet",
@@ -1448,6 +1538,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       setMoreContacts(left ? Math.max(0, cr.total - cr.byId.size - linkedUnread) : 0);
       lastPaintRef.current = { linked, repaint: () => paint(rowsIn, browsingIn) };
       const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
+      if (!fetchDesigns) {
+        const hint = new Map();
+        out.forEach((g) => { if (g.contactId && g.company) hint.set(g.contactId, g.company); });
+        companyHintRef.current = hint;
+      }
       setRows(out);
       // Cache the GROUPED result, not the raw reads: regrouping is the expensive part of
       // this function and the shape the table renders from. Operator view-as is excluded —
@@ -1461,6 +1556,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       try {
         const res = await fetchDesigns({ withContacts: true }); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || [];
         takeContacts(0, { rows: res.crmContacts || [], total: res.crmContactsTotal || 0 });
+        // The companies come with the first page too: those of the contacts a design or a visit
+        // links to that the page does not carry (operator-portal reads them the way the builder's
+        // list does, below). An operator-portal without them answers none, and those rows show
+        // names, as they did before.
+        takeCompanies(res.crmContactCompanies);
       }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
@@ -1497,6 +1597,22 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     if (ccRes) takeContacts(0, ccRes);
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);
+    // THE COMPANIES of the contacts a design or a visit links to that the page does not hold
+    // (SS_CONTACT_COMPANY_COLS), read now the rows are on screen and painted in when they land,
+    // over the newest paint (the GoHighLevel sync below may have repainted meanwhile). Nothing to
+    // read when every linked contact is on the page. Additive: if it fails, those rows keep what the
+    // last paint showed for them, and the name otherwise.
+    const need = ssContactIdsNeedingCompany(
+      [...list.map((r) => r.contact_id), ...browsing.map((l) => l.contact_id)], contactsRef.current.byId);
+    if (need.length) {
+      const gen = loadGenRef.current;
+      const cr = contactsRef.current;
+      ssReadContactCompanies(clientId, need).then((companies) => {
+        if (gen !== loadGenRef.current) return;   // a Refresh started meanwhile; its read wins
+        cr.companies = companies;
+        if (lastPaintRef.current) lastPaintRef.current.repaint();
+      }, () => {});
+    }
     // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows
     // are already on screen by now — this only repaints them, at the tail below.
     if (list.length > 0) {
@@ -1582,7 +1698,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
   const sortVal = (g) => {
     switch (sortKey) {
-      case "customer":     return g.name;
+      case "customer":     return ssContactRowHead(g);   // what the cell shows: the company first
       case "contact":      return g.email || g.phone;
       case "designs":      return g.count;
       case "firstSeen":    return g.firstSeen;
@@ -1686,7 +1802,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           </FilterBar>
           <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
             <span style={FLBL_SPACER} aria-hidden="true">Search</span>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
+            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — company, name, email, phone, status…" />
           </div>
         </div>
       )}
@@ -1753,14 +1869,30 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           A contact with no design and no name (an import, a saved number) shows
                           its phone or email instead, so the one link to its record is not a dash.
                           The phone is crm_contacts' +1 form, so it is written the way people read
-                          one, as the rest of the portal writes it. */}
-                      {g.contactId && onOpenRecord ? (
-                        <button type="button" onClick={() => onOpenRecord(g.contactId)}
-                          title="Open this contact's record"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
-                          {g.name || (g.contactOnly && (g.phone ? phoneDisplay(g.phone) : g.email)) || "—"}
-                        </button>
-                      ) : (g.name || "—")}
+                          one, as the rest of the portal writes it.
+                          THE COMPANY LEADS when the contact has one (Carolyn, 2026-10-14), with the
+                          person under it, as on a pipeline card (ssContactRowHead). The second line
+                          is the name only: the Contact column already carries the phone and email.
+                          It sits INSIDE the link, so it starts where the company starts wherever the
+                          link wraps (on a phone the link drops below the dot), and the link is
+                          top-aligned so the dot stays level with the company, not the name.
+                          A row with no company renders exactly as it did before. */}
+                      {(() => {
+                        const person = g.company && g.name
+                          ? <span data-ss-contact-person="" style={{ display: "block", marginTop: 1, fontSize: 12, fontWeight: 400, color: "#64748B" }}>{g.name}</span>
+                          : null;
+                        if (g.contactId && onOpenRecord) return (
+                          <button type="button" onClick={() => onOpenRecord(g.contactId)}
+                            title="Open this contact's record"
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left", ...(person ? { verticalAlign: "top" } : null) }}>
+                            {ssContactRowHead(g) || "—"}
+                            {person}
+                          </button>
+                        );
+                        return person
+                          ? <span style={{ display: "inline-block", verticalAlign: "top" }}>{ssContactRowHead(g)}{person}</span>
+                          : (ssContactRowHead(g) || "—");
+                      })()}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
@@ -1839,7 +1971,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           return (
                             <div style={{ padding: "6px 4px" }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
-                                Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
+                                Activity — {g.name || g.company || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
                               </div>
                               {/* An invoice that exists in the CRM but was never emailed —
                                   otherwise this design just looks Invoiced. Send invoice now
