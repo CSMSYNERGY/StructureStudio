@@ -184,7 +184,7 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/search$/, h: (r, env) => search(env, r) },
   { method: "GET", re: /^\/contacts$/, h: (r, env) => listContacts(env, r) },
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
-  { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
+  { method: "POST", re: /^\/settings\/me$/, h: (r, env, ec) => settingsMe(env, ec, r) },
   // Your own settings for the portal's "Your calls" card (the apps read them from /token, and
   // here again to see a greeting they just recorded).
   { method: "GET", re: /^\/settings\/me$/, h: (r, env) => mySettings(env, r) },

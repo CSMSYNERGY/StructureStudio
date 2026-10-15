@@ -93,6 +93,12 @@ export interface Env {
    * or more; unset or shorter, those reports are saved with no pseudonym at all.
    */
   LOG_PSEUDONYM_KEY?: string;
+  /**
+   * The dial guard (src/dialGuard.ts, DEVIATIONS 83): one JSON object naming the demo businesses,
+   * the old reviewer logins, the extra numbers a demo may call, the guard's start time and a demo's
+   * daily minutes. Unset: nobody is guarded. Set but unreadable: anyone it could name is refused.
+   */
+  PHONE_DIAL_GUARD?: string;
 
   // ── Text alerts ───────────────────────────────────────────────────────────────────
   /** The Firebase service account JSON, whole. */

@@ -64,6 +64,43 @@ Paste the value at the prompt. Set it once and leave it: a new key gives everyon
 
 APNs: set `APNS_BUNDLE_ID` to the App Store bundle id, the topic for `prod` devices (preview, TestFlight and App Store builds), and `APNS_BUNDLE_ID_DEV` to the development client's id, the topic for `dev` devices. Unset, the Worker derives the dev topic as `APNS_BUNDLE_ID` + `.dev`, but an older Worker doesn't, so set both. The key (`APNS_KEY_P8`, `APNS_KEY_ID`): in the Apple Developer account, Certificates, IDs & Profiles, Keys, a new key with Apple Push Notifications service, team scoped (all topics) and enabled for Production. Every iPhone alert goes to Apple's production host, so a key made for Sandbox alone is refused. Secrets set with a pasted newline are trimmed.
 
+## 3b. The dial guard for app-review logins (2026-10-15, DEVIATIONS 83)
+
+`PHONE_DIAL_GUARD` limits what the logins we hand to store reviewers can make this Worker call, text or forward to. It is one JSON object. This is its shape, with FAKE values (the real tenant id, user id and number go only in the secret, never in this public repo):
+
+```json
+{
+  "demo_tenants": ["example-demo"],
+  "old_login_users": ["00000000-0000-4000-8000-000000000001"],
+  "allow_numbers": ["+15555550123"],
+  "guard_start": "2026-10-15T00:00:00Z",
+  "demo_daily_minutes": 30
+}
+```
+
+- `demo_tenants`: businesses in demo mode. Every login on them may call and text only that business's own numbers (read from the database on each call) and `allow_numbers`.
+- `old_login_users`: logins in old-login mode, on a real business. They may call and text any number except one saved on a contact of their business (the contact's own number, or another person's on the contact, such as a spouse or a merged-away duplicate's number), or one with any call or text on their business from before `guard_start`. They don't see a "Forward to my cell" stored on them either. A reviewer's own phone and the call-back to their own voicemail are new numbers, so they still work. A number already in the business's history before `guard_start` is refused even if it is the reviewer's own, so pick the moment the guard goes live, and check first that the reviewer's numbers aren't in that history.
+- `allow_numbers`: extra numbers a demo business may call (the demo customer line). Any US or Canadian way of writing them; the Worker stores them as +1 numbers.
+- `guard_start`: an ISO time WITH its zone (`Z` or `-05:00`).
+- `demo_daily_minutes`: a demo business's outbound minutes per UTC day, 1 to 1440, never above `DAILY_MINUTE_CAP`. Optional; 30 when left out.
+
+Every key but `demo_daily_minutes` is required (an empty list is fine), and an unknown key makes the whole value unreadable, so a typo can never quietly switch a guard off. Unreadable means fail closed: every login and business whose id appears anywhere in the text is refused calls, texts and forwards, and `dial_guard_config_invalid` shows in `app_errors` at `error`. A blank value is unreadable too: it names nobody, so it guards nobody, but the error row shows it (an empty file piped to `secret put` stores a blank value). Unset means nobody is guarded.
+
+Before it goes live, two things the Worker can't guard, because they happen in the portal (DEVIATIONS 83, "Not covered"):
+
+- Read the old login's phone level and contacts level on its business, and make sure neither is `edit`; lower them if they are. With phone `edit` the login could set the business line's after-hours or no-answer forward to a customer in the portal and then call the business line. With contacts `edit` it could change or clear a customer's number, and text customers from the portal.
+- If the old login has a "Forward to my cell" saved, it is never rung and the apps no longer show it, but it stays in `phone_user_settings`. Clearing it is a one-off database change: ask Ahsan first.
+
+Set it from this directory, as one line pasted at the prompt:
+
+```
+npx wrangler secret put PHONE_DIAL_GUARD
+```
+
+or from a file kept OUTSIDE the repo (Windows PowerShell): `Get-Content -Raw <path to the file> | npx wrangler secret put PHONE_DIAL_GUARD`. Setting a secret makes a new version of the live Worker at once, with the code it already runs: set it before deploying the guard's code (an older Worker ignores it), and the guard is live the moment the new code is. To change who is guarded (add the demo customer line, take the old login out once it is retired), put the whole object again with the change; no code change or deploy is needed. To switch the guard off: `npx wrangler secret delete PHONE_DIAL_GUARD`.
+
+After it is live, check `app_errors` for `dial_guard_config_invalid` (there must be none) and read `dial_guard_refused` rows in summary only (section 10): each refusal is one `info` row with the mode, what was refused (`call`, `text`, `forward_save`, `route_forward`) and counts, never the number. `dial_guard_lookup_failed` (`error`) means an old-login check couldn't read the database and refused the call.
+
 ## 4. First deploy, on workers.dev
 
 ```
@@ -393,6 +430,7 @@ Pseudonymous is not anonymous. Anyone who can query the database can line a repo
 
 - Stop everything for a tenant at once: `update public.client_settings set phone_status = 'off' where client_id = '<id>';`
 - Previous Worker version: `npx wrangler rollback` from this directory.
+- The dial guard blocks something it shouldn't: put `PHONE_DIAL_GUARD` again without that business or login (section 3b), or `npx wrangler secret delete PHONE_DIAL_GUARD` to switch it off for everyone. It is one Worker for every business, so act at once.
 - The search function (migration 305): a Worker from before it never calls it, so rolling the Worker back is always safe. Dropping it (305's REVERSE) is safe only AFTER the Worker is rolled back; the other way round every search and the keypad's contact search fail.
 - Stop email alerts only (texts keep theirs): `drop trigger if exists phone_push_email on public.email_inbound;` (267's ROLLBACK has the rest).
 - If the Worker is down, callers still reach voicemail through the number's fallback Bin.

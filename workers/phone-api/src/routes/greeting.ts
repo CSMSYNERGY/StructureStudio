@@ -15,6 +15,7 @@ import { dropRecording, GREETING_PURPOSE, GREETING_RING_SECONDS, GREETING_SID_RE
 import { createCall, recordingMedia, type TwilioError } from "../twilioRest";
 import { hook } from "../urls";
 import { SETTINGS_COLUMNS, settingsOut, type SettingsRow } from "./me";
+import { cellForwardAllowed } from "../dialGuard";
 import { callerTwilioEnv } from "../twilioAccount";
 
 // ── POST /settings/me/greeting/record ───────────────────────────────────────────────
@@ -123,9 +124,12 @@ export async function clearGreeting(env: Env, ec: Ctx, req: Request): Promise<Re
   const c = await requireCaller(env, req, { needOn: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
+  // A guarded login's stored forward is never shown (me.ts settingsOut). The scoped env keeps
+  // every non-Twilio key, PHONE_DIAL_GUARD included.
+  const hideForward = !cellForwardAllowed(env, c.userId, c.ctx.client_id);
   const row = await myRow(c);
   const sid = row?.greeting_recording_sid ?? null;
-  if (!sid) return ok({ settings: settingsOut(row) });
+  if (!sid) return ok({ settings: settingsOut(row, hideForward) });
   const now = new Date().toISOString();
   const saved = must(
     await c.admin.from("phone_user_settings")
@@ -135,7 +139,7 @@ export async function clearGreeting(env: Env, ec: Ctx, req: Request): Promise<Re
     "clear greeting",
   ) as SettingsRow[] | null;
   // Changed under us (a new recording landed meanwhile): leave that one alone, and say what's saved.
-  if (!saved?.length) return ok({ settings: settingsOut(await myRow(c)) });
+  if (!saved?.length) return ok({ settings: settingsOut(await myRow(c), hideForward) });
   ec.waitUntil(dropRecording(env, sid, c.ctx.client_id, "cleared"));
-  return ok({ settings: settingsOut(saved[0]) });
+  return ok({ settings: settingsOut(saved[0], hideForward) });
 }

@@ -31,6 +31,7 @@ import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } f
 import { greetingOut } from "./me";
 import { onDnd } from "./voice";
 import { callerTwilioEnv } from "../twilioAccount";
+import { cellForwardAllowed } from "../dialGuard";
 
 export const TOKEN_TTL = 3600;
 /** The setup test only needs long enough to run Twilio's preflight. */
@@ -184,7 +185,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     numbers: ctx.numbers,
     settings: {
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
-      forward_to_cell: s?.forward_to_cell ?? null,
+      // Never a guarded login's (../dialGuard.ts): it is never rung, and the old reviewer login is
+      // shared by reviewer after reviewer, so a number one saved must not show to the next.
+      forward_to_cell: cellForwardAllowed(env, claims.sub, ctx.client_id) ? s?.forward_to_cell ?? null : null,
       // Who rings in this person's place while they're away (migration 264), or null.
       dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
       // The hours this person's phone rings and their zone (migration 264), or null for always.

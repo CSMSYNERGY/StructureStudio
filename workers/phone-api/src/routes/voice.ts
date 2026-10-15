@@ -32,6 +32,9 @@ import { hook } from "../urls";
 import { voicemailTwiml, type VoicemailFor } from "../voicemail";
 import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
 import { tenantMatchesWebhook, tenantVerdictForWebhook } from "../twilioAccount";
+import {
+  cellForwardAllowed, GUARD_WORDS, guardedNumberAllowed, guardFor, logGuardRefusal, minuteCapFor, routeForwardRefusal,
+} from "../dialGuard";
 
 /** Twilio allows at most 10 nouns in one <Dial>. */
 const MAX_NOUNS = 10;
@@ -180,15 +183,16 @@ function screenUrl(env: Env, callId: string, business: string | null, userId?: s
 
 /**
  * One <Client> for the member, and their cell (screened) when they chose forwarding. On an armed
- * call (../recording.ts) the <Client> carries recorded=1 and the cell's screen says so.
+ * call (../recording.ts) the <Client> carries recorded=1 and the cell's screen says so. A guarded
+ * login's stored cell is never rung (../dialGuard.ts): `clientId` is the business ringing them.
  */
-function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null, armed = false): string[] {
+function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null, clientId: string, armed = false): string[] {
   const nouns = [clientNoun({
     identity: m.identity,
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "client" }),
     params: { call_id: callId, ...recordedParams(armed) },
   })];
-  const cell = toE164(m.forward_to_cell);
+  const cell = cellForwardAllowed(env, m.user_id, clientId) ? toE164(m.forward_to_cell) : null;
   if (cell) {
     nouns.push(numberNoun({
       e164: cell,
@@ -220,6 +224,18 @@ function forwardTwiml(env: Env, callId: string, info: RouteInfo, forwardTo: stri
     url: screenUrl(env, callId, info.business_name, undefined, rec.armed),
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "cell" }),
   })]));
+}
+
+/**
+ * The route's own forward number (after hours, or when nobody answers), or null for voicemail:
+ * none set, or one the dial guard keeps a demo business from ringing (../dialGuard.ts).
+ */
+function guardedRouteForward(env: Env, ec: Ctx, info: RouteInfo): string | null {
+  const fwd = toE164(info.route.forward_to);
+  const refused = fwd ? routeForwardRefusal(env, info.client_id, fwd) : null;
+  if (!refused) return fwd;
+  logGuardRefusal(ec, { ok: false, mode: refused, counts: {} }, "route_forward", info.client_id);
+  return null;
 }
 
 async function contactIdForNumber(admin: Admin, clientId: string, e164: string): Promise<string | null> {
@@ -383,6 +399,20 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   if (!to) return response(say(SAY.badNumber), hangup());
   if (isPremiumRate(to)) return response(say(SAY.premium), hangup());
 
+  // ── The dial guard (../dialGuard.ts) ────────────────────────────────────────────────
+  // After 911, the number's format and premium, before the minute cap and the wallet. `to` is the
+  // number the <Number> below would dial, so what is checked is exactly what would be dialed. A
+  // refusal writes NO phone_calls row (the number a reviewer typed must never show in the next
+  // reviewer's Recents) and logs one line with counts only.
+  const guard = guardFor(env, ec, identity.userId, ctx.client_id);
+  if (guard.mode) {
+    const verdict = await guardedNumberAllowed(admin, guard.state, guard.mode, { clientId: ctx.client_id, numbers: ctx.numbers }, to);
+    if (!verdict.ok) {
+      logGuardRefusal(ec, verdict, "call", ctx.client_id);
+      return response(say(verdict.mode === "demo" ? GUARD_WORDS.demoCall : GUARD_WORDS.blockedCall), hangup());
+    }
+  }
+
   const contactParam = String(p.ContactId ?? "").trim();
   const refuse = (code: string, words: string) => {
     ec.waitUntil(insertCall(admin, {
@@ -393,7 +423,8 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
     return response(say(words), hangup());
   };
 
-  const cap = intVar(env.DAILY_MINUTE_CAP, 600, 0);
+  // A demo business has its own, lower cap (the guard's demo_daily_minutes), as a cost backstop.
+  const cap = minuteCapFor(guard.state, guard.mode, intVar(env.DAILY_MINUTE_CAP, 600, 0));
   // All in one parallel round: the contact's tenant, today's minutes, and the wallet floor
   // (wallet.ts: one RPC while PHONE_USAGE_METERS is on, none while it is off).
   const [contactOk, used, wallet] = await Promise.all([
@@ -496,7 +527,7 @@ function emergencyDial(env: Env, callId: string, info: RouteInfo, target: { user
   return response(dial({
     timeout: info.route.ring_seconds,
     action: hook(env, "/voice/after-dial", { call: callId, stage: "er", n: round }),
-  }, memberNouns(env, callId, target, info.business_name)));
+  }, memberNouns(env, callId, target, info.business_name, info.client_id)));
 }
 
 /**
@@ -517,7 +548,7 @@ export function ringPlan(info: RouteInfo, now = Date.now(), startAfter = -1): { 
 function ringTwiml(env: Env, callId: string, info: RouteInfo, plan: { members: RouteMember[]; position: number }, rec: RecordingTwiml = NOT_RECORDED): string {
   const nouns: string[] = [];
   for (const m of plan.members) {
-    for (const n of memberNouns(env, callId, m, info.business_name, rec.armed)) {
+    for (const n of memberNouns(env, callId, m, info.business_name, info.client_id, rec.armed)) {
       if (nouns.length < MAX_NOUNS) nouns.push(n);
     }
   }
@@ -585,7 +616,7 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     xml = target ? emergencyDial(env, callId, info, target, 1) : voicemailTwiml(env, callId, info);
     rang = target ? [target.user_id] : [];
   } else if (!isOpen(info.route.business_hours, info.route.time_zone)) {
-    const fwd = info.route.after_hours === "forward" ? toE164(info.route.forward_to) : null;
+    const fwd = info.route.after_hours === "forward" ? guardedRouteForward(env, ec, info) : null;
     xml = fwd ? forwardTwiml(env, callId, info, fwd, rec) : voicemailTwiml(env, callId, info);
     announced = !!fwd && rec.armed;
   } else {
@@ -760,7 +791,7 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
   }
 
   if (stage !== "fwd" && info.route.no_answer === "forward") {
-    const fwd = toE164(info.route.forward_to);
+    const fwd = guardedRouteForward(env, ec, info);
     if (fwd) return forwardTwiml(env, callId, info, fwd, rec);
   }
   return toVoicemail(info);
