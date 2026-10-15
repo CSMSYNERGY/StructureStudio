@@ -29,9 +29,9 @@ import {
 //     With `withContacts: true` it carries the first page of the tenant's contacts too
 //     (crmContacts + crmContactsTotal); with `contactsFrom: n` it answers only the page of
 //     contacts starting at row n. Each page of contacts is audited with its own row count.
-//     The first page also carries crmContactCompanies: [{ id, company }] for the contacts a
-//     design or a visit links to that the page does not carry, so those rows can lead with
-//     their contact's company too.
+//     The first page also carries crmContactCompanies: [{ id, name, company, phone, email }] for
+//     the contacts a design or a visit links to that the page does not carry, so those rows can
+//     lead with their contact's company and show its details from the record too.
 //   { action: "list_users", clientId }    → the people under one tenant
 //   { action: "save_user", … }            → correct a user's name/phone
 //   { action: "send_reset_link", clientId, userId } → email that user a set-password link,
@@ -423,12 +423,13 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         ]);
         if (designs.error) throw designs.error;
         if (versions.error) throw versions.error;
-        // With the first page, THE COMPANIES (2026-10-15) of the contacts a design or a visit links
-        // to that the page does not carry: the list leads each row with its contact's company, and
-        // such a contact sits on a page not sent yet. Exactly the ids, order and bound the builder's
-        // own list reads (contactIdsNeedingCompany), so view-as and the builder agree; none at all
-        // when every linked contact is on the page. Additive: on a failure the field is left out,
-        // and those rows lead with the person's name.
+        // With the first page, THE CONTACTS (2026-10-15) a design or a visit links to that the page
+        // does not carry: the list leads each row with its contact's company and shows the record's
+        // name, phone and email, and such a contact sits on a page not sent yet. Exactly the ids,
+        // order and bound the builder's own list reads (contactIdsNeedingCompany), so view-as and the
+        // builder agree; none at all when every linked contact is on the page. Additive: on a failure
+        // the field is left out, and those rows lead with the person's name and show the designs'
+        // details.
         let companies: ContactCompany[] | null = null;
         let companiesAsked = 0;
         if (contacts) {
@@ -442,7 +443,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         }
         await audit("operator_get_portal", clientId, (designs.data || []).length);
         if (contacts) await audit("operator_get_portal_contacts", clientId, contacts.rows.length, "from=0");
-        if (companies && companiesAsked) await audit("operator_get_portal_contact_companies", clientId, companies.length);
+        if (companies && companiesAsked) await audit("operator_get_portal_linked_contacts", clientId, companies.length);
         return json({
           ok: true, clientId,
           companyName: (cfg.data && (cfg.data as any).company_name) || clientId,

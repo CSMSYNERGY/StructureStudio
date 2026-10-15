@@ -13,8 +13,8 @@
  *
  * Run (from supabase/functions/customer-designs/):
  *   deno test --allow-env --node-modules-dir=none handler.test.ts
- * ⚠️ scripts/preflight.mjs discovers only _shared/*.test.ts and _shared/_test_stubs/*_test.ts, so
- * the pre-push gate does NOT run this file. Run it by hand when handler.ts changes.
+ * scripts/preflight.mjs runs this file on every push (its "functions" deno test group, which
+ * discovers <function>/*.test.ts beside each handler).
  */
 
 import { handle, MAX_LINKS_PER_IDENTITY, type LogInput } from "./handler.ts";

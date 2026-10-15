@@ -66,10 +66,13 @@ function fakeIdAdmin(answer: (q: Query) => { data?: unknown; error?: unknown }) 
 }
 // The ids a query asked for (its `.in("id", ids)`; none when it has no such filter).
 const idsOf = (q: Query) => ((q.find(([m]) => m === "in")?.[1][1] ?? []) as string[]);
-// crm_contacts as far as the company read goes: the asked-for rows that have a company (the query
-// itself filters out a null one).
-const answering = (companies: Record<string, string | null>) => (q: Query) => ({
-  data: idsOf(q).filter((id) => companies[id] != null).map((id) => ({ id, company: companies[id] })),
+// crm_contacts as far as the linked-contact read goes: the asked-for rows that exist (a key in
+// `companies`), with their company and the person's details (`people`, else a name of their own).
+type Person = { name?: string | null; phone?: string | null; email?: string | null };
+const answering = (companies: Record<string, string | null>, people: Record<string, Person> = {}) => (q: Query) => ({
+  data: idsOf(q).filter((id) => id in companies).map((id) => ({
+    id, name: `Person ${id}`, phone: null, email: null, ...people[id], company: companies[id],
+  })),
 });
 const many = (n: number, prefix = "c") => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
 
@@ -161,25 +164,33 @@ Deno.test("readContactCompanies: no ids, no read", async () => {
   assertEquals(calls.length, 0);
 });
 
-Deno.test("readContactCompanies: id and company of THOSE contacts only, live, of ONE tenant", async () => {
+Deno.test("readContactCompanies: THOSE contacts only, live, of ONE tenant, company or not", async () => {
   const { admin, calls } = fakeIdAdmin(answering({
     c1: "Example Barn Co.", c2: "  Sample Shed Works  ", c3: "   ", c4: null,
+  }, {
+    c1: { name: "Pat Example", phone: "+15125550101", email: "pat@example.test" },
+    c4: { name: null, phone: "+15125550104", email: null },
   }));
-  const out = await readContactCompanies(admin, "acme-sheds", ["c1", "c2", "c3", "c4"]);
-  // A company of only spaces is no company.
-  assertEquals(out, [{ id: "c1", company: "Example Barn Co." }, { id: "c2", company: "Sample Shed Works" }]);
+  const out = await readContactCompanies(admin, "acme-sheds", ["c1", "c2", "c3", "c4", "gone"]);
+  // A company of only spaces is no company. A contact with none is still answered: its row shows the
+  // record's name, phone and email (2026-10-15). One that is not there (gone) is not.
+  assertEquals(out, [
+    { id: "c1", name: "Pat Example", company: "Example Barn Co.", phone: "+15125550101", email: "pat@example.test" },
+    { id: "c2", name: "Person c2", company: "Sample Shed Works", phone: null, email: null },
+    { id: "c3", name: "Person c3", company: "", phone: null, email: null },
+    { id: "c4", name: null, company: "", phone: "+15125550104", email: null },
+  ]);
   assertEquals(calls, [[
     ["from", ["crm_contacts"]],
     ["select", [CONTACT_COMPANY_COLS]],
     // The tenant guard. This read runs as the service role, which RLS does not narrow.
     ["eq", ["client_id", "acme-sheds"]],
-    // A tombstone's company is the one it had when it was merged: the survivor's is the one to show.
+    // A tombstone's details are the ones it had when it was merged: the survivor's are the ones to show.
     ["is", ["merged_into", null]],
-    ["not", ["company", "is", null]],
     // The ids asked for, and nothing else: never every contact that has a company.
-    ["in", ["id", ["c1", "c2", "c3", "c4"]]],
+    ["in", ["id", ["c1", "c2", "c3", "c4", "gone"]]],
   ]]);
-  assertEquals(CONTACT_COMPANY_COLS, "id, company");
+  assertEquals(CONTACT_COMPANY_COLS, "id, name, company, phone, email");
 });
 
 Deno.test("readContactCompanies: an imported call list does not make it read the whole table", async () => {
@@ -189,7 +200,7 @@ Deno.test("readContactCompanies: an imported call list does not make it read the
   companies.d1 = "Example Barn Co.";
   const { admin, calls } = fakeIdAdmin(answering(companies));
   const out = await readContactCompanies(admin, "acme-sheds", ["d1", "d2"]);
-  assertEquals(out, [{ id: "d1", company: "Example Barn Co." }]);
+  assertEquals(out.map((c) => [c.id, c.company]), [["d1", "Example Barn Co."]]);
   assertEquals(calls.length, 1);
 });
 
@@ -231,8 +242,8 @@ Deno.test("portal/02-sales.jsx reads the same page and the same columns", async 
   assert(cols, "02-sales.jsx: SS_CONTACT_LIST_COLS not found; re-anchor this test");
   assertEquals(Number(page[1]), CONTACT_LIST_PAGE);
   assertEquals(cols[1], CONTACT_LIST_COLS);
-  // The companies a design's or a visit's row shows: read the same way on both paths, or a row
-  // would carry a company in the builder's list and none in the operator's.
+  // The companies and details a design's or a visit's row shows: read the same way on both paths,
+  // or a row would carry a company or an email in the builder's list and another in the operator's.
   const companyCols = /const SS_CONTACT_COMPANY_COLS = "([^"]+)";/.exec(src);
   assert(companyCols, "02-sales.jsx: SS_CONTACT_COMPANY_COLS not found; re-anchor this test");
   assertEquals(companyCols[1], CONTACT_COMPANY_COLS);
@@ -278,21 +289,30 @@ Deno.test("portal/02-sales.jsx picks the same contacts, in the same order, to th
   for (const [linked, have] of cases) assertEquals(pick(linked, have), contactIdsNeedingCompany(linked, have));
 });
 
-Deno.test("portal/02-sales.jsx reads the companies with the same query, chunks and lanes", async () => {
+Deno.test("portal/02-sales.jsx reads the linked contacts with the same query, chunks and lanes", async () => {
   const { read } = await liftSales();
   const ids = many(CONTACT_COMPANY_CHUNK * 3 + 5);
-  const companies = Object.fromEntries(ids.filter((_, i) => i % 3 === 0).map((id) => [id, ` Barn ${id} `]));
-  const server = fakeIdAdmin(answering(companies));
-  const browser = fakeIdAdmin(answering(companies));
+  // Every other one exists (the rest are merged or gone), and of those every third has a company.
+  const companies = Object.fromEntries(ids.filter((_, i) => i % 2 === 0).map((id, i) => [id, i % 3 === 0 ? ` Barn ${id} ` : null]));
+  const people = Object.fromEntries(ids.map((id, i) => [id, { phone: i % 4 === 0 ? "+15125550100" : null, email: `${id}@example.test` }]));
+  const server = fakeIdAdmin(answering(companies, people));
+  const browser = fakeIdAdmin(answering(companies, people));
   const fromServer = await readContactCompanies(server.admin, "acme-sheds", ids);
-  const fromBrowser: Map<string, string> = await read(browser.admin)("acme-sheds", ids);
+  const fromBrowser: Map<string, Record<string, unknown> | null> = await read(browser.admin)("acme-sheds", ids);
   // Call for call: the builder's own read runs under RLS with their token and keeps client_id as
   // the same guard the service-role read needs.
   assertEquals(browser.calls, server.calls);
   assertEquals(browser.most(), server.most());
-  // Every id asked is answered ("" for none), so the answer outranks what the last paint showed.
+  // Every id asked is answered (null for one the read did not have), so the answer outranks what
+  // the last paint showed; and each row it has says what the server's says, field for field.
   assertEquals(fromBrowser.size, ids.length);
-  assertEquals([...fromBrowser].filter(([, c]) => c), fromServer.map((c) => [c.id, c.company]));
+  const norm = (c: Record<string, unknown>) => ({
+    id: c.id, name: c.name ?? null, company: typeof c.company === "string" ? c.company.trim() : "",
+    phone: c.phone ?? null, email: c.email ?? null,
+  });
+  const had = [...fromBrowser.values()].filter((c): c is Record<string, unknown> => !!c).map(norm);
+  assertEquals(had, fromServer);
+  assertEquals([...fromBrowser].filter(([, c]) => !c).map(([id]) => id), ids.filter((id) => !(id in companies)));
   // A failed chunk fails the read (the list keeps what it showed), and starts no further chunk.
   const failing = fakeIdAdmin(() => ({ error: { message: "permission denied" } }));
   await assertRejects(() => read(failing.admin)("acme-sheds", many(CONTACT_COMPANY_CHUNK * 20)));

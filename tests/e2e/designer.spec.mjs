@@ -411,9 +411,18 @@ test("a builder with a single palette group still gets Insulation, Foundation an
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const o = await routeLayout(page);
+  // Every field the tabs read is SET here, never inherited. The test used to lean on the old test
+  // tenant (pw-demo-barns, since deleted) for the package and insulation, so on a tenant without them
+  // it failed for the tenant's settings, not the product's. One interior item; no inclusions, so that
+  // item stays a palette tool rather than moving into the Included callout; a package; one insulation type.
   o.rewrite = (j) => {
-    j.layoutItems = Object.fromEntries(Object.entries(j.layoutItems || {}).filter(([, c]) => c && c.group === "interior"));
+    j.layoutItems = { workbench: { icon: "🔧", color: "#8B5E3C", group: "interior", label: "Workbench", width: 4, height: 2,
+      wallOnly: false, wallSnap: true, shortLabel: "WB" } };
+    for (const st of j.buildingStyles || []) { st.sizeInclusions = {}; st.sizeInclusionQty = {}; }
+    j.electrical = { label: "Electrical Package", price: 850, includePanel: false, outletItemId: null, switchItemId: null, lightItemId: null,
+      outletSpacingFt: 6, lightSpacingFt: 10 };
     j.electricalItems = [];
+    j.insulation = [{ type: "batt", area: "floor" }, { type: "batt", area: "walls" }, { type: "batt", area: "roof" }];
     j.foundationItems = [{ id: "gravel_pad", rate: 2.5, basis: "sqft_option", label: null, charged: true }];
   };
   // Registered after routeLayout, so it answers first: no catalog doors, windows or ramps.
@@ -451,11 +460,13 @@ for (const n of [1, 2]) {
     const errors = watchConsole(page);
     await routeLayout(page);
     const vents = [pwVent("pw-vent-std", "Standard Vent", 12, "SVNT"), pwVent("pw-vent-big", "Big Vent", 18, "BVNT")].slice(0, n);
-    // Registered after routeLayout, so it answers first: the tenant's catalog plus these vents.
+    // Registered after routeLayout, so it answers first: the tenant's catalog with ITS vents taken out,
+    // plus these. The count of vents is the whole case, so the tenant's own cannot be in it: a tenant
+    // with one vent turned "a single vent" into two and the Choose a vent popup opened.
     await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, async (route) => {
       const resp = await route.fetch();
       const j = await resp.json();
-      j.items = (Array.isArray(j.items) ? j.items : []).concat(vents);
+      j.items = (Array.isArray(j.items) ? j.items : []).filter((fx) => !(fx && fx.category === "vent")).concat(vents);
       return route.fulfill({ response: resp, json: j });
     });
     await bypassGate(page, CLIENT);
@@ -491,7 +502,13 @@ test("Services › Delivery: priced from the address, and Details charges the sa
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const o = await routeLayout(page);
-  o.rewrite = (j) => { j.delivery = { automate: true, configured: true, taxable: false, ruleType: "base_plus" }; };
+  // The amount needs showPricing, and the contact gate it waits behind is the tenant's contactFields:
+  // both are SET here, not inherited (a tenant with pricing hidden showed the description and no $150).
+  o.rewrite = (j) => {
+    j.delivery = { automate: true, configured: true, taxable: false, ruleType: "base_plus" };
+    j.showPricing = true;
+    j.contactFields = ["name", "email", "phone", "street", "city", "state", "zip"];
+  };
   const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, x-client-info, apikey, content-type", "access-control-allow-methods": "POST, OPTIONS" };
   const quotes = [];
   // Registered after routeLayout, so it answers first. A pattern that tolerates a query string, not

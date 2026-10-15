@@ -1162,7 +1162,8 @@ function Dashboard({ session }) {
   // first page of the tenant's contacts (crmContacts + crmContactsTotal) to get_portal's answer, and
   // `contactsFrom` is its "Show more", answered with that page alone. The Pipeline sends neither,
   // so its get_portal carries no contacts at all. The first page also brings crmContactCompanies,
-  // the companies of the contacts a design or a visit links to that the page does not carry; null
+  // the contacts a design or a visit links to that the page does not carry (company, name, phone
+  // and email); null
   // when the answer has none (a failed read, or an operator-portal from before it).
   const viewingFetch = useCallback(async (opts = null) => {
     const contactsFrom = opts && opts.contactsFrom > 0 ? opts.contactsFrom : undefined;

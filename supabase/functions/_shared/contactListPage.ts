@@ -37,13 +37,18 @@ export const CONTACT_LIST_COLS = "id, name, company, phone, email, source, first
 
 /**
  * The company a design's or a browsing visit's row leads with (2026-10-15) is its contact's, and
- * that contact can sit on a page of the list not read yet. So the list reads `id, company` for
- * exactly those contacts: the ones a design or a visit links to that the pages in hand do not
- * carry (contactIdsNeedingCompany). Not every contact that has a company: an imported call list
+ * that contact can sit on a page of the list not read yet. So the list reads those contacts on their
+ * own: exactly the ones a design or a visit links to that the pages in hand do not carry
+ * (contactIdsNeedingCompany). Not every contact that has a company: an imported call list
  * (Pipelines' Import CSV, C20) gives every row one, and that read would be the contact list again.
  * A tenant whose linked contacts all sit on the first page reads nothing more.
+ *
+ * The row also shows the person's name, phone and email from the record rather than the newest
+ * design's copy of them (2026-10-15), so the read brings those too, for every one of those contacts
+ * whether or not it has a company. Without them a row whose contact is on a later page kept the
+ * design's old details until "Show more" brought the contact in, and then changed on screen.
  */
-export const CONTACT_COMPANY_COLS = "id, company";
+export const CONTACT_COMPANY_COLS = "id, name, company, phone, email";
 
 /** Contact ids per request: the ids ride in the URL (`id=in.(...)`), so a long list is chunked. */
 export const CONTACT_COMPANY_CHUNK = 100;
@@ -119,9 +124,13 @@ export async function readContactListPage(
   return { rows, total };
 }
 
+/** A linked contact's row as the list shows it: the company ("" for none) and the person's details. */
 export interface ContactCompany {
   id: string;
+  name: string | null;
   company: string;
+  phone: string | null;
+  email: string | null;
 }
 
 /**
@@ -142,10 +151,12 @@ export function contactIdsNeedingCompany(linked: Iterable<unknown>, have: { has(
 }
 
 /**
- * The company of each live contact in `ids` that has one, as { id, company }: CONTACT_COMPANY_CHUNK
- * ids a request, CONTACT_COMPANY_LANES requests at a time, nothing read for no ids. A company of
- * only spaces is no company. Throws on a database error (no further chunk is started); get_portal
- * treats this read as additive and answers the rest without it.
+ * Each live contact in `ids`, as { id, name, company, phone, email }: CONTACT_COMPANY_CHUNK ids a
+ * request, CONTACT_COMPANY_LANES requests at a time, nothing read for no ids. The company is trimmed
+ * and "" when there is none (a company of only spaces is no company); the details are as stored. An
+ * id that is merged, gone or another tenant's is not answered. Throws on a database error (no
+ * further chunk is started); get_portal treats this read as additive and answers the rest without it.
+ * A portal from before the details came reads only `id` and a non-empty `company` from each row.
  */
 export async function readContactCompanies(admin: Client, clientId: string, ids: readonly string[]): Promise<ContactCompany[]> {
   const chunks: string[][] = [];
@@ -162,12 +173,13 @@ export async function readContactCompanies(admin: Client, clientId: string, ids:
         .select(CONTACT_COMPANY_COLS)
         .eq("client_id", clientId)
         .is("merged_into", null)
-        .not("company", "is", null)
         .in("id", part);
       if (error) { failed = true; throw error; }
-      for (const r of (data || []) as Array<{ id?: unknown; company?: unknown }>) {
+      const text = (v: unknown) => (typeof v === "string" ? v : null);
+      for (const r of (data || []) as Array<Record<string, unknown>>) {
+        if (typeof r.id !== "string" || !r.id) continue;
         const company = typeof r.company === "string" ? r.company.trim() : "";
-        if (typeof r.id === "string" && r.id && company) out.push({ id: r.id, company });
+        out.push({ id: r.id, name: text(r.name), company, phone: text(r.phone), email: text(r.email) });
       }
     }
   };

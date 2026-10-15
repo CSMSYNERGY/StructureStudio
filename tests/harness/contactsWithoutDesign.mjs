@@ -39,6 +39,17 @@
 //   J  view-as: the companies come with get_portal's first page (crmContactCompanies: those of the
 //      linked contacts the page lacks), and an operator-portal from before them (no companies
 //      anywhere) still lists every row by name.
+//   K  THE RECORD'S DETAILS (2026-10-15): a design row showed the newest design's name, email and
+//      phone, so after a contact was edited the list disagreed with the record it opens. A contact
+//      whose record email differs from its designs' shows the record's (and its record page agrees);
+//      a record name and phone win the same way; where the record has none, the design's or the
+//      visit's stays; searching the old email, name or phone still finds the row; the same in
+//      view-as; the control (the artifact before) shows the design's. A contact on a page not read
+//      yet shows its record's details on first load, before "Show more" (the read of the linked
+//      contacts brings them), in the builder's list and in view-as; a Refresh keeps them on screen
+//      while that read runs. ONE ROW PER RECORD: two designs saved under different numbers and a
+//      visit under a third, all linked to one contact, are one row (designs counted, the highest
+//      status, every design's code in Details, newest first), not three that read the same.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
 // skeleton is crmContactDeal.mjs's and the cold deep links supportConsoles.mjs's.
@@ -161,6 +172,13 @@ function restAnswer(url, req, S) {
   }
   if (table === "designs") {
     rows = rows.map((r) => ({ ...r, sel_style: r.selections.style, sel_size: r.selections.size }));
+    // Newest first (created_at desc, short_code desc), as the list's read asks: the list groups
+    // newest-first, so a person's row is their newest design's (K33 reads that order back).
+    rows.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : (a.short_code < b.short_code ? 1 : -1)));
+  }
+  if (table === "captured_leads") {
+    // updated_at desc, id asc, as the list's read asks.
+    rows = [...rows].sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : a.id - b.id));
   }
   const total = rows.length;
   const off = Number(u.searchParams.get("offset") || 0);
@@ -232,6 +250,8 @@ async function run(label, S) {
         return json(route, { ok: true, clientId: S.operator ? OWN_OPS : TENANT, role: S.role || "owner", access: S.access || null, prefs: null, configured: false, branding: {} });
       }
       // The record a row's name opens (A14), in crmContactDeal.mjs's shape.
+      // The Details drawer (K33): the server's answer for codes with nothing to show.
+      if (body.action === "contact_activity") return json(route, { ok: true, designs: [], versions: [], estimates: {} });
       if (body.action === "crm_record") {
         const c = (S.tables.crm_contacts || []).find((x) => x.id === body.id) || null;
         return json(route, {
@@ -290,7 +310,8 @@ const search = async (page, q) => {
   await page.waitForTimeout(400);
 };
 const qp = (url) => Object.fromEntries(new URL(url).searchParams);
-// The list's pages of contacts, and (I) the company reads: `id, company` of named contacts only.
+// The list's pages of contacts, and (I, K) the reads of the linked contacts no page holds: named
+// contacts only, their company and details (or, from a list before K, any read of companies).
 const isCompanyRead = (c) => /\/rest\/v1\/crm_contacts/.test(c.url) && (qp(c.url).company === "not.is.null" || /^in\./.test(qp(c.url).id || ""));
 const crmReads = (calls) => calls.rest.filter((c) => /\/rest\/v1\/crm_contacts/.test(c.url) && !isCompanyRead(c));
 const companyReads = (calls) => calls.rest.filter(isCompanyRead);
@@ -680,8 +701,9 @@ try {
     ok("I22 1200 contacts with a company, ONE company read, for the ONE linked contact the page lacks",
       crmReads(r.calls).length === 1 && co.length === 1 && JSON.stringify(askedIds(co[0])) === JSON.stringify([cid(10700)]),
       `pages=${crmReads(r.calls).length} companies=${JSON.stringify(co.map(askedIds))}`);
-    ok("I22b that read is id and company only, this tenant's live contacts that have one, under the caller's token",
-      cq.select === "id,company" && cq.client_id === `eq.${TENANT}` && cq.merged_into === "is.null" && cq.company === "not.is.null"
+    // Since K, the read brings the contact's name, phone and email too, company or not.
+    ok("I22b that read is the contact's id, company and details only, this tenant's live contacts, under the caller's token",
+      cq.select === "id,name,company,phone,email" && cq.client_id === `eq.${TENANT}` && cq.merged_into === "is.null" && !("company" in cq)
       && !("offset" in cq) && co[0].auth === `Bearer ${SESSION.access_token}`, JSON.stringify(cq));
     // (Searched by company, then picked out by its head: a four-digit number also matches the ids
     // and phones of other bulk rows, so the search alone does not narrow to one.)
@@ -800,7 +822,8 @@ try {
     ok("J6 no uncaught page errors", old.pageErrors.length === 0, old.pageErrors.join(" | "));
     await old.ctx.close();
     // View-as with a design whose contact is past the first page: get_portal sends that contact's
-    // company (and only that one), and the design row leads with it.
+    // company (and only that one), and the design row leads with it. This is the answer's shape from
+    // before K ({ id, company } for the contacts that have one); K-view-as-later drives today's.
     const all = importedCompanies(withCompanies([...LINKED, ...ONLY, ...BULK]))
       .sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
     const designsLater = [...designsWithBlob, BULK_DESIGN];
@@ -823,6 +846,230 @@ try {
       sl.rows && sl.rows.length === 1 && sl.heads[0] === "Faraway Barn Co." && sl.persons[0] === "Bulk Lead 0700", JSON.stringify(sl.heads));
     ok("J9 no uncaught page errors", later.pageErrors.length === 0, later.pageErrors.join(" | "));
     await later.ctx.close();
+  }
+
+  // ── K. the record's details, not the newest design's blob ───────────────────────────────
+  // Pat's contact was edited to a new email after both designs went in, and Quinn's to a new name and
+  // phone. Each row shows what the record says (and the record its name opens says the same), and a
+  // search for what the row showed before still finds it. Pat's phone is the same number on the record
+  // and the designs, so the row shows it exactly as before this change (K14, against the control).
+  // Lee's record has no name and no phone: the visit's stay, exactly as before (K15).
+  const EDITED = {
+    [CP]: { email: "pat.new@example.test" },
+    [CQ]: { name: "Quinn Sample", phone: "+15125550112" },
+    [CL]: { name: null, phone: null },
+  };
+  const edited = (rows) => rows.map((c) => (EDITED[c.id] ? { ...c, ...EDITED[c.id] } : c));
+  const editedTables = () => baseTables({ crm_contacts: edited([...LINKED, ...ONLY, MERGED]) });
+  let patPhoneLine = null;   // K's Pat phone line, for K14
+  let leeCells = null;       // K's Lee customer and contact cells, for K15
+  let quinnCells = null;     // K's Quinn row, for K-merge
+  const onlyRow = async (page, q, head) => { await search(page, q); const x = await snapshot(page); await search(page, ""); return x.rows && x.rows.length === 1 && x.heads[0] === head ? x : null; };
+  // The contact cell's first line (the email) of the one row a search leaves, or null.
+  const emailOf = (page) => page.evaluate(() => {
+    const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
+    const rows = t && t.tBodies[0] ? [...t.tBodies[0].rows] : [];
+    return rows.length === 1 && rows[0].cells[1] ? rows[0].cells[1].innerText.trim().split("\n")[0] : null;
+  });
+  {
+    const r = await run("K", { tables: editedTables(), pageSize: 100 });
+    if (!ok("K0 the list rendered", r.rendered)) throw new Error("K: the list never rendered");
+    const s = await snapshot(r.page);
+    await r.page.screenshot({ path: join(shots, "K-record-details.png"), fullPage: true });
+    const pat = rowOf(s, "Pat Example");
+    ok("K1 a design row shows its contact's email from the record, not the design's",
+      pat && pat.n === 1 && pat.cells[2] === "2" && pat.cells[1].includes("pat.new@example.test") && !pat.cells[1].includes("pat@example.test"),
+      JSON.stringify(pat));
+    patPhoneLine = pat ? pat.cells[1].split("\n")[1] : null;
+    const quinn = rowOf(s, "Quinn Sample");
+    quinnCells = quinn ? quinn.cells : null;
+    ok("K2 ...and the record's name and phone (shown as a contact row shows one), the design's nowhere in the table",
+      quinn && quinn.n === 1 && quinn.cells[2] === "1" && quinn.cells[1].includes("(512) 555-0112") && !s.heads.includes("Quinn Example")
+      && !s.tableHtml.includes("5125550102"), JSON.stringify(quinn));
+    ok("K3 searching the OLD email still finds the row", !!(await onlyRow(r.page, "pat@example.test", "Pat Example")));
+    ok("K4 searching the new email finds it", !!(await onlyRow(r.page, "pat.new@example", "Pat Example")));
+    // "+15125550102" is the design's phone as it was saved: the row's own key is its digits alone
+    // (5125550102), so only the replaced value kept in the row's search text can match it.
+    ok("K5 the old name and the old phone still find Quinn, and so does the phone as shown",
+      !!(await onlyRow(r.page, "Quinn Example", "Quinn Sample")) && !!(await onlyRow(r.page, "+15125550102", "Quinn Sample"))
+      && !!(await onlyRow(r.page, "(512) 555-0112", "Quinn Sample")));
+    ok("K6 nothing else moved: the same ten rows as A", s.rows.length === 10 && s.count === "10", `${s.rows.length} rows: ${JSON.stringify(s.heads)}`);
+    const lee = rowOf(s, "Lee Browser");
+    leeCells = lee ? lee.cells.slice(0, 2) : null;
+    // The search box reads every field of a row, so a marker kept on a design row is a word it finds:
+    // "true" must not find the rows whose details came from the record.
+    await search(r.page, "true");
+    const st = await snapshot(r.page);
+    await search(r.page, "");
+    ok("K6b searching \"true\" finds neither Pat's nor Quinn's row",
+      !(st.heads || []).includes("Pat Example") && !(st.heads || []).includes("Quinn Sample"), JSON.stringify(st.heads));
+    // The record the name opens says the same thing the row does.
+    await r.page.locator("table button", { hasText: "Pat Example" }).first().click();
+    const agrees = await r.page.waitForFunction(() => location.pathname.startsWith("/contacts/c-") && document.body.innerText.includes("pat.new@example.test"),
+      null, { timeout: 15000 }).then(() => true, () => false);
+    ok("K7 the record the row opens shows the same email", agrees && (await r.page.evaluate(() => location.pathname)) === `/contacts/c-${CP}`,
+      await r.page.evaluate(() => location.pathname));
+    ok("K8 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // View-as builds its rows in the same paint, from the contacts get_portal sends.
+  {
+    const contacts = edited([...LINKED, ...ONLY]).sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
+    const getPortal = (body) => ({
+      ok: true, clientId: TENANT, companyName: "Acme Sheds", designs: DESIGNS, versions: [], capturedLeads: LEADS,
+      ...(body.withContacts === true ? { crmContacts: contacts, crmContactsTotal: contacts.length, crmContactCompanies: [] } : {}),
+    });
+    const r = await run("K-view-as", { tables: { designs: [], captured_leads: [], crm_contacts: [] }, operator: true, query: `?view=${TENANT}`, getPortal, pageSize: 100 });
+    if (!ok("K9 the view-as list rendered", r.rendered)) throw new Error("K-view-as: the view-as list never rendered");
+    const s = await snapshot(r.page);
+    const pat = rowOf(s, "Pat Example");
+    ok("K10 view-as: the record's email and name, and the old email still finds the row",
+      pat && pat.cells[1].includes("pat.new@example.test") && !pat.cells[1].includes("pat@example.test") && s.heads.includes("Quinn Sample")
+      && !!(await onlyRow(r.page, "pat@example.test", "Pat Example")), JSON.stringify(s.heads));
+    ok("K11 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // The control: the artifact before this change shows the design's email, so K1 can fail.
+  {
+    const r = await run("K-control", { tables: editedTables(), artifact: BEFORE, pageSize: 100 });
+    if (!ok("K12 the old list rendered", r.rendered)) throw new Error("K-control: the old list never rendered");
+    const s = await snapshot(r.page);
+    const pat = rowOf(s, "Pat Example");
+    ok("K13 before this change the row showed the design's email and Quinn's old name",
+      pat && pat.cells[1].includes("pat@example.test") && !pat.cells[1].includes("pat.new@example.test") && s.heads.includes("Quinn Example"), JSON.stringify(pat));
+    const beforeLine = pat ? pat.cells[1].split("\n")[1] : null;
+    ok("K14 a phone the edit did not change is shown exactly as before this change",
+      !!patPhoneLine && beforeLine === patPhoneLine, `before=${beforeLine} after=${patPhoneLine}`);
+    const lee = rowOf(s, "Lee Browser");
+    ok("K15 a record with no name and no phone keeps the visit's: Lee's row exactly as before this change",
+      !!leeCells && !!lee && JSON.stringify(lee.cells.slice(0, 2)) === JSON.stringify(leeCells) && /\+15125550103/.test(leeCells[1]),
+      `before=${JSON.stringify(lee && lee.cells.slice(0, 2))} after=${JSON.stringify(leeCells)}`);
+    await r.ctx.close();
+  }
+  // A CONTACT ON A PAGE NOT READ YET. 520 newer imports put Pat's, Quinn's and Lee's records on page
+  // two, so on first load no page holds them: the read of the linked contacts brings their details
+  // with their companies, and the rows show the record's from the start, searchable, before any
+  // "Show more" (which then changes nothing on those rows).
+  const NEWER = BULK.slice(0, 520).map((c, i) => {
+    const at = new Date(Date.parse("2026-10-10T12:00:00Z") - i * 60_000).toISOString();
+    return { ...c, first_seen_at: at, created_at: at };
+  });
+  const laterEditedTables = () => baseTables({ crm_contacts: edited([...LINKED, ...ONLY, MERGED, ...NEWER]) });
+  {
+    const r = await run("K-later-page", { tables: laterEditedTables() });
+    if (!ok("K16 the list rendered", r.rendered)) throw new Error("K-later-page: the list never rendered");
+    const s1 = await snapshot(r.page);
+    const co = companyReads(r.calls);
+    const asked = co.flatMap(askedIds).sort();
+    ok("K17 the records are on page two, and ONE read asked for exactly the three linked contacts with their details",
+      !!s1.more && crmReads(r.calls).length === 1 && co.length === 1 && JSON.stringify(asked) === JSON.stringify([CP, CQ, CL].sort())
+      && qp(co[0].url).select === "id,name,company,phone,email",
+      `more=${s1.more} pages=${crmReads(r.calls).length} reads=${JSON.stringify(co.map((c) => qp(c.url)))}`);
+    const pat1 = await onlyRow(r.page, "Pat Example", "Pat Example");
+    ok("K18 before Show more, Pat's row shows the record's email, and the new email finds it",
+      !!pat1 && pat1.rows[0][1].includes("pat.new@example.test") && !pat1.rows[0][1].includes("pat@example.test")
+      && !!(await onlyRow(r.page, "pat.new@example", "Pat Example")), JSON.stringify(pat1 && pat1.rows));
+    const quinn1 = await onlyRow(r.page, "Quinn", "Quinn Sample");
+    ok("K19 ...and Quinn's the record's name and phone, the old ones still finding him",
+      !!quinn1 && quinn1.rows[0][1].includes("(512) 555-0112") && !!(await onlyRow(r.page, "+15125550102", "Quinn Sample")),
+      JSON.stringify(quinn1 && quinn1.rows));
+    await r.page.locator("[data-ss-contacts-more] button", { hasText: "Show more" }).click();
+    await r.page.waitForFunction(() => !document.querySelector("[data-ss-contacts-more]"), null, { timeout: 15000 }).catch(() => {});
+    await r.page.waitForTimeout(500);
+    const pat2 = await onlyRow(r.page, "Pat Example", "Pat Example");
+    const quinn2 = await onlyRow(r.page, "Quinn", "Quinn Sample");
+    ok("K20 Show more brought the records in and those rows did not change",
+      !!pat2 && !!quinn2 && JSON.stringify(pat2.rows) === JSON.stringify(pat1 && pat1.rows) && JSON.stringify(quinn2.rows) === JSON.stringify(quinn1 && quinn1.rows),
+      `before=${JSON.stringify([pat1 && pat1.rows, quinn1 && quinn1.rows])} after=${JSON.stringify([pat2 && pat2.rows, quinn2 && quinn2.rows])}`);
+    ok("K21 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // A Refresh keeps the record's details on screen while that read runs (never back to the design's),
+  // then shows what the read answered: an email changed since is shown changed.
+  {
+    const S = { tables: laterEditedTables() };
+    const r = await run("K-refresh", S);
+    if (!ok("K22 the list rendered", r.rendered)) throw new Error("K-refresh: the list never rendered");
+    await search(r.page, "Pat Example");
+    const first = await emailOf(r.page);
+    S.companyDelay = 4000;
+    S.tables.crm_contacts = S.tables.crm_contacts.map((c) => (c.id === CP ? { ...c, email: "pat.newer@example.test" } : c));
+    const readsBefore = companyReads(r.calls).length;
+    await r.page.locator("button", { hasText: "↻ Refresh" }).first().click();
+    const seen = [];
+    for (let i = 0; i < 30; i++) { seen.push(await emailOf(r.page)); await r.page.waitForTimeout(100); }
+    await r.page.waitForTimeout(4000);
+    const last = await emailOf(r.page);
+    ok("K23 during the Refresh's read Pat's row kept the record's email, never the design's",
+      first === "pat.new@example.test" && companyReads(r.calls).length === readsBefore + 1
+      && seen.every((e) => e === "pat.new@example.test" || e === null) && seen.includes("pat.new@example.test"),
+      `first=${first} seen=${JSON.stringify([...new Set(seen)])}`);
+    ok("K24 then the read's answer: the changed email", last === "pat.newer@example.test", String(last));
+    ok("K25 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // View-as, the same: get_portal's first page lacks those records and sends them with
+  // crmContactCompanies, details and all, as operator-portal does.
+  {
+    const all = edited([...LINKED, ...ONLY, ...NEWER]).sort((a, b) => (a.first_seen_at < b.first_seen_at ? 1 : a.first_seen_at > b.first_seen_at ? -1 : (a.id < b.id ? 1 : -1)));
+    const getPortal = (body) => {
+      const from = body.contactsFrom || 0;
+      const pageRows = all.slice(from, from + 500);
+      if (from > 0) return { ok: true, clientId: TENANT, crmContacts: pageRows, crmContactsTotal: all.length };
+      const onPage = new Set(pageRows.map((c) => c.id));
+      const need = new Set([...DESIGNS.map((d) => d.contact_id), ...LEADS.map((l) => l.contact_id)].filter((id) => id && !onPage.has(id)));
+      return {
+        ok: true, clientId: TENANT, companyName: "Acme Sheds", designs: DESIGNS, versions: [], capturedLeads: LEADS,
+        crmContacts: pageRows, crmContactsTotal: all.length,
+        crmContactCompanies: all.filter((c) => need.has(c.id)).map((c) => ({ id: c.id, name: c.name, company: c.company || "", phone: c.phone, email: c.email })),
+      };
+    };
+    const r = await run("K-view-as-later", { tables: { designs: [], captured_leads: [], crm_contacts: [] }, operator: true, query: `?view=${TENANT}`, getPortal });
+    if (!ok("K26 the view-as list rendered with the records past the first page", r.rendered)) throw new Error("K-view-as-later: the view-as list never rendered");
+    const s = await snapshot(r.page);
+    const pat = await onlyRow(r.page, "Pat Example", "Pat Example");
+    ok("K27 view-as: before Show more, the record's email, and Quinn's record name",
+      !!s.more && !!pat && pat.rows[0][1].includes("pat.new@example.test") && !!(await onlyRow(r.page, "Quinn", "Quinn Sample")),
+      `more=${s.more} pat=${JSON.stringify(pat && pat.rows)}`);
+    ok("K28 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
+  }
+  // ONE ROW PER RECORD. After Quinn's record took the new name and number, a design came in under the
+  // new number, and a visit under a third, all linked to Quinn's record. Grouped by the number each was
+  // saved with, that was a row per number, every one reading "Quinn Sample" and opening the same
+  // record. Now it is one: the newest design's row, with both designs, the higher status, and Details
+  // reading both, newest first. The older design is the accepted one, so the status is not the top
+  // row's own. The visit, linked to a contact that has a design row, has none of its own.
+  {
+    const designs = DESIGNS.map((d) => (d.short_code === "SS-QUI0001A" ? { ...d, status: "accepted" } : d))
+      .concat(design("SS-QUI0002A", CQ, { name: "Quinn Sample", phone: "+15125550112" }, "2026-09-20T15:00:00Z", "draft"));
+    const leads = [...LEADS, {
+      client_id: TENANT, id: 3, name: "Quinn Visitor", phone: "+15125550109", phone_digits: "15125550109", email: null,
+      source: "details", created_at: "2026-08-25T15:00:00Z", updated_at: "2026-09-25T15:00:00Z", contact_id: CQ,
+    }];
+    const r = await run("K-merge", { tables: baseTables({ designs, captured_leads: leads, crm_contacts: edited([...LINKED, ...ONLY, MERGED]) }), pageSize: 100 });
+    if (!ok("K29 the list rendered", r.rendered)) throw new Error("K-merge: the list never rendered");
+    const s = await snapshot(r.page);
+    await r.page.screenshot({ path: join(shots, "K-one-row-per-record.png"), fullPage: true });
+    const quinn = rowOf(s, "Quinn Sample");
+    ok("K30 ONE row for Quinn's record: no second design row, no visit row, the same ten rows as A",
+      quinn && quinn.n === 1 && !s.heads.includes("Quinn Visitor") && !s.heads.includes("Quinn Example") && s.rows.length === 10
+      && (s.rows || []).filter((x) => /^Browsing/.test(x[5])).length === 1, JSON.stringify(s.rows));
+    ok("K31 it carries both designs, the higher status, the older design's first seen and the newer one's activity",
+      quinn && quinnCells && quinn.cells[2] === "2" && quinn.cells[5] === "Accepted" && quinn.cells[3] === quinnCells[3] && quinn.cells[4] !== quinnCells[4],
+      `after=${JSON.stringify(quinn && quinn.cells)} K=${JSON.stringify(quinnCells)}`);
+    ok("K32 the old number still finds the row, and so does the new one",
+      !!(await onlyRow(r.page, "+15125550102", "Quinn Sample")) && !!(await onlyRow(r.page, "5125550112", "Quinn Sample")));
+    // (The first Quinn row with a Details button: a visit row has none, so a list that still showed
+    // one for Quinn fails K33 here rather than timing out on it.)
+    await r.page.locator("table tbody tr", { hasText: "Quinn Sample" }).filter({ has: r.page.locator("button", { hasText: "Details" }) })
+      .first().locator("button", { hasText: "Details" }).click();
+    await r.page.waitForTimeout(800);
+    const act = r.calls.fns.filter((c) => c.fn === "portal-settings" && c.body.action === "contact_activity");
+    ok("K33 Details reads both designs, newest first",
+      act.length === 1 && JSON.stringify(act[0].body.codes) === JSON.stringify(["SS-QUI0002A", "SS-QUI0001A"]), JSON.stringify(act.map((c) => c.body.codes)));
+    ok("K34 no uncaught page errors", r.pageErrors.length === 0, r.pageErrors.join(" | "));
+    await r.ctx.close();
   }
 } finally {
   await browser.close();

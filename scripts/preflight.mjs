@@ -67,10 +67,11 @@
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
 //   7. `deno test` over the edge-function unit tests — the parts of supabase/functions that
-//      cannot be exercised any other way. Three groups with different invocations: the
+//      cannot be exercised any other way. Four groups: the
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
 //      validation, which guards where the client secret gets sent), the pre-existing
-//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, and `tests/phone/`
+//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, a function's own
+//      `<function>/*.test.ts` or `*_test.ts` (run like `_shared`), and `tests/phone/`
 //      (My Synergy Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
 //      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
 //      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
@@ -1815,17 +1816,21 @@ function denoCheck() {
 // could move it is a credential-exfiltration primitive, and the only live way to test the module
 // is to complete a real OAuth round trip. Same skip-with-a-warning policy as denoCheck().
 //
-// TWO GROUPS, because they need different invocations and the difference is not cosmetic:
+// THREE GROUPS under supabase/functions (tests/phone, a fourth, is below), because they need
+// different invocations and the difference is not cosmetic:
 //
 //   _shared/*.test.ts          — self-contained (no jsr:/npm: imports), run with no import map.
 //   _shared/_test_stubs/*_test.ts — the pre-existing resolveTenant suite. It REQUIRES its own
 //                                import map (which rewrites jsr:@supabase/supabase-js@2 to a
 //                                stub); without it 12 of its 14 cases fail on module resolution.
+//   <function>/*.test.ts and <function>/*_test.ts — a function's own tests
+//                                (customer-designs/handler.test.ts), run like _shared:
+//                                self-contained, no import map.
 //
 // The second group existed before this step did and nothing ran it automatically — it guards
 // resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
-// designs. Discovering it by convention rather than listing it means a new file in either shape is
-// covered the day it lands.
+// designs. Discovering them by convention rather than listing them means a new file in any of these
+// shapes is covered the day it lands.
 // My Synergy Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
 const PHONE_TESTS_DIR = "tests/phone";
 const SQL_TESTS_DIR = "tests/sql";
@@ -1852,6 +1857,22 @@ function testGroups() {
     if (files.length && existsSync(join(root, FUNCTIONS_DIR, map))) {
       groups.push({ label: "_test_stubs", files, importMap: map });
     }
+  }
+
+  // A function's OWN tests, beside its handler: <function>/*.test.ts or *_test.ts, either naming as
+  // elsewhere (customer-designs/handler.test.ts was the first, and sat outside the gate from migration
+  // 231 until 2026-10-15 because only the two _shared shapes above were discovered). Same invocation
+  // as _shared: self-contained, no import map, run from supabase/functions. Directories starting with
+  // "_" are not functions (_shared is above).
+  const fnRoot = join(root, FUNCTIONS_DIR);
+  if (existsSync(fnRoot)) {
+    const files = readdirSync(fnRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("_") && e.name !== "node_modules")
+      .flatMap((e) => readdirSync(join(fnRoot, e.name))
+        .filter((f) => f.endsWith(".test.ts") || f.endsWith("_test.ts"))
+        .map((f) => `${e.name}/${f}`))
+      .sort();
+    if (files.length) groups.push({ label: "functions", files, importMap: null });
   }
 
   // tests/phone — My Synergy Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
@@ -2836,12 +2857,19 @@ if (process.argv.includes("--self-test")) {
   // suffix — so it ran zero of those 14 cases while reporting clean.
   // tests/phone joined on 2026-09-29, and it is the one group that runs from the repo root with
   // its own read flag: assert both, or a refactor that dropped either would run it wrongly (or
-  // not at all) and still report clean.
-  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR]) {
+  // not at all) and still report clean. "functions" (a function's own <fn>/*.test.ts) joined on
+  // 2026-10-15; customer-designs/handler.test.ts is named so the group cannot be found empty-handed.
+  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR, "functions"]) {
     if (!groups.some((g) => g.label === want)) {
       console.error(`self-test FAILED: test group "${want}" was not discovered`);
       process.exit(1);
     }
+  }
+  const fnGroup = groups.find((g) => g.label === "functions");
+  if (!fnGroup.files.includes("customer-designs/handler.test.ts") || fnGroup.importMap || fnGroup.cwd) {
+    console.error("self-test FAILED: the functions group does not run customer-designs/handler.test.ts from "
+      + `${FUNCTIONS_DIR} with no import map`);
+    process.exit(1);
   }
   const phoneGroup = groups.find((g) => g.label === PHONE_TESTS_DIR);
   if (phoneGroup.cwd !== root || phoneGroup.readFlag !== "--allow-read" || phoneGroup.importMap

@@ -37,7 +37,7 @@
 //   G. live paint: a body swatch moves the colourless door's panels with the walls and a trim swatch
 //      its frame; a scoped rebuild after that (adding a window through recolorItems3, the 3D footer's
 //      path) keeps the live colour and draws the window; the footer's Window row takes it out again
-//   Q. the quote: Get Quote sends one windows[] line per leaf with inDoor, at the window's price
+//   Q. the estimate: Get Estimate sends one windows[] line per leaf with inDoor, at the window's price
 //   E. the board-and-batten door is UNCHANGED: its mesh digest equals the one recorded on a clean
 //      origin/beta tree before this change (PLANK_DIGEST)
 //   F. no page errors; screenshots of every door straight on, for holding up against the real doors
@@ -73,7 +73,7 @@ const D3 = {
 const CONFIG = {
   clientId: "harness-door-looks",
   branding: { companyName: "Acme Sheds", accentColor: "#1D4ED8", headerBg: "#FFFFFF", tagline: null, logo: null },
-  // [] unlocks Get Quote with no typing (contactComplete short-circuits on an empty list).
+  // [] unlocks Get Estimate with no typing (contactComplete short-circuits on an empty list).
   contactFields: [],
   buildingStyles: [{ value: "doors", label: "Door Test", img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {}, d3: D3 }],
   defaultSizes: [SIZE],
@@ -431,7 +431,7 @@ async function runMoney(browser, rect) {
     ok("I the Included chip counts the window in the door as placed", /is-placed/.test(cls), cls);
     await page.screenshot({ path: join(shots, "i-chip.png") });
     const before = calls.length;
-    const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+    const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit for Updated Estimate)$/ }).last();
     let payload = null;
     if (await submit.count()) {
       await submit.click().catch(() => {});
@@ -442,7 +442,7 @@ async function runMoney(browser, rect) {
       }
     }
     const gateMsg = await page.getByText(/Please place all included items/).count();
-    ok("I ...and the submit gate lets the quote through, with nothing declined", !!payload && gateMsg === 0 && !(payload.declinedItems || []).length
+    ok("I ...and the submit gate lets the estimate through, with nothing declined", !!payload && gateMsg === 0 && !(payload.declinedItems || []).length
       && (payload.windows || []).filter((w) => w.inDoor && w.fixtureItemId === "w-door").length === 1, payload ? JSON.stringify(payload.declinedItems) : `no payload; gate message ${gateMsg}`);
     ok("I no page errors (submit)", errors.length === 0, errors.slice(0, 3).join(" | "));
     await ctx.close();
@@ -644,14 +644,14 @@ async function main() {
   }
   await page.evaluate(() => window.__ss3dEngine.setLiveColors(null, null));
 
-  // Q. The quote.
+  // Q. The estimate.
   await page.evaluate(() => {
     const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "✕" && x.previousElementSibling && /^3D Preview/.test(x.previousElementSibling.textContent.trim()));
     if (b) b.click();
   });
   await settle(page, 1500);
   const before = calls.length;
-  const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+  const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit for Updated Estimate)$/ }).last();
   let payload = null;
   if (await submit.count()) {
     await submit.click().catch(() => {});
@@ -661,7 +661,7 @@ async function main() {
       if (hit) payload = hit.body;
     }
   }
-  ok("Q Get Quote reached submit-estimate", !!payload);
+  ok("Q Get Estimate reached submit-estimate", !!payload);
   if (payload) {
     const dw = (payload.windows || []).filter((w) => w.inDoor);
     ok("Q one windows[] line per leaf of each door with a window (1 + 2), inDoor, at the window's price",
