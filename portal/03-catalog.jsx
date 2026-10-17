@@ -3772,14 +3772,6 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
-// A partition wall (migration 278) is priced by the foot of wall, by the square foot of wall (its length
-// times its height) or each: the three methods its pricing understands. portal-settings refuses the
-// others for it, and submit-estimate would charge them each.
-const LP_METHODS_PARTITION = [
-  { value: "each", label: "each" },
-  { value: "lineal_ft", label: "lineal ft — per foot of wall" },
-  { value: "sqft_option", label: "sqft option — per sq ft of wall" },
-];
 // The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
 // methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
 // flat rate." Values must match the style_wall_heights check constraint (228).
@@ -3881,6 +3873,9 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       priceStandalone: r.price_standalone != null ? String(r.price_standalone) : "",
       taxable: r.taxable !== false, active: r.active !== false,
       internalOnly: r.internal_only === true, sortOrder: r.sort_order || 0,
+      // Allowed on interior walls (311): ticked on the Interior walls tab; carried through this
+      // card's save so it survives. Absent reads as yes, the column's default.
+      interiorWallOk: r.interior_wall_ok !== false,
     })));
   };
   useEffect(() => { load(); }, [clientId]);
@@ -5109,10 +5104,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
     // no longer shown or archived here. The three electrical devices are not layout items at
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
-    return (data.items || []).filter((it) => it.key !== "ramp" && (it.paletteGroup || "interior") === group).map((it) => {
+    // The interior wall (278's partitionWall) has its own tab since 311 (InteriorWalls), and
+    // save_layout_pricing no longer writes it, so it is not listed here either.
+    return (data.items || []).filter((it) => it.key !== "ramp" && it.key !== "partitionWall" && (it.paletteGroup || "interior") === group).map((it) => {
       const p = byKey[it.key] || {};
-      // An item that stays out of the customer's palette until it is PRICED (171's shelves, 278's partition
-      // wall) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
+      // An item that stays out of the customer's palette until it is PRICED (171's shelves) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
       // item would appear free on every customer's designer the first time this card was saved for
       // something else. Any other item keeps showing 0, which is what it costs today.
       const unpriced = !!it.hiddenUntilPriced && p.rate == null;
@@ -5225,9 +5221,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
       if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
       const payloadRows = src.filter((r) => !(r.unpriced && String(r.rate ?? "").trim() === "")).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
         ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
-      // partitionAware: this card knows the partition wall (278), so portal-settings lets it price one.
-      // The card from before it, which cannot, never sends the flag.
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows, partitionAware: true } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -5260,7 +5254,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
         const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
         if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
         const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
-        if (method && (itemKey !== "partitionWall" || LP_METHODS_PARTITION.some((m) => m.value === method))) byKey[itemKey].pricing_method = method;
+        if (method) byKey[itemKey].pricing_method = method;
         const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
         if (rate !== "") byKey[itemKey].rate = rate;
       });
@@ -5332,7 +5326,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
                     </td>
                     <td style={S.td}>
                       <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
-                        {(r.item_key === "partitionWall" ? LP_METHODS_PARTITION : LP_METHODS).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                       </select>
                     </td>
                     <td style={S.td}>
@@ -5403,6 +5397,278 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
             </ul>
           </div>
         )}
+      </div>
+    </>
+  );
+}
+
+// ─── Interior walls (migration 311): Settings → Options → Interior walls ───
+// Four cards on one Save: framing and price (interior_wall_settings), the builder's own wall
+// coverings (interior_wall_coverings, the Electrical card's list pattern), what may go IN a wall
+// (rough openings, and the door/window "Allowed in interior walls" tick) and what may go ON one (the
+// electrical "Allowed on interior walls" tick). The two tick lists are written column-only by
+// save_interior_walls, so this tab never resends either catalog. The wall used to be one row on
+// Interior items (278); that card no longer lists it.
+const IW_METHODS = [
+  { value: "lineal_ft", label: "per foot of wall" },
+  { value: "sqft_option", label: "per sq ft of wall face" },
+  { value: "each", label: "each wall" },
+];
+const IW_COVER_METHODS = [
+  { value: "sqft_option", label: "per sq ft of that side" },
+  { value: "lineal_ft", label: "per foot of wall" },
+  { value: "each", label: "each side" },
+];
+function InteriorWalls({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [f, setF] = useState(null);
+  const [covers, setCovers] = useState([]);
+  const [fixtures, setFixtures] = useState([]);   // doors and windows: { id, name, category, inPartition }
+  const [elec, setElec] = useState([]);           // electrical items: { id, name, icon, interiorWallOk }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    // Null until the tab is first saved (or seeded from the old Interior items price): the table's
+    // own defaults, rates blank = not offered yet.
+    const w = data.interiorWalls || {};
+    const str = (v) => (v != null ? String(v) : "");
+    setF({
+      standardStud: w.standard_stud === "2x6" ? "2x6" : "2x4",
+      method: IW_METHODS.some((m) => m.value === w.pricing_method) ? w.pricing_method : "lineal_ft",
+      rate2x4: str(w.rate_2x4),
+      rate2x6: str(w.rate_2x6),
+      standardHeight: w.standard_height === "rafters" ? "rafters" : "plate",
+      allowRafters: w.allow_rafters !== false,
+      allowRo: w.allow_rough_openings !== false,
+      taxable: w.taxable !== false,
+      internalOnly: w.internal_only === true,
+    });
+    setCovers((data.interiorWallCoverings || []).map((c) => ({
+      id: c.id, name: c.name || "", method: c.pricing_method || "sqft_option", rate: str(c.rate),
+      taxable: c.taxable !== false, internalOnly: c.internal_only === true, active: c.active !== false,
+    })));
+    setFixtures((data.fixtures || []).filter((x) => (x.category === "door" || x.category === "window") && !x.archived)
+      .map((x) => ({ id: x.id, name: x.name || "", category: x.category, inPartition: x.in_partition !== false })));
+    setElec((data.electricalItems || []).map((e) => ({ id: e.id, name: e.name || "", icon: e.icon || "⚡", interiorWallOk: e.interior_wall_ok !== false })));
+  };
+  useEffect(() => { load(); }, [clientId]);
+
+  const set = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
+  const updCover = (i, k, v) => setCovers((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const moveCover = (i, d) => setCovers((p) => {
+    const j = i + d; if (j < 0 || j >= p.length) return p;
+    const n = p.slice(); const t = n[i]; n[i] = n[j]; n[j] = t; return n;
+  });
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const stdRate = f.standardStud === "2x6" ? f.rate2x6 : f.rate2x4;
+      if (String(stdRate).trim() === "") throw new Error(`Enter a rate for a ${f.standardStud} wall: it is your standard framing. Leave the other size blank if you don't offer it.`);
+      const bad = [["2x4", f.rate2x4], ["2x6", f.rate2x6]].filter(([, v]) => { const t = String(v).trim(); return t !== "" && !(Number.isFinite(Number(t)) && Number(t) >= 0); });
+      if (bad.length) throw new Error(`Nothing was saved. The ${bad.map((b) => b[0]).join(" and ")} rate isn't a dollar amount.`);
+      const badCover = covers.filter((c) => c.name.trim() && String(c.rate).trim() !== "" && !(Number.isFinite(Number(c.rate)) && Number(c.rate) >= 0));
+      if (badCover.length) throw new Error(`Nothing was saved. Fix the rate on: ${badCover.map((c) => c.name.trim()).join(", ")}.`);
+      const inPartition = {}; fixtures.forEach((x) => { inPartition[x.id] = x.inPartition; });
+      const interiorWallOk = {}; elec.forEach((e) => { interiorWallOk[e.id] = e.interiorWallOk; });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({
+        action: "save_interior_walls",
+        standardStud: f.standardStud, method: f.method, rate2x4: f.rate2x4, rate2x6: f.rate2x6,
+        standardHeight: f.standardHeight, allowRafters: f.standardHeight === "rafters" ? true : f.allowRafters,
+        allowRo: f.allowRo, taxable: f.taxable, internalOnly: f.internalOnly,
+        inPartition, interiorWallOk,
+      }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const rows = covers.map((c, i) => ({ ...c, sortOrder: (i + 1) * 10 }));
+      const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_interior_wall_coverings", rows }) });
+      if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
+      await load();
+      setMsg({ ok: "Saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const cbx = { width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT };
+  const hint = { display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 };
+  const note = { fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680, lineHeight: 1.5 };
+  if (!f) {
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>Interior walls</div>
+        {msg && msg.err ? <div style={S.err}>{msg.err}</div> : <SkelRows cols={3} rows={4} widths={["40%", "60%", "30%"]} />}
+      </div>
+    );
+  }
+  const offered = String(f.standardStud === "2x6" ? f.rate2x6 : f.rate2x4).trim() !== "";
+  const tickList = (list, key, label, onTick) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+      {list.map((x) => (
+        <label key={x.id} style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={!!x[key]} onChange={(e) => onTick(x.id, e.target.checked)} style={cbx} />
+          {x.icon ? <span>{x.icon}</span> : null}{x.name}
+        </label>
+      ))}
+      {!list.length && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>{label}</span>}
+    </div>
+  );
+  const tickFixture = (id, v) => setFixtures((p) => p.map((x) => (x.id === id ? { ...x, inPartition: v } : x)));
+  const tickElec = (id, v) => setElec((p) => p.map((x) => (x.id === id ? { ...x, interiorWallOk: v } : x)));
+
+  return (
+    <>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      {/* 1. Framing & price */}
+      <div style={S.card}>
+        <div style={S.h2}>Framing &amp; price</div>
+        <p style={note}>
+          A wall your customer draws inside the building. Pick the framing you build with as standard and
+          a rate for each size you offer. <b>Leave a size blank and you don&rsquo;t offer it.</b> Owners,
+          admins and reps can switch any wall to the other size in the designer; customers never see the
+          choice. {!offered && <b style={{ color: "#B45309" }}>Customers can&rsquo;t add interior walls until your standard size has a rate.</b>}
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
+          <div style={{ minWidth: 170 }}>
+            <span style={{ ...S.lbl, marginBottom: 6 }}>Standard framing</span>
+            {["2x4", "2x6"].map((s) => (
+              <label key={s} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 14, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                <input type="radio" name="iw-stud" checked={f.standardStud === s} onChange={() => set("standardStud", s)} style={cbx} />{s}
+              </label>
+            ))}
+          </div>
+          {["2x4", "2x6"].map((s) => (
+            <label key={s} style={{ display: "block", minWidth: 150 }}>
+              <span style={{ ...S.lbl }}>{s} wall rate{f.standardStud === s ? " (standard)" : ""}</span>
+              <input type="number" min="0" step="0.01" placeholder="not offered" value={s === "2x4" ? f.rate2x4 : f.rate2x6}
+                onChange={(e) => set(s === "2x4" ? "rate2x4" : "rate2x6", e.target.value)} style={{ ...S.input, width: 130 }} />
+              <span style={hint}>Blank = not offered. 0 = included.</span>
+            </label>
+          ))}
+          <label style={{ display: "block", minWidth: 200 }}>
+            <span style={{ ...S.lbl }}>How it&rsquo;s priced</span>
+            <select value={f.method} onChange={(e) => set("method", e.target.value)} style={{ ...S.input, width: 200 }}>
+              {IW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+            <span style={hint}>Per sq ft uses the wall&rsquo;s length times its height.</span>
+          </label>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+          <label style={{ display: "block", minWidth: 320 }}>
+            <span style={{ ...S.lbl }}>Standard height</span>
+            <select value={f.standardHeight} onChange={(e) => set("standardHeight", e.target.value)} style={{ ...S.input, width: 320 }}>
+              <option value="plate">Stud wall height (level with the wall plate)</option>
+              <option value="rafters">To the rafters (follows the roof)</option>
+            </select>
+            <span style={hint}>Where a new wall&rsquo;s top stops. Customers can change it on each wall.</span>
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 22, cursor: f.standardHeight === "rafters" ? "default" : "pointer", fontSize: 13 }}
+            title={f.standardHeight === "rafters" ? "Your standard is to the rafters, so it is always offered." : undefined}>
+            <input type="checkbox" checked={f.standardHeight === "rafters" || f.allowRafters} disabled={f.standardHeight === "rafters"}
+              onChange={(e) => set("allowRafters", e.target.checked)} style={cbx} />
+            Offer &ldquo;To the rafters&rdquo;
+          </label>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center" }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
+            title="Available in the rep designer only. Hidden from the customer-facing page; a wall a rep adds still prices normally.">
+            <input type="checkbox" checked={f.internalOnly} onChange={(e) => set("internalOnly", e.target.checked)} style={cbx} />
+            Internal only
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
+            <input type="checkbox" checked={f.taxable} onChange={(e) => set("taxable", e.target.checked)} style={cbx} />
+            Taxable
+          </label>
+        </div>
+      </div>
+
+      {/* 2. Wall coverings */}
+      <div style={S.card}>
+        <div style={S.h2}>Wall coverings</div>
+        <p style={note}>
+          What can go on each side of an interior wall: drywall, OSB, shiplap. The customer picks one for
+          each side, or leaves it bare. <b>Leave a rate blank and you don&rsquo;t offer it; 0 means it&rsquo;s
+          included.</b> Per sq ft is that side&rsquo;s length times its height.
+        </p>
+        <div style={{ overflowX: "auto", marginBottom: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+            <thead>
+              <tr>
+                <th style={S.th}>Covering</th>
+                <th style={S.th}>How it&rsquo;s priced</th>
+                <th style={S.th}>Rate ($)</th>
+                <th style={{ ...S.th, textAlign: "center" }} title="Rep designer only, hidden from the customer-facing page.">Internal</th>
+                <th style={{ ...S.th, textAlign: "center" }}>Taxable</th>
+                <th style={S.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {covers.map((c, i) => (
+                <tr key={c.id || ("new-" + i)}>
+                  <td style={S.td}><input value={c.name} maxLength={60} onChange={(e) => updCover(i, "name", e.target.value)} style={{ ...S.input, width: 170 }} /></td>
+                  <td style={S.td}>
+                    <select value={c.method} onChange={(e) => updCover(i, "method", e.target.value)} style={{ ...S.input, width: 180 }}>
+                      {IW_COVER_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={c.rate} onChange={(e) => updCover(i, "rate", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={c.internalOnly} onChange={(e) => updCover(i, "internalOnly", e.target.checked)} style={cbx} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={c.taxable} onChange={(e) => updCover(i, "taxable", e.target.checked)} style={cbx} /></td>
+                  <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                    <button onClick={() => moveCover(i, -1)} disabled={i === 0} title="Move up" style={{ background: "transparent", border: "none", cursor: i === 0 ? "default" : "pointer", color: "#64748B", fontSize: 13 }}>&uarr;</button>
+                    <button onClick={() => moveCover(i, 1)} disabled={i === covers.length - 1} title="Move down" style={{ background: "transparent", border: "none", cursor: i === covers.length - 1 ? "default" : "pointer", color: "#64748B", fontSize: 13 }}>&darr;</button>
+                    <button onClick={() => setCovers((p) => p.filter((_, j) => j !== i))}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#B91C1C", fontWeight: 700, fontSize: 13 }}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+              {!covers.length && (
+                <tr><td colSpan={6} style={{ ...S.td, color: "#94A3B8", fontSize: 12.5 }}>No coverings yet. Walls are bare studs until you add one.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <button onClick={() => setCovers((p) => p.concat([{ id: "", name: "", method: "sqft_option", rate: "", taxable: true, internalOnly: false, active: true }]))}
+          style={S.btn("#F1F5F9", "#334155")}>+ Add a covering</button>
+      </div>
+
+      {/* 3. Openings */}
+      <div style={S.card}>
+        <div style={S.h2}>Openings</div>
+        <p style={note}>
+          What a customer can put in an interior wall. Rough openings use the rates you set on the
+          Doors and Windows tabs.
+        </p>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+          <input type="checkbox" checked={f.allowRo} onChange={(e) => set("allowRo", e.target.checked)} style={cbx} />
+          Rough openings allowed in interior walls
+        </label>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Doors allowed in interior walls</div>
+        {tickList(fixtures.filter((x) => x.category === "door"), "inPartition", "No doors in your catalog yet.", tickFixture)}
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Windows allowed in interior walls</div>
+        {tickList(fixtures.filter((x) => x.category === "window"), "inPartition", "No windows in your catalog yet.", tickFixture)}
+      </div>
+
+      {/* 4. Electrical */}
+      <div style={S.card}>
+        <div style={S.h2}>Electrical</div>
+        <p style={note}>
+          Which of your electrical items a customer can put on an interior wall. Each one is charged at
+          its own price, the same as one added on an outside wall beyond your package.
+        </p>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Allowed on interior walls</div>
+        {tickList(elec, "interiorWallOk", "No electrical items yet. Add them on the Electrical tab.", tickElec)}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : DOOR_MINT, "#0F4C46")}>{busy ? "Saving…" : "Save interior walls"}</button>
+        {msg && <span style={{ fontSize: 12.5, color: msg.err ? "#B91C1C" : "#047857" }}>{msg.err || msg.ok}</span>}
       </div>
     </>
   );
@@ -5520,6 +5786,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
     // Can go inside a door (289): windows only; absent reads as no, the column's default.
     in_door: d.in_door === true,
+    // Allowed in interior walls (311): doors and windows; absent reads as YES, the column's default.
+    in_partition: d.in_partition !== false,
     // null = offered on EVERY building style (the living default); an array = only those (272).
     style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
     // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
@@ -5582,6 +5850,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Can be used inside a door (289). WINDOW-ONLY on the wire, like the colour list: portal-settings
     // forces it off for every other category, so sending it for a door would be a value it throws away.
     ...(isWindowCat ? { inDoor: r.in_door === true } : {}),
+    // Allowed in interior walls (311): doors and windows only. Ticked on the Interior walls tab; it
+    // rides every line save so the tick survives a price edit made here.
+    ...((isWindowCat || isDoorCat) ? { inPartition: r.in_partition !== false } : {}),
     // Offered on (272), every category, the same collapse: every style ticked, hidden ones
     // included, goes over as null ("every style"), so a style added later offers this item
     // without a visit here.
@@ -5721,9 +5992,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // builder can set loft-door heights in bulk (see the edit panel). Adding a column is safe
   // for anyone holding an older sheet: import matches columns BY NAME and an absent one is
   // left untouched, so an old export re-imports exactly as it always did.
+  // "Interior walls" (311): may this door or window go in an interior wall. Doors and windows only;
+  // a sheet from before it has no such column, and import leaves the tick alone.
+  const inWalls = isDoorCat || isWindowCat;
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", ...(inWalls ? ["Interior walls"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), ...(inWalls ? ["Interior walls"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -5736,8 +6010,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", ...(inWalls ? [yn(r.in_partition !== false)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), ...(inWalls ? [yn(r.in_partition !== false)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -5800,7 +6074,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
-        iSill = col("height off floor"), iSillMode = col("placement"),
+        iSill = col("height off floor"), iSillMode = col("placement"), iInWalls = col("interior walls", "interior wall"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iTaxable = col("taxable", "tax"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -5866,6 +6140,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         if (isWindowCat && iSillMode >= 0) {
           row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
         }
+        // Interior walls (311): absent column leaves the tick alone; a blank cell is the default, yes.
+        if (inWalls && iInWalls >= 0) row.inPartition = bool(cols, iInWalls, true);
         return row;
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
@@ -5878,7 +6154,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).

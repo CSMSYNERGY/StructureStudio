@@ -351,6 +351,9 @@ const GATES: GateTable = {
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
   save_electrical_items:          { area: "settings_options", level: "edit" },
+  // Interior walls (311): the Interior walls tab's two saves.
+  save_interior_walls:            { area: "settings_options", level: "edit" },
+  save_interior_wall_coverings:   { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
@@ -2608,7 +2611,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       return { ...res, courses: !res.error };
     })();
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, wallet] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes, wallet] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -2630,7 +2633,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // whole catalog read fails on the unknown column.
       // in_door (289): a window's "Can be used inside a door" tick. The same applies: 289 is applied
       // BEFORE this function is deployed, or every portal's catalog read fails.
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // in_partition (311): "Allowed in interior walls". Same rule: 311 is applied first.
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -2648,6 +2652,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
       // is simply one offering no site work yet.
       admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // Interior walls (311): the tab's settings row (null until first saved or seeded from the 278
+      // partition price) and the builder's covering list. 311 is applied BEFORE this deploy.
+      admin.from("interior_wall_settings").select("standard_stud, pricing_method, rate_2x4, rate_2x6, standard_height, allow_rafters, allow_rough_openings, taxable, internal_only").eq("client_id", clientId).maybeSingle(),
+      admin.from("interior_wall_coverings").select("id, name, pricing_method, rate, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order").order("name"),
       // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
       walletRead,
     ]);
@@ -2656,7 +2664,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -2699,6 +2707,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
       foundation: foundationRes.data ?? [],
+      // Interior walls (311). Null settings = a tenant who has never saved the tab; the card falls
+      // back to the table's defaults.
+      interiorWalls: iwSettingsRes.data ?? null,
+      interiorWallCoverings: iwCoveringsRes.data ?? [],
       // Can the Cladding card offer a lap course size (275)? False only on a database before it.
       claddingCourses: claddingRes.courses === true,
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
@@ -3201,34 +3213,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
-      // A partition wall (278) is priced only from the card that knows it (partitionAware, sent by the
-      // portal that ships the Interior items card). Production's card from before it sends every row it
-      // lists on Save, and a price set there would put a Partition Wall button on production's designer,
-      // which cannot draw one (it places a sliver no quote charges). The catalog hides an unpriced one
-      // from that card already; this is the backstop, and it never asks for a price. A priced one that
-      // card only sends back unchanged is passed over quietly. Remove once production carries the new
-      // Interior items card.
-      if (itemKey === "partitionWall" && payload.partitionAware !== true) {
+      // An interior wall (278's partitionWall) is priced on its own tab since 311: Settings → Options →
+      // Interior walls (save_interior_walls), which keeps this row in step for the designer until slice
+      // 2 reads interiorWalls. This action never writes it. A card that only sends the row back unchanged
+      // (production's Interior items card from before 311) is passed over quietly; a change is refused
+      // in words that say where the price lives now.
+      if (itemKey === "partitionWall") {
         const ex = exByKey.get(itemKey);
         const unchanged = !!ex && ex.pricing_method === method && Number(ex.rate) === rate;
-        if (!unchanged) skipped.push(ex ? "Partition Wall: its price can be changed after the next app update" : "Partition Wall: opens with the next app update, nothing to set yet");
+        if (!unchanged) skipped.push("Interior wall: its price is set on Settings → Options → Interior walls");
         continue;
       }
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
-      // A partition wall (migration 278) is charged per foot of wall, per square foot of wall or each;
-      // the other four mean nothing for one wall, and submit-estimate would quietly charge them each.
-      if (itemKey === "partitionWall" && !["each", "lineal_ft", "sqft_option"].includes(method)) {
-        skipped.push(`${itemKey}: a partition wall is priced each, per foot (lineal ft) or per square foot of wall (sqft option)`);
-        continue;
-      }
-      // ...and it is only OFFERED once it has a price above $0: a first price of 0 would put it on every
-      // customer's designer, free. The card leaves an untouched (blank) one out of the Save, so this
-      // only says no to a 0 typed for a wall that has no price yet.
-      if (itemKey === "partitionWall" && !idByKey.has(itemKey) && !(rate > 0)) {
-        skipped.push(`${itemKey}: not offered until it has a price above $0`);
-        continue;
-      }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
       // Optional per-item image (shown on the estimate line for this product). Only written
       // when the row carries an imageUrl field, so a save from an older client never blanks
@@ -6395,6 +6392,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         sort_order: Number(r?.sortOrder) || 0,
         updated_at: new Date().toISOString(),
       };
+      // Allowed on interior walls (311), presence-guarded: a card that never sends it (production's,
+      // or the Interior walls tab's own flag save, which writes the column directly) leaves the tick
+      // alone on an update, and a new row takes the column's default, true.
+      if (r && Object.prototype.hasOwnProperty.call(r, "interiorWallOk") && r.interiorWallOk !== undefined) {
+        row.interior_wall_ok = r.interiorWallOk !== false;
+      }
       // ── RENAME IS AN UPDATE, NOT AN UPSERT ────────────────────────────────────────────
       // The row carries BOTH the primary key and a conflict target of (client_id, name), and
       // those disagree the moment a builder renames an item: Postgres routes the statement by
@@ -6506,6 +6509,183 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const up = await admin.from("electrical_settings").upsert(row, { onConflict: "client_id" });
     if (up.error) return dbFail(req, clientId, "save your electrical settings", up.error);
     return json({ ok: true });
+  }
+
+  // ── Interior walls (311): Settings → Options → Interior walls ──────────────────────────────
+  // One row per tenant, upserted whole, plus the two tick lists the tab shows ("Allowed in interior
+  // walls" on doors and windows, "Allowed on interior walls" on electrical items), which are written
+  // column-only so the tab never has to resend either catalog.
+  //
+  // THE 278 ROW IS KEPT IN STEP. Until slice 2 the designer and submit-estimate still price a wall
+  // from layout_item_pricing 'partitionWall' (and get_config hides the button while that row has no
+  // rate), so this save mirrors the STANDARD stud's method and rate into it, and the tab's taxable /
+  // internal-only into client_layout_items. The Interior items card no longer lists the wall and
+  // save_layout_pricing no longer writes it, so this is the one writer.
+  if (action === "save_interior_walls") {
+    const p = payload as Record<string, unknown>;
+    const STUDS = new Set(["2x4", "2x6"]);
+    const METHODS = new Set(["each", "lineal_ft", "sqft_option"]);
+    const HEIGHTS = new Set(["plate", "rafters"]);
+    const standardStud = String(p.standardStud ?? "2x4");
+    if (!STUDS.has(standardStud)) return json({ error: "Pick 2x4 or 2x6 as your standard framing." }, 400);
+    const method = String(p.method ?? "");
+    if (!METHODS.has(method)) return json({ error: "Interior walls are priced each, per foot of wall or per square foot of wall." }, 400);
+    // A rate is a number >= 0 or genuinely absent. "" means "this size is not offered" and reaches the
+    // column as NULL, never as 0: 0 is a wall included at no charge.
+    const rateOf = (v: unknown): number | null | undefined => {
+      const t = String(v ?? "").trim();
+      if (t === "") return null;
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;
+    };
+    const rate2x4 = rateOf(p.rate2x4), rate2x6 = rateOf(p.rate2x6);
+    if (rate2x4 === undefined || rate2x6 === undefined) {
+      return json({ error: "A wall rate has to be a number. Leave a size blank if you don't offer it." }, 400);
+    }
+    const standardRate = standardStud === "2x6" ? rate2x6 : rate2x4;
+    if (standardRate == null) {
+      return json({ error: `Enter a rate for a ${standardStud} wall: it is your standard framing. Leave the other size blank if you don't offer it.` }, 400);
+    }
+    const standardHeight = String(p.standardHeight ?? "plate");
+    if (!HEIGHTS.has(standardHeight)) return json({ error: "Pick stud wall height or to the rafters as your standard wall height." }, 400);
+    const allowRafters = p.allowRafters !== false;
+    if (standardHeight === "rafters" && !allowRafters) {
+      return json({ error: "Your standard height is to the rafters, so \"To the rafters\" has to be offered. Tick it, or make stud wall height the standard." }, 400);
+    }
+    const taxable = p.taxable !== false;
+    const internalOnly = p.internalOnly === true;
+    // The two tick lists: { id: boolean }. Ids that are not uuids are dropped rather than handed to
+    // Postgres (22P02). Every write is scoped to this tenant, so a foreign id matches nothing.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const splitFlags = (v: unknown): { on: string[]; off: string[] } | null => {
+      const on: string[] = [], off: string[] = [];
+      if (v == null) return { on, off };
+      if (typeof v !== "object" || Array.isArray(v)) return null;
+      const entries = Object.entries(v as Record<string, unknown>);
+      if (entries.length > MAX_BULK_ROWS) return null;
+      for (const [id, val] of entries) {
+        if (!UUID_RE.test(id)) continue;
+        (val === false ? off : on).push(id);
+      }
+      return { on, off };
+    };
+    const fixFlags = splitFlags(p.inPartition), elecFlags = splitFlags(p.interiorWallOk);
+    if (!fixFlags || !elecFlags) {
+      return json({ error: "Those interior-wall ticks didn't come through in a form we can save. Reload the page and try again." }, 400);
+    }
+    const up = await admin.from("interior_wall_settings").upsert({
+      client_id: clientId,
+      standard_stud: standardStud,
+      pricing_method: method,
+      rate_2x4: rate2x4,
+      rate_2x6: rate2x6,
+      standard_height: standardHeight,
+      allow_rafters: allowRafters,
+      allow_rough_openings: p.allowRo !== false,
+      taxable,
+      internal_only: internalOnly,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (up.error) return dbFail(req, clientId, "save your interior wall settings", up.error);
+    for (const [ids, val] of [[fixFlags.on, true], [fixFlags.off, false]] as [string[], boolean][]) {
+      if (!ids.length) continue;
+      const r = await admin.from("fixture_items").update({ in_partition: val })
+        .eq("client_id", clientId).in("category", ["door", "window"]).in("id", ids);
+      if (r.error) return dbFail(req, clientId, "save which doors and windows go in interior walls", r.error);
+    }
+    for (const [ids, val] of [[elecFlags.on, true], [elecFlags.off, false]] as [string[], boolean][]) {
+      if (!ids.length) continue;
+      const r = await admin.from("electrical_items").update({ interior_wall_ok: val })
+        .eq("client_id", clientId).in("id", ids);
+      if (r.error) return dbFail(req, clientId, "save which electrical items go on interior walls", r.error);
+    }
+    // The 278 row, kept in step (see above). The all-styles row only; a per-style row, which no card
+    // has ever written, is left alone.
+    const lp = await admin.from("layout_item_pricing").select("id").eq("client_id", clientId)
+      .eq("item_key", "partitionWall").is("style_id", null).maybeSingle();
+    if (lp.error) return dbFail(req, clientId, "save your interior wall price", lp.error);
+    const lpWrite = lp.data?.id
+      ? await admin.from("layout_item_pricing").update({ pricing_method: method, rate: standardRate }).eq("id", lp.data.id).eq("client_id", clientId)
+      : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: "partitionWall", style_id: null, pricing_method: method, rate: standardRate });
+    if (lpWrite.error) return dbFail(req, clientId, "save your interior wall price", lpWrite.error);
+    const cli = await admin.from("client_layout_items").update({ taxable, internal_only: internalOnly })
+      .eq("client_id", clientId).eq("item_key", "partitionWall");
+    if (cli.error) return dbFail(req, clientId, "save your interior wall settings", cli.error);
+    return json({ ok: true });
+  }
+
+  // The builder's own list of wall coverings (311): save_electrical_items' shape. Upsert by id (a
+  // rename is an update), a name clash is a 409 in words, and a row the editor did not send back is
+  // deleted: it is the builder's own list, and a removed row is expected to be gone.
+  if (action === "save_interior_wall_coverings") {
+    const rows = Array.isArray((payload as Record<string, unknown>).rows)
+      ? (payload as Record<string, unknown>).rows as Record<string, unknown>[] : [];
+    if (rows.length > MAX_BULK_ROWS) return json({ error: `That's more than ${MAX_BULK_ROWS} coverings in one save.` }, 400);
+    const METHODS = new Set(["sqft_option", "lineal_ft", "each"]);
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    // Validate the whole list before writing any of it: two rows with one name, or one bad rate,
+    // would otherwise stop the save halfway and leave half a list.
+    const seen = new Set<string>();
+    const clean: Record<string, unknown>[] = [];
+    for (const r of rows) {
+      const name = String(r?.name ?? "").trim().slice(0, 60);
+      if (!name) continue;
+      const k = name.toLowerCase();
+      if (seen.has(k)) return json({ error: `You have two wall coverings called "${name}". Give one of them a different name.` }, 409);
+      seen.add(k);
+      const method = String(r?.method ?? "sqft_option");
+      if (!METHODS.has(method)) return json({ error: `"${name}" has to be priced per square foot of wall, per foot of wall, or each.` }, 400);
+      const t = String(r?.rate ?? "").trim();
+      const rate = t === "" ? null : Number(t);
+      if (rate != null && (!Number.isFinite(rate) || rate < 0)) {
+        return json({ error: `"${name}" has a rate that isn't a number. Leave it blank if you don't offer it, or 0 if it's included.` }, 400);
+      }
+      const rawId = String(r?.id ?? "").trim();
+      clean.push({
+        id: UUID_RE.test(rawId) ? rawId : "",
+        row: {
+          client_id: clientId,
+          name,
+          pricing_method: method,
+          rate,
+          taxable: r?.taxable !== false,
+          internal_only: r?.internalOnly === true,
+          active: r?.active !== false,
+          sort_order: Number(r?.sortOrder) || 0,
+          updated_at: new Date().toISOString(),
+        },
+      });
+    }
+    const keep: string[] = [];
+    let saved = 0;
+    for (const c of clean) {
+      const row = c.row as Record<string, unknown>;
+      const id = String(c.id);
+      const nameClash = (err: { code?: string } | null) =>
+        String(err?.code ?? "") === "23505"
+          ? json({ error: `You already have a wall covering called "${row.name}". Give one of them a different name.` }, 409)
+          : null;
+      let savedId: string | null = null;
+      if (id) {
+        // .eq("client_id") is load-bearing: the id arrives in the body.
+        const upd = await admin.from("interior_wall_coverings").update(row)
+          .eq("id", id).eq("client_id", clientId).select("id").maybeSingle();
+        if (upd.error) return nameClash(upd.error) ?? dbFail(req, clientId, "save your wall coverings", upd.error);
+        savedId = upd.data?.id ? String(upd.data.id) : null;
+      }
+      // No id, or an id that no longer matches a row of this tenant's: keyed by name instead.
+      if (!savedId) {
+        const ins = await admin.from("interior_wall_coverings").upsert(row, { onConflict: "client_id,name" }).select("id").single();
+        if (ins.error) return nameClash(ins.error) ?? dbFail(req, clientId, "save your wall coverings", ins.error);
+        savedId = ins.data?.id ? String(ins.data.id) : null;
+      }
+      if (savedId) keep.push(savedId);
+      saved++;
+    }
+    const del = await admin.from("interior_wall_coverings").delete().eq("client_id", clientId)
+      .not("id", "in", `(${keep.length ? keep.map((k) => `"${k}"`).join(",") : '"00000000-0000-0000-0000-000000000000"'})`);
+    if (del.error) return dbFail(req, clientId, "tidy up your wall coverings", del.error);
+    return json({ ok: true, saved });
   }
 
   if (action === "save_insulation") {
@@ -6836,6 +7016,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     } else if (has("inDoor")) {
       rec.in_door = row?.inDoor === true;
     }
+    // Allowed in interior walls (311): doors and windows, presence-guarded the same way, so a sheet
+    // without the column or an older portal leaves the builder's tick alone. The column defaults TRUE,
+    // so only an explicit false takes an item out of the interior-wall pickers. A ramp or vent is never
+    // written: nothing reads it for them.
+    if ((category === "door" || category === "window") && has("inPartition")) {
+      rec.in_partition = row?.inPartition !== false;
+    }
     // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
     // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
     // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
@@ -6912,6 +7099,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     if (!("in_door" in rec)) rec.in_door = false;
+    if (!("in_partition" in rec)) rec.in_partition = true;
     if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";

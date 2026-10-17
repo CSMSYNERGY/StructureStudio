@@ -4997,6 +4997,7 @@ function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {sub === "ramps" && <RampsView {...p} />}
       {sub === "cladding" && <CladdingView {...p} />}
       {sub === "interior" && <LayoutPricing {...p} />}
+      {sub === "interior-walls" && <InteriorWalls {...p} />}
       {sub === "electrical" && <Electrical {...p} />}
       {sub === "insulation" && <Insulation {...p} />}
       {sub === "delivery" && <DeliveryView {...p} />}

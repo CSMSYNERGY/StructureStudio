@@ -61,7 +61,7 @@ const ROUTES = [
   // Options hub — nine catalog editors, one tab each
   "/settings/options", "/settings/doors", "/settings/windows",
   "/settings/vents", "/settings/ramps", "/settings/cladding",
-  "/settings/interior", "/settings/electrical", "/settings/insulation",
+  "/settings/interior", "/settings/interior-walls", "/settings/electrical", "/settings/insulation",
   "/settings/delivery", "/settings/foundation",
   // Your own settings
   "/settings/myprofile",

@@ -28,10 +28,10 @@
 //      wall to wall — and does not offer it in the 3D palette. A "Look inside" shot.
 //   J. QUOTE: Get Quote sends itemSummary.partitions with the length, the height and the door by its
 //      catalog id, and floorPlanItems carries the wall with no `wall`.
-//   K. THE PORTAL'S Interior items card: the Partition Wall row is "Not offered yet", its rate starts
-//      blank, its method list is each / per foot / per sq ft of wall, a Save made for something else
-//      does not send it (so it never appears free), and a rate typed in is sent. Every catalog read asks
-//      for the unpriced items (withUnpriced) and every Save says it knows the partition (partitionAware).
+//   K. THE PORTAL (311): Interior items no longer lists the wall and its Save never sends one; the
+//      Interior walls tab shows the seeded 2x4 rate, sends the framing, the door/window and electrical
+//      ticks and the ordered coverings on Save, and refuses a blank standard rate before sending.
+//      Every catalog read asks for the unpriced items (withUnpriced).
 //   M. INTERIOR WALLS V2 (2026-10-17), on a rep's designer (canOverridePrice): press-drag draws a wall
 //      that snaps to 45 degrees; with Shift it keeps its own angle; a wall drawn up to another's body
 //      lands on it (a T); every wall is two parallel lines turned to its angle on the plan, and the PDF
@@ -457,7 +457,7 @@ const run = async () => {
     // ── M, N. Interior walls v2 on a rep's designer ─────────────────────────────────────────────
     await v2Run(ctx, ok, shots, allErrors);
 
-    // ── K. The portal's Interior items card ───────────────────────────────────────────────────
+    // ── K. The portal's Interior items card and Interior walls tab ───────────────────────────────────────────────────
     await portalRun(browser, ok, shots, allErrors);
 
     ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | "));
@@ -660,13 +660,24 @@ async function portalRun(browser, ok, shots, allErrors) {
   page.on("pageerror", (e) => allErrors.push("K: " + e.message));
   const saves = [];
   const catalogs = [];
-  // As portal-settings' catalog answers after 278: the partition is hidden until priced and has no
-  // pricing row; the shelf is priced; the workbench is not hidden and has no row (it shows 0).
-  let lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }];
+  // As portal-settings' catalog answers after 311: the partition wall is still an item (priced, so it
+  // is listed), but the Interior items card leaves it out; the Interior walls tab reads its own row,
+  // seeded from the 278 price ($35 per foot, 2x4), one covering, a door, a window and two electrical items.
+  const lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }, { item_key: "partitionWall", pricing_method: "lineal_ft", rate: 35, image_url: null }];
   const items = () => [
     { key: "workbench", label: "Workbench", archived: false, internalOnly: false, taxable: true, wallSnap: true, depthIn: null, heightOffFloorIn: 36, hiddenUntilPriced: false },
     { key: "shelf", label: "Single Shelf", archived: false, internalOnly: false, taxable: true, wallSnap: true, depthIn: 12, heightOffFloorIn: 48, hiddenUntilPriced: true },
     { key: "partitionWall", label: "Partition Wall", archived: false, internalOnly: false, taxable: true, wallSnap: false, depthIn: null, heightOffFloorIn: null, hiddenUntilPriced: true },
+  ];
+  const iw = { standard_stud: "2x4", pricing_method: "lineal_ft", rate_2x4: 35, rate_2x6: null, standard_height: "plate", allow_rafters: true, allow_rough_openings: true, taxable: true, internal_only: false };
+  const covers = [{ id: "00000000-0000-4000-8000-0000000000c1", name: "Drywall", pricing_method: "sqft_option", rate: 2.5, taxable: true, internal_only: false, active: true, sort_order: 10 }];
+  const fixtures = [
+    { id: "00000000-0000-4000-8000-0000000000d1", category: "door", name: "Walk door", in_partition: true, archived: false },
+    { id: "00000000-0000-4000-8000-0000000000a1", category: "window", name: "Slider window", in_partition: true, archived: false },
+  ];
+  const elec = [
+    { id: "00000000-0000-4000-8000-0000000000f1", name: "Ceiling fan", icon: "F", interior_wall_ok: true },
+    { id: "00000000-0000-4000-8000-0000000000f2", name: "Outlet", icon: "O", interior_wall_ok: true },
   ];
   await ctx.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   const handler = async (route) => {
@@ -693,64 +704,75 @@ async function portalRun(browser, ok, shots, allErrors) {
       case "catalog":
         catalogs.push(body);
         return jsonR(route, { ok: true, clientId: CLIENT, styles: [], sizes: [], items: items(), inclusions: [], layoutPricing: lp,
-          colors: [], fixtures: [], wallHeights: [], insulation: [], insulationEnabled: false });
-      case "save_layout_pricing": {
+          colors: [], fixtures, wallHeights: [], insulation: [], insulationEnabled: false, electricalItems: elec,
+          interiorWalls: iw, interiorWallCoverings: covers });
+      case "save_layout_pricing":
+      case "save_interior_walls":
+      case "save_interior_wall_coverings":
         saves.push(body);
-        for (const row of body.rows) {
-          const had = lp.find((x) => x.item_key === row.item_key);
-          if (had) Object.assign(had, { pricing_method: row.pricing_method, rate: row.rate });
-          else lp.push({ item_key: row.item_key, pricing_method: row.pricing_method, rate: row.rate, image_url: null });
-        }
-        return jsonR(route, { ok: true, saved: body.rows.length, skipped: [] });
-      }
+        return jsonR(route, { ok: true, saved: (body.rows || []).length, skipped: [] });
       default: return jsonR(route, { ok: true });
     }
   };
   await ctx.route(`**/${REF}.supabase.co/**`, handler);
   await ctx.route(`**/${REF}.functions.supabase.co/**`, handler);
+  const go = async (path) => {
+    await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, path);
+  };
   try {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/settings/interior"); window.dispatchEvent(new PopStateEvent("popstate")); });
-    await page.waitForFunction(() => !!document.querySelector('[data-ss-lp-item="partitionWall"]'), null, { timeout: 20000 }).catch(() => {});
+    // K0-K1: Interior items no longer lists the wall; its Save never sends one.
+    await go("/settings/interior");
+    await page.waitForFunction(() => !!document.querySelector('[data-ss-lp-item="shelf"]'), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
-    const row = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    if (!ok("K0 the Interior items card lists the Partition Wall", await row.count() > 0)) return;
-    ok("K1 its row says it is not offered yet", (await row.innerText()).includes("Not offered yet"));
-    const rate = row.locator('input[type="number"]').first();
-    ok("K2 its rate starts blank, not 0", (await rate.inputValue()) === "" && (await rate.getAttribute("placeholder")) === "not offered");
-    const opts = await row.locator("select").first().locator("option").allTextContents();
-    ok("K3 it is priced each, per foot of wall or per square foot of wall — nothing else",
-      JSON.stringify(opts) === JSON.stringify(["each", "lineal ft — per foot of wall", "sqft option — per sq ft of wall"]), JSON.stringify(opts));
-    const shelfOpts = await page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="shelf"]') }).first().locator("select option").count();
-    ok("K3b every other item keeps the seven methods", shelfOpts === 7, String(shelfOpts));
-    const card = page.locator("div").filter({ has: page.getByText("Interior items", { exact: true }) }).filter({ has: page.locator("table") }).last();
-    await card.screenshot({ path: join(shots, "K-options-card.png") });
-    // A Save for something else: the shelf goes up to $20 a foot.
-    await page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="shelf"]') }).first().locator('input[type="number"]').first().fill("20");
+    ok("K0 the Interior items card lists the shelf but no longer the interior wall",
+      await page.locator('[data-ss-lp-item="shelf"]').count() > 0 && await page.locator('[data-ss-lp-item="partitionWall"]').count() === 0);
     await page.getByRole("button", { name: "Save prices" }).click();
     for (let i = 0; i < 20 && saves.length < 1; i++) await settle(page, 200);
-    await settle(page, 500);
-    const first = saves[0] ? saves[0].rows : [];
-    ok("K4 a Save for another item does not send the partition (it stays unoffered, never free)",
-      first.length > 0 && !first.some((x) => x.item_key === "partitionWall") && first.some((x) => x.item_key === "shelf" && x.rate === 20), JSON.stringify(first));
-    // The builder prices it: $22 per foot of wall.
-    const row2 = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    await row2.locator("select").first().selectOption("lineal_ft");
-    await row2.locator('input[type="number"]').first().fill("22");
-    await page.getByRole("button", { name: "Save prices" }).click();
-    for (let i = 0; i < 20 && saves.length < 2; i++) await settle(page, 200);
-    await settle(page, 500);
-    const second = saves[1] ? saves[1].rows : [];
-    ok("K5 a rate typed in is sent, per foot", second.some((x) => x.item_key === "partitionWall" && x.pricing_method === "lineal_ft" && x.rate === 22), JSON.stringify(second));
-    const row3 = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    ok("K6 ...and after the reload it is priced (no longer 'Not offered yet')", !(await row3.innerText()).includes("Not offered yet") && (await row3.locator('input[type="number"]').first().inputValue()) === "22");
-    await card.screenshot({ path: join(shots, "K-options-card-priced.png") });
-    // portal-settings lists an unpriced partition wall only to a read that asks, and lets only a Save
-    // that says it knows the item price one (production's card from before 278 does neither).
-    ok("K7 every catalog read asks for the unpriced items (withUnpriced)", catalogs.length > 0 && catalogs.every((b) => b.withUnpriced === true), JSON.stringify(catalogs.map((b) => b.withUnpriced)));
-    ok("K8 every Save says it knows the partition wall (partitionAware)", saves.length === 2 && saves.every((b) => b.partitionAware === true), JSON.stringify(saves.map((b) => b.partitionAware)));
+    const lpSave = saves.find((b) => b.action === "save_layout_pricing");
+    ok("K1 its Save sends no partition row and no partitionAware flag", !!lpSave && !lpSave.rows.some((r) => r.item_key === "partitionWall") && !("partitionAware" in lpSave), JSON.stringify(lpSave));
+
+    // K2-K8: the Interior walls tab.
+    await go("/settings/interior-walls");
+    await page.waitForFunction(() => document.body.innerText.includes("Framing & price"), null, { timeout: 20000 }).catch(() => {});
+    await settle(page, 600);
+    const text = await page.locator("body").innerText();
+    ok("K2 the Interior walls tab opens on its four cards",
+      ["Framing & price", "Wall coverings", "Doors allowed in interior walls", "Allowed on interior walls", "Save interior walls"].every((t) => text.toLowerCase().includes(t.toLowerCase())));
+    const rate4 = page.locator('input[type="number"]').nth(0);
+    const rate6 = page.locator('input[type="number"]').nth(1);
+    ok("K3 the seeded 2x4 rate shows; 2x6 is blank (not offered)", (await rate4.inputValue()) === "35" && (await rate6.inputValue()) === "" && (await rate6.getAttribute("placeholder")) === "not offered");
+    await page.screenshot({ path: join(shots, "K-interior-walls.png"), fullPage: true });
+    // Offer 2x6 at $42, untick the door and the fan, add OSB included, and save.
+    await rate6.fill("42");
+    await page.getByLabel("Walk door").uncheck();
+    await page.getByLabel("Ceiling fan").uncheck();
+    await page.getByRole("button", { name: "+ Add a covering" }).click();
+    const newName = page.locator("tbody tr").filter({ has: page.locator("input:not([type])") }).last().locator("input").first();
+    await newName.fill("OSB");
+    const newRate = page.locator("tbody tr").last().locator('input[type="number"]').first();
+    await newRate.fill("0");
+    const before = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    for (let i = 0; i < 25 && saves.length < before + 2; i++) await settle(page, 200);
+    const w = saves.find((b) => b.action === "save_interior_walls");
+    const c = saves.find((b) => b.action === "save_interior_wall_coverings");
+    ok("K4 Save sends the framing: 2x4 standard at 35, 2x6 at 42, per foot, plate height",
+      !!w && w.standardStud === "2x4" && w.rate2x4 === "35" && w.rate2x6 === "42" && w.method === "lineal_ft" && w.standardHeight === "plate" && w.allowRafters === true, JSON.stringify(w));
+    ok("K5 ...and the ticks as id → yes/no for every door, window and electrical item",
+      !!w && w.inPartition["00000000-0000-4000-8000-0000000000d1"] === false && w.inPartition["00000000-0000-4000-8000-0000000000a1"] === true
+      && w.interiorWallOk["00000000-0000-4000-8000-0000000000f1"] === false && w.interiorWallOk["00000000-0000-4000-8000-0000000000f2"] === true, JSON.stringify(w && [w.inPartition, w.interiorWallOk]));
+    ok("K6 the coverings go in their order, the new one included at $0",
+      !!c && JSON.stringify(c.rows.map((r) => [r.name, r.rate, r.sortOrder])) === JSON.stringify([["Drywall", "2.5", 10], ["OSB", "0", 20]]), JSON.stringify(c && c.rows));
+    // A blank standard rate is refused in the page, before anything is sent.
+    await rate4.fill("");
+    const n = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    await settle(page, 600);
+    ok("K7 a blank standard rate is refused before anything is sent", saves.length === n && (await page.locator("body").innerText()).includes("Enter a rate for a 2x4 wall"));
+    ok("K8 every catalog read asks for the unpriced items (withUnpriced)", catalogs.length > 0 && catalogs.every((b) => b.withUnpriced === true), JSON.stringify(catalogs.map((b) => b.withUnpriced)));
   } finally {
     await ctx.close();
   }
