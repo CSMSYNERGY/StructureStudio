@@ -8236,7 +8236,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //                  (ai_edited, source_photo_id) and the hold is captured; on failure released.
   // One at a time per builder: the wallet allows one live hold per meter (wallet_tx_one_hold).
   if (action === "photo_bg_info" || action === "photo_bg_start" || action === "photo_bg_status") {
-    const FAL_KEY = Deno.env.get("FAL_AI_API_KEY") ?? "";
+    // The secret was saved as FAL_AI_API_KEY_Structure_Studio on this project (2026-10-17); the
+    // plain FramedUp name is read too, so either spelling works.
+    const FAL_KEY = Deno.env.get("FAL_AI_API_KEY") || Deno.env.get("FAL_AI_API_KEY_Structure_Studio") || "";
     const BG_MODEL = "openai/gpt-image-2/edit";
     const BG_METER = "photo_background_change";
     const [{ data: meter }, { data: csEx }, { data: walletRow }] = await Promise.all([
