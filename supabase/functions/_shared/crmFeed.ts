@@ -215,7 +215,7 @@ export async function buildCrmFeed(
           return r?.data ?? [];
         })().catch(() => [])
       : Promise.resolve([]),
-    codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
+    codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, accepted_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("change_orders").select("id, short_code, co_no, status, total_before_cents, total_after_cents, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("invoice_sends").select("short_code, status, invoice_number, issued_by, updated_at, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     opts.contactId ? q(admin.from("captured_leads").select("id, name, source, created_at").eq("client_id", clientId).eq("contact_id", opts.contactId)) : Promise.resolve([]),
@@ -308,7 +308,7 @@ export async function buildCrmFeed(
     const what = [sel.style, sel.size].filter(Boolean).join(" ") || "a design";
     push({ id: `d:${d.short_code}`, type: "design_created", at: iso(d.created_at), title: `Design started — ${what}`, code: d.short_code, icon: "design" });
     if (d.ss_quote_sent_at) push({ id: `qs:${d.short_code}`, type: "email", at: iso(d.ss_quote_sent_at), title: `Quote ${d.ss_quote_number || ""} sent`.trim(), code: d.short_code, icon: "email" });
-    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Quote accepted", code: d.short_code, icon: "accept" });
+    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Estimate accepted", code: d.short_code, icon: "accept" });
     // The customer OPENED the estimate. The one genuinely GHL-only signal, and it is here
     // as a stamped column rather than a live API call.
     if (d.ghl_last_visited_at) push({ id: `ov:${d.short_code}`, type: "quote_opened", at: iso(d.ghl_last_visited_at), title: "Customer opened the quote", code: d.short_code, icon: "eye" });
@@ -402,8 +402,17 @@ export async function buildCrmFeed(
       ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email", meta }
       : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
   }
+  // Estimates are ACCEPTED, never signed (Carolyn 2026-10-17: "I don't want ANY signatures on
+  // estimates… the customer signs the invoice"). Only invoices and change orders read "signed".
+  // This used to title every row "Quote signed by", click acceptances and invoices included.
+  const how: Record<string, string> = { click: "clicked Accept", drawn: "drawn signature", typed: "typed signature", rep: "recorded by staff" };
   for (const a of accepts as any[]) {
-    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
+    const who = a.signer_name || "customer";
+    const title = a.subject === "change_order" ? `Change order signed by ${who}`
+      : a.subject === "invoice" ? (a.method === "rep" ? `Invoice accepted for ${who} (recorded by staff)` : `Invoice signed by ${who}`)
+      : (a.method === "rep" ? `Estimate accepted for ${who} (recorded by staff)` : `Estimate accepted by ${who}`);
+    const method = how[a.method] || a.method;
+    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.accepted_at), title, body: a.quote_number ? `${a.subject === "invoice" ? "Invoice" : a.subject === "change_order" ? "Change order" : "Estimate"} ${a.quote_number} · ${method}` : method, code: a.short_code, icon: "accept" });
   }
   for (const c of changeOrders as any[]) {
     const delta = (Number(c.total_after_cents || 0) - Number(c.total_before_cents || 0)) / 100;

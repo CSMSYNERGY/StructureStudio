@@ -823,8 +823,8 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
       <div style={S.card}>
         <div style={S.h2}>Customer login code</div>
         <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
-          How your customers get the 6-digit code that logs them in to see, accept and sign their estimates
-          and invoices. This is the option they're offered first — they can still pick the other one.
+          How your customers get the 6-digit code that logs them in to see and accept their estimates,
+          and to sign and pay their invoices. This is the option they're offered first — they can still pick the other one.
         </p>
         <div role="group" aria-label="Customer login code" data-ss-login-default={form.customerLoginDefault === "email" ? "email" : "sms"}
           style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>

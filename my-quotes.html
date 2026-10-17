@@ -1853,6 +1853,11 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   //    INVOICE (sign_invoice, migration 136). Quotes no longer reach here at all — they
   //    are accepted with a click via toggleAcceptPanel. ──
   function toggleSignPanel(card, q, signBtn, co, inv) {
+    // SIGNING IS FOR INVOICES AND CHANGE ORDERS ONLY (Carolyn 2026-10-17: "I don't want ANY
+    // signatures on estimates"). An estimate is accepted with a click (toggleAcceptPanel). The
+    // estimate branch that lived here had no caller left; it is gone, and this guard keeps a
+    // future caller from reopening it.
+    if (!co && !inv) return;
     var existing = card.querySelector(".sign-panel");
     if (existing) { existing.parentNode.removeChild(existing); return; }
 
@@ -1996,19 +2001,16 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // consentSentenceInvoice), printed the way the designer prints it. The composition below is
       // only the fallback for a customer-quotes that sent no sentence.
       consentSpan.textContent = q.signConsentText;
-    } else if (inv) {
-      // Mirrors consentSentenceInvoice() in customer-accept — see the note in
-      // toggleAcceptPanel about why these two compositions must not drift.
-      // amountDue, not q.total — the server composes the stored consent_text from the same
-      // figure, and the two sentences must not name different money.
+    } else {
+      // An invoice (the guard at the top rules out anything else). Mirrors
+      // consentSentenceInvoice() in customer-accept — see the note in toggleAcceptPanel about
+      // why these two compositions must not drift. amountDue, not q.total — the server composes
+      // the stored consent_text from the same figure, and the two sentences must not name
+      // different money.
       var invTotalText = fmtMoney(inv.amountDue == null ? q.total : inv.amountDue);
       var invNumText = inv.number != null ? String(inv.number) : "your invoice";
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept invoice " +
         invNumText + (invTotalText ? " for " + invTotalText : "") + ".";
-    } else {
-      var totalText = fmtMoney(q.total);
-      consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I accept estimate " +
-        numText + (totalText ? " for " + totalText : "") + ".";
     }
     consentRow.appendChild(consentBox);
     consentRow.appendChild(consentSpan);
@@ -2022,7 +2024,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var submit = document.createElement("button");
     submit.type = "button";
     submit.className = "btn btn-primary";
-    var submitLabel = co ? "Sign & Approve" : inv ? "Sign Invoice" : "Sign & Accept";
+    var submitLabel = co ? "Sign & Approve" : "Sign Invoice";
     submit.textContent = submitLabel;
     submit.style.marginTop = "4px";
     panel.appendChild(submit);
@@ -2034,9 +2036,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to sign."); return; }
       var payload = co
         ? { action: "ack_change_order", token: token, changeOrderId: co.id, signerName: signerName, consent: true, method: mode }
-        : inv
-        ? { action: "sign_invoice", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode }
-        : { action: "accept_quote", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode };
+        : { action: "sign_invoice", token: token, quoteRef: q.quoteRef, signerName: signerName, consent: true, method: mode };
       if (mode === "drawn") {
         if (!hasInk) { setError(errEl, "Draw your signature in the box (or switch to typing your name)."); return; }
         payload.signatureDataUrl = canvas.toDataURL("image/png");
