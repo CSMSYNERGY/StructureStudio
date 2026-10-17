@@ -23,6 +23,12 @@
 /my-quotes   /my-quotes.html  200
 /my-quotes/  /my-quotes       301
 
+# The Online Shop (2026-10-17): a builder's lot buildings, public and embeddable on their own
+# website (shop-embed.js). ?client= picks the builder, ?unit= one building; no sub-paths, so no
+# /shop/* rule. Deliberately NO X-Frame-Options in _headers: framing is the point.
+/shop        /shop.html       200
+/shop/       /shop            301
+
 # ── THE APP'S ADDRESSES: /<page>[/<sub>], NO /portal (Carolyn 2026-10-12) ─────────────────
 # "It's app.structurestudiosuite.com forward slash advance. Like, so let's remove portal from
 # anywhere." Every page of the app is portal.html, rewritten — 200, never 301, so the address

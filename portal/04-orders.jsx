@@ -4849,10 +4849,240 @@ const invMoney = (cents) => cents == null ? "—" :
 // building's estimates is the buyer, and to warn on the others — but NOT to decide sold-ness
 // any more: that is stored now (see invSold above the fold).
 const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
+// ── The Online Shop (migration 310, Carolyn 2026-10-17) ────────────────────────────────────
+// Builders list lot buildings on a public, branded page (shop.html) their own website can embed.
+// Brittney Weis (Midwest Mini Barns' marketer) asked for this on the 2026-10-12 call in place of
+// a Shopify store, including the option NOT to show prices — so price is per building AND
+// shop-wide. Every write goes through portal-settings; nothing here touches a schedule or a sale.
+const SHOP_PUBLIC_ORIGIN = "https://app.structurestudiosuite.com";
+
+function ShopSettingsPanel({ clientId, canEdit }) {
+  const [s, setS] = useState(null);
+  const [paymentsLive, setPaymentsLive] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [copied, setCopied] = useState(null);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "shop_settings" } });
+      if (!live) return;
+      if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "Could not load your shop settings.") }); return; }
+      setS(data.settings); setPaymentsLive(!!data.paymentsLive);
+    })();
+    return () => { live = false; };
+  }, [clientId]);
+  if (!s) return msg && msg.err ? <div style={S.err}>{msg.err}</div> : <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading shop settings…</div>;
+  const set = (k, v) => setS((x) => ({ ...x, [k]: v }));
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_shop_settings", settings: s } });
+    setSaving(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "That didn't save.") }); return; }
+    setMsg({ ok: s.enabled ? "Saved. Your shop is live." : "Saved. Your shop is switched off." });
+  };
+  const shopUrl = `${SHOP_PUBLIC_ORIGIN}/shop?client=${encodeURIComponent(clientId)}`;
+  const embed = `<div data-ss-shop="${clientId}"></div>\n<script src="${SHOP_PUBLIC_ORIGIN}/shop-embed.js" async></script>`;
+  const copy = async (what, text) => {
+    try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(null), 1600); } catch (_e) { window.prompt("Copy this:", text); }
+  };
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const row = { display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 };
+  const check = (k, text, hint) => (
+    <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canEdit ? "pointer" : "default" }}>
+      <input type="checkbox" checked={!!s[k]} disabled={!canEdit} onChange={(e) => set(k, e.target.checked)} style={{ marginTop: 2 }} />
+      <span><strong>{text}</strong>{hint ? <span style={{ color: "#64748B" }}> — {hint}</span> : null}</span>
+    </label>
+  );
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
+      {check("enabled", "Shop is live", "show buildings marked “List online” at your shop link")}
+      {check("hideAllPrices", "Hide all prices", "every building shows “Call for price” and an inquiry form instead of a price")}
+      <div style={row}>
+        <div style={{ flex: "1 1 240px" }}>
+          <span style={lbl}>Heading</span>
+          <input value={s.heading} disabled={!canEdit} maxLength={120} onChange={(e) => set("heading", e.target.value)}
+            placeholder="Buildings ready to deliver" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "1 1 160px" }}>
+          <span style={lbl}>Google Tag Manager ID</span>
+          <input value={s.gtmContainerId} disabled={!canEdit} onChange={(e) => set("gtmContainerId", e.target.value)}
+            placeholder="GTM-XXXXXXX" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <span style={lbl}>Intro</span>
+        <textarea value={s.intro} disabled={!canEdit} maxLength={1000} rows={2} onChange={(e) => set("intro", e.target.value)}
+          placeholder="Every building on our lot is built and ready. Ask about delivery to your yard."
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+      </div>
+      <div style={row}>
+        <div style={{ flex: "1 1 220px" }}>
+          <span style={lbl}>Deposit at online checkout</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <select value={s.depositMode} disabled={!canEdit} onChange={(e) => set("depositMode", e.target.value)} style={{ ...S.input }}>
+              <option value="percent">Percent of price</option>
+              <option value="flat">Flat amount ($)</option>
+              <option value="full">Pay in full</option>
+            </select>
+            {s.depositMode !== "full" && (
+              <input type="number" min="0" step="1" value={s.depositValue} disabled={!canEdit}
+                onChange={(e) => set("depositValue", e.target.value)} style={{ ...S.input, width: 90 }} />
+            )}
+          </div>
+        </div>
+        <div style={{ flex: "1 1 240px" }}>
+          <span style={lbl}>Terms link (https://)</span>
+          <input value={s.termsUrl} disabled={!canEdit} onChange={(e) => set("termsUrl", e.target.value)}
+            placeholder="https://yourbusiness.com/terms" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+      </div>
+      {s.depositMode !== "full" && check("allowPayInFull", "Let buyers choose to pay in full")}
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+        {paymentsLive
+          ? "Online card payments are on for your account, so buyers will be able to check out and pay the deposit once checkout launches."
+          : "Online card payments aren't set up for your account yet, so checkout will send you a purchase request instead of taking payment. Ask CSM Synergy to set up payments."}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {canEdit && <button type="button" disabled={saving} onClick={save} style={S.btn(ACCENT, "#FFF")}>{saving ? "Saving…" : "Save shop settings"}</button>}
+        <a href={shopUrl} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>Preview shop ↗</a>
+        <button type="button" onClick={() => copy("link", shopUrl)} style={S.btn("#F1F5F9", "#334155")}>{copied === "link" ? "Copied ✓" : "Copy shop link"}</button>
+        <button type="button" onClick={() => copy("embed", embed)} style={S.btn("#F1F5F9", "#334155")}>{copied === "embed" ? "Copied ✓" : "Copy website embed code"}</button>
+      </div>
+      {msg && msg.ok && <div style={{ color: "#15803D", fontSize: 13, fontWeight: 600, marginTop: 10 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 10 }}>{msg.err}</div>}
+    </div>
+  );
+}
+
+function InventoryListingEditor({ unit, canEdit, onChanged }) {
+  const [listed, setListed] = useState(!!unit.listed);
+  const [showPrice, setShowPrice] = useState(unit.showPriceOnline !== false);
+  const [title, setTitle] = useState(unit.publicTitle || "");
+  const [desc, setDesc] = useState(unit.publicDescription || "");
+  const [photos, setPhotos] = useState(unit.photos || []);
+  const [busy, setBusy] = useState(null);       // "save" | "upload" | photo id
+  const [msg, setMsg] = useState(null);
+  const [dragId, setDragId] = useState(null);
+  const fileRef = useRef(null);
+
+  const call = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body });
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "That didn't save.") }); return null; }
+    return data;
+  };
+  const saveListing = async () => {
+    setBusy("save"); setMsg(null);
+    const r = await call({ action: "save_inventory_listing", unitId: unit.id, listed, showPriceOnline: showPrice, publicTitle: title, publicDescription: desc });
+    setBusy(null);
+    if (r) { setMsg({ ok: listed ? "Saved — this building is listed online." : "Saved." }); onChanged && onChanged(); }
+  };
+  const savePhotos = async (patch) => {
+    const r = await call({ action: "save_inventory_photos", unitId: unit.id, ...patch });
+    if (r) { setPhotos(r.photos || []); onChanged && onChanged(); }
+    return r;
+  };
+  const upload = async (fileList) => {
+    const files = Array.from(fileList || []).filter((f) => /^image\/(jpeg|png|webp)$/.test(f.type));
+    if (!files.length) { setMsg({ err: "Pick JPG, PNG or WEBP photos." }); return; }
+    setBusy("upload"); setMsg(null);
+    const fitted = [];
+    for (const f of files) fitted.push(await ssFitImageForUpload(f, 2_800_000, 2000));
+    const added = [];
+    for (const f of fitted) {
+      const r = await call({ action: "inventory_photo_upload_url", unitId: unit.id, contentType: f.type || "image/jpeg", count: 1 });
+      const up = r && r.uploads && r.uploads[0];
+      if (!up) break;
+      const { error } = await sb.storage.from("inventory-photos").uploadToSignedUrl(up.key, up.token, f, { contentType: f.type || "image/jpeg" });
+      if (error) { setMsg({ err: "A photo didn't upload: " + (error.message || "try again") }); break; }
+      added.push(up.key);
+    }
+    if (added.length) {
+      const r = await savePhotos({ add: added });
+      if (r) setMsg({ ok: `${added.length} photo${added.length === 1 ? "" : "s"} added.` });
+    }
+    setBusy(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  const remove = async (p) => {
+    if (!window.confirm("Remove this photo?")) return;
+    setBusy(p.id); await savePhotos({ remove: [p.id] }); setBusy(null);
+  };
+  const move = async (fromId, toId) => {
+    if (!fromId || fromId === toId) return;
+    const ids = photos.map((p) => p.id);
+    const from = ids.indexOf(fromId), to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    setPhotos(ids.map((id) => photos.find((p) => p.id === id)));
+    await savePhotos({ order: ids });
+  };
+  const makeCover = (p) => move(p.id, photos[0] && photos[0].id);
+
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
+      <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "#94A3B8", textTransform: "uppercase", marginBottom: 9 }}>
+        Online listing — building #{unit.serial}
+      </div>
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", fontSize: 13, fontWeight: 700, color: "#334155" }}>
+          <input type="checkbox" checked={listed} disabled={!canEdit} onChange={(e) => setListed(e.target.checked)} /> List online
+        </label>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", fontSize: 13, fontWeight: 700, color: "#334155" }}>
+          <input type="checkbox" checked={showPrice} disabled={!canEdit} onChange={(e) => setShowPrice(e.target.checked)} />
+          Show price online <span style={{ fontWeight: 500, color: "#64748B" }}>(off = “Call for price”)</span>
+        </label>
+      </div>
+      <input value={title} disabled={!canEdit} maxLength={120} onChange={(e) => setTitle(e.target.value)}
+        placeholder={`Title — e.g. ${[titleCase(unit.style || ""), unit.size].filter(Boolean).join(" ") || "12x16 Lofted Barn"}`}
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 8 }} />
+      <textarea value={desc} disabled={!canEdit} maxLength={4000} rows={3} onChange={(e) => setDesc(e.target.value)}
+        placeholder="Description — what makes this building a good buy, options included, ready-to-deliver notes…"
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical", marginBottom: 10 }} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        {photos.map((p, i) => (
+          <div key={p.id} draggable={canEdit} onDragStart={() => setDragId(p.id)} onDragOver={(e) => e.preventDefault()}
+            onDrop={() => { move(dragId, p.id); setDragId(null); }}
+            style={{ position: "relative", width: 112, height: 84, borderRadius: 8, overflow: "hidden", border: i === 0 ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", background: "#FFF", cursor: canEdit ? "grab" : "default", opacity: busy === p.id ? 0.4 : 1 }}>
+            <img src={p.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            {i === 0 && <span style={{ position: "absolute", left: 4, top: 4, background: ACCENT, color: "#FFF", fontSize: 9.5, fontWeight: 800, borderRadius: 6, padding: "1px 6px" }}>COVER</span>}
+            {p.aiEdited && <span style={{ position: "absolute", left: 4, bottom: 4, background: "rgba(15,23,42,.75)", color: "#FFF", fontSize: 9.5, fontWeight: 700, borderRadius: 6, padding: "1px 6px" }}>AI background</span>}
+            {canEdit && (
+              <div style={{ position: "absolute", right: 3, top: 3, display: "flex", gap: 3 }}>
+                {i > 0 && <button type="button" title="Make cover photo" onClick={() => makeCover(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>★</button>}
+                <button type="button" title="Remove photo" onClick={() => remove(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>✕</button>
+              </div>
+            )}
+          </div>
+        ))}
+        {canEdit && photos.length < 12 && (
+          <button type="button" disabled={busy === "upload"} onClick={() => fileRef.current && fileRef.current.click()}
+            style={{ width: 112, height: 84, borderRadius: 8, border: "1.5px dashed #CBD5E1", background: "#FFF", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            {busy === "upload" ? "Uploading…" : "+ Add photos"}
+          </button>
+        )}
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }}
+          onChange={(e) => upload(e.target.files)} />
+      </div>
+      {photos.length > 1 && canEdit && <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>Drag photos to reorder. The first one is the cover.</div>}
+      {listed && photos.length === 0 && <div style={{ fontSize: 12, color: "#B45309", marginBottom: 8 }}>Add at least one photo — listings without photos get far fewer inquiries.</div>}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        {canEdit && <button type="button" disabled={busy === "save"} onClick={saveListing} style={S.btn(ACCENT, "#FFF")}>{busy === "save" ? "Saving…" : "Save listing"}</button>}
+        {msg && msg.ok && <span style={{ color: "#15803D", fontSize: 13, fontWeight: 600 }}>{msg.ok}</span>}
+        {msg && msg.err && <span style={{ color: "#B91C1C", fontSize: 13, fontWeight: 600 }}>{msg.err}</span>}
+      </div>
+    </div>
+  );
+}
+
 function InventoryTable({
-  clientId, refreshKey = 0, isAdmin = false,
+  clientId, refreshKey = 0, isAdmin = false, access = null,
   onOpenDesign = null, onSendEstimate = null, onNew = null, onQuoteNewBuild = null,
 }) {
+  // The Online Shop's listing tools are inventory:edit (portal-settings GATES agrees).
+  const canEditShop = isAdmin || !!(access && access.inventory === "edit");
+  const [shopOpen, setShopOpen] = useState(false);
+  const [listingOpen, setListingOpen] = useState({});   // unit id -> listing editor open
   // A STATUS VIEW, deliberately (Carolyn 2026-08-08): "NO SCHEDULING EVER HAPPENS FROM THE
   // INVENTORY PAGE. It should only state the status." The build status follows the Build and
   // Delivery schedules; the sale follows the customer's invoice (or a recorded payment). The
@@ -5074,6 +5304,13 @@ function InventoryTable({
               fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
             {meta.label}
           </span>
+          {u.listed && (
+            <span title={u.showPriceOnline === false ? "Listed in your Online Shop (price hidden)" : "Listed in your Online Shop"}
+              style={{ background: "#ECFDF5", color: "#047857", borderRadius: 14, padding: "3px 9px",
+              fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+              ONLINE{(u.photos || []).length ? ` · ${(u.photos || []).length} 📷` : ""}
+            </span>
+          )}
           {invSold(u) && (
             <span title={u.soldAt ? "Sold " + fmtDate(u.soldAt) : undefined}
               style={{ background: INV_SALE_COLORS.bg, color: INV_SALE_COLORS.fg, borderRadius: 14,
@@ -5102,8 +5339,11 @@ function InventoryTable({
         count={rows ? (anyFilterOn ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          <button type="button" aria-pressed={shopOpen} onClick={() => setShopOpen((v) => !v)}
+            style={S.btn(shopOpen ? "#1E293B" : "#F1F5F9", shopOpen ? "#FFF" : "#334155")}>🛒 Online Shop</button>
           {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New building request</button>}
         </>} />
+      {shopOpen && <ShopSettingsPanel clientId={clientId} canEdit={canEditShop} />}
       <input value={query} onChange={(e) => setQuery(e.target.value)}
         placeholder="Search inventory — serial #, building, location, customer…"
         style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 11 }} />
@@ -5223,11 +5463,18 @@ function InventoryTable({
                             onClick={() => onSendEstimate && onSendEstimate(u)}
                             style={linkBtn({ color: ACCENT })}>Send estimate</button>
                         )}
+                        <button type="button" onClick={() => setListingOpen((x) => ({ ...x, [u.id]: !x[u.id] }))}
+                          style={linkBtn({ color: ACCENT })}>{listingOpen[u.id] ? "Close listing" : "Online"}</button>
                         {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
                         {isAdmin && <button type="button" disabled={busyId === u.id} onClick={() => del(u)}
                           style={linkBtn({ color: "#CBD5E1", marginRight: 0 })}>Delete</button>}
                       </td>
                     </tr>
+                    {listingOpen[u.id] && (
+                      <tr><td colSpan={10} style={{ padding: "2px 8px 12px" }}>
+                        <InventoryListingEditor unit={u} canEdit={canEditShop} onChanged={load} />
+                      </td></tr>
+                    )}
                     {isOpen && ests.length > 0 && (
                       <tr><td colSpan={10} style={{ padding: "2px 8px 12px" }}>
                         <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>

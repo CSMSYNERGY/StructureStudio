@@ -585,6 +585,14 @@ const GATES: GateTable = {
   // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
   // is a Designs deletion happening under an Inventory verb, so it needs both.
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
+  // The Online Shop (migration 310). Listing a building, its photos and the shop's own settings
+  // are all decisions about how the builder's stock is sold, so they sit with inventory:edit;
+  // reading the settings is a view.
+  save_inventory_listing:     { area: "inventory", level: "edit" },
+  inventory_photo_upload_url: { area: "inventory", level: "edit" },
+  save_inventory_photos:      { area: "inventory", level: "edit" },
+  shop_settings:              { area: "inventory", level: "view" },
+  save_shop_settings:         { area: "inventory", level: "edit" },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
   // Push to Invoice from the designer (Carolyn 2026-09-01): the same irreversible send as
@@ -1120,6 +1128,13 @@ async function regenerateQuotePdf(
 // feeds a computed expiry on list_inventory today — but it is the ONE place the number lives,
 // so the future listing query and this agree by construction.
 const SOLD_LABEL_DAYS = 30;
+// ⚠️ get_public_shop (migration 310) spells the same 30 days in SQL, because that is the anon
+// read path. Change one, change both.
+
+// The Online Shop's photo bucket (migration 310): public read, images only, 8 MB. Keys are
+// '<client_id>/<unit_id>/<uuid>.<ext>' — the table's check constraint enforces that shape.
+const INVENTORY_PHOTOS = "inventory-photos";
+const INVENTORY_PHOTO_MAX = 12;
 
 // The buyer's first name, for the "SOLD — Dave" label. Contact names are ONE flat field in
 // this product (there is no first/last split anywhere in storage, and contactFields[] cannot
@@ -7873,10 +7888,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: unit } = await admin.from("inventory_units")
       .select("id, design_short_code, serial").eq("id", unitId).eq("client_id", clientId).maybeSingle();
     if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    // The Online Shop photos (migration 310). The rows cascade with the unit; the FILES do not,
+    // so their keys are read first and removed after. Best-effort: a stray file is a public
+    // image nobody links to any more, never a reason to refuse the delete.
+    const { data: photoRows } = await admin.from("inventory_unit_photos")
+      .select("storage_key").eq("client_id", clientId).eq("unit_id", unitId);
     // Customer estimates sent from this unit keep existing — their inventory_unit_id
     // FK nulls out. Only the unit row goes here; the portal then calls delete_design
     // for the master (reusing its storage/version cascade unchanged).
     const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
+    if (!error && photoRows?.length) {
+      const keys = photoRows.map((p: { storage_key: string }) => p.storage_key)
+        .filter((k: string) => k.startsWith(`${clientId}/${unitId}/`));
+      if (keys.length) await admin.storage.from(INVENTORY_PHOTOS).remove(keys).catch(() => {});
+    }
     if (error) return dbFail(req, clientId, "delete that building", error);
 
     // The master design goes with it, HERE rather than in a second call from the browser.
@@ -7915,12 +7940,172 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, designShortCode: code, masterDeleted });
   }
 
+  // ── The Online Shop (migration 310, Carolyn 2026-10-17) ──────────────────────
+  // A unit's public listing: on/off, price shown or not, title, description.
+  if (action === "save_inventory_listing") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(payload, "listed")) patch.listed = payload.listed === true;
+    if (Object.prototype.hasOwnProperty.call(payload, "showPriceOnline")) patch.show_price_online = payload.showPriceOnline !== false;
+    if (Object.prototype.hasOwnProperty.call(payload, "publicTitle")) {
+      patch.public_title = String(payload.publicTitle ?? "").trim().slice(0, 120) || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "publicDescription")) {
+      patch.public_description = String(payload.publicDescription ?? "").trim().slice(0, 4000) || null;
+    }
+    const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
+      .eq("id", unitId).eq("client_id", clientId);
+    if (error) return dbFail(req, clientId, "save that listing", error);
+    if (!count) return json({ error: "Inventory unit not found." }, 404);
+    await audit("portal_save_inventory_listing", 1, `unit=${unitId} listed=${patch.listed ?? "-"}`);
+    return json({ ok: true });
+  }
+
+  // Signed upload URLs for a unit's photos. The browser PUTs each file, then calls
+  // add_inventory_photos with the keys it was given. Keys are minted here, never chosen by the
+  // browser, so a photo can only ever land in this builder's folder for this unit.
+  if (action === "inventory_photo_upload_url") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const { data: unit } = await admin.from("inventory_units").select("id")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+    const ext = EXT[String(payload.contentType || "image/jpeg")];
+    if (!ext) return json({ error: "Use a JPG, PNG or WEBP photo." }, 400);
+    const { count: have } = await admin.from("inventory_unit_photos")
+      .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", unitId);
+    const room = INVENTORY_PHOTO_MAX - (have ?? 0);
+    if (room <= 0) return json({ error: `A building can have up to ${INVENTORY_PHOTO_MAX} photos. Remove one first.` }, 400);
+    const want = Math.max(1, Math.min(room, Math.floor(Number(payload.count) || 1)));
+    const uploads: { key: string; token: string | undefined }[] = [];
+    for (let i = 0; i < want; i++) {
+      const key = `${clientId}/${unitId}/${crypto.randomUUID()}.${ext}`;
+      const { data: signed, error } = await admin.storage.from(INVENTORY_PHOTOS).createSignedUploadUrl(key);
+      if (error) {
+        if (!uploads.length) return dbFail(req, clientId, "start that upload", error);
+        break;
+      }
+      uploads.push({ key, token: signed?.token });
+    }
+    return json({ ok: true, uploads });
+  }
+
+  // Record uploaded photos, re-order them, or remove them — one action, the whole list.
+  //   add:    keys just uploaded (appended at the end, in the order given)
+  //   order:  photo ids in their new display order (first = cover)
+  //   remove: photo ids to delete (row and file)
+  if (action === "save_inventory_photos") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const { data: unit } = await admin.from("inventory_units").select("id")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    const prefix = `${clientId}/${unitId}/`;
+    const asList = (v: unknown) => (Array.isArray(v) ? v : []).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 50);
+
+    const remove = asList(payload.remove);
+    if (remove.length) {
+      const { data: gone } = await admin.from("inventory_unit_photos").delete()
+        .eq("client_id", clientId).eq("unit_id", unitId).in("id", remove).select("storage_key");
+      const keys = (gone ?? []).map((g: { storage_key: string }) => g.storage_key).filter((k: string) => k.startsWith(prefix));
+      if (keys.length) await admin.storage.from(INVENTORY_PHOTOS).remove(keys).catch(() => {});
+    }
+
+    const add = asList(payload.add).filter((k) => k.startsWith(prefix) && /^[0-9a-f-]{36}\.(jpg|png|webp)$/.test(k.slice(prefix.length)));
+    if (add.length) {
+      const { data: existing } = await admin.from("inventory_unit_photos")
+        .select("sort_order").eq("client_id", clientId).eq("unit_id", unitId)
+        .order("sort_order", { ascending: false }).limit(1);
+      const { count: have } = await admin.from("inventory_unit_photos")
+        .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", unitId);
+      const room = Math.max(0, INVENTORY_PHOTO_MAX - (have ?? 0));
+      let next = ((existing ?? [])[0]?.sort_order ?? -1) + 1;
+      const rows = add.slice(0, room).map((k) => ({ client_id: clientId, unit_id: unitId, storage_key: k, sort_order: next++ }));
+      if (rows.length) {
+        const { error } = await admin.from("inventory_unit_photos").insert(rows);
+        if (error) return dbFail(req, clientId, "save those photos", error);
+      }
+    }
+
+    const order = asList(payload.order);
+    for (let i = 0; i < order.length; i++) {
+      await admin.from("inventory_unit_photos").update({ sort_order: i })
+        .eq("client_id", clientId).eq("unit_id", unitId).eq("id", order[i]);
+    }
+
+    const { data: photos, error: listErr } = await admin.from("inventory_unit_photos")
+      .select("id, storage_key, ai_edited").eq("client_id", clientId).eq("unit_id", unitId)
+      .order("sort_order", { ascending: true }).order("created_at", { ascending: true });
+    if (listErr) return dbFail(req, clientId, "load those photos", listErr);
+    await audit("portal_save_inventory_photos", 1, `unit=${unitId} add=${add.length} remove=${remove.length}`);
+    return json({
+      ok: true,
+      photos: (photos ?? []).map((p: { id: string; storage_key: string; ai_edited: boolean }) => ({
+        id: p.id, aiEdited: !!p.ai_edited,
+        url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl,
+      })),
+    });
+  }
+
+  // Shop-wide settings.
+  if (action === "shop_settings") {
+    const { data, error } = await admin.from("shop_settings").select("*").eq("client_id", clientId).maybeSingle();
+    if (error) return dbFail(req, clientId, "load your shop settings", error);
+    const { data: pay } = await admin.from("client_settings")
+      .select("payments_online_enabled, cardpointe_merchid").eq("client_id", clientId).maybeSingle();
+    return json({
+      ok: true,
+      settings: {
+        enabled: !!data?.enabled,
+        hideAllPrices: !!data?.hide_all_prices,
+        depositMode: data?.deposit_mode ?? "percent",
+        depositValue: data?.deposit_value != null ? Number(data.deposit_value) : 10,
+        allowPayInFull: data?.allow_pay_in_full !== false,
+        gtmContainerId: data?.gtm_container_id ?? "",
+        heading: data?.heading ?? "",
+        intro: data?.intro ?? "",
+        termsUrl: data?.terms_url ?? "",
+      },
+      paymentsLive: !!(pay?.payments_online_enabled && pay?.cardpointe_merchid),
+    });
+  }
+
+  if (action === "save_shop_settings") {
+    const s = (payload.settings && typeof payload.settings === "object") ? payload.settings : {};
+    const depositMode = ["full", "percent", "flat"].includes(s.depositMode) ? s.depositMode : "percent";
+    const depositValue = Math.round(Math.max(0, Number(s.depositValue) || 0) * 100) / 100;
+    if (depositMode === "percent" && depositValue > 100) return json({ error: "A deposit can't be more than 100%." }, 400);
+    if (depositMode === "flat" && depositValue > 100000) return json({ error: "That deposit is too large." }, 400);
+    const gtm = String(s.gtmContainerId ?? "").trim().toUpperCase();
+    if (gtm && !/^GTM-[A-Z0-9]{4,12}$/.test(gtm)) return json({ error: "A Google Tag Manager ID looks like GTM-ABC1234." }, 400);
+    const termsUrl = String(s.termsUrl ?? "").trim();
+    if (termsUrl && (!/^https:\/\//i.test(termsUrl) || termsUrl.length > 500)) return json({ error: "The terms link must start with https://" }, 400);
+    const row = {
+      client_id: clientId,
+      enabled: s.enabled === true,
+      hide_all_prices: s.hideAllPrices === true,
+      deposit_mode: depositMode,
+      deposit_value: depositValue,
+      allow_pay_in_full: s.allowPayInFull !== false,
+      gtm_container_id: gtm || null,
+      heading: String(s.heading ?? "").trim().slice(0, 120) || null,
+      intro: String(s.intro ?? "").trim().slice(0, 1000) || null,
+      terms_url: termsUrl || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await admin.from("shop_settings").upsert(row, { onConflict: "client_id" });
+    if (error) return dbFail(req, clientId, "save your shop settings", error);
+    await audit("portal_save_shop_settings", 1, `enabled=${row.enabled} hidePrices=${row.hide_all_prices}`);
+    return json({ ok: true });
+  }
+
   // ── The Inventory tab's data ─────────────────────────────────────────────────
   if (action === "list_inventory") {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
         .select("id, serial, design_short_code, location_id, asking_price_cents, "
-          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at")
+          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at, "
+          + "listed, show_price_online, public_title, public_description")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
@@ -8015,6 +8200,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const jobRows = (jobsRes.data ?? []) as JobRow[];
     const stopRows = (stopsRes.data ?? []) as StopRow[];
+    // Online Shop photos (migration 310), in display order, as public URLs.
+    const { data: photoRows } = unitIds.length
+      ? await admin.from("inventory_unit_photos")
+        .select("id, unit_id, storage_key, sort_order, ai_edited, created_at")
+        .eq("client_id", clientId).in("unit_id", unitIds)
+        .order("sort_order", { ascending: true }).order("created_at", { ascending: true })
+      : { data: [] };
+    const photosByUnit = new Map<string, { id: string; url: string; aiEdited: boolean }[]>();
+    for (const p of (photoRows ?? []) as { id: string; unit_id: string; storage_key: string; ai_edited: boolean }[]) {
+      const list = photosByUnit.get(p.unit_id) ?? [];
+      list.push({ id: p.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl, aiEdited: !!p.ai_edited });
+      photosByUnit.set(p.unit_id, list);
+    }
     const stageIds = [...new Set(jobRows.map((j) => j.stage_id).filter(Boolean))] as string[];
     const { data: stageRows } = stageIds.length
       ? await admin.from("schedule_stages").select("id, name, kind").eq("client_id", clientId).in("id", stageIds)
@@ -8074,6 +8272,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
         createdAt: u.created_at, updatedAt: u.updated_at,
         estimates: estsByUnit.get(u.id) ?? [],
+        // ── The Online Shop listing (migration 310) ──
+        listed: !!u.listed, showPriceOnline: u.show_price_online !== false,
+        publicTitle: u.public_title ?? "", publicDescription: u.public_description ?? "",
+        photos: photosByUnit.get(u.id) ?? [],
       };
     });
     return json({ ok: true, units: out, locations: locsRes.data ?? [], soldLabelDays: SOLD_LABEL_DAYS });

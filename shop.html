@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Buildings for sale</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png"/>
+<style>
+/* The Online Shop (migration 310, Carolyn 2026-10-17) — a builder's lot buildings on a public,
+   branded page their own website can embed (shop-embed.js). Deliberately PLAIN JS + inline CSS,
+   like my-quotes.html: no React, no Babel, no /vendor/ scripts, so it loads fast on a phone and
+   inside a builder's site. The only network calls are the get_public_shop RPC and two edge
+   functions (delivery-quote, capture-lead). Brand colours come from the builder's own config. */
+:root {
+  --accent: #D97706;
+  --accent-fg: #FFFFFF;
+  --header-bg: linear-gradient(135deg, #1E293B 0%, #334155 100%);
+  --ink: #0F172A;
+  --muted: #64748B;
+  --line: #E2E8F0;
+  --card: #FFFFFF;
+  --bg: #F1F5F9;
+  --ok: #047857;
+  --err: #B91C1C;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+body.embed { background: transparent; }
+[hidden] { display: none !important; }
+a { color: var(--accent); }
+button { font: inherit; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 16px; }
+header.top { background: var(--header-bg); color: #FFF; }
+header.top .wrap { display: flex; align-items: center; gap: 14px; padding-top: 16px; padding-bottom: 16px; }
+header.top img { max-height: 52px; max-width: 180px; background: #FFF; border-radius: 8px; padding: 4px; }
+header.top .name { font-weight: 800; font-size: 20px; }
+header.top .tag { opacity: .85; font-size: 13px; }
+.intro { padding: 18px 0 6px; }
+.intro h1 { font-size: 24px; margin: 0 0 4px; }
+.intro p { margin: 0; color: var(--muted); max-width: 720px; white-space: pre-line; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.filters select { border: 1px solid var(--line); background: #FFF; border-radius: 10px; padding: 8px 10px; font: inherit; font-size: 14px; color: var(--ink); max-width: 100%; }
+.count { color: var(--muted); font-size: 13px; padding-bottom: 8px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; padding-bottom: 28px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; text-align: left; padding: 0; color: inherit; }
+.card:hover { box-shadow: 0 6px 22px rgba(15,23,42,.10); }
+.card:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.ph { position: relative; aspect-ratio: 4/3; background: #E2E8F0; overflow: hidden; }
+.ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ph .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #94A3B8; font-size: 13px; font-weight: 600; }
+.badge { position: absolute; left: 10px; top: 10px; border-radius: 8px; padding: 3px 9px; font-size: 12px; font-weight: 800; letter-spacing: .4px; }
+.badge.sold { background: #B91C1C; color: #FFF; }
+.badge.n { left: auto; right: 10px; background: rgba(15,23,42,.72); color: #FFF; font-weight: 700; }
+.cbody { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.ctitle { font-weight: 800; font-size: 16px; }
+.cmeta { color: var(--muted); font-size: 13px; }
+.cprice { margin-top: auto; padding-top: 8px; font-weight: 800; font-size: 18px; color: var(--ink); }
+.cprice.call { font-size: 14px; color: var(--accent); }
+.empty { background: #FFF; border: 1px solid var(--line); border-radius: 14px; padding: 28px 18px; text-align: center; color: var(--muted); margin: 16px 0 28px; }
+/* Detail */
+.back { background: none; border: none; color: var(--accent); font-weight: 700; padding: 14px 0 8px; cursor: pointer; }
+.detail { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; padding-bottom: 32px; align-items: start; }
+@media (max-width: 820px) { .detail { grid-template-columns: minmax(0, 1fr); } }
+.gal { background: #FFF; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.gal .main { position: relative; aspect-ratio: 4/3; background: #E2E8F0; }
+.gal .main img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gal .nav { position: absolute; top: 50%; transform: translateY(-50%); border: none; background: rgba(255,255,255,.9); width: 38px; height: 38px; border-radius: 50%; font-size: 20px; cursor: pointer; }
+.gal .prev { left: 10px; } .gal .next { right: 10px; }
+.thumbs { display: flex; gap: 6px; padding: 8px; overflow-x: auto; }
+.thumbs button { border: 2px solid transparent; border-radius: 8px; padding: 0; width: 72px; height: 54px; flex: 0 0 auto; overflow: hidden; cursor: pointer; background: #E2E8F0; }
+.thumbs button.on { border-color: var(--accent); }
+.thumbs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.panel { background: #FFF; border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+.panel h2 { font-size: 22px; margin: 0 0 4px; }
+.panel h3 { font-size: 15px; margin: 0 0 10px; }
+.price { font-size: 26px; font-weight: 800; margin: 8px 0 4px; }
+.price.call { font-size: 18px; color: var(--accent); }
+.specs { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 14px; margin: 10px 0 0; }
+.specs dt { color: var(--muted); } .specs dd { margin: 0; font-weight: 600; }
+.desc { white-space: pre-line; color: #334155; margin-top: 12px; font-size: 14px; }
+label.f { display: block; font-size: 13px; font-weight: 700; color: #334155; margin: 8px 0 3px; }
+input.t, textarea.t { width: 100%; border: 1px solid #CBD5E1; border-radius: 10px; padding: 10px 11px; font: inherit; font-size: 15px; background: #FFF; color: var(--ink); }
+textarea.t { resize: vertical; min-height: 74px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.row3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; }
+@media (max-width: 420px) { .row3 { grid-template-columns: 1fr 1fr; } .row3 > :first-child { grid-column: 1 / -1; } }
+.btn { display: inline-block; border: none; border-radius: 10px; background: var(--accent); color: var(--accent-fg); font-weight: 800; padding: 12px 16px; cursor: pointer; width: 100%; margin-top: 12px; font-size: 15px; }
+.btn[disabled] { opacity: .6; cursor: default; }
+.btn.ghost { background: #F1F5F9; color: var(--ink); }
+.msg { margin-top: 10px; font-size: 14px; font-weight: 600; }
+.msg.ok { color: var(--ok); } .msg.err { color: var(--err); }
+.note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+.result { margin-top: 10px; background: #F8FAFC; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px; }
+.foot { color: #94A3B8; font-size: 12px; text-align: center; padding: 6px 0 22px; }
+.center { padding: 60px 16px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="top" id="top" hidden>
+  <div class="wrap">
+    <img id="logo" alt="" hidden/>
+    <div><div class="name" id="bizName"></div><div class="tag" id="bizTag"></div></div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="screen-loading" class="center">Loading buildings…</div>
+  <div id="screen-missing" class="center" hidden>This shop isn't available right now.</div>
+
+  <section id="screen-list" hidden>
+    <div class="intro"><h1 id="heading">Buildings for sale</h1><p id="introText"></p></div>
+    <div class="filters">
+      <select id="fStyle" aria-label="Style"><option value="">All styles</option></select>
+      <select id="fSize" aria-label="Size"><option value="">All sizes</option></select>
+      <select id="fLot" aria-label="Location"><option value="">All locations</option></select>
+      <select id="fSort" aria-label="Sort">
+        <option value="new">Newest first</option>
+        <option value="low">Price: low to high</option>
+        <option value="high">Price: high to low</option>
+      </select>
+    </div>
+    <div class="count" id="count"></div>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty" hidden>No buildings match. Try another style or size — or ask us about building one for you.</div>
+  </section>
+
+  <section id="screen-unit" hidden>
+    <button type="button" class="back" id="backBtn">← All buildings</button>
+    <div class="detail">
+      <div>
+        <div class="gal">
+          <div class="main" id="galMain"></div>
+          <div class="thumbs" id="thumbs"></div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <h2 id="uTitle"></h2>
+          <div class="cmeta" id="uSerial"></div>
+          <div class="price" id="uPrice"></div>
+          <dl class="specs" id="uSpecs"></dl>
+          <div class="desc" id="uDesc"></div>
+        </div>
+
+        <div class="panel" id="deliveryPanel">
+          <h3>Delivery to your address</h3>
+          <form id="delForm" novalidate>
+            <label class="f" for="dStreet">Street (optional)</label>
+            <input class="t" id="dStreet" autocomplete="street-address"/>
+            <div class="row3">
+              <div><label class="f" for="dCity">City</label><input class="t" id="dCity" autocomplete="address-level2"/></div>
+              <div><label class="f" for="dState">State</label><input class="t" id="dState" maxlength="20" autocomplete="address-level1"/></div>
+              <div><label class="f" for="dZip">Zip</label><input class="t" id="dZip" inputmode="numeric" maxlength="10" autocomplete="postal-code"/></div>
+            </div>
+            <button type="submit" class="btn ghost" id="delBtn">Check delivery</button>
+          </form>
+          <div class="result" id="delResult" hidden></div>
+        </div>
+
+        <div class="panel">
+          <h3 id="askTitle">Ask about this building</h3>
+          <form id="askForm" novalidate>
+            <label class="f" for="aName">Your name</label>
+            <input class="t" id="aName" autocomplete="name" maxlength="200"/>
+            <div class="row2">
+              <div><label class="f" for="aPhone">Phone</label><input class="t" id="aPhone" type="tel" autocomplete="tel" maxlength="40"/></div>
+              <div><label class="f" for="aZip">Delivery zip</label><input class="t" id="aZip" inputmode="numeric" maxlength="10" autocomplete="postal-code"/></div>
+            </div>
+            <label class="f" for="aEmail">Email (optional)</label>
+            <input class="t" id="aEmail" type="email" autocomplete="email" maxlength="200"/>
+            <label class="f" for="aMsg">Questions? (optional)</label>
+            <textarea class="t" id="aMsg" maxlength="2000"></textarea>
+            <button type="submit" class="btn" id="askBtn">Send</button>
+            <div class="msg" id="askMsg" hidden></div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </section>
+  <div class="foot" id="foot"></div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // Baked-in data connection — identical constants to index.html / my-quotes.html. The anon key
+  // is public by design; everything this page reads goes through get_public_shop (migration 310),
+  // which returns only what a public page may show.
+  var SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+  var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+  var HEADERS = { "Authorization": "Bearer " + SUPABASE_ANON_KEY, "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+
+  var params;
+  try { params = new URLSearchParams(location.search); } catch (e) { params = { get: function () { return null; } }; }
+  var clientId = (params.get("client") || "").trim().toLowerCase();
+  var EMBED = params.get("embed") === "1";
+  if (EMBED) document.body.className = "embed";
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function show(name) {
+    ["loading", "missing", "list", "unit"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
+    postHeight();
+  }
+
+  // ── Analytics: Google Tag Manager's dataLayer, plus the parent page when embedded ──
+  window.dataLayer = window.dataLayer || [];
+  function track(event, data) {
+    var payload = { event: event };
+    for (var k in (data || {})) payload[k] = data[k];
+    try { window.dataLayer.push(payload); } catch (e) {}
+    if (EMBED && window.parent !== window) {
+      try { window.parent.postMessage({ source: "ss-shop", type: "event", event: event, data: data || {} }, "*"); } catch (e) {}
+    }
+  }
+  function loadGtm(id) {
+    if (!/^GTM-[A-Z0-9]{4,12}$/.test(id || "")) return;
+    window.dataLayer.push({ "gtm.start": Date.now(), event: "gtm.js" });
+    var s = document.createElement("script");
+    s.async = true;
+    s.src = "https://www.googletagmanager.com/gtm.js?id=" + encodeURIComponent(id);
+    document.head.appendChild(s);
+  }
+
+  // ── Embedded: tell the parent how tall we are, so its iframe never scrolls ──
+  var lastH = 0;
+  function postHeight() {
+    if (!EMBED || window.parent === window) return;
+    var h = Math.ceil(document.documentElement.scrollHeight);
+    if (h === lastH) return;
+    lastH = h;
+    try { window.parent.postMessage({ source: "ss-shop", type: "height", height: h }, "*"); } catch (e) {}
+  }
+  if (EMBED) {
+    window.addEventListener("load", postHeight);
+    setInterval(postHeight, 600);
+  }
+
+  // ── Branding. Colours are the builder's own; anything that is not plainly a colour or a
+  // gradient is ignored (the same CSS charset gate portal-settings applies on save). ──
+  var CSS_OK = /^[#(),.%\-\w\s]+$/;
+  function applyBrand(b) {
+    var root = document.documentElement.style;
+    var accent = String(b.accentColor || "").trim();
+    var first = (accent.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/i) || [])[0];
+    if (first && CSS_OK.test(first)) root.setProperty("--accent", first);
+    var hdr = String(b.headerBg || "").trim();
+    if (hdr && CSS_OK.test(hdr)) root.setProperty("--header-bg", hdr);
+    if (!EMBED) {
+      $("top").hidden = false;
+      $("bizName").textContent = b.companyName || "";
+      $("bizTag").textContent = b.tagline || "";
+      if (b.logoUrl && /^https:\/\//.test(b.logoUrl)) { $("logo").src = b.logoUrl; $("logo").alt = b.companyName || ""; $("logo").hidden = false; }
+    }
+    if (b.companyName) document.title = "Buildings for sale — " + b.companyName;
+    $("foot").textContent = b.companyName ? "© " + new Date().getFullYear() + " " + b.companyName : "";
+  }
+
+  function money(cents) {
+    if (cents == null) return null;
+    return "$" + Math.round(cents / 100).toLocaleString("en-US");
+  }
+  function titleCase(s) { return String(s || "").replace(/\b([a-z])/g, function (m) { return m.toUpperCase(); }); }
+  function unitName(u) { return u.title || [u.size, titleCase(u.style)].filter(Boolean).join(" ") || ("Building #" + u.serial); }
+
+  var shop = null, units = [], current = null;
+
+  // ── Load ──
+  function load() {
+    if (!/^[a-z0-9-]{1,64}$/.test(clientId)) { show("missing"); return; }
+    fetch(SUPABASE_URL + "/rest/v1/rpc/get_public_shop", { method: "POST", headers: HEADERS, body: JSON.stringify({ p_client_id: clientId }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) { show("missing"); return; }
+        shop = d;
+        units = d.units || [];
+        applyBrand(d.branding || {});
+        var s = d.shop || {};
+        loadGtm(s.gtmContainerId);
+        $("heading").textContent = s.heading || "Buildings for sale";
+        $("introText").textContent = s.intro || "";
+        fillFilters();
+        route();
+        track("ss_shop_view", { client: clientId, buildings: units.length });
+      })
+      .catch(function () { show("missing"); });
+  }
+
+  function fillFilters() {
+    var styles = {}, sizes = {}, lots = {};
+    units.forEach(function (u) {
+      if (u.style) styles[titleCase(u.style)] = 1;
+      if (u.size) sizes[u.size] = 1;
+      if (u.locationId) lots[u.locationId] = u.locationName || u.locationCity || "Lot";
+    });
+    function fill(sel, map, label) {
+      var keys = Object.keys(map).sort(function (a, b) { return String(map[a] === 1 ? a : map[a]).localeCompare(String(map[b] === 1 ? b : map[b]), undefined, { numeric: true }); });
+      keys.forEach(function (k) { var o = el("option", null, map[k] === 1 ? k : map[k]); o.value = k; sel.appendChild(o); });
+      sel.hidden = keys.length < 2;
+    }
+    fill($("fStyle"), styles); fill($("fSize"), sizes); fill($("fLot"), lots);
+    var anyPrice = units.some(function (u) { return u.priceCents != null; });
+    $("fSort").hidden = !anyPrice;
+    ["fStyle", "fSize", "fLot", "fSort"].forEach(function (id) { $(id).addEventListener("change", renderList); });
+  }
+
+  function renderList() {
+    var st = $("fStyle").value, sz = $("fSize").value, lot = $("fLot").value, sort = $("fSort").value;
+    var list = units.filter(function (u) {
+      return (!st || titleCase(u.style) === st) && (!sz || u.size === sz) && (!lot || u.locationId === lot);
+    });
+    if (sort === "low" || sort === "high") {
+      list = list.slice().sort(function (a, b) {
+        var pa = a.priceCents == null ? Infinity : a.priceCents, pb = b.priceCents == null ? Infinity : b.priceCents;
+        if (a.sold !== b.sold) return a.sold ? 1 : -1;
+        return sort === "low" ? pa - pb : (pb === Infinity ? -1 : pa === Infinity ? 1 : pb - pa);
+      });
+    }
+    var grid = $("grid");
+    grid.textContent = "";
+    var forSale = list.filter(function (u) { return !u.sold; }).length;
+    $("count").textContent = forSale + " building" + (forSale === 1 ? "" : "s") + " available";
+    $("empty").hidden = list.length > 0;
+    list.forEach(function (u) {
+      var c = el("button", "card"); c.type = "button";
+      var ph = el("div", "ph");
+      if (u.photos && u.photos.length) {
+        var img = el("img"); img.src = u.photos[0]; img.alt = unitName(u); img.loading = "lazy"; ph.appendChild(img);
+        if (u.photos.length > 1) ph.appendChild(el("span", "badge n", u.photos.length + " photos"));
+      } else ph.appendChild(el("div", "none", "Photo coming soon"));
+      if (u.sold) ph.appendChild(el("span", "badge sold", "SOLD"));
+      c.appendChild(ph);
+      var b = el("div", "cbody");
+      b.appendChild(el("div", "ctitle", unitName(u)));
+      var meta = [u.title ? [u.size, titleCase(u.style)].filter(Boolean).join(" ") : "", u.locationCity || u.locationName].filter(Boolean).join(" · ");
+      if (meta) b.appendChild(el("div", "cmeta", meta));
+      var p = money(u.priceCents);
+      b.appendChild(el("div", "cprice" + (p || u.sold ? "" : " call"), u.sold ? "Sold" : (p || "Call for price")));
+      c.appendChild(b);
+      c.addEventListener("click", function () { go(u.id); });
+      grid.appendChild(c);
+    });
+    postHeight();
+  }
+
+  // ── Routing: ?unit=<id> (so a link to one building can be shared) ──
+  function go(id) {
+    try {
+      var url = new URL(location.href);
+      if (id) url.searchParams.set("unit", id); else url.searchParams.delete("unit");
+      history.pushState({}, "", url.toString());
+    } catch (e) {}
+    route();
+    try { window.scrollTo(0, 0); } catch (e) {}
+    if (EMBED && window.parent !== window) { try { window.parent.postMessage({ source: "ss-shop", type: "scrollTop" }, "*"); } catch (e) {} }
+  }
+  window.addEventListener("popstate", route);
+  function route() {
+    var id = null;
+    try { id = new URLSearchParams(location.search).get("unit"); } catch (e) {}
+    var u = id && units.filter(function (x) { return x.id === id; })[0];
+    if (u) renderUnit(u); else { current = null; renderList(); show("list"); }
+  }
+  $("backBtn").addEventListener("click", function () { go(null); });
+
+  // ── One building ──
+  var galIdx = 0;
+  function renderGallery() {
+    var u = current, main = $("galMain"), th = $("thumbs");
+    main.textContent = ""; th.textContent = "";
+    var photos = u.photos || [];
+    if (!photos.length) { main.appendChild(el("div", "none", "Photo coming soon")); th.hidden = true; return; }
+    var img = el("img"); img.src = photos[galIdx]; img.alt = unitName(u); main.appendChild(img);
+    if (u.sold) main.appendChild(el("span", "badge sold", "SOLD"));
+    if (photos.length > 1) {
+      var prev = el("button", "nav prev", "‹"); prev.type = "button"; prev.setAttribute("aria-label", "Previous photo");
+      var next = el("button", "nav next", "›"); next.type = "button"; next.setAttribute("aria-label", "Next photo");
+      prev.onclick = function () { galIdx = (galIdx - 1 + photos.length) % photos.length; renderGallery(); };
+      next.onclick = function () { galIdx = (galIdx + 1) % photos.length; renderGallery(); };
+      main.appendChild(prev); main.appendChild(next);
+    }
+    th.hidden = photos.length < 2;
+    photos.forEach(function (src, i) {
+      var b = el("button", i === galIdx ? "on" : ""); b.type = "button"; b.setAttribute("aria-label", "Photo " + (i + 1));
+      var t = el("img"); t.src = src; t.alt = ""; t.loading = "lazy"; b.appendChild(t);
+      b.onclick = function () { galIdx = i; renderGallery(); };
+      th.appendChild(b);
+    });
+  }
+  function renderUnit(u) {
+    current = u; galIdx = 0;
+    renderGallery();
+    $("uTitle").textContent = unitName(u);
+    $("uSerial").textContent = "Stock #" + u.serial + (u.locationName ? " · on our " + u.locationName + " lot" : "");
+    var p = money(u.priceCents);
+    $("uPrice").textContent = u.sold ? "Sold" : (p || "Call for price");
+    $("uPrice").className = "price" + (p || u.sold ? "" : " call");
+    var specs = $("uSpecs"); specs.textContent = "";
+    [["Size", u.size], ["Style", titleCase(u.style)], ["Roof", [u.roofType, u.roofColor].filter(Boolean).join(" · ")],
+     ["Siding", u.bodyColor], ["Trim", u.trimColor],
+     ["Location", [u.locationName, [u.locationCity, u.locationState].filter(Boolean).join(", ")].filter(Boolean).join(" — ")]]
+      .forEach(function (r) { if (r[1]) { specs.appendChild(el("dt", null, r[0])); specs.appendChild(el("dd", null, r[1])); } });
+    $("uDesc").textContent = u.description || "";
+    $("deliveryPanel").hidden = !!u.sold;
+    $("delResult").hidden = true;
+    $("askTitle").textContent = u.sold ? "This one's sold — ask about a similar building" : (p ? "Ask about this building" : "Ask for the price");
+    $("askMsg").hidden = true; $("askBtn").disabled = false;
+    show("unit");
+    track("ss_unit_view", { client: clientId, serial: u.serial, size: u.size, style: u.style, price: u.priceCents != null ? u.priceCents / 100 : null });
+  }
+
+  // ── Delivery calculator: priced from the lot this building sits on ──
+  $("delForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var u = current; if (!u) return;
+    var addr = { street: $("dStreet").value.trim(), city: $("dCity").value.trim(), state: $("dState").value.trim(), zip: $("dZip").value.trim() };
+    var out = $("delResult");
+    if (!addr.city || !addr.state || !/^\d{5}/.test(addr.zip)) {
+      out.hidden = false; out.textContent = "Enter your city, state and 5-digit zip."; postHeight(); return;
+    }
+    if (!$("aZip").value) $("aZip").value = addr.zip.slice(0, 5);
+    $("delBtn").disabled = true; out.hidden = false; out.textContent = "Checking…";
+    fetch(SUPABASE_URL + "/functions/v1/delivery-quote?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ clientId: clientId, address: addr, source: "shop", originLocationId: u.locationId || null })
+    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (d) {
+      $("delBtn").disabled = false;
+      if (!d || d.error) { out.textContent = (d && d.error) || "We couldn't check delivery just now. Ask us below and we'll price it for you."; postHeight(); return; }
+      var miles = d.miles != null ? d.miles + " miles from our " + (d.originName || "lot") : "";
+      var txt;
+      if (!d.configured) txt = "We'll price delivery to your address — ask us below.";
+      else if (d.fee === 0) txt = "Free delivery to your address" + (miles ? " (" + miles + ")" : "") + ".";
+      else if (d.fee != null) txt = "Delivery to your address: " + money(Math.round(d.fee * 100)) + (miles ? " (" + miles + ")" : "") + ".";
+      else if (d.reason === "beyond_last_band") txt = "You're outside our standard delivery area" + (miles ? " (" + miles + ")" : "") + " — ask us below and we'll price it for you.";
+      else txt = (miles ? "About " + miles + ". " : "") + "Ask us below for the delivery price.";
+      out.textContent = txt;
+      track("ss_delivery_check", { client: clientId, serial: u.serial, miles: d.miles, fee: d.fee });
+      postHeight();
+    }).catch(function () { $("delBtn").disabled = false; out.textContent = "We couldn't check delivery just now. Ask us below and we'll price it for you."; postHeight(); });
+  });
+
+  // ── Inquiry: a lead in the builder's CRM, tagged with this building ──
+  $("askForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var u = current; if (!u) return;
+    var m = $("askMsg");
+    function say(cls, t) { m.className = "msg " + cls; m.textContent = t; m.hidden = false; postHeight(); }
+    var name = $("aName").value.trim(), phone = $("aPhone").value.trim();
+    if (!name) return say("err", "Please enter your name.");
+    if (phone.replace(/\D/g, "").length < 10) return say("err", "Please enter a 10-digit phone number.");
+    var email = $("aEmail").value.trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("err", "That email doesn't look right.");
+    $("askBtn").disabled = true;
+    fetch(SUPABASE_URL + "/functions/v1/capture-lead?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({
+        clientId: clientId, source: "shop", inventoryUnitId: u.id,
+        name: name, phone: phone, email: email,
+        street: $("dStreet").value.trim(), city: $("dCity").value.trim(), state: $("dState").value.trim(),
+        zip: ($("aZip").value || $("dZip").value).trim(),
+        message: $("aMsg").value.trim()
+      })
+    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (d) {
+      if (d && d.ok === false) { $("askBtn").disabled = false; return say("err", "Please check your name and phone number and try again."); }
+      var biz = (shop && shop.branding && shop.branding.companyName) || "We";
+      say("ok", "Thanks! " + biz + " will be in touch about #" + u.serial + " soon.");
+      track("ss_inquiry", { client: clientId, serial: u.serial, size: u.size, style: u.style });
+    }).catch(function () { $("askBtn").disabled = false; say("err", "That didn't send. Check your connection and try again."); });
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>
