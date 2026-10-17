@@ -160,8 +160,12 @@ Deno.test("⚠️ exactly the five customer-facing calls pass the pick; the cali
     for (const c of withPick) assert(("d3ResolveStyleSpec(" + c).startsWith(CUSTOMER_CALL), `${file}: ${c.slice(0, 160)}`);
     // The others, named, so a new call has to be classified here before this passes. (The Advanced
     // page's two seeds share one statement, so the match for the first carries the second.)
-    const others = calls.filter((c) => !c.includes("d3CustomerRoofProfile"));
-    assertEquals(others.length, 3, `${file}: ${JSON.stringify(others.map((c) => c.slice(0, 60)))}`);
+    // ssPartitionRoofAt2D (Interior walls v2, 2026-10-17) reads the ROOF's shape alone, which no
+    // customer pick moves, so it passes the style and nothing else.
+    const roofOnly = "styleCfg, s0.style, C.wallHeightFt)";
+    assertEquals(calls.filter((c) => c === roofOnly).length, 1, `${file}: the interior wall's roof read`);
+    const others = calls.filter((c) => !c.includes("d3CustomerRoofProfile") && c !== roofOnly);
+    assertEquals(others.length, 3,`${file}: ${JSON.stringify(others.map((c) => c.slice(0, 60)))}`);
     // reflowItems: wall geometry only, the roof's metal is nothing to it.
     assert(others[0].startsWith("styleCfg, s.style, C.wallHeightFt, d3SidingOverride(C, s), "), `${file}: ${others[0].slice(0, 80)}`);
     // openCalEditor: its object is posted back AS THE STYLE.

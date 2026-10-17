@@ -256,7 +256,7 @@ try {
     ok("F2: a loft across the wing's stretch is placed", !!loft, JSON.stringify(items.map((i) => i.type)));
     // F3: a partition clicked at y 5 crosses the open ground: refused; at y 20 it is placed.
     await settle(page, 4200);
-    await (await revealTool(page, /Partition Wall/)).click();
+    await (await revealTool(page, /Interior wall/)).click();
     await settle(page, 300);
     await clickSvg(page, { x: px(16), y: py(5) });
     items = (await readItems(page)) || [];
@@ -350,7 +350,8 @@ try {
   }
 
   if (want("P")) {
-    // A partition wall across the wing's stretch (y 20, wall to wall), moved and stretched toward the open ground.
+    // A partition wall across the wing's stretch (y 20, wall to wall), moved and stretched toward the open ground. Saved
+    // in the v1 shape on purpose: it opens as the same wall in v2's (x1Ft..y2Ft; ssPartitionNormalize).
     const part = { id: 21, type: "partitionWall", axis: "x", atFt: 20, fromFt: 0, toFt: 24, heightIn: null, openings: [], wall: null, x: 0, y: 0 };
     const { page, errors } = await openWith(ctx, [part]);
     const pt = async () => ((await readItems(page)) || []).find((i) => i.id === 21);
@@ -358,28 +359,30 @@ try {
     await drag(page, { x: px(16), y: py(20) }, { x: px(16), y: py(5) });
     let p1 = await pt();
     // The drag follows the pointer up to the open stretch's edge and is refused past it: never in it.
-    ok("P1: a wall-to-wall partition dragged across toward the open stretch stops at its edge, never in it", !!p1 && Number(p1.atFt) - 0.1875 >= 10 - 0.01 && Number(p1.atFt) < 20 && Number(p1.fromFt) === 0, JSON.stringify(p1 && [p1.atFt, p1.fromFt, p1.toFt]));
+    ok("P1: a wall-to-wall partition dragged across toward the open stretch stops at its edge, never in it", !!p1 && Number(p1.y1Ft) - 3.5 / 24 >= 10 - 0.01 && Number(p1.y1Ft) < 20 && Number(p1.x1Ft) === 0, JSON.stringify(p1 && [p1.y1Ft, p1.x1Ft, p1.x2Ft]));
     ok("P1: ...and says why", /can't cross the open ground beside the wing/i.test(await toastText(page)));
     const end = page.locator('[data-ss-partition-end="from"]').first();
     if (await end.count()) {
-      const b = await end.boundingBox(), to = await svgPoint(page, px(8), py(20));
+      // Along the wall's own line: since v2 (2026-10-17) an end follows the pointer anywhere, so a drag
+      // aimed off the line would turn the wall rather than shorten it.
+      const b = await end.boundingBox(), to = await svgPoint(page, px(8), py(Number(p1.y1Ft)));
       await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down();
       await page.mouse.move(to.x, to.y, { steps: 12 }); await page.mouse.up(); await settle(page, 400);
     }
     p1 = await pt();
-    ok("P2: its end pulled in to the face beside the open ground (x 8) is kept", !!p1 && near(Number(p1.fromFt), 8, 0.1), JSON.stringify(p1 && [p1.atFt, p1.fromFt, p1.toFt]));
-    await clickSvg(page, { x: px(16), y: py(Number(p1.atFt)) });
-    await drag(page, { x: px(16), y: py(Number(p1.atFt)) }, { x: px(16), y: py(5) });
+    ok("P2: its end pulled in to the face beside the open ground (x 8) is kept", !!p1 && near(Number(p1.x1Ft), 8, 0.1), JSON.stringify(p1 && [p1.y1Ft, p1.x1Ft, p1.x2Ft]));
+    await clickSvg(page, { x: px(16), y: py(Number(p1.y1Ft)) });
+    await drag(page, { x: px(16), y: py(Number(p1.y1Ft)) }, { x: px(16), y: py(5) });
     p1 = await pt();
-    ok("P3: shortened clear of it, the same move across is allowed", !!p1 && near(Number(p1.atFt), 5, 0.6), JSON.stringify(p1 && [p1.atFt, p1.fromFt, p1.toFt]));
+    ok("P3: shortened clear of it, the same move across is allowed", !!p1 && near(Number(p1.y1Ft), 5, 0.6), JSON.stringify(p1 && [p1.y1Ft, p1.x1Ft, p1.x2Ft]));
     const end2 = page.locator('[data-ss-partition-end="from"]').first();
     if (await end2.count()) {
-      const b = await end2.boundingBox(), to = await svgPoint(page, px(2), py(Number(p1.atFt)));
+      const b = await end2.boundingBox(), to = await svgPoint(page, px(2), py(Number(p1.y1Ft)));
       await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down();
       await page.mouse.move(to.x, to.y, { steps: 12 }); await page.mouse.up(); await settle(page, 400);
     }
     const p4 = await pt();
-    ok("P4: stretched back out into the open ground, its end is refused and stays at x 8", !!p4 && near(Number(p4.fromFt), 8, 0.1), JSON.stringify(p4 && [p4.atFt, p4.fromFt, p4.toFt]));
+    ok("P4: stretched back out into the open ground, its end is refused and stays at x 8", !!p4 && near(Number(p4.x1Ft), 8, 0.1), JSON.stringify(p4 && [p4.y1Ft, p4.x1Ft, p4.x2Ft]));
     ok("P: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }

@@ -605,26 +605,41 @@ const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east
 // trying to do it by using lines and notes but hardly works." Eight of that builder's designs drew one
 // with a Line and a Note ("Partition wall w/ door between", "TACK ROOM Partition 90" high"), which
 // is the whole requirement: straight, usually wall to wall, full height or a stated height, often
-// with a door in it.
+// with a door in it. Customers read it as an "Interior wall"; the item key stays partitionWall, so no
+// pricing join breaks (INTERIOR_SCOPE.md rule 4).
 //
-// THE ITEM IS STORED IN FEET, inside the building and measured from its north-west corner, not in
-// page pixels like every older item: { id, type: "partitionWall", wall: null, axis, atFt, fromFt,
-// toFt, heightIn, openings }. Axis "x" runs west to east at `atFt` from the north wall; axis "y" runs
-// north to south at `atFt` from the west wall; fromFt..toFt are its two ends along that run. A null
-// heightIn is FULL height, so the wall follows the building's plate wherever that ends up.
+// GEOMETRY V2 (2026-10-17, Interior walls v2 slice 2): a wall is a SEGMENT between two points, at any
+// angle, stored in FEET inside the building and measured from its north-west corner:
+//   { id, type: "partitionWall", wall: null, x1Ft, y1Ft, x2Ft, y2Ft, heightMode, heightIn, stud,
+//     covers: { a, b }, openings }
+// x runs east, y south. U is the unit direction from end 1 to end 2, N = (U.y, -U.x) the normal to
+// its LEFT as the plan draws it (north for a wall running east), and side "a" is the face on N.
+// heightMode is "plate" (the top plate level with the outside walls' plate: stud wall height),
+// "rafters" (the top follows the underside of the roof along the whole run; the designer works that
+// out, this block only takes it as a function) or "custom" (heightIn inches, never above the plate).
+// stud null is the builder's standard size; covers are slice 3's and stay { a: null, b: null } here.
 //
-// ITS DOORS AND WINDOWS LIVE INSIDE IT ({ id, kind, fixtureItemId, centerFt, … }) and never as
-// placed door items. A door item carries `wall`, and about 126 places read `wall`: the building's
-// front, the door collisions, the doors[] estimate schedule, the gable vents, the electrical layout.
-// None of them may ever meet a door standing in the middle of the floor, so none of them can.
+// The v1 shape, { axis, atFt, fromFt, toFt, heightIn, openings }, is still READ: ssPartitionNormalize
+// turns it into endpoints (axis x: from west to east at atFt from the north wall, axis y: north to
+// south at atFt from the west wall), so a link saved before v2 opens as the same wall. heightIn null
+// was "full height" and is "plate"; a number is "custom".
+//
+// ITS DOORS AND WINDOWS LIVE INSIDE IT ({ id, kind, fixtureItemId, centerFt, … }; centerFt is feet
+// from END 1 along the wall) and never as placed door items. A door item carries `wall`, and about
+// 126 places read `wall`: the building's front, the door collisions, the doors[] estimate schedule,
+// the gable vents, the electrical layout. None of them may ever meet a door standing in the middle of
+// the floor, so none of them can.
 //
 // Plain JS with no JSX and no outside names: partition_test.ts lifts this block from both twins
 // (byte for byte the same) and runs it, and designerPricing.ts lifts it beside the price rows.
 const SS_PARTITION_KEY = "partitionWall";
-const SS_PARTITION_T_FT = 0.375;      // drawn thickness: 2x4 studs sheathed both sides, about 4.5 in
-const SS_PARTITION_EDGE_FT = 1;       // the closest it may stand to an outside wall
+// Stud depth in inches by size, and what a covered face adds (slice 3's sheathing, half an inch).
+const SS_PARTITION_STUD_IN = { "2x4": 3.5, "2x6": 5.5 };
+const SS_PARTITION_COVER_IN = 0.5;
+const SS_PARTITION_EDGE_FT = 1;       // the closest a wall may stand to an outside wall it runs along
 const SS_PARTITION_MIN_FT = 2;        // the shortest partition
-const SS_PARTITION_SNAP_FT = 0.5;     // an end dragged this close to a wall or a crossing partition lands on it
+const SS_PARTITION_SNAP_FT = 0.5;     // an end dragged this close to a wall or another partition lands on it
+const SS_PARTITION_ANGLE_SNAP_DEG = 5; // within this of 0/45/90/135 degrees a free end snaps to it
 const SS_PARTITION_END_FT = 0.25;     // framing kept between an opening and the partition's end (3 in)
 const SS_PARTITION_GAP_FT = 0.375;    // and between two openings, so their casings (D3_CASE_F each) never overlap (4.5 in)
 const SS_PARTITION_HEADER_IN = 3;     // a cut-down wall still clears its tallest opening by a header
@@ -634,21 +649,100 @@ const SS_PARTITION_DOOR_H_IN = 78, SS_PARTITION_WINDOW_H_IN = 36, SS_PARTITION_S
 // One inch is the snap everywhere: placing, moving, stretching and sliding a door along it.
 function ssPartInch(ft) { return Math.round(Number(ft) * 12) / 12; }
 function ssPartR2(n) { return Math.round(Number(n) * 100) / 100; }
-// A partition is an item of this type WITH A RUN. One without (a plain rectangle a designer from before
-// this block could place, had a builder priced the item before it was live) is left to the generic
-// floor-item paths, exactly as that designer drew it, rather than read as a wall with no ends.
-function ssIsPartition(it) { return !!it && it.type === SS_PARTITION_KEY && (it.axis === "x" || it.axis === "y"); }
-// The building dimension a partition runs along, and the one it moves across.
-function ssPartitionRunFt(axis, bldgW, bldgH) { return axis === "y" ? Number(bldgH) : Number(bldgW); }
-function ssPartitionCrossFt(axis, bldgW, bldgH) { return axis === "y" ? Number(bldgW) : Number(bldgH); }
-function ssPartitionLenFt(p) { return p ? Math.max(0, (Number(p.toFt) || 0) - (Number(p.fromFt) || 0)) : 0; }
-// Its height in feet against the wall it stands under: full height is the wall, and a stated height
-// never goes above it (a taller-wall upgrade taken off again must not leave the partition through the
-// ceiling).
+function ssPartNum(v) { return v != null && v !== "" && isFinite(Number(v)); }
+function ssPartitionHasEnds(it) { return ssPartNum(it.x1Ft) && ssPartNum(it.y1Ft) && ssPartNum(it.x2Ft) && ssPartNum(it.y2Ft); }
+// A partition is an item of this type WITH A RUN: two endpoints, or the v1 axis. One without (a plain
+// rectangle a designer from before this block could place, had a builder priced the item before it
+// was live) is left to the generic floor-item paths, exactly as that designer drew it.
+function ssIsPartition(it) { return !!it && it.type === SS_PARTITION_KEY && (ssPartitionHasEnds(it) || it.axis === "x" || it.axis === "y"); }
+// The stored shape, from either the v1 or the v2 one. An item already in v2 comes back as the SAME
+// object, so a load that changes nothing changes nothing.
+function ssPartitionNormalize(it) {
+  if (!ssIsPartition(it)) return it;
+  const ends = ssPartitionHasEnds(it);
+  const modeOk = it.heightMode === "plate" || it.heightMode === "rafters" || (it.heightMode === "custom" && Number(it.heightIn) > 0);
+  const coversOk = !!it.covers && typeof it.covers === "object";
+  const studOk = it.stud === null || it.stud === "2x4" || it.stud === "2x6";
+  if (ends && modeOk && coversOk && studOk && !("axis" in it)) return it;
+  const out = { ...it };
+  if (!ends) {
+    const at = Number(it.atFt) || 0, from = Number(it.fromFt) || 0, to = Number(it.toFt) || 0;
+    if (it.axis === "y") Object.assign(out, { x1Ft: at, y1Ft: from, x2Ft: at, y2Ft: to });
+    else Object.assign(out, { x1Ft: from, y1Ft: at, x2Ft: to, y2Ft: at });
+    out.openings = (it.openings || []).map((o) => ({ ...o, centerFt: (Number(o.centerFt) || 0) - from }));
+  } else {
+    ["x1Ft", "y1Ft", "x2Ft", "y2Ft"].forEach((k) => { out[k] = Number(it[k]); });
+  }
+  delete out.axis; delete out.atFt; delete out.fromFt; delete out.toFt;
+  if (!modeOk) {
+    const h = Number(it.heightIn);
+    if (it.heightMode !== "rafters" && it.heightIn != null && isFinite(h) && h > 0) { out.heightMode = "custom"; out.heightIn = h; }
+    else { out.heightMode = it.heightMode === "rafters" ? "rafters" : "plate"; out.heightIn = null; }
+  }
+  if (out.heightMode !== "custom") out.heightIn = null;
+  if (!coversOk) out.covers = { a: null, b: null };
+  if (!studOk) out.stud = null;
+  if (!Array.isArray(out.openings)) out.openings = [];
+  return out;
+}
+// The wall as vectors: its ends, its length, U along it from end 1 and N to its left (side a).
+function ssPartitionGeom(p) {
+  const q = ssPartitionNormalize(p);
+  const x1 = Number(q.x1Ft) || 0, y1 = Number(q.y1Ft) || 0, x2 = Number(q.x2Ft) || 0, y2 = Number(q.y2Ft) || 0;
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+  const ux = len > 1e-9 ? dx / len : 1, uy = len > 1e-9 ? dy / len : 0;
+  return { x1, y1, x2, y2, dx, dy, len, ux, uy, nx: uy, ny: -ux };
+}
+function ssPartitionLenFt(p) { return p ? ssPartitionGeom(p).len : 0; }
+// Its angle on the plan in degrees (0 runs east, 90 south), for the SVG and the canvas.
+function ssPartitionAngleDeg(p) { const g = ssPartitionGeom(p); return Math.atan2(g.dy, g.dx) * 180 / Math.PI; }
+// Feet along it from end 1 for a plan point in feet (unclamped), and how far off its line that is.
+function ssPartitionAlongFt(p, fx, fy) { const g = ssPartitionGeom(p); return (fx - g.x1) * g.ux + (fy - g.y1) * g.uy; }
+function ssPartitionOffFt(p, fx, fy) { const g = ssPartitionGeom(p); return (fx - g.x1) * g.nx + (fy - g.y1) * g.ny; }
+// The point `along` feet from end 1.
+function ssPartitionPointAt(p, along) { const g = ssPartitionGeom(p); return [g.x1 + g.ux * along, g.y1 + g.uy * along]; }
+// The stud size a wall is framed in: its own (a rep's override) or the builder's standard.
+function ssPartitionStud(p, std) { const s = p && p.stud; return s === "2x4" || s === "2x6" ? s : (std === "2x6" ? "2x6" : "2x4"); }
+// Its real thickness in feet: the stud's depth plus half an inch for each covered face.
+function ssPartitionThicknessFt(p, std) {
+  const c = (p && p.covers) || {};
+  return (SS_PARTITION_STUD_IN[ssPartitionStud(p, std)] + (c.a ? SS_PARTITION_COVER_IN : 0) + (c.b ? SS_PARTITION_COVER_IN : 0)) / 12;
+}
+// How tall it is: "plate" | "rafters" | "custom".
+function ssPartitionHeightMode(p) { return ssPartitionNormalize(p).heightMode; }
+// Its height in feet against the wall it stands under, where the top is FLAT: stud wall height is the
+// wall, and a stated height never goes above it (a taller-wall upgrade taken off again must not leave
+// the partition through the ceiling). A wall to the rafters is at least the wall; its real top is
+// ssPartitionTopFt's.
 function ssPartitionHeightFt(p, wallFt) {
   const w = Number(wallFt) > 0 ? Number(wallFt) : 8;
-  const h = p && p.heightIn != null ? Number(p.heightIn) / 12 : NaN;
+  const q = ssPartitionNormalize(p);
+  const h = q && q.heightMode === "custom" ? Number(q.heightIn) / 12 : NaN;
   return isFinite(h) && h > 0 ? Math.min(h, w) : w;
+}
+// The top of the wall `along` feet from end 1. `roofAt(xFt, yFt)` is the underside of the roof (or of a
+// loft's floor framing) over that plan point, handed in by the designer; without it, or for a wall that
+// is not to the rafters, the top is flat. Never under SS_PARTITION_MIN_HEIGHT_IN.
+function ssPartitionTopFt(p, wallFt, roofAt, along) {
+  const flat = ssPartitionHeightFt(p, wallFt);
+  if (ssPartitionHeightMode(p) !== "rafters" || typeof roofAt !== "function") return flat;
+  const pt = ssPartitionPointAt(p, along);
+  const t = Number(roofAt(pt[0], pt[1]));
+  return isFinite(t) ? Math.max(SS_PARTITION_MIN_HEIGHT_IN / 12, t) : flat;
+}
+// The face of the wall in square feet, one side: length x height, or for a wall to the rafters the
+// area under its top, summed an inch at a time (exact to a hair on a gable's peak).
+function ssPartitionFaceAreaSqFt(p, wallFt, roofAt) {
+  const len = ssPartitionLenFt(p);
+  if (ssPartitionHeightMode(p) !== "rafters" || typeof roofAt !== "function") return len * ssPartitionHeightFt(p, wallFt);
+  const n = Math.max(8, Math.min(2400, Math.ceil(len * 12)));
+  let a = 0, prev = ssPartitionTopFt(p, wallFt, roofAt, 0);
+  for (let i = 1; i <= n; i++) {
+    const h = ssPartitionTopFt(p, wallFt, roofAt, (len * i) / n);
+    a += ((prev + h) / 2) * (len / n);
+    prev = h;
+  }
+  return a;
 }
 function ssPartitionOpeningWidthFt(o) { return (Number(o && o.widthIn) || (o && o.kind === "window" ? 24 : 36)) / 12; }
 // [bottom, top] of an opening, in inches off the floor. A door stands on the floor; a window sits on
@@ -668,59 +762,174 @@ function ssPartitionMinHeightIn(p) {
 // click to the inch, and never closer than a foot to an outside wall. null when the building has no
 // room for one.
 function ssPartitionAt(fx, fy, bldgW, bldgH) {
-  const axis = Number(bldgW) <= Number(bldgH) ? "x" : "y";
-  const cross = ssPartitionCrossFt(axis, bldgW, bldgH);
+  const W = Number(bldgW), H = Number(bldgH);
+  const horiz = W <= H;
+  const cross = horiz ? H : W;
   if (!(cross >= 2 * SS_PARTITION_EDGE_FT)) return null;
-  const want = axis === "x" ? Number(fy) : Number(fx);
-  return { axis, atFt: Math.max(SS_PARTITION_EDGE_FT, Math.min(cross - SS_PARTITION_EDGE_FT, ssPartInch(want))), fromFt: 0, toFt: ssPartitionRunFt(axis, bldgW, bldgH) };
+  const at = Math.max(SS_PARTITION_EDGE_FT, Math.min(cross - SS_PARTITION_EDGE_FT, ssPartInch(horiz ? fy : fx)));
+  return horiz ? { x1Ft: 0, y1Ft: at, x2Ft: W, y2Ft: at } : { x1Ft: at, y1Ft: 0, x2Ft: at, y2Ft: H };
 }
-// Moving the whole wall ACROSS the building: where it lands.
-function ssPartitionMoveAcross(p, wantFt, bldgW, bldgH) {
-  const cross = ssPartitionCrossFt(p.axis, bldgW, bldgH);
-  return Math.max(SS_PARTITION_EDGE_FT, Math.min(cross - SS_PARTITION_EDGE_FT, ssPartInch(wantFt)));
+// Is (x, y) on an outside wall's inside face?
+function ssPartitionOnWall(x, y, W, H) {
+  const t = 0.01;
+  return Math.abs(x) < t || Math.abs(y) < t || Math.abs(x - W) < t || Math.abs(y - H) < t;
 }
-// Two parallel partitions closer than this cannot both be framed, and on a plan they read as one.
-function ssPartitionClash(p, others) {
-  return (others || []).some((o) => ssIsPartition(o) && o.id !== p.id && o.axis === p.axis
-    && Math.abs((Number(o.atFt) || 0) - (Number(p.atFt) || 0)) < SS_PARTITION_SNAP_FT
-    && Math.min(Number(o.toFt), Number(p.toFt)) - Math.max(Number(o.fromFt), Number(p.fromFt)) > 0.01);
+// Where a ray from (px, py) along (ux, uy) leaves the building.
+function ssPartitionExit(px, py, ux, uy, W, H) {
+  const tx = ux > 1e-9 ? (W - px) / ux : ux < -1e-9 ? -px / ux : Infinity;
+  const ty = uy > 1e-9 ? (H - py) / uy : uy < -1e-9 ? -py / uy : Infinity;
+  const t = Math.min(tx, ty);
+  if (!isFinite(t) || t < 0) return [px, py];
+  // The wall it meets is met exactly, not a rounding error short of it.
+  return [tx <= ty ? (ux > 0 ? W : 0) : px + ux * t, ty <= tx ? (uy > 0 ? H : 0) : py + uy * t];
 }
-// Moving one END ("from" | "to") toward wantFt: the patch it lands on. Outside walls and partitions
-// crossing this one are magnets; it never gets shorter than SS_PARTITION_MIN_FT and never cuts into
-// the framing round a door or window in it. A partition IN LINE with this one (or close enough to
-// clash, ssPartitionClash) is a hard stop: the end can meet it, never run along it, or the feet they
-// share would be drawn as one wall and charged twice.
-function ssPartitionMoveEnd(p, end, wantFt, bldgW, bldgH, others) {
-  const run = ssPartitionRunFt(p.axis, bldgW, bldgH);
-  let v = ssPartInch(wantFt);
-  const stops = [0, run];
-  (others || []).forEach((o) => {
-    if (ssIsPartition(o) && o.id !== p.id && o.axis !== p.axis
-      && Number(o.fromFt) - 0.01 <= Number(p.atFt) && Number(o.toFt) + 0.01 >= Number(p.atFt)) stops.push(Number(o.atFt));
-  });
-  let best = null;
-  stops.forEach((s) => { if (Math.abs(v - s) < SS_PARTITION_SNAP_FT && (best == null || Math.abs(v - s) < Math.abs(v - best))) best = s; });
-  if (best != null) v = best;
-  const ops = p.openings || [];
-  const near = (others || []).filter((o) => ssIsPartition(o) && o.id !== p.id && o.axis === p.axis
-    && Math.abs((Number(o.atFt) || 0) - (Number(p.atFt) || 0)) < SS_PARTITION_SNAP_FT);
-  if (end === "from") {
-    let hi = Number(p.toFt) - SS_PARTITION_MIN_FT;
-    ops.forEach((o) => { hi = Math.min(hi, Number(o.centerFt) - ssPartitionOpeningWidthFt(o) / 2 - SS_PARTITION_END_FT); });
-    let lo0 = 0;
-    near.forEach((o) => { if (Number(o.toFt) <= Number(p.fromFt) + 0.01) lo0 = Math.max(lo0, Number(o.toFt)); });
-    return { fromFt: Math.max(lo0, Math.min(hi, v)) };
+// The direction from (fx, fy) to (vx, vy), snapped to 0/45/90/135 degrees when within
+// SS_PARTITION_ANGLE_SNAP_DEG of one, or null when it is not (or `free` is set: Shift, or the bar's
+// "Free angle"). Exact unit vectors, so a snapped wall is exactly level, plumb or diagonal.
+function ssPartitionSnapDir(fx, fy, vx, vy, free) {
+  if (free) return null;
+  const dx = vx - fx, dy = vy - fy;
+  if (Math.hypot(dx, dy) < 1e-6) return null;
+  const ang = Math.atan2(dy, dx), step = Math.PI / 4;
+  const k = Math.round(ang / step);
+  if (Math.abs(ang - k * step) > (SS_PARTITION_ANGLE_SNAP_DEG * Math.PI) / 180) return null;
+  const r = Math.SQRT1_2;
+  const DIRS = [[1, 0], [r, r], [0, 1], [-r, r], [-1, 0], [-r, -r], [0, -1], [r, -r]];
+  return DIRS[((k % 8) + 8) % 8];
+}
+// A point to the inch RELATIVE to the fixed end (so a snapped angle stays exact), kept in the building.
+function ssPartitionInchFrom(fx, fy, vx, vy, dir, W, H) {
+  let dx = ssPartInch(vx - fx), dy = ssPartInch(vy - fy);
+  if (dir && dir[0] !== 0 && dir[1] !== 0) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dir[0]) * m; dy = Math.sign(dir[1]) * m; }
+  return [Math.max(0, Math.min(W, fx + dx)), Math.max(0, Math.min(H, fy + dy))];
+}
+// Moving one END ("from" = end 1 | "to" = end 2) toward (wantX, wantY) feet: the patch it lands on.
+// Snapping, in order: (1) the inside face of an outside wall, (2) another partition's end or its body
+// (a T), (3) the angle (0/45/90/135 degrees within 5, unless `free`), (4) whole inches. It stays inside
+// the building, never gets shorter than SS_PARTITION_MIN_FT and never cuts into the framing round a
+// door or window in it: an end that would is pushed back out along the wall. Moving end 1 keeps every
+// opening where it is (their centerFt is measured from end 1, so it is shifted to match). Clashing
+// with a partition in line with it is the caller's check (ssPartitionClash), which refuses the move.
+function ssPartitionMoveEnd(p, end, wantX, wantY, bldgW, bldgH, others, free) {
+  const q = ssPartitionNormalize(p), g = ssPartitionGeom(q);
+  const W = Number(bldgW), H = Number(bldgH), S = SS_PARTITION_SNAP_FT;
+  const one = end === "from";
+  const fx = one ? g.x2 : g.x1, fy = one ? g.y2 : g.y1;
+  let vx = Math.max(0, Math.min(W, Number(wantX))), vy = Math.max(0, Math.min(H, Number(wantY)));
+  const dir = ssPartitionSnapDir(fx, fy, vx, vy, free);
+  let snapped = false;
+  const sx = vx < S ? 0 : W - vx < S ? W : null, sy = vy < S ? 0 : H - vy < S ? H : null;
+  if (sx != null || sy != null) {
+    if (dir) {
+      const e = ssPartitionExit(fx, fy, dir[0], dir[1], W, H);
+      if (Math.hypot(e[0] - vx, e[1] - vy) <= 2 * S) { vx = e[0]; vy = e[1]; snapped = true; }
+    }
+    if (!snapped) { if (sx != null) vx = sx; if (sy != null) vy = sy; snapped = true; }
+  } else {
+    const parts = (others || []).filter((o) => ssIsPartition(o) && o.id !== q.id).map(ssPartitionGeom);
+    let best = null, bd = S;
+    parts.forEach((o) => [[o.x1, o.y1], [o.x2, o.y2]].forEach((e) => {
+      const d = Math.hypot(e[0] - vx, e[1] - vy);
+      if (d < bd) { bd = d; best = e; }
+    }));
+    if (!best) {
+      // A body: along the snapped direction to where it meets that wall's line (if that is on the wall
+      // and near), else straight onto it.
+      let bb = 2 * S;
+      parts.forEach((o) => {
+        let pt = null, d = Infinity;
+        const den = dir ? dir[0] * o.uy - dir[1] * o.ux : 0;
+        if (dir && Math.abs(den) > 1e-9) {
+          const s = ((o.x1 - fx) * o.uy - (o.y1 - fy) * o.ux) / den;
+          const hit = [fx + dir[0] * s, fy + dir[1] * s];
+          const ht = (hit[0] - o.x1) * o.ux + (hit[1] - o.y1) * o.uy;
+          if (s > 0 && ht >= -1e-6 && ht <= o.len + 1e-6) { pt = hit; d = Math.hypot(hit[0] - vx, hit[1] - vy); }
+        }
+        if (!pt || d > 2 * S) {
+          const t = Math.max(0, Math.min(o.len, (vx - o.x1) * o.ux + (vy - o.y1) * o.uy));
+          pt = [o.x1 + o.ux * t, o.y1 + o.uy * t];
+          d = Math.hypot(pt[0] - vx, pt[1] - vy);
+          if (d >= S) pt = null;
+        }
+        if (pt && d < bb) { bb = d; best = pt; }
+      });
+    }
+    if (best) { vx = best[0]; vy = best[1]; snapped = true; }
+    else if (dir) { const L = Math.hypot(vx - fx, vy - fy); vx = fx + dir[0] * L; vy = fy + dir[1] * L; }
   }
-  let lo = Number(p.fromFt) + SS_PARTITION_MIN_FT;
-  ops.forEach((o) => { lo = Math.max(lo, Number(o.centerFt) + ssPartitionOpeningWidthFt(o) / 2 + SS_PARTITION_END_FT); });
-  let hi0 = run;
-  near.forEach((o) => { if (Number(o.fromFt) >= Number(p.toFt) - 0.01) hi0 = Math.min(hi0, Number(o.fromFt)); });
-  return { toFt: Math.min(hi0, Math.max(lo, v)) };
+  if (!snapped) [vx, vy] = ssPartitionInchFrom(fx, fy, vx, vy, dir, W, H);
+  // The shortest it may be: 2 ft, and the framing round every door and window in it.
+  let len = Math.hypot(vx - fx, vy - fy);
+  const ux = len > 1e-9 ? (vx - fx) / len : (one ? -g.ux : g.ux), uy = len > 1e-9 ? (vy - fy) / len : (one ? -g.uy : g.uy);
+  let need = SS_PARTITION_MIN_FT;
+  (q.openings || []).forEach((o) => {
+    const c = Number(o.centerFt) || 0, hw = ssPartitionOpeningWidthFt(o) / 2 + SS_PARTITION_END_FT;
+    need = Math.max(need, one ? g.len - c + hw : c + hw);
+  });
+  if (len < need - 1e-9) {
+    vx = Math.max(0, Math.min(W, fx + ux * need)); vy = Math.max(0, Math.min(H, fy + uy * need));
+    len = Math.hypot(vx - fx, vy - fy);
+  }
+  if (!one) return { x2Ft: vx, y2Ft: vy };
+  const out = { x1Ft: vx, y1Ft: vy };
+  if ((q.openings || []).length && Math.abs(len - g.len) > 1e-9) out.openings = q.openings.map((o) => ({ ...o, centerFt: (Number(o.centerFt) || 0) + (len - g.len) }));
+  return out;
 }
-// The range an opening's CENTRE may take along the partition, or null when it cannot fit at all.
+// Moving the WHOLE wall by (dxFt, dyFt): the patch. A wall with an end on an outside wall moves ACROSS
+// itself only (the drag projected onto N), and that end slides along the wall's own line to stay on the
+// outside wall, so a wall-to-wall partition stays wall to wall wherever it is dragged; a wall standing
+// free on the floor follows the pointer. It stays inside the building and to the inch, a wall running
+// along an outside wall keeps SS_PARTITION_EDGE_FT off it, and its doors and windows go with it.
+function ssPartitionTranslate(p, dxFt, dyFt, bldgW, bldgH) {
+  const q = ssPartitionNormalize(p), g = ssPartitionGeom(q);
+  const W = Number(bldgW), H = Number(bldgH), E = SS_PARTITION_EDGE_FT;
+  const on1 = ssPartitionOnWall(g.x1, g.y1, W, H), on2 = ssPartitionOnWall(g.x2, g.y2, W, H);
+  let dx = Number(dxFt) || 0, dy = Number(dyFt) || 0;
+  if (on1 || on2) { const d = dx * g.nx + dy * g.ny; dx = d * g.nx; dy = d * g.ny; }
+  dx = ssPartInch(dx); dy = ssPartInch(dy);
+  // Kept inside by its free ends (an end on an outside wall is put back on it below), or by its middle.
+  const pts = [[g.x1, g.y1, on1], [g.x2, g.y2, on2]].filter((e) => !e[2]);
+  if (!pts.length) pts.push([(g.x1 + g.x2) / 2, (g.y1 + g.y2) / 2]);
+  const xs = pts.map((e) => e[0]), ys = pts.map((e) => e[1]);
+  dx = Math.max(-Math.min(...xs), Math.min(W - Math.max(...xs), dx));
+  dy = Math.max(-Math.min(...ys), Math.min(H - Math.max(...ys), dy));
+  let ax = g.x1 + dx, ay = g.y1 + dy, bx = g.x2 + dx, by = g.y2 + dy;
+  // Running along an outside wall: a foot off it.
+  if (Math.max(ax, bx) < E) { const s = E - Math.max(ax, bx); ax += s; bx += s; }
+  if (Math.min(ax, bx) > W - E) { const s = Math.min(ax, bx) - (W - E); ax -= s; bx -= s; }
+  if (Math.max(ay, by) < E) { const s = E - Math.max(ay, by); ay += s; by += s; }
+  if (Math.min(ay, by) > H - E) { const s = Math.min(ay, by) - (H - E); ay -= s; by -= s; }
+  const mx = (ax + bx) / 2, my = (ay + by) / 2;
+  const sx = ax, sy = ay;
+  if (on1) [ax, ay] = ssPartitionExit(mx, my, -g.ux, -g.uy, W, H);
+  if (on2) [bx, by] = ssPartitionExit(mx, my, g.ux, g.uy, W, H);
+  const out = { x1Ft: ax, y1Ft: ay, x2Ft: bx, y2Ft: by };
+  // End 1 slid along the wall by `s`: every opening keeps its place on the floor.
+  const s = (ax - sx) * g.ux + (ay - sy) * g.uy;
+  if ((q.openings || []).length && Math.abs(s) > 1e-9) out.openings = q.openings.map((o) => ({ ...o, centerFt: (Number(o.centerFt) || 0) - s }));
+  return out;
+}
+// Two partitions IN LINE (parallel within about 2 degrees, under SS_PARTITION_SNAP_FT apart) that share
+// any run cannot both be framed, and on a plan they read as one wall charged twice. Walls meeting at an
+// end (L), at a body (T) or crossing (X) do not clash.
+function ssPartitionClash(p, others) {
+  const a = ssPartitionGeom(p);
+  return (others || []).some((o) => {
+    if (!ssIsPartition(o) || o.id === p.id) return false;
+    const b = ssPartitionGeom(o);
+    if (Math.abs(a.ux * b.uy - a.uy * b.ux) > 0.035) return false;
+    const d1 = Math.abs((b.x1 - a.x1) * a.nx + (b.y1 - a.y1) * a.ny), d2 = Math.abs((b.x2 - a.x1) * a.nx + (b.y2 - a.y1) * a.ny);
+    if (Math.max(d1, d2) >= SS_PARTITION_SNAP_FT) return false;
+    const t1 = (b.x1 - a.x1) * a.ux + (b.y1 - a.y1) * a.uy, t2 = (b.x2 - a.x1) * a.ux + (b.y2 - a.y1) * a.uy;
+    return Math.min(a.len, Math.max(t1, t2)) - Math.max(0, Math.min(t1, t2)) > 0.01;
+  });
+}
+// The range an opening's CENTRE may take along the partition (feet from end 1), or null when it
+// cannot fit at all.
 function ssPartitionCenterRange(p, widthFt) {
-  const lo = Number(p.fromFt) + widthFt / 2 + SS_PARTITION_END_FT;
-  const hi = Number(p.toFt) - widthFt / 2 - SS_PARTITION_END_FT;
+  const len = ssPartitionLenFt(p);
+  const lo = widthFt / 2 + SS_PARTITION_END_FT;
+  const hi = len - widthFt / 2 - SS_PARTITION_END_FT;
   return hi >= lo - 1e-9 ? [lo, Math.max(lo, hi)] : null;
 }
 // Is opening `o` (centred at o.centerFt) legal in `p`: inside its ends with framing to spare, and
@@ -732,6 +941,11 @@ function ssPartitionOpeningOk(p, o) {
   if (!r || !isFinite(c) || c < r[0] - 1e-6 || c > r[1] + 1e-6) return false;
   return !(p.openings || []).some((q) => q && q.id !== o.id
     && Math.abs(Number(q.centerFt) - c) < (ssPartitionOpeningWidthFt(q) + w) / 2 + SS_PARTITION_GAP_FT - 1e-6);
+}
+// A wall that can stand: long enough, and every door and window in it legal.
+function ssPartitionValid(p) {
+  const q = ssPartitionNormalize(p);
+  return ssPartitionLenFt(q) >= SS_PARTITION_MIN_FT - 1e-6 && (q.openings || []).every((o) => ssPartitionOpeningOk(q, o));
 }
 // The legal centre nearest wantFt for opening `o`, searching outward an inch at a time (reflowItems'
 // seat() search, at the plan's own snap), or null when there is nowhere it fits.
@@ -747,25 +961,33 @@ function ssPartitionSeatOpening(p, o, wantFt) {
   }
   return null;
 }
-// A NEW BUILDING SIZE (reflowItems). The wall keeps its distance from the north (axis x) or west
-// (axis y) wall, clamped inside; an end standing on an outside wall stays on it, so a wall-to-wall
-// partition stays wall to wall; any other end is clamped into the new building, and every door and
-// window keeps its place if it still fits. Returns { item, kind } in reflowItems' own words: kind is
-// null (nothing to tell anyone), "resized" (the clamp shortened it) or "blocked" (it cannot be kept,
-// and the size change is put back). Nothing moved returns the SAME object.
+// A NEW BUILDING SIZE (reflowItems). An end standing on an outside wall stays on that wall (the east
+// and south walls move with the size), so a wall-to-wall partition stays wall to wall; every other
+// coordinate keeps its distance from the north-west corner, clamped into the new building -- and a wall
+// running along one axis is held a foot off the walls across it. Every door and window keeps its place
+// if it still fits. Returns { item, kind } in reflowItems' own words: kind is null (nothing to tell
+// anyone), "resized" (the clamp shortened it) or "blocked" (it cannot be kept, and the size change is
+// put back). Nothing moved returns the SAME object.
 function ssPartitionReflow(p, prev, next) {
-  const tol = 0.01;
-  const runA = ssPartitionRunFt(p.axis, prev.w, prev.h), runB = ssPartitionRunFt(p.axis, next.w, next.h);
-  const crossB = ssPartitionCrossFt(p.axis, next.w, next.h);
-  if (!(crossB >= 2 * SS_PARTITION_EDGE_FT)) return { item: p, kind: "blocked" };
-  const from0 = Number(p.fromFt) || 0, to0 = Number(p.toFt) || 0, at0 = Number(p.atFt) || 0;
-  const fromFt = Math.abs(from0) < tol ? 0 : Math.max(0, Math.min(from0, runB));
-  const toFt = Math.abs(to0 - runA) < tol ? runB : Math.max(0, Math.min(to0, runB));
-  const atFt = Math.max(SS_PARTITION_EDGE_FT, Math.min(crossB - SS_PARTITION_EDGE_FT, at0));
-  if (toFt - fromFt < SS_PARTITION_MIN_FT - 1e-6) return { item: p, kind: "blocked" };
-  const span = { ...p, atFt, fromFt, toFt, openings: [] };
+  const tol = 0.01, E = SS_PARTITION_EDGE_FT;
+  const q = ssPartitionNormalize(p), g = ssPartitionGeom(q);
+  const pw = Number(prev.w), ph = Number(prev.h), nw = Number(next.w), nh = Number(next.h);
+  if (!(nw >= 2 * E && nh >= 2 * E)) return { item: p, kind: "blocked" };
+  const across = (v, a, b) => Math.abs(a - b) < tol && v > tol;   // a wall running along the other axis
+  const map = (v, pd, nd, flat) => {
+    if (Math.abs(v) < tol) return 0;
+    if (Math.abs(v - pd) < tol) return nd;
+    if (Math.abs(pd - nd) < 1e-9) return v;
+    return flat ? Math.max(E, Math.min(nd - E, v)) : Math.max(0, Math.min(nd, v));
+  };
+  const vert = across(g.x1, g.x1, g.x2), horiz = across(g.y1, g.y1, g.y2);
+  const x1 = map(g.x1, pw, nw, vert), x2 = map(g.x2, pw, nw, vert);
+  const y1 = map(g.y1, ph, nh, horiz), y2 = map(g.y2, ph, nh, horiz);
+  const span = { ...q, x1Ft: x1, y1Ft: y1, x2Ft: x2, y2Ft: y2, openings: [] };
+  const len = ssPartitionLenFt(span);
+  if (len < SS_PARTITION_MIN_FT - 1e-6) return { item: p, kind: "blocked" };
   let opMoved = false;
-  const ops = (p.openings || []).map((o) => {
+  const ops = (q.openings || []).map((o) => {
     const r = ssPartitionCenterRange(span, ssPartitionOpeningWidthFt(o));
     if (!r) return null;
     const c = Math.max(r[0], Math.min(r[1], Number(o.centerFt)));
@@ -773,75 +995,102 @@ function ssPartitionReflow(p, prev, next) {
     return o;
   });
   if (ops.some((o) => !o)) return { item: p, kind: "blocked" };
-  const out = { ...span, openings: opMoved ? ops : (p.openings || []) };
+  const out = { ...span, openings: opMoved ? ops : (q.openings || []) };
   if (ops.some((o) => !ssPartitionOpeningOk(out, o))) return { item: p, kind: "blocked" };
-  const wallToWall = Math.abs(from0) < tol && Math.abs(to0 - runA) < tol;
-  const kind = !wallToWall && toFt - fromFt < to0 - from0 - tol ? "resized" : null;
-  if (atFt === at0 && fromFt === from0 && toFt === to0 && !opMoved) return { item: p, kind: null };
+  const wallToWall = ssPartitionOnWall(g.x1, g.y1, pw, ph) && ssPartitionOnWall(g.x2, g.y2, pw, ph);
+  const kind = !wallToWall && len < g.len - tol ? "resized" : null;
+  if (q === p && x1 === g.x1 && y1 === g.y1 && x2 === g.x2 && y2 === g.y2 && !opMoved) return { item: p, kind: null };
   return { item: out, kind };
 }
-// Is page point (px, py) on the partition? Its position ALONG the run in feet, or null.
+// Is page point (px, py) on the partition? Its position ALONG it in feet from end 1, or null.
 function ssPartitionHit(p, px, py, mgX, mgY, scale, tolPx) {
-  const along = p.axis === "y" ? (py - mgY) / scale : (px - mgX) / scale;
-  const across = p.axis === "y" ? (px - mgX) / scale : (py - mgY) / scale;
-  const tol = tolPx / scale;
-  if (along < Number(p.fromFt) - tol || along > Number(p.toFt) + tol) return null;
-  return Math.abs(across - Number(p.atFt)) <= tol ? along : null;
+  const g = ssPartitionGeom(p);
+  const fx = (px - mgX) / scale, fy = (py - mgY) / scale, tol = tolPx / scale;
+  const t = (fx - g.x1) * g.ux + (fy - g.y1) * g.uy;
+  if (t < -tol || t > g.len + tol) return null;
+  return Math.abs((fx - g.x1) * g.nx + (fy - g.y1) * g.ny) <= tol ? Math.max(0, Math.min(g.len, t)) : null;
 }
 // The door or window at alongFt, or null.
 function ssPartitionOpeningAt(p, alongFt) {
   return (p.openings || []).find((o) => Math.abs(Number(o.centerFt) - alongFt) <= ssPartitionOpeningWidthFt(o) / 2) || null;
 }
-// The solid stretches and the openings cut into the wall, along its run, in feet. One answer for the
-// plan, the PDF and the 3D, so the three draw the same wall.
+// The solid stretches and the openings cut into the wall, along it from end 1, in feet. One answer for
+// the plan, the PDF and the 3D, so the three draw the same wall.
 function ssPartitionPieces(p) {
-  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0;
-  const holes = (p.openings || []).map((o) => {
+  const q = ssPartitionNormalize(p);
+  const to = ssPartitionLenFt(q);
+  const holes = (q.openings || []).map((o) => {
     const w = ssPartitionOpeningWidthFt(o), c = Number(o.centerFt);
-    return { o, a0: Math.max(from, c - w / 2), a1: Math.min(to, c + w / 2) };
+    return { o, a0: Math.max(0, c - w / 2), a1: Math.min(to, c + w / 2) };
   }).filter((h) => h.a1 > h.a0).sort((a, b) => a.a0 - b.a0);
   const solid = [];
-  let cur = from;
+  let cur = 0;
   holes.forEach((h) => { if (h.a0 > cur + 1e-6) solid.push([cur, h.a0]); cur = Math.max(cur, h.a1); });
   if (to > cur + 1e-6) solid.push([cur, to]);
   return { solid, holes };
 }
-// Feet in feet-and-inches, to the inch, the way the plan and the quote both print a partition.
+// Feet in feet-and-inches, to the inch, the way the plan and the estimate both print a partition.
 function ssPartitionFtIn(ft) {
   const n = Math.round(Number(ft) * 12);
   if (!(n > 0)) return "0\"";
   const f = Math.floor(n / 12), i = n % 12;
   return f ? (i ? f + "'" + i + "\"" : f + "'") : i + "\"";
 }
-// "12' long, full height (8')" or "12' long, 7'6" tall": the plan's PDF bullet and the quote row.
+// "12' long, stud wall height (8')", "12' long, 7'6" tall" or "12' long, to the rafters": the plan's
+// PDF bullet and the estimate row.
 function ssPartitionSize(p, wallFt) {
+  const mode = ssPartitionHeightMode(p), len = ssPartitionFtIn(ssPartitionLenFt(p));
+  if (mode === "rafters") return len + " long, to the rafters";
   const h = ssPartitionFtIn(ssPartitionHeightFt(p, wallFt));
-  return ssPartitionFtIn(ssPartitionLenFt(p)) + " long, " + (p.heightIn == null ? "full height (" + h + ")" : h + " tall");
+  return len + " long, " + (mode === "custom" ? h + " tall" : "stud wall height (" + h + ")");
+}
+// The plan's and the PDF's label: "INTERIOR 12' · 2x4 · 7'6" tall" (or "· to rafters").
+function ssPartitionPlanLabel(p, wallFt, std) {
+  const mode = ssPartitionHeightMode(p);
+  return "INTERIOR " + ssPartitionFtIn(ssPartitionLenFt(p)) + " · " + ssPartitionStud(p, std) + " · "
+    + (mode === "rafters" ? "to rafters" : ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall");
 }
 // How a partition is charged under the builder's method: per foot of wall, per square foot of wall
-// (its length times its height) or each. Any other method a pricing row could carry is charged each.
+// (its face: length x height, or the area under its top when it goes to the rafters, never less than
+// length x the wall) or each. Any other method a pricing row could carry is charged each.
 // THE ONE RULE, mirrored line for line by _shared/partitionPricing.ts on the server.
-function ssPartitionCharge(p, method, wallFt) {
+function ssPartitionCharge(p, method, wallFt, roofAt) {
   const len = ssPartR2(ssPartitionLenFt(p));
   if (method === "lineal_ft") return { qty: len, per: "per ft", method };
-  if (method === "sqft_option") return { qty: ssPartR2(len * ssPartitionHeightFt(p, wallFt)), per: "per sq ft", method };
+  if (method === "sqft_option") {
+    if (ssPartitionHeightMode(p) === "rafters" && typeof roofAt === "function") {
+      const w = Number(wallFt) > 0 ? Number(wallFt) : 8;
+      return { qty: ssPartR2(Math.max(ssPartR2(ssPartitionFaceAreaSqFt(p, wallFt, roofAt)), len * w)), per: "per sq ft", method };
+    }
+    return { qty: ssPartR2(len * ssPartitionHeightFt(p, wallFt)), per: "per sq ft", method };
+  }
   return { qty: 1, per: "each", method: "each" };
 }
-// What the estimate is told about the partitions (itemSummary.partitions): sizes, and each door or
-// window by its catalog id. submit-estimate re-reads every price, clamps every length to the building
-// and every height to its wall, so nothing here is trusted for money.
-function ssPartitionSummary(items, wallFt) {
-  return (items || []).filter(ssIsPartition).map((p) => ({
-    id: String(p.id), axis: p.axis === "y" ? "y" : "x",
-    lengthFt: ssPartR2(ssPartitionLenFt(p)),
-    heightIn: p.heightIn != null ? Number(p.heightIn) : null,
-    heightFt: ssPartR2(ssPartitionHeightFt(p, wallFt)),
-    openings: (p.openings || []).map((o) => ({
-      id: String(o.id), kind: o.kind === "window" ? "window" : "door", fixtureItemId: o.fixtureItemId || null,
-      name: o.name || null, widthIn: o.widthIn != null ? Number(o.widthIn) : null, heightIn: o.heightIn != null ? Number(o.heightIn) : null,
-      swing: o.swing || null, operation: o.operation || null, price: o.price != null ? Number(o.price) : null,
-    })),
-  }));
+// What the estimate is told about the partitions (itemSummary.partitions): ends, sizes, framing and
+// each door or window by its catalog id. submit-estimate re-reads every price, clamps every end into
+// the building and every height to its wall, and a wall to the rafters' face area between the wall's
+// and the roof's, so nothing here is trusted for money.
+function ssPartitionSummary(items, wallFt, roofAt) {
+  const r4 = (n) => Math.round(Number(n) * 10000) / 10000;
+  return (items || []).filter(ssIsPartition).map((p0) => {
+    const p = ssPartitionNormalize(p0);
+    const mode = p.heightMode;
+    return {
+      id: String(p.id), x1Ft: r4(p.x1Ft), y1Ft: r4(p.y1Ft), x2Ft: r4(p.x2Ft), y2Ft: r4(p.y2Ft),
+      lengthFt: ssPartR2(ssPartitionLenFt(p)),
+      stud: p.stud === "2x4" || p.stud === "2x6" ? p.stud : null,
+      covers: { a: (p.covers && p.covers.a) || null, b: (p.covers && p.covers.b) || null },
+      heightMode: mode,
+      heightIn: mode === "custom" ? Number(p.heightIn) : null,
+      heightFt: ssPartR2(ssPartitionHeightFt(p, wallFt)),
+      faceAreaSqFt: ssPartR2(ssPartitionFaceAreaSqFt(p, wallFt, mode === "rafters" ? roofAt : null)),
+      openings: (p.openings || []).map((o) => ({
+        id: String(o.id), kind: o.kind === "window" ? "window" : "door", fixtureItemId: o.fixtureItemId || null,
+        name: o.name || null, widthIn: o.widthIn != null ? Number(o.widthIn) : null, heightIn: o.heightIn != null ? Number(o.heightIn) : null,
+        swing: o.swing || null, operation: o.operation || null, price: o.price != null ? Number(o.price) : null,
+      })),
+    };
+  });
 }
 // ── END PARTITION WALLS ──
 
@@ -1938,134 +2187,176 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
   else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
   ctx.setLineDash([]);
 }
-// A PARTITION WALL ON THE PLAN (see the PARTITION WALLS block). The solid stretches are a bar the
-// wall's thickness; a door is the door bar with the swing arc every catalog door draws
-// (fixtureDoorSVG), and a window the window bar with its mullions. The door glyph is drawn by
-// standing the opening in for a north wall (axis x) or an east wall (axis y), so "out" swings north
-// or east, "in" south or west, and Flip swing is all a builder needs to point it into the right room.
+/// A PARTITION WALL ON THE PLAN (see the PARTITION WALLS block; v2 2026-10-17). Two parallel lines at
+// half its thickness either side of its line (ssPartitionThicknessFt: the stud plus its coverings),
+// with a light fill between them, at ANY angle: everything is drawn in the wall's own frame (moved to
+// end 1 and turned by its angle), so x runs along it from end 1 and -y is side a. An opening breaks
+// both lines and gets a jamb tick at each side; a door is the door bar with the swing arc every catalog
+// door draws (fixtureDoorSVG, stood in for a north wall: "out" swings to side a, "in" to side b, and
+// Flip swing is all a builder needs to point it into the right room), and a window the window bar with
+// its mullions. The label reads "INTERIOR 12' · 2x4 · 7'6" tall" and is turned to read left to right.
 // Canvas twin: ssPartitionCanvas, the PDF. `h` carries the plan's handlers and selection.
-function ssPartitionSVG(p, cfg, mgX, mgY, scale, wallFt, h) {
-  const horiz = p.axis !== "y";
-  const tPx = Math.max(4, SS_PARTITION_T_FT * scale);
-  const at = Number(p.atFt) || 0;
-  const px = (a) => (horiz ? mgX + a * scale : mgX + at * scale);
-  const py = (a) => (horiz ? mgY + at * scale : mgY + a * scale);
+function ssPartitionSVG(p0, cfg, mgX, mgY, scale, wallFt, std, h) {
+  const p = ssPartitionNormalize(p0), g = ssPartitionGeom(p);
+  const ang = (Math.atan2(g.dy, g.dx) * 180) / Math.PI;
+  const flip = ang > 90 + 1e-6 || ang <= -90 + 1e-6;
+  const tPx = Math.max(4, ssPartitionThicknessFt(p, std) * scale);
+  const len = g.len * scale;
   const color = (cfg && cfg.color) || "#57534E";
-  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0, mid = (from + to) / 2;
-  const band = (a0, a1, w) => (horiz
-    ? { x: px(a0), y: py(0) - w / 2, width: (a1 - a0) * scale, height: w }
-    : { x: px(0) - w / 2, y: py(a0), width: w, height: (a1 - a0) * scale });
   const { solid, holes } = ssPartitionPieces(p);
   const grab = h.locked ? undefined : { cursor: h.armed ? "crosshair" : "grab" };
-  const label = "PARTITION " + ssPartitionFtIn(ssPartitionLenFt(p)) + (p.heightIn != null ? " · " + ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall" : "");
+  const label = ssPartitionPlanLabel(p, wallFt, std);
   const off = tPx / 2 + 5;
+  const x1 = mgX + g.x1 * scale, y1 = mgY + g.y1 * scale, x2 = mgX + g.x2 * scale, y2 = mgY + g.y2 * scale;
+  const cap = (a) => <line x1={a} y1={-tPx / 2} x2={a} y2={tPx / 2} stroke={color} strokeWidth={1.5} />;
   return (
     <g key={p.id} data-ss-partition={p.id}>
-      {/* A wide invisible grip along the whole run, so a thin wall is easy to pick up and move. */}
-      <rect {...band(from, to, Math.max(tPx, 14))} fill="transparent" style={grab}
-        onMouseDown={(e) => h.onBody(e)} onTouchStart={(e) => h.onBody(e)} />
-      {h.isSel && <rect {...band(from - 4 / scale, to + 4 / scale, tPx + 8)} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="4 2" rx={3} pointerEvents="none" />}
-      {solid.map(([a0, a1], k) => <rect key={"s" + k} {...band(a0, a1, tPx)} fill={color} pointerEvents="none" />)}
-      {holes.map(({ o, a0, a1 }) => {
-        const iw = (a1 - a0) * scale, c = (a0 + a1) / 2, win = o.kind === "window";
-        const oSel = h.isSel && h.selOpeningId === o.id;
-        const dc = o.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR;
-        const lbl = (fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim();
-        return (
-          <g key={"o" + o.id} data-ss-partition-opening={o.id} transform={`translate(${px(c)},${py(c)}) rotate(${horiz ? 0 : 90})`}
-            style={grab} onMouseDown={(e) => h.onOpening(e, o.id)} onTouchStart={(e) => h.onOpening(e, o.id)}>
-            <rect x={-iw / 2} y={-Math.max(tPx, 12) / 2} width={iw} height={Math.max(tPx, 12)} fill="transparent" />
-            <rect x={-iw / 2} y={-tPx / 2} width={iw} height={tPx} fill={win ? FIXTURE_WINDOW_COLOR : dc} rx={1} />
-            {win
-              ? <g>{[0, -iw / 4, iw / 4].map((lx) => <line key={lx} x1={lx} y1={-tPx / 2 + 1} x2={lx} y2={tPx / 2 - 1} stroke="#FFF" strokeWidth={lx ? 1 : 1.5} />)}</g>
-              : fixtureDoorSVG({ wall: horiz ? "north" : "east", swing: o.swing, operation: o.operation }, iw, dc)}
-            {oSel && <rect x={-iw / 2 - 3} y={-tPx / 2 - 3} width={iw + 6} height={tPx + 6} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="3 2" rx={2} pointerEvents="none" />}
-            <text x={0} y={tPx / 2 + 10} textAnchor="middle" fill="#1E293B" fontSize={8} fontWeight="700" pointerEvents="none">{lbl}</text>
-          </g>
-        );
-      })}
-      <text x={horiz ? px(mid) : px(0) - off} y={horiz ? py(0) - off : py(mid)} textAnchor="middle" fill={color} fontSize={9} fontWeight="700" pointerEvents="none"
-        transform={horiz ? undefined : `rotate(-90,${px(0) - off},${py(mid)})`}>{label}</text>
-      {h.isSel && !h.locked && [["from", from], ["to", to]].map(([end, a]) => (
-        <circle key={end} data-ss-partition-end={end} cx={px(a)} cy={py(a)} r={7} fill={h.surface} stroke={h.selColor} strokeWidth={1.5}
-          style={{ cursor: horiz ? "ew-resize" : "ns-resize" }}
+      <g transform={`translate(${x1},${y1}) rotate(${ang})`}>
+        {/* A wide invisible grip along the whole wall, so a thin wall is easy to pick up and move. */}
+        <rect x={0} y={-Math.max(tPx, 14) / 2} width={len} height={Math.max(tPx, 14)} fill="transparent" style={grab}
+          onMouseDown={(e) => h.onBody(e)} onTouchStart={(e) => h.onBody(e)} />
+        {h.isSel && <rect x={-4} y={-tPx / 2 - 4} width={len + 8} height={tPx + 8} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="4 2" rx={3} pointerEvents="none" />}
+        <g pointerEvents="none">
+          {solid.map(([a0, a1], k) => (
+            <g key={"s" + k}>
+              <rect x={a0 * scale} y={-tPx / 2} width={(a1 - a0) * scale} height={tPx} fill={color} fillOpacity={0.22} />
+              <line x1={a0 * scale} y1={-tPx / 2} x2={a1 * scale} y2={-tPx / 2} stroke={color} strokeWidth={1.5} />
+              <line x1={a0 * scale} y1={tPx / 2} x2={a1 * scale} y2={tPx / 2} stroke={color} strokeWidth={1.5} />
+            </g>
+          ))}
+          {solid.length > 0 && solid[0][0] < 1e-6 && cap(0)}
+          {solid.length > 0 && solid[solid.length - 1][1] > g.len - 1e-6 && cap(len)}
+        </g>
+        {holes.map(({ o, a0, a1 }) => {
+          const iw = (a1 - a0) * scale, c = ((a0 + a1) / 2) * scale, win = o.kind === "window";
+          const oSel = h.isSel && h.selOpeningId === o.id;
+          const dc = o.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR;
+          const lbl = (fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim();
+          const ly = tPx / 2 + 10;
+          return (
+            <g key={"o" + o.id} data-ss-partition-opening={o.id} transform={`translate(${c},0)`}
+              style={grab} onMouseDown={(e) => h.onOpening(e, o.id)} onTouchStart={(e) => h.onOpening(e, o.id)}>
+              <rect x={-iw / 2} y={-Math.max(tPx, 12) / 2} width={iw} height={Math.max(tPx, 12)} fill="transparent" />
+              <rect x={-iw / 2} y={-tPx / 2} width={iw} height={tPx} fill={win ? FIXTURE_WINDOW_COLOR : dc} rx={1} />
+              {win
+                ? <g>{[0, -iw / 4, iw / 4].map((lx) => <line key={lx} x1={lx} y1={-tPx / 2 + 1} x2={lx} y2={tPx / 2 - 1} stroke="#FFF" strokeWidth={lx ? 1 : 1.5} />)}</g>
+                : fixtureDoorSVG({ wall: "north", swing: o.swing, operation: o.operation }, iw, dc)}
+              {/* The jambs: the wall's two lines stop here, and a tick says so. */}
+              <line x1={-iw / 2} y1={-tPx / 2 - 2} x2={-iw / 2} y2={tPx / 2 + 2} stroke={color} strokeWidth={1.5} pointerEvents="none" />
+              <line x1={iw / 2} y1={-tPx / 2 - 2} x2={iw / 2} y2={tPx / 2 + 2} stroke={color} strokeWidth={1.5} pointerEvents="none" />
+              {oSel && <rect x={-iw / 2 - 3} y={-tPx / 2 - 3} width={iw + 6} height={tPx + 6} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="3 2" rx={2} pointerEvents="none" />}
+              <text x={0} y={ly} textAnchor="middle" fill="#1E293B" fontSize={8} fontWeight="700" pointerEvents="none"
+                transform={flip ? `rotate(180,0,${ly - 3})` : undefined}>{lbl}</text>
+            </g>
+          );
+        })}
+        <text x={len / 2} y={-off} textAnchor="middle" fill={color} fontSize={9} fontWeight="700" pointerEvents="none"
+          transform={flip ? `rotate(180,${len / 2},${-off - 3})` : undefined}>{label}</text>
+      </g>
+      {h.isSel && !h.locked && [["from", x1, y1], ["to", x2, y2]].map(([end, ex, ey]) => (
+        <circle key={end} data-ss-partition-end={end} cx={ex} cy={ey} r={7} fill={h.surface} stroke={h.selColor} strokeWidth={1.5}
+          style={{ cursor: "move" }}
           onMouseDown={(e) => { e.stopPropagation(); h.onEnd(e, end); }} onTouchStart={(e) => { e.stopPropagation(); h.onEnd(e, end); }} />
       ))}
     </g>
   );
 }
-function ssPartitionCanvas(ctx, p, cfg, mgX, mgY, scale, wallFt) {
-  const horiz = p.axis !== "y";
-  const tPx = Math.max(4, SS_PARTITION_T_FT * scale);
-  const at = Number(p.atFt) || 0;
-  const px = (a) => (horiz ? mgX + a * scale : mgX + at * scale);
-  const py = (a) => (horiz ? mgY + at * scale : mgY + a * scale);
+function ssPartitionCanvas(ctx, p0, cfg, mgX, mgY, scale, wallFt, std) {
+  const p = ssPartitionNormalize(p0), g = ssPartitionGeom(p);
+  const rad = Math.atan2(g.dy, g.dx), ang = (rad * 180) / Math.PI;
+  const flip = ang > 90 + 1e-6 || ang <= -90 + 1e-6;
+  const tPx = Math.max(4, ssPartitionThicknessFt(p, std) * scale);
+  const len = g.len * scale;
   const color = (cfg && cfg.color) || "#57534E";
-  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0, mid = (from + to) / 2;
   const { solid, holes } = ssPartitionPieces(p);
+  const line = (ax, ay, bx, by) => { ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); };
+  // Text turned to read left to right: a half turn about its own anchor.
+  const upright = (txt, x, y) => {
+    if (!flip) { ctx.fillText(txt, x, y); return; }
+    ctx.save(); ctx.translate(x, y - 3); ctx.rotate(Math.PI); ctx.fillText(txt, 0, 3); ctx.restore();
+  };
   ctx.save();
-  ctx.fillStyle = color;
+  ctx.translate(mgX + g.x1 * scale, mgY + g.y1 * scale);
+  ctx.rotate(rad);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
   solid.forEach(([a0, a1]) => {
-    if (horiz) ctx.fillRect(px(a0), py(0) - tPx / 2, (a1 - a0) * scale, tPx);
-    else ctx.fillRect(px(0) - tPx / 2, py(a0), tPx, (a1 - a0) * scale);
+    ctx.save(); ctx.globalAlpha = 0.22; ctx.fillStyle = color; ctx.fillRect(a0 * scale, -tPx / 2, (a1 - a0) * scale, tPx); ctx.restore();
+    line(a0 * scale, -tPx / 2, a1 * scale, -tPx / 2);
+    line(a0 * scale, tPx / 2, a1 * scale, tPx / 2);
   });
+  if (solid.length && solid[0][0] < 1e-6) line(0, -tPx / 2, 0, tPx / 2);
+  if (solid.length && solid[solid.length - 1][1] > g.len - 1e-6) line(len, -tPx / 2, len, tPx / 2);
   holes.forEach(({ o, a0, a1 }) => {
-    const iw = (a1 - a0) * scale, c = (a0 + a1) / 2, win = o.kind === "window";
+    const iw = (a1 - a0) * scale, c = ((a0 + a1) / 2) * scale, win = o.kind === "window";
     const dc = o.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR;
     ctx.save();
-    ctx.translate(px(c), py(c));
-    if (!horiz) ctx.rotate(Math.PI / 2);
+    ctx.translate(c, 0);
     ctx.fillStyle = win ? FIXTURE_WINDOW_COLOR : dc;
     ctx.fillRect(-iw / 2, -tPx / 2, iw, tPx);
     if (win) {
       ctx.strokeStyle = "#FFF";
       [0, -iw / 4, iw / 4].forEach((lx) => { ctx.lineWidth = lx ? 1 : 1.5; ctx.beginPath(); ctx.moveTo(lx, -tPx / 2 + 1); ctx.lineTo(lx, tPx / 2 - 1); ctx.stroke(); });
     } else {
-      fixtureDoorCanvas(ctx, { wall: horiz ? "north" : "east", swing: o.swing, operation: o.operation }, iw, dc);
+      fixtureDoorCanvas(ctx, { wall: "north", swing: o.swing, operation: o.operation }, iw, dc);
     }
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    line(-iw / 2, -tPx / 2 - 2, -iw / 2, tPx / 2 + 2);
+    line(iw / 2, -tPx / 2 - 2, iw / 2, tPx / 2 + 2);
     ctx.fillStyle = "#1E293B"; ctx.font = "bold 8px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText((fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim(), 0, tPx / 2 + 10);
+    upright((fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim(), 0, tPx / 2 + 10);
     ctx.restore();
   });
-  const off = tPx / 2 + 5;
-  const label = "PARTITION " + ssPartitionFtIn(ssPartitionLenFt(p)) + (p.heightIn != null ? " · " + ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall" : "");
   ctx.fillStyle = color; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center";
-  if (horiz) ctx.fillText(label, px(mid), py(0) - off);
-  else { ctx.translate(px(0) - off, py(mid)); ctx.rotate(-Math.PI / 2); ctx.fillText(label, 0, 0); }
+  upright(ssPartitionPlanLabel(p, wallFt, std), len / 2, -(tPx / 2 + 5));
   ctx.restore();
 }
-// The selection toolbar's controls for a PARTITION WALL: its height (Full, or a number of inches),
-// "+ Door" and "+ Window" (the same pickers the outside walls use; what is chosen goes IN this wall),
-// and, with one of its doors or windows selected on the plan, Flip swing and Remove for just that
-// opening. A component of its own so the inch field can keep what is being typed without a new hook
-// in the designer body. The designer's handlers do every check and say why when they refuse.
-function SSPartitionBar({ p, wallFt, canDoor, canWindow, opening, onHeight, onAddDoor, onAddWindow, onFlip, onRemoveOpening }) {
-  const full = p.heightIn == null;
+// The selection toolbar's controls for a PARTITION WALL (an "Interior wall" to the customer): how tall
+// it goes (Stud wall height, To the rafters when the builder offers it, or Custom, a number of inches),
+// the stud size for a rep (owners, admins and granted reps only, the price-override gate: `studs` is
+// null for everyone else, so a customer never sees the choice), "Free angle" (the touch screen's
+// Shift: a drawn or stretched end keeps its angle), "+ Door" and "+ Window" (the same pickers the
+// outside walls use; what is chosen goes IN this wall), and, with one of its doors or windows selected
+// on the plan, Flip swing and Remove for just that opening. A component of its own so the inch field
+// can keep what is being typed without a new hook in the designer body. The designer's handlers do
+// every check and say why when they refuse.
+function SSPartitionBar({ p: p0, wallFt, std, allowRafters, free, onFree, studs, onStud, canDoor, canWindow, opening, onHeight, onAddDoor, onAddWindow, onFlip, onRemoveOpening }) {
+  const p = ssPartitionNormalize(p0);
+  const mode = p.heightMode === "rafters" && allowRafters === false ? "plate" : p.heightMode;
+  const custom = mode === "custom";
   const wallIn = Math.round((Number(wallFt) || 8) * 12);
-  const [draft, setDraft] = useState(full ? "" : String(p.heightIn));
-  useEffect(() => { setDraft(p.heightIn == null ? "" : String(p.heightIn)); }, [p.id, p.heightIn]);
+  const [draft, setDraft] = useState(custom ? String(p.heightIn) : "");
+  useEffect(() => { setDraft(p.heightMode === "custom" && p.heightIn != null ? String(p.heightIn) : ""); }, [p.id, p.heightMode, p.heightIn]);
   const commit = () => {
     const t = String(draft).trim();
-    if (t === "" || !isFinite(Number(t))) { setDraft(full ? "" : String(p.heightIn)); return; }
+    if (t === "" || !isFinite(Number(t))) { setDraft(custom ? String(p.heightIn) : ""); return; }
     // The field shows what was APPLIED, not what was typed: a height clamped back to the one the wall
     // already has changes nothing, so the effect above never runs and the refused number would stay.
     const h = onHeight(Math.round(Number(t)));
-    setDraft(h != null ? String(h) : full ? "" : String(p.heightIn));
+    setDraft(h != null ? String(h) : custom ? String(p.heightIn) : "");
   };
   const chip = (on) => (on ? "ssd-seg-b is-on" : "ssd-seg-b");
+  const stud = ssPartitionStud(p, std);
   return (<>
-    <div className="ssd-seg is-tb" role="group" aria-label="Partition wall height">
-      <button onClick={() => onHeight(null)} aria-pressed={full} title={"As tall as the walls (" + ssPartitionFtIn(wallIn / 12) + ")"} className={chip(full)}>Full height</button>
-      <button onClick={() => { if (full) onHeight(Math.max(ssPartitionMinHeightIn(p), wallIn - 12)); }} aria-pressed={!full} title="Set the wall's own height" className={chip(!full)}>Custom</button>
+    <div className="ssd-seg is-tb" role="group" aria-label="Interior wall height">
+      <button onClick={() => onHeight(null)} aria-pressed={mode === "plate"} title={"The top plate level with the outside walls' (" + ssPartitionFtIn(wallIn / 12) + ")"} className={chip(mode === "plate")}>Stud wall height</button>
+      {allowRafters !== false && <button onClick={() => onHeight("rafters")} aria-pressed={mode === "rafters"} title="The top follows the underside of the roof all along the wall" className={chip(mode === "rafters")}>To the rafters</button>}
+      <button onClick={() => { if (!custom) onHeight(Math.max(ssPartitionMinHeightIn(p), wallIn - 12)); }} aria-pressed={custom} title="Set the wall's own height" className={chip(custom)}>Custom</button>
     </div>
-    {!full && (
+    {custom && (
       <span className="ssd-tb-read">
-        <input type="number" min={1} step={1} value={draft} data-ss-partition-height="1" aria-label="Partition wall height in inches"
+        <input type="number" min={1} step={1} value={draft} data-ss-partition-height="1" aria-label="Interior wall height in inches"
           onChange={(e) => setDraft(e.target.value)} onBlur={commit}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }}
           style={{ width: 56, font: "inherit", padding: "2px 4px", border: "1px solid #CBD5E1", borderRadius: 4 }} /> in tall
       </span>
     )}
+    {Array.isArray(studs) && studs.length > 1 && (
+      <div className="ssd-seg is-tb" role="group" aria-label="Framing" data-ss-partition-stud="1" title="Stud size (staff only; the customer sees it on the plan's label)">
+        {studs.map((s) => <button key={s} onClick={() => onStud(s)} aria-pressed={stud === s} className={chip(stud === s)}>{"Framing " + s}</button>)}
+      </div>
+    )}
+    <button onClick={onFree} aria-pressed={!!free} data-ss-partition-free="1" className={free ? "ssd-tb-btn is-soft is-on" : "ssd-tb-btn is-soft"}
+      title="Keep the angle a wall's end is dragged to (or hold Shift while dragging)">{free ? "✓ Free angle" : "Free angle"}</button>
     {canDoor && <button onClick={onAddDoor} className="ssd-tb-btn is-soft">+ Door</button>}
     {canWindow && <button onClick={onAddWindow} className="ssd-tb-btn is-soft">+ Window</button>}
     {opening && opening.kind !== "window" && opening.operation !== "slideup" && (
@@ -3754,6 +4045,57 @@ function ssRemoveFromRow(key, it) {
 }
 // ── END WINDOWS IN DOORS ──
 
+// ── INTERIOR WALLS: THE BUILDER'S SETUP (Interior walls v2, 2026-10-17) ──
+// get_config's `interiorWalls` key (slice 1: the Interior walls tab) is { offered, standardStud,
+// studs: { "2x4": { rate }, "2x6": { rate } }, method, standardHeight, allowRafters, allowRo, coverings }.
+// Until a tenant has it, this falls back to today: the partitionWall layout row (`layoutRate`, the
+// { rate, method } computeLayoutPricingRows resolves) is the standard 2x4 rate, 2x4 the standard,
+// stud wall height the standard height and "To the rafters" offered. A size is offered when the key
+// names it with a rate, or with its rate nulled because the tenant hides prices. Mirrored by
+// _shared/partitionPricing.ts interiorWallRates on the server, which reads the same table.
+function ssInteriorWallCfg(C, layoutRate) {
+  const iw = C && C.interiorWalls;
+  if (iw && typeof iw === "object" && !Array.isArray(iw)) {
+    const studs = {}, offeredStuds = [];
+    ["2x4", "2x6"].forEach((s) => {
+      const e = iw.studs && iw.studs[s];
+      const r = e && typeof e === "object" && e.rate != null && e.rate !== "" && isFinite(Number(e.rate)) ? Number(e.rate) : null;
+      studs[s] = r;
+      if (e && typeof e === "object" && (r != null || !(C && C.showPricing))) offeredStuds.push(s);
+    });
+    const std = iw.standardStud === "2x6" ? "2x6" : "2x4";
+    if (offeredStuds.indexOf(std) < 0) offeredStuds.unshift(std);
+    return {
+      offered: iw.offered !== false, standardStud: std, studs, offeredStuds, method: iw.method || "each",
+      standardHeight: iw.standardHeight === "rafters" ? "rafters" : "plate", allowRafters: iw.allowRafters !== false, source: "interiorWalls",
+    };
+  }
+  return {
+    offered: true, standardStud: "2x4", studs: { "2x4": layoutRate ? Number(layoutRate.rate) || 0 : null, "2x6": null }, offeredStuds: ["2x4"],
+    method: (layoutRate && layoutRate.method) || "each", standardHeight: "plate", allowRafters: true, source: "layout",
+  };
+}
+// The stud size a wall is PRICED at: its own when the builder offers that size, else the standard
+// (_shared/partitionPricing.ts partitionStud, the same rule).
+function ssInteriorWallStud(p, iw) {
+  const s = ssPartitionStud(p, iw.standardStud);
+  return iw.studs[s] != null ? s : iw.standardStud;
+}
+// The wall as it is priced: v2's shape, and a wall "to the rafters" at stud wall height when the
+// builder does not offer that (the server's allowRafters rule).
+function ssPartitionPricedAs(p, iw) {
+  const q = ssPartitionNormalize(p);
+  return iw && iw.allowRafters === false && q.heightMode === "rafters" ? { ...q, heightMode: "plate" } : q;
+}
+// A new interior wall between the ends `ends` ({ x1Ft, y1Ft, x2Ft, y2Ft }), as tall as the builder's
+// standard height, framed in their standard stud (null), bare both sides.
+function ssNewPartition(id, type, ends, iw) {
+  return {
+    id, type: type || SS_PARTITION_KEY, wall: null, x1Ft: ends.x1Ft, y1Ft: ends.y1Ft, x2Ft: ends.x2Ft, y2Ft: ends.y2Ft,
+    heightMode: iw && iw.allowRafters !== false && iw.standardHeight === "rafters" ? "rafters" : "plate", heightIn: null,
+    stud: null, covers: { a: null, b: null }, openings: [],
+  };
+}
 function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
   const pricing = C.layoutPricing;
@@ -3918,22 +4260,32 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // resolvedWallHeightFt. A door or window is its catalog price and is never netted against the
   // size's inclusions, which are the building's own doors. An unpriced partition still gets a $0
   // row: it is on the plan, and the quote must say so.
+  //
+  // INTERIOR WALLS V2 (2026-10-17): the rate is the one for the wall's stud size (ssInteriorWallCfg:
+  // the builder's Interior walls tab, else the partitionWall row as the 2x4 rate), and a wall to the
+  // rafters priced per square foot is charged its real face, under the roof the 3D builds or a loft's
+  // floor framing (ssPartitionRoofAt2D), never less than its length x the wall. The row reads
+  // "Interior wall", the customer's word for it; its key is still ssPriceRowKey "partition".
   const partitions = items.filter(ssIsPartition);
   if (partitions.length) {
-    const prp = resolve(SS_PARTITION_KEY) || { rate: 0, method: "each" };
+    const iw = ssInteriorWallCfg(C, resolve(SS_PARTITION_KEY) || { rate: 0, method: "each" });
     const wallFt = pricedWallHeightFt(C, (C.buildingStyles || []).find((s) => s.value === styleKey), styleKey, sel, bW);
-    const pLabel = (C.layoutItems && C.layoutItems[SS_PARTITION_KEY] && C.layoutItems[SS_PARTITION_KEY].label) || "Partition Wall";
-    for (const p of partitions) {
-      const ch = ssPartitionCharge(p, prp.method, wallFt);
-      const total = Math.round(prp.rate * ch.qty * 100) / 100;
+    const anyRafters = iw.allowRafters && partitions.some((p) => ssPartitionHeightMode(p) === "rafters");
+    const roofAt = anyRafters && typeof ssPartitionRoofAt2D === "function" ? ssPartitionRoofAt2D(C, sel, items, bW, bL, wallFt) : null;
+    for (const p0 of partitions) {
+      const p = ssPartitionPricedAs(p0, iw);
+      const stud = ssInteriorWallStud(p, iw);
+      const rate = iw.studs[stud] || 0;
+      const ch = ssPartitionCharge(p, iw.method, wallFt, roofAt);
+      const total = Math.round(rate * ch.qty * 100) / 100;
       const per = ch.method === "lineal_ft" ? " / ft" : ch.method === "sqft_option" ? " / sq ft" : " each";
-      rows.push({ key: ssPriceRowKey("partition", p.id), label: pLabel, qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + fmtMoney2(prp.rate) + per,
-        total, method: ch.method, ...ssPriceable(prp.rate, ch.qty, ch.per) });
+      rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing · " + fmtMoney2(rate) + per,
+        total, method: ch.method, ...ssPriceable(rate, ch.qty, ch.per) });
       nonPctSubtotal += total;
       for (const o of (p.openings || [])) {
         const price = o.price != null ? Number(o.price) : 0;
         if (!(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
-        rows.push({ key: ssPriceRowKey("partition", p.id, o.id), label: (o.name || (o.kind === "window" ? "Window" : "Door")) + " (in partition)",
+        rows.push({ key: ssPriceRowKey("partition", p.id, o.id), label: (o.name || (o.kind === "window" ? "Window" : "Door")) + " (in interior wall)",
           qty: 1, unit: fmtMoney2(price) + " each", total: price, method: "each", ...ssPriceable(price, 1, "each") });
         nonPctSubtotal += price;
       }
@@ -7395,6 +7747,80 @@ function ssLoftWithHeight(it, heightIn, plateFt) {
   return { item: { ...rest, elevationFt: h / 12 }, note: null };
 }
 // ── END LOFT HEIGHT ──
+// ── THE UNDERSIDE OF THE ROOF OVER A PLAN POINT (Interior walls v2 slice 2b, 2026-10-17) ──
+// For an interior wall "to the rafters": how high the underside of the roof is over plan point
+// (xFt, yFt) (feet from the north-west corner), as a function built once per roof. It is the roof
+// profile the renderer extrudes (d3Massing's centre profile through d3MakeProfYAt, the line that
+// passes through the plate at the wall centreline and that the board-and-batten and every gable cap
+// are clipped to), read through the same branches as d3CeilingFt and d3WallTops:
+//   * gable, gambrel (barn and lofted barn), single slope (lean-to): the profile across the span;
+//   * a roof step's rear section (d3RoofStep): that section's own profile;
+//   * side wings (d3MassingTopAt) and stackable wings (d3ListTopAt): the wing roof over a wing, the
+//     centre's over the centre; inside an END wing, that wing's plate (its ceiling), a conservative
+//     answer until an end wing's roof line is needed;
+//   * a roof raised on its rafters (roof.seat): the shell, a rafter above the plate (d3ShellFt).
+// Never under the plate. ⚠️ plateFt IS THE WALL PLATE, as ssLoftPlateFt's H is.
+function ssRoofUndersideFn(roofCfg, W, L, plateFt) {
+  const Hp = Number(plateFt) > 0 ? Number(plateFt) : D3.WALL_H;
+  const H = d3ShellFt(roofCfg, Hp);
+  const m = d3Massing(roofCfg, W, L, H);
+  const deep = d3WingListDeep(m);
+  const st = !deep && !m.wings.length ? d3RoofStep(roofCfg, W, L, H) : null;
+  const front = d3MakeProfYAt(m.prof, m.Hc);
+  const rear = st ? d3MakeProfYAt(d3RoofProfile(st.rearCfg, m.S, st.Hb, m.tallNeg).dedup, st.Hb) : null;
+  return (xFt, yFt) => {
+    const x = Number(xFt) - W / 2, z = Number(yFt) - L / 2;
+    const u = m.uAxisIsX ? x : z;
+    let top;
+    if (deep) {
+      const zr = m.uAxisIsX ? z + m.L / 2 : m.L / 2 - x;
+      const end = (m.ends || []).find((t) => t.sz * (zr - t.zI) > 1e-6 && (t.outer || t.sz * (zr - t.zO) <= 1e-6));
+      top = end ? end.ye : d3ListTopAt(m, u);
+    } else if (m.wings.length) top = d3MassingTopAt(m, u);
+    else top = rear && z < -L / 2 + st.stepFt ? rear(u) : front(u - m.uc);
+    return Math.max(Hp, isFinite(top) ? top : Hp);
+  };
+}
+function ssRoofUndersideFt(roofCfg, W, L, plateFt, xFt, yFt) { return ssRoofUndersideFn(roofCfg, W, L, plateFt)(xFt, yFt); }
+// A wall to the rafters' top over a plan point: the roof's underside, or, where a loft stands over it,
+// the underside of the loft's floor framing (`lofts`: [{ x0, x1, y0, y1, bottom }] in plan feet).
+function ssPartitionRoofFn(roofCfg, W, L, plateFt, lofts) {
+  const roof = ssRoofUndersideFn(roofCfg, W, L, plateFt);
+  return (x, y) => {
+    let t = roof(x, y);
+    (lofts || []).forEach((f) => { if (x > f.x0 - 1e-6 && x < f.x1 + 1e-6 && y > f.y0 - 1e-6 && y < f.y1 + 1e-6) t = Math.min(t, f.bottom); });
+    return t;
+  };
+}
+// ssPartitionRoofFn for the plan, the Details rows and the payload: the roof the 3D builds this design
+// with (the resolver call ventRoof2D makes) and every loft's floor where the 3D puts it (loftElevOf's
+// rule: on its plate, drawn D3_LOFT_PLATE_GAP under it, or a rep's height), less its thickness. Null
+// when the building's size is unknown or anything here throws: the wall is then priced flat.
+function ssPartitionRoofAt2D(C, sel, items, Wft, Lft, plateFt) {
+  try {
+    const W = Number(Wft), L = Number(Lft);
+    if (!(W > 0 && L > 0)) return null;
+    const s0 = sel || {};
+    const styleCfg = ((C && C.buildingStyles) || []).find((x) => x.value === s0.style);
+    // The roof only: no customer pick (siding, wall height, foundation, metal profile) moves its shape,
+    // so the resolver is asked with the style alone, and the plate is handed in.
+    const spec = d3ResolveStyleSpec(styleCfg, s0.style, C.wallHeightFt);
+    const roof = (spec && spec.roof) || D3_DEFAULT_ROOF;
+    const G = pageGeom(W, L);
+    const lc = (C.layoutItems && C.layoutItems.loft) || {};
+    const lofts = (items || []).filter((i) => i && i.type === "loft").map((lf) => {
+      const w = lf.widthFt || lc.width || 6, d = lf.heightFt || lc.height || 4;
+      const cx = (lf.x - G.mgX) / G.scale, cy = (lf.y - G.mgY) / G.scale;
+      const plate = ssLoftPlateFt(roof, W, L, plateFt, cx - W / 2, cy - L / 2, w, d);
+      const e0 = ssLoftElevFt(lf, plate);
+      const top = e0 >= plate - 1e-6 ? plate - D3_LOFT_PLATE_GAP : e0;
+      return { x0: cx - w / 2, x1: cx + w / 2, y0: cy - d / 2, y1: cy + d / 2, bottom: top - D3.LOFT_T };
+    });
+    return ssPartitionRoofFn(roof, W, L, plateFt, lofts);
+  } catch (_e) {
+    return null;
+  }
+}
 // ⚠️ MERGE HOOK FOR THE PROJECTING PORCH (2026-09-24). With wings a porch on a gable end stands in
 // front of the CENTRE only: this returns that span, where its middle sits in profile u, and the
 // centre wall's top — or null when the style has no wings. d3PorchSpan (the porch-width branch)
@@ -11476,6 +11902,9 @@ function buildShed3DModel(THREE, p) {
       wf.O[1] + wf.U[1] * ac + wf.N[1] * (out || 0)
     );
     if (wf.U[0] === 0) b.rotation.y = Math.PI / 2;
+    // A wall at ANY angle (an interior wall, Interior walls v2): the box turned so its local +x runs along
+    // U. Every outside wall's U is axis-aligned (U[1] is 0 wherever U[0] is not), so none of them gets here.
+    else if (wf.U[1]) b.rotation.y = Math.atan2(-wf.U[1], wf.U[0]);
     return b;
   };
 
@@ -12025,13 +12454,17 @@ function buildShed3DModel(THREE, p) {
   // `inset` is a window IN A DOOR (migration 289, trimDoorLeaf): no sill board, no sill nose, no
   // shutters and no flower box, because it sits in a door's panel inside the slim casing the door
   // draws for it. Every other caller passes nothing and gets exactly the window it always did.
-  const d3WindowFill = (og, wf, o, limL, limR, inset) => {
+  // `tw` (optional) is the wall's own thickness where it is not an outside wall's T: an interior wall
+  // (Interior walls v2), whose stud and coverings make it thinner or thicker than the shell. Absent,
+  // every outside window is drawn exactly as it always was.
+  const d3WindowFill = (og, wf, o, limL, limR, inset, tw) => {
     const f = D3_CASE_F;
+    const Tw = tw || T;
     if (!inset) {
-      og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, casingDepth));
+      og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, tw ? tw + 0.08 : casingDepth));
       // Sill nose: a slightly wider, deeper board under the casing — the one
       // horizontal shadow line that makes the window read as installed.
-      og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, T / 2 + 0.04, 0.16));
+      og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, Tw / 2 + 0.04, 0.16));
     }
     // Sash: a slim dark inner ring set INTO the opening. The depth step
     // between casing → sash → glass is what turns the old flat decal into
@@ -12040,10 +12473,10 @@ function buildShed3DModel(THREE, p) {
     // A catalog window's chosen color drives the sash (and muntins below) — the
     // "frame" a shopper means when they say a black or white window.
     const sashMat = mat(o.it.colorHex || "#3A3F45", { roughness: 0.6 });
-    og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, T * 0.5));
-    og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, T * 0.5));
-    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, T * 0.5));
-    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y0, o.y0 + s, 0, T * 0.5));
+    og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, Tw * 0.5));
+    og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, Tw * 0.5));
+    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, Tw * 0.5));
+    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y0, o.y0 + s, 0, Tw * 0.5));
     // Glass you can genuinely see through — the interior showing through
     // the panes is what sells it. Slight blue-green tint, a whisper of
     // metalness for sky glint; depthWrite off so the ghosted look-inside
@@ -15852,41 +16285,90 @@ function buildShed3DModel(THREE, p) {
     porchStepsGroup.visible = !hit;
     porchStepsGroup.userData.ssHiddenBy = hit ? "ramp" : null;
   };
-  // ── A PARTITION WALL (migration 278; the PARTITION WALLS block) ──
+  // ── A PARTITION WALL (migration 278; the PARTITION WALLS block; v2 geometry 2026-10-17) ──
   // Reached only from buildInterior's partition branch, which no item of a design without one can
-  // enter, so every other model is built by exactly the code it always was. Sheathing-coloured,
-  // SS_PARTITION_T_FT thick, from the floor to its own height (full height is the plate), split round
-  // its doors and windows the way buildOneWall splits a wall: a full-height piece between openings,
-  // the wall under a window and a header over each one. The door is plankDoorLeaf (the roll-up for a
-  // slide-up or roll-up catalog door) and the window d3WindowFill, on a frame laid along the
-  // partition, so they are the same door and window the outside walls draw. NO itemId on the group:
-  // the 3D editor cannot pick it up, which is the v1 rule — it is placed and moved on the plan.
-  const buildPartition3D = (it) => {
-    const horiz = it.axis !== "y";
-    const at = Number(it.atFt) || 0, from = Number(it.fromFt) || 0;
-    const Hp = ssPartitionHeightFt(it, Hplate), PT = SS_PARTITION_T_FT;
-    const wf = horiz
-      ? { O: [from - bldgW / 2, at - bldgH / 2], U: [1, 0], N: [0, 1] }
-      : { O: [at - bldgW / 2, from - bldgH / 2], U: [0, 1], N: [1, 0] };
+  // enter, so every other model is built by exactly the code it always was. Sheathing-coloured, as
+  // thick as its stud and coverings (ssPartitionThicknessFt), laid along its own U at any angle
+  // (wallBox turns a box to any U), from the floor to its own height: the plate, a stated height, or
+  // TO THE RAFTERS, where each solid stretch is the face polygon under the roof's underside
+  // (ssPartitionRoofFn, the same function the plan prices the face area with) extruded to the wall's
+  // thickness, so the wall meets the roof, or stops under a loft's floor framing. Split round its doors
+  // and windows the way buildOneWall splits a wall: a full-height piece between openings, the wall
+  // under a window and a header over each one. The door is plankDoorLeaf (the roll-up for a slide-up or
+  // roll-up catalog door) and the window d3WindowFill (at this wall's thickness), on a frame laid along
+  // the partition, so they are the same door and window the outside walls draw. NO itemId on the
+  // group: the 3D editor cannot pick it up, which is the v1 rule — it is placed and moved on the plan.
+  const buildPartition3D = (it0, itemsNow) => {
+    const it = ssPartitionNormalize(it0), pg = ssPartitionGeom(it);
+    const pcfg = itemTypes[it.type] || {};
+    const Hp = ssPartitionHeightFt(it, Hplate), PT = ssPartitionThicknessFt(it, pcfg.standardStud);
+    const wf = { O: [pg.x1 - bldgW / 2, pg.y1 - bldgH / 2], U: [pg.ux, pg.uy], N: [pg.nx, pg.ny] };
     const g = new THREE.Group();
     g.userData = { partition: true };
     // Every material here is the partition's OWN. rebuildInterior disposes the interior group's
     // materials with no shared set, so a mesh left on the model-lifetime trimMat (d3WindowFill's sill
     // uses it) would dispose the building's trim on every live drag; the swap at the end prevents it.
     const wm = mat(D3_COLORS.partition), pTrim = mat(trimColor);
+    // To the rafters (and offered): the top follows the roof's underside, or a loft's floor framing.
+    const roofLine = it.heightMode === "rafters" && pcfg.allowRafters !== false
+      ? ssPartitionRoofFn(roofCfg, bldgW, bldgH, Hplate, (itemsNow || []).filter((lf) => lf.type === "loft").map((lf) => {
+        const lc = itemTypes[lf.type] || {};
+        const w = lf.widthFt || lc.width || 6, d = lf.heightFt || lc.height || 4;
+        const cx = ftX(lf.x) + bldgW / 2, cy = ftZ(lf.y) + bldgH / 2;
+        return { x0: cx - w / 2, x1: cx + w / 2, y0: cy - d / 2, y1: cy + d / 2, bottom: loftElevOf(lf) - D3.LOFT_T };
+      }))
+      : null;
+    // Each FACE follows the roof right above it (side a at +N x half the thickness, side b at -N), so a
+    // wall across a slope has a sloped top across its thickness too: no gap on the uphill face, no
+    // poke-through on the downhill one.
+    const faceTop = (a, s) => {
+      const off = (s * PT) / 2;
+      return ssPartitionTopFt(it, Hplate, roofLine ? (x, y) => roofLine(x + pg.nx * off, y + pg.ny * off) : null, a);
+    };
+    const wmSloped = roofLine ? mat(D3_COLORS.partition, { side: THREE.DoubleSide }) : null;
+    // A stretch of wall from y0 up to the top: a box under a flat top; under the roof, a prism sampled an
+    // inch at a time, built in the wall's own frame (x along it from end 1, z across: -z is side a) and
+    // turned to it like wallBox turns a box.
+    const piece = (m, a0, a1, y0) => {
+      if (!roofLine) return wallBox(m, wf, a0, a1, y0, Hp, 0, PT);
+      const n = Math.max(1, Math.ceil((a1 - a0) * 12)), h = PT / 2;
+      const A = [], TA = [], TB = [];
+      for (let i = 0; i <= n; i++) {
+        const a = a0 + ((a1 - a0) * i) / n;
+        A.push(a); TA.push(Math.max(y0 + 0.05, faceTop(a, 1))); TB.push(Math.max(y0 + 0.05, faceTop(a, -1)));
+      }
+      const v = [];
+      const quad = (p, q, r, s2) => { v.push(...p, ...q, ...r, ...p, ...r, ...s2); };
+      for (let i = 0; i < n; i++) {
+        const x0 = A[i], x1 = A[i + 1];
+        quad([x0, y0, -h], [x1, y0, -h], [x1, TA[i + 1], -h], [x0, TA[i], -h]);       // side a
+        quad([x0, y0, h], [x0, TB[i], h], [x1, TB[i + 1], h], [x1, y0, h]);           // side b
+        quad([x0, TA[i], -h], [x1, TA[i + 1], -h], [x1, TB[i + 1], h], [x0, TB[i], h]); // the top, under the roof
+        quad([x0, y0, -h], [x0, y0, h], [x1, y0, h], [x1, y0, -h]);                   // the bottom
+      }
+      quad([A[0], y0, -h], [A[0], TA[0], -h], [A[0], TB[0], h], [A[0], y0, h]);
+      quad([A[n], y0, -h], [A[n], y0, h], [A[n], TB[n], h], [A[n], TA[n], -h]);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(geo, m === wm ? wmSloped : m);
+      mesh.rotation.y = Math.atan2(-wf.U[1], wf.U[0]);
+      mesh.position.set(wf.O[0], 0, wf.O[1]);
+      return mesh;
+    };
     const { solid, holes } = ssPartitionPieces(it);
-    solid.forEach(([a0, a1]) => g.add(wallBox(wm, wf, a0 - from, a1 - from, 0, Hp, 0, PT)));
-    holes.forEach(({ o, a0: h0, a1: h1 }) => {
-      const a0 = h0 - from, a1 = h1 - from, f = D3_CASE_F, cd = PT + 0.08;
+    solid.forEach(([a0, a1]) => g.add(piece(wm, a0, a1, 0)));
+    holes.forEach(({ o, a0, a1 }) => {
+      const f = D3_CASE_F, cd = PT + 0.08;
       const sp = ssPartitionOpeningSpanIn(o);
       const top = Math.max(0.5, Math.min(sp[1] / 12, Hp - 0.2));
       const y0 = Math.max(0, Math.min(sp[0] / 12, top - 0.5));
       if (y0 > 0.01) g.add(wallBox(wm, wf, a0, a1, 0, y0, 0, PT));
-      if (Hp - top > 0.01) g.add(wallBox(wm, wf, a0, a1, top, Hp, 0, PT));
+      if (roofLine || Hp - top > 0.01) g.add(piece(wm, a0, a1, top));
       g.add(wallBox(pTrim, wf, a0 - f, a0, y0, top + f, 0, cd));
       g.add(wallBox(pTrim, wf, a1, a1 + f, y0, top + f, 0, cd));
       g.add(wallBox(pTrim, wf, a0 - f, a1 + f, top, top + f, 0, cd));
-      if (o.kind === "window") { d3WindowFill(g, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f); return; }
+      if (o.kind === "window") { d3WindowFill(g, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f, undefined, PT); return; }
       const look = fixtureDoorStyle({ fixtureItemId: o.fixtureItemId });
       const doorMat = mat(D3_COLORS.door), ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
       const y1d = top - 0.05, field = look === "auto" ? "plank" : look;
@@ -16162,7 +16644,7 @@ function buildShed3DModel(THREE, p) {
       g.userData = { itemId: it.id, floorItem: true };
       interiorGroup.add(g);
     } else if (ssIsPartition(it)) {
-      buildPartition3D(it);
+      buildPartition3D(it, itemsNow);
     }
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
@@ -23992,7 +24474,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // A partition wall's TOOL (modelKey "partition", migration 278) is told apart by partitionType: the
     // click that places one, the armed hint and the 3D palette read it. A PLACED wall is told apart by
     // its own shape (ssIsPartition), so the plan, the drag, the PDF and the 3D never depend on the config.
-    ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => [k, { ...baseItems[k], partitionType: true }])),
+    // Customers read it as an "Interior wall" (Interior walls v2): the button, the selection and the
+    // estimate say so whatever the config row is called. The builder's standard stud and whether "To
+    // the rafters" is offered ride along for the 3D, which reads ITEMS and nothing else.
+    ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => [k, {
+      ...baseItems[k], partitionType: true, label: "Interior wall",
+      standardStud: ssInteriorWallCfg(C).standardStud, allowRafters: ssInteriorWallCfg(C).allowRafters,
+    }])),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
@@ -24214,6 +24702,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The door or window selected INSIDE a partition wall, { pid, oid }. It counts only while that
   // partition is the selection.
   const [selOpening, setSelOpening] = useState(null);
+  // "Free angle" (Interior walls v2): the touch screen's Shift. On, a drawn or stretched interior wall
+  // keeps the angle it is dragged to instead of snapping to 0/45/90/135 degrees.
+  const [partFree, setPartFree] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState(null); // note being typed in-place on the canvas
   // Pick-one-to-remove mode ({ type }): entered from a Details row's × when several
   // "each"-priced items of that type are placed — the plan highlights them and the
@@ -25463,7 +25954,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // vent on a 10 ft wall reads as a collision and is moved every time the design is opened. And
   // against its SHELL (d3ShellFt, roof.seat), the height ventRoof2D's H and the 3D measure a vent and
   // an opening's band against, or a raised style's top-spot vent would be checked a rafter too low.
-  const repairLoaded = (loaded, sizeLabel, selections) => {
+  const repairLoaded = (loaded0, sizeLabel, selections) => {
+    // An interior wall saved in the v1 shape ({ axis, atFt, ... }) opens as the same wall in v2's
+    // (ssPartitionNormalize); every other item, and a v2 wall, is the same object.
+    const loaded = Array.isArray(loaded0) && loaded0.some(ssIsPartition) ? loaded0.map(ssPartitionNormalize) : loaded0;
     const d = parseSize(sizeLabel);
     if (!d || !loaded.length) return loaded;
     try {
@@ -25867,6 +26361,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // How tall a full-height partition wall is: the wall the quote prices (pricedWallHeightFt), so the
   // plan, the PDF and the estimate all speak of the same wall.
   const partWallFt = pricedWallHeightFt(C, selectedStyle, sel.style, sel, bldgW);
+  // The builder's interior wall setup (Interior walls v2): the standard stud, the sizes offered and
+  // whether "To the rafters" is (C.interiorWalls, else today's partitionWall row as the 2x4 rate).
+  const iwCfg = ssInteriorWallCfg(C);
+  const partStd = iwCfg.standardStud;
+  // A wall to the rafters' top over a plan point: the roof's underside the 3D builds, or a loft's floor
+  // framing over it. A function, built only when a wall asks for it (a render, the PDF, the payload).
+  const partRoofAt = () => (iwCfg.allowRafters ? ssPartitionRoofAt2D(C, sel, items, bldgW, bldgH, partWallFt) : null);
   // The roof and plate height the 3D builds this design with — the SAME resolver call the 3D props
   // make — for putting a vent into a gable from the plan, which has no roof of its own to ask
   // (2026-09-15). A function, not a value: it is read when a vent is placed, dragged, reflowed or
@@ -25892,10 +26393,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const inOpenGround = (cx, cy, wPx, hPx) => !!wingNotches && d3InNotch(wingNotches, (cx - wPx / 2 - mgX) / scale, (cy - hPx / 2 - mgY) / scale, (cx + wPx / 2 - mgX) / scale, (cy + hPx / 2 - mgY) / scale);
   // A footprint wall's length for a "wider than the wall" refusal: what is left of it beside a part-wall wing.
   const wallLenFt = (w) => (spanFt && spanFt[w] ? spanFt[w][1] - spanFt[w][0] : (w === "north" || w === "south" ? pW : pH) / scale);
-  // A partition wall's line, as the rectangle it is drawn, reaching into the open ground.
-  const partitionInOpen = (p) => !!wingNotches && ssIsPartition(p) && (p.axis === "y"
-    ? d3InNotch(wingNotches, Number(p.atFt) - SS_PARTITION_T_FT / 2, Number(p.fromFt), Number(p.atFt) + SS_PARTITION_T_FT / 2, Number(p.toFt))
-    : d3InNotch(wingNotches, Number(p.fromFt), Number(p.atFt) - SS_PARTITION_T_FT / 2, Number(p.toFt), Number(p.atFt) + SS_PARTITION_T_FT / 2));
+  // A partition wall's line reaching into the open ground: the segment, at its own thickness, tested
+  // against every notch a few inches at a time, so a diagonal wall across an L-shaped footprint is
+  // caught where a bounding box would refuse a legal one.
+  const partitionInOpen = (p) => {
+    if (!wingNotches || !ssIsPartition(p)) return false;
+    // Its thickness reaches across it, and along it only a sliver (under d3InNotch's 0.01 ft overlap at
+    // an end, over it between two samples): a wall that stops on the open ground's edge is clear of it.
+    const g = ssPartitionGeom(p), h = ssPartitionThicknessFt(p, partStd) / 2, e = 0.0075;
+    const hx = h * Math.abs(g.nx) + e * Math.abs(g.ux), hy = h * Math.abs(g.ny) + e * Math.abs(g.uy);
+    const n = Math.max(1, Math.ceil(g.len * 4));
+    for (let i = 0; i <= n; i++) {
+      const x = g.x1 + (g.dx * i) / n, y = g.y1 + (g.dy * i) / n;
+      if (d3InNotch(wingNotches, x - hx, y - hy, x + hx, y + hy)) return true;
+    }
+    return false;
+  };
   // What is ALREADY in the open ground (saved before the wing was set to part of its wall): left where it is, never
   // moved, and marked on the plan with one sentence. Footprint-wall items out there are not built in 3D either.
   const inOpenItems = wingNotches ? items.filter((it) => {
@@ -26007,7 +26520,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // under it, and a door with a ramp as wide as itself could not be selected by click at all.
       const hit = [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).reverse().find((it) => {
         const c = ITEMS[it.type]; if (!c) return false;
-        if (ssIsPartition(it)) return ssPartitionHit(it, pt.x, pt.y, mgX, mgY, scale, Math.max(7, (SS_PARTITION_T_FT * scale) / 2 + 3)) != null;
+        if (ssIsPartition(it)) return ssPartitionHit(it, pt.x, pt.y, mgX, mgY, scale, Math.max(7, (ssPartitionThicknessFt(it, partStd) * scale) / 2 + 3)) != null;
         if (c.lineType) {
           // Distance from click to the line segment
           const A = pt.x - it.x1, B = pt.y - it.y1;
@@ -26180,10 +26693,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const refuse = (m) => { setToast(m); setTimeout(() => setToast(null), 4000); };
       if (fx < 0 || fy < 0 || fx > bw || fy > bh) { refuse("Click inside the building, where the partition wall should go."); return; }
       const g = ssPartitionAt(fx, fy, bw, bh);
-      if (!g) { refuse("This building is too small for a partition wall."); return; }
-      const ni = { id: idCounter++, type: activeTool, wall: null, ...g, heightIn: null, openings: [] };
-      if (ssPartitionClash(ni, items)) { refuse("There is already a partition wall there. Click somewhere else."); return; }
-      if (partitionInOpen(ni)) { refuse("A partition wall here would cross the open ground beside the wing. Click where it runs wall to wall inside the building."); return; }
+      if (!g) { refuse("This building is too small for an interior wall."); return; }
+      const ni = ssNewPartition(idCounter++, activeTool, g, iwCfg);
+      if (ssPartitionClash(ni, items)) { refuse("There is already an interior wall there. Click somewhere else."); return; }
+      if (partitionInOpen(ni)) { refuse("An interior wall here would cross the open ground beside the wing. Click where it runs wall to wall inside the building, or drag to draw it."); return; }
       setItems((p) => [...p, ni]); dropPartitionPrices(ni.id); setSelectedId(ni.id); setSelOpening(null); setActiveTool(null); setToast(null);
       return;
     }
@@ -26361,11 +26874,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ...(win ? { sillIn: fx.sillIn != null && Number(fx.sillIn) >= 0 ? Number(fx.sillIn) : null } : { swing: swing || "out", operation: operation || null }),
       price: fx.price != null ? Number(fx.price) : null, centerFt: 0,
     };
-    const c = ssPartitionSeatOpening(p, o, (Number(p.fromFt) + Number(p.toFt)) / 2);
-    if (c == null) { refuseDrag(`That ${what} doesn't fit in this partition wall. Make the wall longer, or take something out of it.`); return; }
+    const c = ssPartitionSeatOpening(p, o, ssPartitionLenFt(p) / 2);
+    if (c == null) { refuseDrag(`That ${what} doesn't fit in this interior wall. Make the wall longer, or take something out of it.`); return; }
     const placed = { ...o, centerFt: c };
-    if (p.heightIn != null && ssPartitionOpeningSpanIn(placed)[1] + SS_PARTITION_HEADER_IN > Number(p.heightIn)) {
-      refuseDrag(`This partition wall is too low for that ${what}. Set it to Full height or taller first.`); return;
+    if (ssPartitionHeightMode(p) === "custom" && ssPartitionOpeningSpanIn(placed)[1] + SS_PARTITION_HEADER_IN > Number(p.heightIn)) {
+      refuseDrag(`This interior wall is too low for that ${what}. Set it to Stud wall height or taller first.`); return;
     }
     setItems((prev) => prev.map((i) => (i.id === pid ? { ...i, openings: [...(i.openings || []), placed] } : i)));
     dropPartitionPrices(pid, placed.id);
@@ -26669,14 +27182,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
     const pt = getSvgPt(e);
     if (ssIsPartition(item)) {
-      // The wall moves ACROSS the building; one of its doors or windows slides ALONG it. Both are
-      // measured from where the pointer took hold, so nothing jumps on the first move.
-      const horiz = item.axis !== "y";
-      const along = (horiz ? pt.x - mgX : pt.y - mgY) / scale, across = (horiz ? pt.y - mgY : pt.x - mgX) / scale;
+      // The wall moves as a whole (ssPartitionTranslate: an end on an outside wall stays on it); one of
+      // its doors or windows slides ALONG it. Both are measured from where the pointer took hold, so
+      // nothing jumps on the first move.
+      const fx = (pt.x - mgX) / scale, fy = (pt.y - mgY) / scale;
       const op = openingId != null ? (item.openings || []).find((q) => q.id === openingId) : null;
+      const g0 = ssPartitionGeom(item);
       setDragging(op
-        ? { id: item.id, kind: "partitionOpening", openingId, off: along - Number(op.centerFt) }
-        : { id: item.id, kind: "partition", off: across - Number(item.atFt) });
+        ? { id: item.id, kind: "partitionOpening", openingId, off: ssPartitionAlongFt(item, fx, fy) - Number(op.centerFt) }
+        : { id: item.id, kind: "partition", ox: fx - g0.x1, oy: fy - g0.y1 });
       return;
     }
     if (cfg && cfg.lineType) {
@@ -26764,10 +27278,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // A partition's END, stretched along its run: outside walls and crossing partitions are magnets,
       // and it keeps its minimum length and the framing round its doors (ssPartitionMoveEnd).
       if (ssIsPartition(it)) {
-        const along = (it.axis !== "y" ? pt.x - mgX : pt.y - mgY) / scale;
-        const patch = ssPartitionMoveEnd(it, resizing.handle === "from" ? "from" : "to", along, pW / scale, pH / scale, items);
+        const patch = ssPartitionMoveEnd(it, resizing.handle === "from" ? "from" : "to", (pt.x - mgX) / scale, (pt.y - mgY) / scale,
+          pW / scale, pH / scale, items, !!(e.shiftKey || partFree));
         if (Object.keys(patch).every((k) => patch[k] === it[k])) return;
-        if (partitionInOpen({ ...it, ...patch })) { refuseDrag("A partition wall can't run into the open ground beside the wing."); return; }
+        const moved = { ...it, ...patch };
+        if (!ssPartitionValid(moved)) return;
+        if (ssPartitionClash(moved, items)) { refuseDrag("Another interior wall is in the way: walls can meet or cross, never run along each other."); return; }
+        if (partitionInOpen(moved)) { refuseDrag("An interior wall can't run into the open ground beside the wing."); return; }
         setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...patch } : i)));
         return;
       }
@@ -26936,27 +27453,54 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     if (!dragging) return;
     const pt = getSvgPt(e);
+    // DRAWING an interior wall (press-drag with the tool armed, Interior walls v2): end 1 where the
+    // press was, end 2 following the pointer with ssPartitionMoveEnd's snapping (Shift, or the bar's
+    // Free angle, turns the angle snap off). The wall exists from the first real move; a press that
+    // never moved stays a click, which handleClick turns into today's short-span wall.
+    if (dragging.kind === "partitionDraw") {
+      if (!movedRef.current) return;
+      const bw = pW / scale, bh = pH / scale;
+      const fx = Math.max(0, Math.min(bw, (pt.x - mgX) / scale)), fy = Math.max(0, Math.min(bh, (pt.y - mgY) / scale));
+      const cur = dragging.id != null ? items.find((i) => i.id === dragging.id) : null;
+      const base = cur || ssNewPartition(null, dragging.type, { x1Ft: dragging.x1Ft, y1Ft: dragging.y1Ft, x2Ft: dragging.x1Ft + 0.01, y2Ft: dragging.y1Ft }, iwCfg);
+      const patch = ssPartitionMoveEnd(base, "to", fx, fy, bw, bh, items, !!(e.shiftKey || partFree));
+      const next = { ...base, ...patch };
+      if (ssPartitionClash(next, items) || partitionInOpen(next)) return;
+      // Selected only when the pointer comes up (onPtrUp): its toolbar would otherwise appear above the
+      // plan mid-drag and move the plan under the pointer.
+      if (!cur) {
+        const ni = { ...next, id: idCounter++ };
+        setItems((p) => [...p, ni]); dropPartitionPrices(ni.id);
+        setDragging({ ...dragging, id: ni.id });
+        return;
+      }
+      setItems((p) => p.map((i) => (i.id === cur.id ? { ...i, ...patch } : i)));
+      return;
+    }
     const it = items.find((i) => i.id === dragging.id);
     if (!it) return;
     const cfg = ITEMS[it.type]; if (!cfg) return;
 
-    // A partition wall moves across the building; a door or window in one slides along it. Every
-    // refusal says why, through refuseDrag like every other drag.
+    // A partition wall moves as a whole; a door or window in one slides along it. Every refusal says
+    // why, through refuseDrag like every other drag.
     if (dragging.kind === "partition") {
-      const atFt = ssPartitionMoveAcross(it, ((it.axis !== "y" ? pt.y - mgY : pt.x - mgX) / scale) - dragging.off, pW / scale, pH / scale);
-      if (atFt === Number(it.atFt)) return;
-      if (ssPartitionClash({ ...it, atFt }, items)) { refuseDrag("Another partition wall is in the way."); return; }
-      if (partitionInOpen({ ...it, atFt })) { refuseDrag("A partition wall can't cross the open ground beside the wing. Shorten it first."); return; }
-      setItems((p) => p.map((i) => (i.id === it.id ? { ...i, atFt } : i)));
+      const g0 = ssPartitionGeom(it);
+      const patch = ssPartitionTranslate(it, (pt.x - mgX) / scale - dragging.ox - g0.x1, (pt.y - mgY) / scale - dragging.oy - g0.y1, pW / scale, pH / scale);
+      if (Object.keys(patch).every((k) => patch[k] === it[k])) return;
+      const moved = { ...it, ...patch };
+      if (!ssPartitionValid(moved)) { refuseDrag("The interior wall would be too short there for what is in it."); return; }
+      if (ssPartitionClash(moved, items)) { refuseDrag("Another interior wall is in the way."); return; }
+      if (partitionInOpen(moved)) { refuseDrag("An interior wall can't cross the open ground beside the wing. Shorten it first."); return; }
+      setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...patch } : i)));
       return;
     }
     if (dragging.kind === "partitionOpening") {
       const o = (it.openings || []).find((q) => q.id === dragging.openingId);
       const r = o ? ssPartitionCenterRange(it, ssPartitionOpeningWidthFt(o)) : null;
       if (!r) return;
-      const c = Math.max(r[0], Math.min(r[1], ssPartInch(((it.axis !== "y" ? pt.x - mgX : pt.y - mgY) / scale) - dragging.off)));
+      const c = Math.max(r[0], Math.min(r[1], ssPartInch(ssPartitionAlongFt(it, (pt.x - mgX) / scale, (pt.y - mgY) / scale) - dragging.off)));
       if (c === Number(o.centerFt)) return;
-      if (!ssPartitionOpeningOk(it, { ...o, centerFt: c })) { refuseDrag("Doors and windows in one partition wall can't overlap."); return; }
+      if (!ssPartitionOpeningOk(it, { ...o, centerFt: c })) { refuseDrag("Doors and windows in one interior wall can't overlap."); return; }
       setItems((p) => p.map((i) => (i.id === it.id ? { ...i, openings: i.openings.map((q) => (q.id === o.id ? { ...q, centerFt: c } : q)) } : i)));
       return;
     }
@@ -27128,9 +27672,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const y = mgY + cyFt * scale;
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, x, y } : i));
     }
-  }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds, notchKey]);
+  }, [dragging, resizing, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, getResizeBounds, notchKey, partFree]);
 
   const onPtrUp = useCallback(() => {
+    // A drawn interior wall is done: the tool is put down, and the wall stays selected.
+    if (dragging && dragging.kind === "partitionDraw" && dragging.id != null) { setSelectedId(dragging.id); setSelOpening(null); setActiveTool(null); setToast(null); }
     // Dropping a note's leader handle back onto the note removes the pointer
     // ("drag it home to delete it") — checked on release, not mid-drag, so the
     // handle doesn't vanish under the cursor while crossing the note.
@@ -27150,7 +27696,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     justGesturedRef.current = movedRef.current;
     movedRef.current = false;
     gestureStartRef.current = null;
-  }, [resizing]);
+  }, [resizing, dragging]);
+  // A press on the plan with the interior wall tool armed: the start of a drawn wall (onPtrMove's
+  // "partitionDraw"). Only inside the building; anything else is left to the click.
+  const onPlanDown = (e) => {
+    if (!activeTool || !ITEMS[activeTool] || !ITEMS[activeTool].partitionType || planLockedRef.current || pendingRemoval || gateRequired) return;
+    const pt = getSvgPt(e);
+    const fx = (pt.x - mgX) / scale, fy = (pt.y - mgY) / scale;
+    if (fx < 0 || fy < 0 || fx > pW / scale || fy > pH / scale) return;
+    movedRef.current = false;
+    gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
+    setDragging({ kind: "partitionDraw", id: null, type: activeTool, x1Ft: ssPartInch(fx), y1Ft: ssPartInch(fy) });
+  };
 
   useEffect(() => {
     if (dragging || resizing) {
@@ -27317,22 +27874,37 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (r.refuse) { refuseDrag(r.refuse); return; }
     setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...r.patch } : i)));
   };
-  // A selected PARTITION WALL's toolbar (SSPartitionBar). Height: null is full height; a number of
-  // inches is kept between the tallest door or window in it (plus a header) and the wall itself, and
-  // anything at or over the wall is full height. Each correction says what it did. Returns the height
-  // the wall ends up with (null = full), or undefined when nothing was done, for the bar's field.
+  // A selected PARTITION WALL's toolbar (SSPartitionBar). Height: null is stud wall height (the plate),
+  // "rafters" is to the rafters (when the builder offers it), and a number of inches is a custom height
+  // kept between the tallest door or window in it (plus a header) and the wall itself; anything at or
+  // over the wall is stud wall height. Each correction says what it did. Returns the height the wall
+  // ends up with (null = not custom), or undefined when nothing was done, for the bar's field.
   const partitionHeightSel = (pid, heightIn) => {
-    const p = items.find((i) => i.id === pid);
-    if (!p || planLocked) return;
+    const p0 = items.find((i) => i.id === pid);
+    if (!p0 || planLocked) return;
+    const p = ssPartitionNormalize(p0);
+    if (heightIn === "rafters") {
+      if (!iwCfg.allowRafters) return;
+      if (p.heightMode !== "rafters") setItems((prev) => prev.map((i) => (i.id === pid ? { ...ssPartitionNormalize(i), heightMode: "rafters", heightIn: null } : i)));
+      return null;
+    }
     const wallIn = Math.round(partWallFt * 12);
     let h = heightIn == null ? null : Math.round(Number(heightIn));
     if (h != null && !isFinite(h)) return;
-    if (h != null && h >= wallIn) { refuseDrag(`The walls are ${ssPartitionFtIn(wallIn / 12)} tall, so this partition is full height.`); h = null; }
+    if (h != null && h >= wallIn) { refuseDrag(`The walls are ${ssPartitionFtIn(wallIn / 12)} tall, so this wall goes to stud wall height.`); h = null; }
     const min = ssPartitionMinHeightIn(p);
-    if (h != null && h < min) { refuseDrag((p.openings || []).length ? `The tallest door or window in this wall needs it at least ${ssPartitionFtIn(min / 12)} tall.` : `A partition wall is at least ${ssPartitionFtIn(min / 12)} tall.`); h = min; }
-    if (h === p.heightIn) return h;
-    setItems((prev) => prev.map((i) => (i.id === pid ? { ...i, heightIn: h } : i)));
+    if (h != null && h < min) { refuseDrag((p.openings || []).length ? `The tallest door or window in this wall needs it at least ${ssPartitionFtIn(min / 12)} tall.` : `An interior wall is at least ${ssPartitionFtIn(min / 12)} tall.`); h = min; }
+    const mode = h == null ? "plate" : "custom";
+    if (mode === p.heightMode && h === p.heightIn) return h;
+    setItems((prev) => prev.map((i) => (i.id === pid ? { ...ssPartitionNormalize(i), heightMode: mode, heightIn: h } : i)));
     return h;
+  };
+  // A rep's framing override (owners, admins and granted reps only, the price-override gate): null is
+  // the builder's standard, "2x4" / "2x6" that size. Never shown to a customer.
+  const partitionStudSel = (pid, stud) => {
+    if (planLocked || !(embedded && canOverridePrice)) return;
+    const s = stud === "2x4" || stud === "2x6" ? (stud === partStd ? null : stud) : null;
+    setItems((prev) => prev.map((i) => (i.id === pid && ssIsPartition(i) ? { ...ssPartitionNormalize(i), stud: s } : i)));
   };
   // A selected LOFT's height (SSLoftBar, LOFT HEIGHT). Its plate is the one the 3D draws it on: the same
   // resolver call (ventRoof2D) and the same footprint read (ssLoftPlateFt) as buildShed3DModel.
@@ -27493,7 +28065,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
 
       // Partition wall: ssPartitionCanvas, the twin of the plan's ssPartitionSVG.
-      if (ssIsPartition(item)) { ssPartitionCanvas(ctx, item, cfg, mgX, mgY, scale, partWallFt); return; }
+      if (ssIsPartition(item)) { ssPartitionCanvas(ctx, item, cfg, mgX, mgY, scale, partWallFt, partStd); return; }
 
       // Plan-bound items: position is already in page coords; widths are in feet
       const itemW = item.widthFt || cfg.width;
@@ -27679,7 +28251,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // One bullet per partition wall, with what is in it: the plan shows where, this says what.
     items.filter(ssIsPartition).forEach((p) => {
       const inIt = (p.openings || []).map((o) => `${fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12)} ${o.name || o.kind}`);
-      bullets.push(`${(ITEMS[p.type] && ITEMS[p.type].label) || "Partition wall"} — ${ssPartitionSize(p, partWallFt)}${inIt.length ? ", with " + inIt.join(" and ") : ""}`);
+      bullets.push(`Interior wall — ${ssPartitionSize(p, partWallFt)}, ${ssPartitionStud(p, partStd)} framing${inIt.length ? ", with " + inIt.join(" and ") : ""}`);
     });
     // Lines and notes are not bulleted — they already render at their position on the page.
     customOptions.forEach((co) => {
@@ -30724,7 +31296,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { type: "textNote", wall: null, text: (item.text || "").trim() };
           }
           // A partition wall in its own words (ssPartitionSummary): sizes and what is in it, never a wall.
-          if (ssIsPartition(item)) return { type: item.type, wall: null, ...ssPartitionSummary([item], partWallFt)[0] };
+          if (ssIsPartition(item)) return { type: item.type, wall: null, ...ssPartitionSummary([item], partWallFt, partRoofAt())[0] };
           return {
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
@@ -30911,7 +31483,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
           // Partition walls (278), only when there are some: submit-estimate prices each wall from these
           // sizes, clamped to the building, and each door or window in one from the catalog by its id.
-          ...(items.some(ssIsPartition) ? { partitions: ssPartitionSummary(items, partWallFt) } : {}),
+          ...(items.some(ssIsPartition) ? { partitions: ssPartitionSummary(items, partWallFt, partRoofAt()) } : {}),
         },
         customOptions: customOptions.filter((co) => co.name && co.name.trim()).map((co) => ({
           name: co.name.trim(),
@@ -36616,7 +37188,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               e44132fb bug, turned vertical). Kept short: the box is what the row has left over, and
               a hint wider than that is clipped to nothing (199px at 768 with 3D on). */}
           {activeTool
-            ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].partitionType ? "Click inside the building where the wall goes" : ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
+            ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].partitionType ? "Click inside the building where the wall goes, or press and drag to draw it" : ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
             : selectedId && !planLocked ? (() => {
               const si = items.find((i) => i.id === selectedId);
               if (!si) return null;
@@ -36690,6 +37262,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!si || !ssIsPartition(si)) return null;
             const op = selOpening && selOpening.pid === si.id ? (si.openings || []).find((o) => o.id === selOpening.oid) : null;
             return <SSPartitionBar p={si} wallFt={partWallFt} canDoor={partitionDoors.length > 0} canWindow={offeredWindows.length > 0} opening={op || null}
+              std={partStd} allowRafters={iwCfg.allowRafters} free={partFree} onFree={() => setPartFree((v) => !v)}
+              studs={embedded && canOverridePrice ? iwCfg.offeredStuds : null} onStud={(s) => partitionStudSel(si.id, s)}
               onHeight={(h) => partitionHeightSel(si.id, h)}
               onAddDoor={() => { setDoorPick({ partitionId: si.id }); setActiveTool(null); setToast(null); }}
               onAddWindow={() => { setWindowPick({ partitionId: si.id }); setActiveTool(null); setToast(null); }}
@@ -36865,7 +37439,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             inline style, which beats a presentation attribute. The PDF draws its own canvas. */}
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ display: "block", "--ssd-plan-w": `${dispMaxW}px`, width: "calc(100% + 2 * var(--ssd-plan-bleed, 0px))", marginLeft: "calc(-1 * var(--ssd-plan-bleed, 0px))", marginRight: "calc(-1 * var(--ssd-plan-bleed, 0px))", maxWidth: dispMaxW, height: "auto", boxSizing: "border-box", background: pal.panel, borderRadius: 4, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "none", border: `1px solid ${pal.lineCard}`, userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
-          onClick={handleClick}>
+          onClick={handleClick} onMouseDown={onPlanDown} onTouchStart={onPlanDown}>
           {/* Visible page background — only the area above the auto info band */}
           <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill={pal.panel} />
           {/* Plan rectangle and grid */}
@@ -37077,7 +37651,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
             // ─── Partition wall: its own drawing, grips and handlers (ssPartitionSVG) ───
             if (ssIsPartition(item)) {
-              return ssPartitionSVG(item, cfg, mgX, mgY, scale, partWallFt, {
+              return ssPartitionSVG(item, cfg, mgX, mgY, scale, partWallFt, partStd, {
                 isSel, selOpeningId: selOpening && selOpening.pid === item.id ? selOpening.oid : null,
                 selColor: planSel, surface: pal.surface, armed: !!activeTool, locked: planLocked,
                 onBody: (e) => onPtrDown(e, item), onOpening: (e, oid) => onPtrDown(e, item, oid), onEnd: (e, end) => startResize(e, item, end),
@@ -37275,9 +37849,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const c = ITEMS[it.type] || {};
             let x0, y0, w, h;
             if (ssIsPartition(it)) {
-              const a = Number(it.fromFt) * scale, b = Number(it.toFt) * scale, t = Math.max(6, SS_PARTITION_T_FT * scale);
-              if (it.axis === "y") { x0 = mgX + Number(it.atFt) * scale - t / 2; y0 = mgY + a; w = t; h = b - a; }
-              else { x0 = mgX + a; y0 = mgY + Number(it.atFt) * scale - t / 2; w = b - a; h = t; }
+              const g = ssPartitionGeom(it), t = Math.max(6, ssPartitionThicknessFt(it, partStd) * scale);
+              x0 = mgX + Math.min(g.x1, g.x2) * scale - t / 2; y0 = mgY + Math.min(g.y1, g.y2) * scale - t / 2;
+              w = Math.abs(g.dx) * scale + t; h = Math.abs(g.dy) * scale + t;
             } else {
               const iw = (it.widthFt || c.width || 1) * scale, ih = (it.heightFt || c.height || 0.5) * scale;
               const rot = it.rotation === 90 || it.rotation === 270;

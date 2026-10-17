@@ -304,7 +304,7 @@ Deno.test("E - plate traps: \"under the eave\" compares a lean-to's eave with th
 Deno.test("a wall device's plate rules and the gable vent's words measure the PLATE; the lamp's eave cap stays on the shell", () => {
   for (const [name, src] of TWINS) {
     const body = codeOnly(lift(src, name, "function buildShed3DModel(", "\nfunction d3UnbindFixtureMats("));
-    const el = lift(body, name, "const buildElectrical3D = (", "\n  const buildPartition3D = (it) => {");
+    const el = lift(body, name, "const buildElectrical3D = (", "\n  const buildPartition3D = (");
     assert(el.includes("const wPlate = wTop - (H - Hplate);"), `${name}: the plate under the device`);
     // "Mounted within 3 in of the plate": a 96 in light on a raised 8 ft wall is still the lamp under the eave.
     assert(el.includes("(hFt != null && hFt >= wPlate - 0.25)"), `${name}: the outside test reads the plate`);

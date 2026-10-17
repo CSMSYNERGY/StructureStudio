@@ -67,7 +67,9 @@ const FIXTURES = [
   { id: "fx-ramp", category: "ramp", name: "Ramp", price: 300, width_in: 48, height_in: 48, image_url: null, show_image_on_estimate: false, color_mode: "fixed", archived: false, taxable: true },
 ];
 
-type World = { method?: string | null; rate?: number; wallHeight?: boolean; inclusion?: boolean };
+// `iw` is the tenant's interior_wall_settings row (slice 1); absent, the table answers nothing (no row, or
+// the table not there yet), and "error" fails the read the way a missing table does.
+type World = { method?: string | null; rate?: number; wallHeight?: boolean; inclusion?: boolean; iw?: Record<string, unknown> | "error"; d3?: Record<string, unknown> };
 type Trace = { designUpdates: any[]; ghl: { url: string; method: string; body: any }[] };
 const ratesOf = (w: World) => (w.method === null ? [] : [{ item_key: "partitionWall", style_id: null, pricing_method: w.method ?? "lineal_ft", rate: w.rate ?? 22, image_url: null }]);
 
@@ -81,7 +83,8 @@ function tableRows(world: World, table: string): any[] | null {
     }];
     case "client_users": return [{ role: "owner", title: null, access: null, user_id: UID, client_id: T, location_id: null, prefs: null }];
     case "app_operators": return [];
-    case "building_styles": return [STYLE];
+    case "building_styles": return [world.d3 ? { ...STYLE, d3: world.d3 } : STYLE];
+    case "interior_wall_settings": return world.iw && world.iw !== "error" ? [world.iw] : null;
     case "building_sizes": return [SIZE];
     case "layout_item_pricing": return ratesOf(world);
     case "building_size_inclusions": return world.inclusion ? [{ item_key: "partitionWall", qty: 1, included: true, size_id: "sz-1012" }] : [];
@@ -106,6 +109,9 @@ function chain(world: World, trace: Trace, table: string, ops: any[][]): any {
     const verb = ops.find((o) => ["select", "insert", "update", "delete", "upsert"].includes(o[0]))?.[0] ?? "?";
     if (verb === "update" && table === "designs") trace.designUpdates.push(ops.find((o) => o[0] === "update")?.[1]);
     if (verb !== "select") return Promise.resolve({ data: [], error: null }).then(ok, bad);
+    if (table === "interior_wall_settings" && world.iw === "error") {
+      return Promise.resolve({ data: null, error: { message: 'relation "public.interior_wall_settings" does not exist' } }).then(ok, bad);
+    }
     let rows = tableRows(world, table);
     const one = ops.some((o) => o[0] === "single" || o[0] === "maybeSingle");
     if (rows == null) return Promise.resolve({ data: one ? null : [], error: null }).then(ok, bad);
@@ -181,7 +187,12 @@ const C = (w: World) => ({
   layoutPricing: Object.fromEntries(ratesOf(w).map((r) => [r.item_key, { rate: r.rate, method: r.pricing_method }])),
   layoutItems: { partitionWall: { label: "Partition Wall", modelKey: "partition", group: "interior" } },
   sizePricing: { econo: { "10x12": { basePrice: 3000, widthFt: 10, lengthFt: 12 } } },
-  buildingStyles: [{ value: "econo", label: "Econo", d3: { wallHeightFt: 8 } }],
+  buildingStyles: [{ value: "econo", label: "Econo", d3: w.d3 || { wallHeightFt: 8 } }],
+  // get_config's interiorWalls key (slice 1), as the designer reads it, from the same row the server reads.
+  ...(w.iw && w.iw !== "error" ? { interiorWalls: {
+    offered: true, standardStud: w.iw.standard_stud, method: w.iw.pricing_method, standardHeight: "plate", allowRafters: w.iw.allow_rafters !== false,
+    studs: { "2x4": { rate: w.iw.rate_2x4 ?? null }, "2x6": { rate: w.iw.rate_2x6 ?? null } },
+  } } : {}),
   colors: [],
   wallHeightOptions: w.wallHeight ? { econo: [{ deltaIn: 6, ratePerLf: 5 }] } : {},
   fixtures: FIXTURES.map((f) => ({ id: f.id, price: f.price })),
@@ -220,11 +231,11 @@ Deno.test("per foot: each wall is its length at the rate, its door and window th
   const r = await submit(payloadFor(ITEMS, SEL, {}), {});
   assertEquals(r.status, 200, JSON.stringify(r.body));
   assertEquals(wallLines(r.snap).map((l: any) => [l.name, l.qty, l.amount, l.desc]), [
-    ["Partition Wall", 10, 22, "10' long, full height (8') · with a door and a window"],
-    ["Partition Wall", 6.5, 22, "6'6\" long, 7'6\" tall · with a door"],
+    ["Interior Wall", 10, 22, "10' long, stud wall height (8') · 2x4 framing · with a door and a window"],
+    ["Interior Wall", 6.5, 22, "6'6\" long, 7'6\" tall · 2x4 framing · with a door"],
   ]);
-  assertEquals(named(r.snap, "Barn Door").map((l: any) => [l.kind, l.qty, l.amount, l.desc]), [["door", 1, 450, "3'×6'8\" · right hinge · in partition wall"]]);
-  assertEquals(named(r.snap, "2x3 Window").map((l: any) => [l.kind, l.qty, l.amount, l.desc]), [["window", 1, 120, "2'×3' · in partition wall"]]);
+  assertEquals(named(r.snap, "Barn Door").map((l: any) => [l.kind, l.qty, l.amount, l.desc]), [["door", 1, 450, "3'×6'8\" · right hinge · in interior wall"]]);
+  assertEquals(named(r.snap, "2x3 Window").map((l: any) => [l.kind, l.qty, l.amount, l.desc]), [["window", 1, 120, "2'×3' · in interior wall"]]);
   assertEquals(named(r.snap, "Curtain"), [], "an unpriced catalog door adds no line");
   assert(wallLines(r.snap).every((l: any) => l.kind === "layout_item"), "no new QBO kind");
 });
@@ -267,7 +278,7 @@ Deno.test("an anonymous caller cannot make a wall longer than the building or ta
 Deno.test("a size inclusion row for a partition wall nets nothing", async () => {
   const w: World = { inclusion: true };
   const r = await submit(payloadFor(ITEMS, SEL, w), w);
-  assertEquals(wallLines(r.snap).map((l: any) => [l.name, l.qty, l.amount]), [["Partition Wall", 10, 22], ["Partition Wall", 6.5, 22]]);
+  assertEquals(wallLines(r.snap).map((l: any) => [l.name, l.qty, l.amount]), [["Interior Wall", 10, 22], ["Interior Wall", 6.5, 22]]);
   assertFalse(JSON.stringify(r.snap).includes("(included)"));
   // ...and declining one it "includes" credits nothing off the building.
   const d = await submit(payloadFor([], SEL, w, { declinedItems: [{ key: "partitionWall", label: "Partition Wall" }] }), w);
@@ -310,7 +321,7 @@ Deno.test("a rep's price on a wall's row and on a door's row re-prices exactly t
   const client = detailsSubtotal(D, sel, ITEMS, [], C(w), PAINT);
   const r = await submit(payloadFor(ITEMS, SEL, w, { priceOverrides: list }), w);
   const repriced = r.snap.lines.filter((l: any) => "listAmount" in l);
-  assertEquals(repriced.map((l: any) => [l.name, l.qty, l.amount, l.listAmount]), [["Partition Wall", 10, 25, 22], ["Barn Door", 1, 400, 450]]);
+  assertEquals(repriced.map((l: any) => [l.name, l.qty, l.amount, l.listAmount]), [["Interior Wall", 10, 25, 22], ["Barn Door", 1, 400, 450]]);
   assertEquals(linesTotal(r.estimate.items), r2(client.subtotal));
 });
 
@@ -327,4 +338,79 @@ Deno.test("no partitions key and an empty list produce the same estimate, with n
   assertEquals(a.estimate.items, b.estimate.items);
   assertEquals(a.snap, b.snap);
   assertEquals(wallLines(a.snap), []);
+});
+
+// ─── 6. Interior walls v2 (2026-10-17): any angle, a rate per stud size, a wall to the rafters ──────
+// The tenant's Interior walls tab (interior_wall_settings, slice 1): 2x4 the standard at $30 a foot,
+// 2x6 offered at $38. Wall 9 is a 10 ft diagonal (6 across, 8 down) a rep framed in 2x6, with a priced
+// door in it; wall 10 runs the 10 ft width in the standard stud. Stored in v2's shape, as the designer
+// now holds every wall.
+const IW = { standard_stud: "2x4", pricing_method: "lineal_ft", rate_2x4: 30, rate_2x6: 38, allow_rafters: true, taxable: true };
+const V2: any[] = [
+  { id: 9, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 2, x2Ft: 6, y2Ft: 10, heightMode: "plate", heightIn: null, stud: "2x6",
+    covers: { a: null, b: null }, openings: [
+      { id: 1, kind: "door", fixtureItemId: "fx-door", name: "Barn Door", planLabel: "BARN", widthIn: 36, heightIn: 80, centerFt: 5, swing: "in", operation: "left", price: 450 },
+    ] },
+  { id: 10, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 11, x2Ft: 10, y2Ft: 11, heightMode: "plate", heightIn: null, stud: null,
+    covers: { a: null, b: null }, openings: [] },
+];
+
+Deno.test("v2: a diagonal 2x6 wall is its true length at the 2x6 rate; the standard wall at the 2x4 rate; Details agrees", async () => {
+  const w: World = { method: "lineal_ft", rate: 22, iw: IW };
+  const r = await submit(payloadFor(V2, SEL, w), w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(wallLines(r.snap).map((l: any) => [l.name, l.qty, l.amount, l.desc]), [
+    ["Interior Wall", 10, 38, "10' long, stud wall height (8') · 2x6 framing · with a door"],
+    ["Interior Wall", 10, 30, "10' long, stud wall height (8') · 2x4 framing"],
+  ]);
+  const client = detailsSubtotal(D, SEL, V2, [], C(w), PAINT);
+  assertEquals(client.priceRows.filter((x: any) => x.label === "Interior wall").map((x: any) => [x.key, x.qty, x.total]),
+    [["partition:9", 10, 380], ["partition:10", 10, 300]]);
+  assert(client.priceRows.find((x: any) => x.key === "partition:9").unit.includes("2x6 framing"));
+  assertEquals(linesTotal(r.estimate.items), r2(client.subtotal), "Details subtotal == the estimate's line total");
+});
+
+Deno.test("v2: a size the builder does not offer prices at the standard; per square foot, the face", async () => {
+  const w: World = { iw: { ...IW, rate_2x6: null, pricing_method: "sqft_option", rate_2x4: 3 } };
+  const r = await submit(payloadFor(V2, SEL, w), w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(wallLines(r.snap).map((l: any) => [l.qty, l.amount, l.desc.includes("2x4 framing")]), [[80, 3, true], [80, 3, true]]);
+  const client = detailsSubtotal(D, SEL, V2, [], C(w), PAINT);
+  assertEquals(linesTotal(r.estimate.items), r2(client.subtotal));
+});
+
+Deno.test("v2: no interior_wall_settings yet (a failed read or no row) prices exactly as the partitionWall row did", async () => {
+  const base = await submit(payloadFor(ITEMS, SEL, {}), {});
+  const failed = await submit(payloadFor(ITEMS, SEL, { iw: "error" }), { iw: "error" });
+  assertEquals(failed.status, 200, JSON.stringify(failed.body));
+  assertEquals(failed.estimate.items, base.estimate.items);
+  assertEquals(wallLines(failed.snap).map((l: any) => [l.qty, l.amount]), [[10, 22], [6.5, 22]]);
+});
+
+Deno.test("v2: a wall to the rafters is charged its face, held between the wall's and the roof's; off, it is the wall's", async () => {
+  // A 6:12 gable over the 10 x 12: the roof rises at most 12 / 2 x 0.5 = 3 ft, plus 2.5 ft of allowance.
+  const d3 = { wallHeightFt: 8, roof: { type: "gable", pitch: 0.5 } };
+  const raft = (id: string, faceAreaSqFt: unknown) => ({ id, x1Ft: 0, y1Ft: 6, x2Ft: 10, y2Ft: 6, lengthFt: 10, heightMode: "rafters", faceAreaSqFt, openings: [] });
+  const parts = [raft("1", 92.5), raft("2", 1e6), raft("3", 10), raft("4", "x")];
+  const w: World = { iw: { ...IW, pricing_method: "sqft_option", rate_2x4: 2 }, d3 };
+  const r = await submit(payloadFor([], SEL, w, {}, parts), w, ANON_KEY);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(wallLines(r.snap).map((l: any) => [l.qty, l.desc]), [
+    [92.5, "10' long, to the rafters · 2x4 framing"], [135, "10' long, to the rafters · 2x4 framing"],
+    [80, "10' long, to the rafters · 2x4 framing"], [80, "10' long, to the rafters · 2x4 framing"],
+  ]);
+  const off: World = { ...w, iw: { ...(w.iw as Record<string, unknown>), allow_rafters: false } };
+  const o = await submit(payloadFor([], SEL, off, {}, parts), off, ANON_KEY);
+  assertEquals(wallLines(o.snap).map((l: any) => [l.qty, l.desc]).slice(0, 2), [[80, "10' long, stud wall height (8') · 2x4 framing"], [80, "10' long, stud wall height (8') · 2x4 framing"]]);
+});
+
+Deno.test("v2: forged ends are clamped into the building and the length never passes its diagonal", async () => {
+  const w: World = { iw: IW };
+  const parts = [
+    { id: "1", x1Ft: -100, y1Ft: -100, x2Ft: 100, y2Ft: 100, lengthFt: 500, stud: "2x6", openings: [] },
+    { id: "2", x1Ft: 0, y1Ft: 0, x2Ft: 6, y2Ft: 8, lengthFt: 400, stud: "2x8", openings: [] },
+  ];
+  const r = await submit(payloadFor([], SEL, w, {}, parts), w, ANON_KEY);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(wallLines(r.snap).map((l: any) => [l.qty, l.amount]), [[15.62, 38], [10, 30]]);
 });

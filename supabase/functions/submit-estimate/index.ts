@@ -25,7 +25,9 @@ import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor, bosIsPct } from "../_s
 import { ssPriceGroupId, ssPriceRowKey } from "../_shared/priceRowKey.ts";
 import { applyPriceOverrides, parsePriceOverrides } from "../_shared/priceOverride.ts";
 // Partition walls (migration 278): the clamped reading of itemSummary.partitions and how a wall is charged.
-import { partitionCharge, partitionDescription, partitionOpeningDescription, partitionsFromPayload } from "../_shared/partitionPricing.ts";
+import {
+  interiorWallRates, partitionCharge, partitionDescription, partitionMaxRiseFt, partitionOpeningDescription, partitionsFromPayload, partitionStud,
+} from "../_shared/partitionPricing.ts";
 import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
@@ -1818,12 +1820,34 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // body is ever a price: an id that is not in this tenant's catalog, or not a door or window, prices
   // nothing. Never netted against a size's inclusions (those are the building's own doors), and no new
   // QBO kind: a wall is a layout_item, a door a door, a window a window.
+  //
+  // INTERIOR WALLS V2 (2026-10-17): a wall is a segment at any angle, framed in 2x4 or 2x6 and as tall
+  // as the stud wall, a stated height, or the roof's underside ("to the rafters"). The rate is the one
+  // for its stud size in interior_wall_settings (slice 1); until that table exists for this tenant (a
+  // failed read or no row) the 278 partitionWall layout row is the standard 2x4 rate, exactly as
+  // before. A wall to the rafters is charged by its face area held between the wall's and the roof's
+  // (partitionMaxRiseFt over the style's own roof). Nothing from the body is a price.
   {
-    const partitions = partitionsFromPayload((summary as Record<string, unknown>).partitions,
-      { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt);
+    const rawPartitions = (summary as Record<string, unknown>).partitions;
+    let iwRow: Record<string, unknown> | null = null;
+    if (Array.isArray(rawPartitions) && rawPartitions.length) {
+      try {
+        const iwRes = await supabase.from("interior_wall_settings")
+          .select("standard_stud, pricing_method, rate_2x4, rate_2x6, allow_rafters, taxable")
+          .eq("client_id", clientId).maybeSingle();
+        if (iwRes.error) console.info(`submit-estimate: interior_wall_settings not read (${iwRes.error.message}); the partitionWall layout rate prices the walls`);
+        else iwRow = (iwRes.data as Record<string, unknown> | null) ?? null;
+      } catch (e) {
+        console.info(`submit-estimate: interior_wall_settings not read (${e instanceof Error ? e.message : String(e)}); the partitionWall layout rate prices the walls`);
+      }
+    }
+    const lp = layoutRates.get("partitionWall");
+    const iw = interiorWallRates(iwRow, lp ?? null);
+    const partitions = partitionsFromPayload(rawPartitions,
+      { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt,
+      { maxRiseFt: partitionMaxRiseFt(styleD3, buildingWidthFt, buildingDepthFt), allowRafters: iw.allowRafters });
     if (partitions.length) {
-      const lp = layoutRates.get("partitionWall");
-      const rate = lp?.rate || 0;
+      const wallNonTaxable = iw.taxable != null ? iw.taxable === false : layoutTaxable.get("partitionWall") === false;
       const fxIds = [...new Set(partitions.flatMap((p) => p.openings.map((o) => o.fixtureItemId)).filter((x): x is string => !!x))];
       const fxRows = new Map<string, { name: string; category: string; price: number | null; widthIn: number | null; heightIn: number | null; url: string | null; show: boolean }>();
       if (fxIds.length) {
@@ -1839,12 +1863,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
       }
       for (const p of partitions) {
-        const ch = partitionCharge(p, lp?.method);
+        const stud = partitionStud(p, iw);
+        const ch = partitionCharge(p, iw.method);
         targetItems.push(tagLine({
-          name: "Partition Wall", qty: ch.qty, amount: rate,
+          name: "Interior Wall", qty: ch.qty, amount: iw.rates[stud] ?? 0,
           priceId: "", productId: "", attachments: lp ? imgAttachments(lp.imageUrl) : [],
-          currency: "USD", type: "one_time", description: partitionDescription(p),
-        }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: layoutTaxable.get("partitionWall") === false,
+          currency: "USD", type: "one_time", description: partitionDescription(p, stud),
+        }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: wallNonTaxable,
              ...(p.id ? { rowKey: ssPriceRowKey("partition", p.id) } : {}) }));
         for (const o of p.openings) {
           const fx = o.fixtureItemId ? fxRows.get(o.fixtureItemId) : undefined;
