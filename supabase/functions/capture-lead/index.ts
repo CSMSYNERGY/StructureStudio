@@ -168,7 +168,15 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
           : Promise.resolve({ data: null }),
       ]);
       const sel = (m?.selections || {}) as { style?: string; size?: string };
-      const what = [u.public_title || [sel.size, sel.style].filter(Boolean).join(" ")].filter(Boolean).join("");
+      // selections.style is the catalog KEY ("lofted"); the note should read the way the shop
+      // shows it, so use the style's label when the catalog has one.
+      let styleName = sel.style || "";
+      if (styleName) {
+        const { data: bs } = await sb.from("building_styles").select("label")
+          .eq("client_id", clientId).eq("key", styleName).maybeSingle();
+        if (bs?.label) styleName = bs.label;
+      }
+      const what = [u.public_title || [sel.size, styleName].filter(Boolean).join(" ")].filter(Boolean).join("");
       shopUnit = {
         id: u.id, serial: u.serial,
         label: `#${u.serial}${what ? " — " + what : ""}${lot?.name ? " (" + lot.name + ")" : ""}`,
