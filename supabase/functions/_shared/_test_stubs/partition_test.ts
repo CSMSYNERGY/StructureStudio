@@ -306,14 +306,14 @@ Deno.test("to the rafters: the top follows the roof along the wall, and its face
   assertEquals(P.ssPartitionFaceAreaSqFt(wall(), 8, roofAt), 96);
 });
 
-Deno.test("how a wall is charged: per foot, per square foot of its face, each — anything else is each", () => {
+Deno.test("how a wall is charged: per lineal foot or per square foot of its face; there is no each", () => {
   const p = wall({ x2Ft: 11.5, heightMode: "custom", heightIn: 90 });
   assertEquals(P.ssPartitionCharge(p, "lineal_ft", 8), { qty: 11.5, per: "per ft", method: "lineal_ft" });
   assertEquals(P.ssPartitionCharge(p, "sqft_option", 8), { qty: 86.25, per: "per sq ft", method: "sqft_option" });
   assertEquals(P.ssPartitionCharge(wall(), "sqft_option", 8.5), { qty: 102, per: "per sq ft", method: "sqft_option" }, "stud wall height is the priced wall");
-  assertEquals(P.ssPartitionCharge(p, "each", 8), { qty: 1, per: "each", method: "each" });
-  assertEquals(P.ssPartitionCharge(p, "pct_estimate_total", 8), { qty: 1, per: "each", method: "each" });
-  assertEquals(P.ssPartitionCharge(p, undefined, 8).qty, 1);
+  assertEquals(P.ssPartitionCharge(p, "each", 8), { qty: 11.5, per: "per ft", method: "lineal_ft" }, "never one wall at the rate");
+  assertEquals(P.ssPartitionCharge(p, "pct_estimate_total", 8), { qty: 11.5, per: "per ft", method: "lineal_ft" });
+  assertEquals(P.ssPartitionCharge(p, undefined, 8).qty, 11.5);
   // To the rafters, per square foot: the face under the roof, never less than the wall's own.
   const r = wall({ heightMode: "rafters" });
   assertEquals(P.ssPartitionCharge(r, "sqft_option", 8, (x: number) => gable(x)).qty, 110.4);
@@ -371,4 +371,40 @@ Deno.test("sizes and labels read the way a builder writes them", () => {
   assertEquals(P.ssPartitionPlanLabel(wall({ heightMode: "custom", heightIn: 90 }), 8, "2x4"), "INTERIOR 12' · 2x4 · 7'6\" tall");
   assertEquals(P.ssPartitionPlanLabel(wall({ heightMode: "rafters", stud: "2x6" }), 8, "2x4"), "INTERIOR 12' · 2x6 · to rafters");
   assertEquals(P.ssPartitionPlanLabel(wall(), 7.5, "2x6"), "INTERIOR 12' · 2x6 · 7'6\" tall");
+});
+
+// ── The builder's setup (ssInteriorWallCfg, outside the block; lifted from both twins) ─────────────
+// Each builder sets interior walls up on the tab (2026-10-17, no seed). get_config's interiorWalls:
+// an object = the tab; null = not set up (no wall offered, $0); ABSENT = a get_config from before 312
+// (the 278 layout row, as before; the server reads it in exactly that case: the table missing).
+const liftFn = (src: string, name: string, file: string) => {
+  const i = src.indexOf(`function ${name}(`), j = i < 0 ? -1 : src.indexOf("\n}\n", i);
+  if (i < 0 || j < 0) throw new Error(`partition_test: ${name} moved in ${file}`);
+  return src.slice(i, j + 3);
+};
+const CFG_SRC = liftFn(CMP, "ssInteriorWallCfg", "structure-studio.component.js");
+const iwCfg: (C: Any, layoutRate?: Any) => Any = new Function(`${CFG_SRC}; return ssInteriorWallCfg;`)();
+
+Deno.test("ssInteriorWallCfg is the same in both twins", () => {
+  assertStrictEquals(liftFn(JSX, "ssInteriorWallCfg", "StructureStudio.jsx"), CFG_SRC);
+});
+
+Deno.test("an unconfigured builder (interiorWalls null) is offered no wall and prices nothing, whatever the 278 row says", () => {
+  const c = iwCfg({ interiorWalls: null, showPricing: true }, { rate: 35, method: "lineal_ft" });
+  assertEquals([c.offered, c.studs, c.source], [false, { "2x4": null, "2x6": null }, "none"]);
+});
+
+Deno.test("the tab: per lineal ft or per sq ft; 'each' or a standard with no rate is not offered", () => {
+  const tab = (o: Any) => iwCfg({ showPricing: true, interiorWalls: { offered: true, standardStud: "2x4", studs: { "2x4": { rate: 30 } }, method: "lineal_ft", ...o } });
+  assertEquals([tab({}).offered, tab({}).method, tab({}).studs["2x4"]], [true, "lineal_ft", 30]);
+  assertEquals([tab({ method: "sqft_option" }).offered, tab({ method: "sqft_option" }).method], [true, "sqft_option"]);
+  assertEquals([tab({ method: "each" }).offered, tab({ method: "each" }).studs["2x4"]], [false, null]);
+  assertEquals(tab({ offered: false }).offered, false);
+  assertEquals(tab({ internalOnly: true }).internalOnly, true);
+});
+
+Deno.test("no interiorWalls key at all (before 312): the 278 row, as before; a non-wall method prices nothing", () => {
+  const legacy = iwCfg({ showPricing: true }, { rate: 35, method: "lineal_ft" });
+  assertEquals([legacy.offered, legacy.studs["2x4"], legacy.method, legacy.source], [true, 35, "lineal_ft", "layout"]);
+  assertEquals(iwCfg({ showPricing: true }, { rate: 400, method: "each" }).studs["2x4"], null);
 });

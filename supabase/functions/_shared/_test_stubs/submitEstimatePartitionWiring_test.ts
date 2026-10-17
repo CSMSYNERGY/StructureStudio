@@ -1,9 +1,13 @@
 // Partition walls on the estimate (migration 278), driven through the SHIPPED submit-estimate handler.
 //
 // WHAT IS PINNED, each against the real handler:
-//   1. THE THREE METHODS. A wall priced per foot is its length at the rate, per square foot of wall
-//      its length x height (full height = the wall the estimate prices, a taller-wall upgrade
-//      included), each one at the rate; an unpriced wall still prints, at $0.
+//   1. THE TWO METHODS (Carolyn, 2026-10-17). A wall priced per foot is its length at the rate, per
+//      square foot of wall its length x height (full height = the wall the estimate prices, a
+//      taller-wall upgrade included). There is no "each". A tenant that has NOT SET UP the Interior
+//      walls tab (no interior_wall_settings row) is offered no walls; one that reaches the estimate
+//      anyway still prints, at $0, and the designer's Details agree, even with a 278 row priced.
+//      Only a MISSING table (a database before 312) prices from the 278 row; any other failed read
+//      refuses the estimate.
 //   2. CLAMPING. The anon key reaches this function, so a body claiming a 400 ft wall, a 50 ft one in
 //      a 10 ft building or a 40 ft height is charged for the building's own run and its own wall —
 //      never more. And a size inclusion row for the item nets nothing.
@@ -67,11 +71,19 @@ const FIXTURES = [
   { id: "fx-ramp", category: "ramp", name: "Ramp", price: 300, width_in: 48, height_in: 48, image_url: null, show_image_on_estimate: false, color_mode: "fixed", archived: false, taxable: true },
 ];
 
-// `iw` is the tenant's interior_wall_settings row (slice 1); absent, the table answers nothing (no row, or
-// the table not there yet), and "error" fails the read the way a missing table does.
-type World = { method?: string | null; rate?: number; wallHeight?: boolean; inclusion?: boolean; iw?: Record<string, unknown> | "error"; d3?: Record<string, unknown> };
+// `iw` is the tenant's interior_wall_settings row (the Interior walls tab). Left out, the tab is saved
+// with `method` / `rate` as the standard 2x4 (method null = NOT SET UP: no row). "none" = no row,
+// "missing" fails the read the way a missing table does (a database before 312, get_config without
+// the key), and "error" fails it any other way. The 278 layout row is always there (ratesOf), as it is
+// live, so every world proves it is ignored unless the table is missing.
+type World = { method?: string | null; rate?: number; wallHeight?: boolean; inclusion?: boolean; iw?: Record<string, unknown> | "none" | "missing" | "error"; d3?: Record<string, unknown> };
 type Trace = { designUpdates: any[]; ghl: { url: string; method: string; body: any }[] };
 const ratesOf = (w: World) => (w.method === null ? [] : [{ item_key: "partitionWall", style_id: null, pricing_method: w.method ?? "lineal_ft", rate: w.rate ?? 22, image_url: null }]);
+const iwOf = (w: World): Record<string, any> | null => {
+  if (w.iw && typeof w.iw === "object") return w.iw;
+  if (w.iw || w.method === null) return null;
+  return { standard_stud: "2x4", pricing_method: w.method ?? "lineal_ft", rate_2x4: w.rate ?? 22, rate_2x6: null, allow_rafters: true, taxable: true };
+};
 
 function tableRows(world: World, table: string): any[] | null {
   switch (table) {
@@ -84,7 +96,7 @@ function tableRows(world: World, table: string): any[] | null {
     case "client_users": return [{ role: "owner", title: null, access: null, user_id: UID, client_id: T, location_id: null, prefs: null }];
     case "app_operators": return [];
     case "building_styles": return [world.d3 ? { ...STYLE, d3: world.d3 } : STYLE];
-    case "interior_wall_settings": return world.iw && world.iw !== "error" ? [world.iw] : null;
+    case "interior_wall_settings": { const row = iwOf(world); return row ? [row] : null; }
     case "building_sizes": return [SIZE];
     case "layout_item_pricing": return ratesOf(world);
     case "building_size_inclusions": return world.inclusion ? [{ item_key: "partitionWall", qty: 1, included: true, size_id: "sz-1012" }] : [];
@@ -109,8 +121,11 @@ function chain(world: World, trace: Trace, table: string, ops: any[][]): any {
     const verb = ops.find((o) => ["select", "insert", "update", "delete", "upsert"].includes(o[0]))?.[0] ?? "?";
     if (verb === "update" && table === "designs") trace.designUpdates.push(ops.find((o) => o[0] === "update")?.[1]);
     if (verb !== "select") return Promise.resolve({ data: [], error: null }).then(ok, bad);
+    if (table === "interior_wall_settings" && world.iw === "missing") {
+      return Promise.resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table 'public.interior_wall_settings' in the schema cache" } }).then(ok, bad);
+    }
     if (table === "interior_wall_settings" && world.iw === "error") {
-      return Promise.resolve({ data: null, error: { message: 'relation "public.interior_wall_settings" does not exist' } }).then(ok, bad);
+      return Promise.resolve({ data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } }).then(ok, bad);
     }
     let rows = tableRows(world, table);
     const one = ops.some((o) => o[0] === "single" || o[0] === "maybeSingle");
@@ -188,11 +203,13 @@ const C = (w: World) => ({
   layoutItems: { partitionWall: { label: "Partition Wall", modelKey: "partition", group: "interior" } },
   sizePricing: { econo: { "10x12": { basePrice: 3000, widthFt: 10, lengthFt: 12 } } },
   buildingStyles: [{ value: "econo", label: "Econo", d3: w.d3 || { wallHeightFt: 8 } }],
-  // get_config's interiorWalls key (slice 1), as the designer reads it, from the same row the server reads.
-  ...(w.iw && w.iw !== "error" ? { interiorWalls: {
-    offered: true, standardStud: w.iw.standard_stud, method: w.iw.pricing_method, standardHeight: "plate", allowRafters: w.iw.allow_rafters !== false,
-    studs: { "2x4": { rate: w.iw.rate_2x4 ?? null }, "2x6": { rate: w.iw.rate_2x6 ?? null } },
-  } } : {}),
+  // get_config's interiorWalls key (312), as the designer reads it, from the same row the server reads:
+  // null without a row, and no key at all only on a database before 312 (the table missing).
+  ...(w.iw === "missing" ? {} : { interiorWalls: ((iw) => iw ? {
+    offered: (iw.standard_stud === "2x6" ? iw.rate_2x6 : iw.rate_2x4) != null, standardStud: iw.standard_stud, method: iw.pricing_method,
+    standardHeight: "plate", allowRafters: iw.allow_rafters !== false,
+    studs: { ...(iw.rate_2x4 != null ? { "2x4": { rate: iw.rate_2x4 } } : {}), ...(iw.rate_2x6 != null ? { "2x6": { rate: iw.rate_2x6 } } : {}) },
+  } : null)(iwOf(w)) }),
   colors: [],
   wallHeightOptions: w.wallHeight ? { econo: [{ deltaIn: 6, ratePerLf: 5 }] } : {},
   fixtures: FIXTURES.map((f) => ({ id: f.id, price: f.price })),
@@ -251,13 +268,19 @@ Deno.test("per square foot of wall: length x height, full height at the priced w
   assertEquals(wallLines(r2_.snap).map((l: any) => l.qty), [85, 48.75], "full height follows the +6 in wall; a stated 7'6\" does not");
 });
 
-Deno.test("each: one at the rate per wall; unpriced: still on the quote, at $0", async () => {
-  const each: World = { method: "each", rate: 650 };
-  const r = await submit(payloadFor(ITEMS, SEL, each), each);
-  assertEquals(wallLines(r.snap).map((l: any) => [l.qty, l.amount]), [[1, 650], [1, 650]]);
-  const none: World = { method: null };
-  const z = await submit(payloadFor(ITEMS, SEL, none), none);
-  assertEquals(wallLines(z.snap).map((l: any) => [l.qty, l.amount]), [[1, 0], [1, 0]]);
+Deno.test("NOT SET UP: no Interior walls row prices every wall at $0, even with the 278 row at $22; Details agree", async () => {
+  for (const w of [{ iw: "none", method: "lineal_ft", rate: 22 }, { method: null }] as World[]) {
+    const r = await submit(payloadFor(ITEMS, SEL, w), w);
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    assertEquals(wallLines(r.snap).map((l: any) => [l.name, l.qty, l.amount]), [["Interior Wall", 10, 0], ["Interior Wall", 6.5, 0]], "on the plan, so on the estimate, at nothing");
+    const client = detailsSubtotal(D, SEL, ITEMS, [], C(w), PAINT);
+    assertEquals(client.priceRows.filter((x: any) => x.label === "Interior wall").map((x: any) => x.total), [0, 0]);
+    assertEquals(linesTotal(r.estimate.items), r2(client.subtotal), "Details subtotal == the estimate's line total");
+  }
+  // A row whose method is "each" (the CHECK refuses it; a hand-written row could not) prices nothing either.
+  const each: World = { iw: { standard_stud: "2x4", pricing_method: "each", rate_2x4: 650 } };
+  const e = await submit(payloadFor(ITEMS, SEL, each), each);
+  assertEquals(wallLines(e.snap).map((l: any) => l.amount), [0, 0]);
 });
 
 // ─── 2. Clamping ───────────────────────────────────────────────────────────────────────────────
@@ -302,7 +325,7 @@ Deno.test("a door's price is the catalog's, whatever the body says; a foreign id
 
 // ─── 4. One spelling, both sides ────────────────────────────────────────────────────────────────
 Deno.test("PARITY: the Details rows and the CRM estimate agree to the cent, for every method", async () => {
-  for (const w of [{ method: "lineal_ft", rate: 22 }, { method: "sqft_option", rate: 3.15 }, { method: "each", rate: 650 }, { method: null }] as World[]) {
+  for (const w of [{ method: "lineal_ft", rate: 22 }, { method: "sqft_option", rate: 3.15 }, { method: null }, { iw: "missing", method: "lineal_ft", rate: 22 }] as World[]) {
     const client = detailsSubtotal(D, SEL, ITEMS, [], C(w), PAINT);
     const r = await submit(payloadFor(ITEMS, SEL, w), w);
     assertEquals(r.status, 200, JSON.stringify(r.body));
@@ -379,12 +402,20 @@ Deno.test("v2: a size the builder does not offer prices at the standard; per squ
   assertEquals(linesTotal(r.estimate.items), r2(client.subtotal));
 });
 
-Deno.test("v2: no interior_wall_settings yet (a failed read or no row) prices exactly as the partitionWall row did", async () => {
+Deno.test("v2: only a MISSING table prices from the 278 row; any other failed read refuses the estimate", async () => {
+  // Tab saved at the same $22/ft as the 278 row: the missing-table estimate is the same estimate.
   const base = await submit(payloadFor(ITEMS, SEL, {}), {});
+  const missing = await submit(payloadFor(ITEMS, SEL, { iw: "missing" }), { iw: "missing" });
+  assertEquals(missing.status, 200, JSON.stringify(missing.body));
+  assertEquals(missing.estimate.items, base.estimate.items);
+  assertEquals(wallLines(missing.snap).map((l: any) => [l.qty, l.amount]), [[10, 22], [6.5, 22]]);
   const failed = await submit(payloadFor(ITEMS, SEL, { iw: "error" }), { iw: "error" });
-  assertEquals(failed.status, 200, JSON.stringify(failed.body));
-  assertEquals(failed.estimate.items, base.estimate.items);
-  assertEquals(wallLines(failed.snap).map((l: any) => [l.qty, l.amount]), [[10, 22], [6.5, 22]]);
+  assertEquals(failed.status, 400, JSON.stringify(failed.body));
+  assert(/interior wall settings/.test(failed.body.error), failed.body.error);
+  assertEquals(failed.estimate, null, "nothing reaches the CRM");
+  // No walls on the design: the table is never read, so a failing read refuses nothing.
+  const plain = await submit(payloadFor([], SEL, { iw: "error" }), { iw: "error" });
+  assertEquals(plain.status, 200, JSON.stringify(plain.body));
 });
 
 Deno.test("v2: a wall to the rafters is charged its face, held between the wall's and the roof's; off, it is the wall's", async () => {

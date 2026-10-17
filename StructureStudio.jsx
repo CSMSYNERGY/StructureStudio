@@ -1050,13 +1050,13 @@ function ssPartitionPlanLabel(p, wallFt, std) {
   return "INTERIOR " + ssPartitionFtIn(ssPartitionLenFt(p)) + " · " + ssPartitionStud(p, std) + " · "
     + (mode === "rafters" ? "to rafters" : ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall");
 }
-// How a partition is charged under the builder's method: per foot of wall, per square foot of wall
-// (its face: length x height, or the area under its top when it goes to the rafters, never less than
-// length x the wall) or each. Any other method a pricing row could carry is charged each.
+// How a partition is charged under the builder's method, the builder's choice of exactly two (Carolyn,
+// 2026-10-17): per square foot of wall (its face: length x height, or the area under its top when it
+// goes to the rafters, never less than length x the wall) or per lineal foot of wall, which is also
+// what any other method reads as. There is no "each" for a wall.
 // THE ONE RULE, mirrored line for line by _shared/partitionPricing.ts on the server.
 function ssPartitionCharge(p, method, wallFt, roofAt) {
   const len = ssPartR2(ssPartitionLenFt(p));
-  if (method === "lineal_ft") return { qty: len, per: "per ft", method };
   if (method === "sqft_option") {
     if (ssPartitionHeightMode(p) === "rafters" && typeof roofAt === "function") {
       const w = Number(wallFt) > 0 ? Number(wallFt) : 8;
@@ -1064,7 +1064,7 @@ function ssPartitionCharge(p, method, wallFt, roofAt) {
     }
     return { qty: ssPartR2(len * ssPartitionHeightFt(p, wallFt)), per: "per sq ft", method };
   }
-  return { qty: 1, per: "each", method: "each" };
+  return { qty: len, per: "per ft", method: "lineal_ft" };
 }
 // What the estimate is told about the partitions (itemSummary.partitions): ends, sizes, framing and
 // each door or window by its catalog id. submit-estimate re-reads every price, clamps every end into
@@ -4048,13 +4048,21 @@ function ssRemoveFromRow(key, it) {
 // ── INTERIOR WALLS: THE BUILDER'S SETUP (Interior walls v2, 2026-10-17) ──
 // get_config's `interiorWalls` key (slice 1: the Interior walls tab) is { offered, standardStud,
 // studs: { "2x4": { rate }, "2x6": { rate } }, method, standardHeight, allowRafters, allowRo, coverings }.
-// Until a tenant has it, this falls back to today: the partitionWall layout row (`layoutRate`, the
-// { rate, method } computeLayoutPricingRows resolves) is the standard 2x4 rate, 2x4 the standard,
-// stud wall height the standard height and "To the rafters" offered. A size is offered when the key
-// names it with a rate, or with its rate nulled because the tenant hides prices. Mirrored by
+// THREE CASES (Carolyn, 2026-10-17: each builder sets interior walls up on the tab; there is no seed):
+//   * the key is an object: the tab decides everything, the Interior wall button included (`offered`);
+//   * the key is there and NULL: this builder has not set interior walls up, so none are offered to a
+//     customer or a rep (`offered` false) and a wall already on a saved design prices at $0;
+//   * the key is ABSENT: a get_config from before migration 312, where the table does not exist
+//     either. Today's 278 behaviour holds: the partitionWall layout row (`layoutRate`, the { rate,
+//     method } computeLayoutPricingRows resolves) is the standard 2x4 rate and its own palette flag
+//     decides the button. The server reads the 278 row in exactly that case too (the table missing),
+//     so the designer and the estimate always agree.
+// A size is offered when the key names it with a rate, or with its rate nulled because the tenant
+// hides prices. The wall's method is per lineal ft or per sq ft only. Mirrored by
 // _shared/partitionPricing.ts interiorWallRates on the server, which reads the same table.
 function ssInteriorWallCfg(C, layoutRate) {
   const iw = C && C.interiorWalls;
+  const wallMethod = (m) => m === "lineal_ft" || m === "sqft_option";
   if (iw && typeof iw === "object" && !Array.isArray(iw)) {
     const studs = {}, offeredStuds = [];
     ["2x4", "2x6"].forEach((s) => {
@@ -4065,14 +4073,23 @@ function ssInteriorWallCfg(C, layoutRate) {
     });
     const std = iw.standardStud === "2x6" ? "2x6" : "2x4";
     if (offeredStuds.indexOf(std) < 0) offeredStuds.unshift(std);
+    const ok = iw.offered !== false && wallMethod(iw.method);
     return {
-      offered: iw.offered !== false, standardStud: std, studs, offeredStuds, method: iw.method || "each",
-      standardHeight: iw.standardHeight === "rafters" ? "rafters" : "plate", allowRafters: iw.allowRafters !== false, source: "interiorWalls",
+      offered: ok, standardStud: std, studs: ok ? studs : { "2x4": null, "2x6": null }, offeredStuds, method: ok ? iw.method : "lineal_ft",
+      standardHeight: iw.standardHeight === "rafters" ? "rafters" : "plate", allowRafters: iw.allowRafters !== false,
+      internalOnly: iw.internalOnly === true, taxable: iw.taxable !== false, source: "interiorWalls",
     };
   }
+  if (C && Object.prototype.hasOwnProperty.call(C, "interiorWalls")) {
+    return {
+      offered: false, standardStud: "2x4", studs: { "2x4": null, "2x6": null }, offeredStuds: ["2x4"],
+      method: "lineal_ft", standardHeight: "plate", allowRafters: true, internalOnly: false, taxable: true, source: "none",
+    };
+  }
+  const legacyOk = !layoutRate || wallMethod(layoutRate.method);
   return {
-    offered: true, standardStud: "2x4", studs: { "2x4": layoutRate ? Number(layoutRate.rate) || 0 : null, "2x6": null }, offeredStuds: ["2x4"],
-    method: (layoutRate && layoutRate.method) || "each", standardHeight: "plate", allowRafters: true, source: "layout",
+    offered: true, standardStud: "2x4", studs: { "2x4": layoutRate && legacyOk ? Number(layoutRate.rate) || 0 : null, "2x6": null }, offeredStuds: ["2x4"],
+    method: layoutRate && legacyOk ? layoutRate.method : "lineal_ft", standardHeight: "plate", allowRafters: true, source: "layout",
   };
 }
 // The stud size a wall is PRICED at: its own when the builder offers that size, else the standard
@@ -4264,13 +4281,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // row: it is on the plan, and the quote must say so.
   //
   // INTERIOR WALLS V2 (2026-10-17): the rate is the one for the wall's stud size (ssInteriorWallCfg:
-  // the builder's Interior walls tab, else the partitionWall row as the 2x4 rate), and a wall to the
+  // the builder's Interior walls tab; not set up = $0; the partitionWall row as the 2x4 rate only on a
+  // get_config from before 312), and a wall to the
   // rafters priced per square foot is charged its real face, under the roof the 3D builds or a loft's
   // floor framing (ssPartitionRoofAt2D), never less than its length x the wall. The row reads
   // "Interior wall", the customer's word for it; its key is still ssPriceRowKey "partition".
   const partitions = items.filter(ssIsPartition);
   if (partitions.length) {
-    const iw = ssInteriorWallCfg(C, resolve(SS_PARTITION_KEY) || { rate: 0, method: "each" });
+    const iw = ssInteriorWallCfg(C, resolve(SS_PARTITION_KEY) || null);
     const wallFt = pricedWallHeightFt(C, (C.buildingStyles || []).find((s) => s.value === styleKey), styleKey, sel, bW);
     const anyRafters = iw.allowRafters && partitions.some((p) => ssPartitionHeightMode(p) === "rafters");
     const roofAt = anyRafters && typeof ssPartitionRoofAt2D === "function" ? ssPartitionRoofAt2D(C, sel, items, bW, bL, wallFt) : null;
@@ -4280,7 +4298,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       const rate = iw.studs[stud] || 0;
       const ch = ssPartitionCharge(p, iw.method, wallFt, roofAt);
       const total = Math.round(rate * ch.qty * 100) / 100;
-      const per = ch.method === "lineal_ft" ? " / ft" : ch.method === "sqft_option" ? " / sq ft" : " each";
+      const per = ch.method === "sqft_option" ? " / sq ft" : " / ft";
       rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing · " + fmtMoney2(rate) + per,
         total, method: ch.method, ...ssPriceable(rate, ch.qty, ch.per) });
       nonPctSubtotal += total;
@@ -24524,10 +24542,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Customers read it as an "Interior wall" (Interior walls v2): the button, the selection and the
     // estimate say so whatever the config row is called. The builder's standard stud and whether "To
     // the rafters" is offered ride along for the 3D, which reads ITEMS and nothing else.
-    ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => [k, {
-      ...baseItems[k], partitionType: true, label: "Interior wall",
-      standardStud: ssInteriorWallCfg(C).standardStud, allowRafters: ssInteriorWallCfg(C).allowRafters,
-    }])),
+    // WHETHER THE BUTTON IS OFFERED (2026-10-17): the Interior walls tab decides once get_config carries
+    // its key. Not set up (null) or not offered = no button for a customer OR a rep (noPalette, and
+    // partitionOff stops a placement however the tool got armed); a placed wall still draws. Offered =
+    // the button, whatever 278's hidden-until-priced flag on the layout row says, and the tab's
+    // internal-only. No key at all (a get_config from before 312) = the layout row decides, as before.
+    ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => {
+      const iwc = ssInteriorWallCfg(C);
+      const gate = iwc.source === "layout" ? {} : { noPalette: !iwc.offered, partitionOff: !iwc.offered, internalOnly: !!iwc.internalOnly };
+      return [k, {
+        ...baseItems[k], partitionType: true, label: "Interior wall", ...gate,
+        standardStud: iwc.standardStud, allowRafters: iwc.allowRafters,
+      }];
+    })),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
@@ -26738,6 +26765,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (cfg.partitionType) {
       const fx = (pt.x - mgX) / scale, fy = (pt.y - mgY) / scale, bw = pW / scale, bh = pH / scale;
       const refuse = (m) => { setToast(m); setTimeout(() => setToast(null), 4000); };
+      // Not set up on the Interior walls tab: no new wall, however the tool got armed.
+      if (cfg.partitionOff) { setActiveTool(null); refuse("Interior walls aren't offered on this building."); return; }
       if (fx < 0 || fy < 0 || fx > bw || fy > bh) { refuse("Click inside the building, where the partition wall should go."); return; }
       const g = ssPartitionAt(fx, fy, bw, bh);
       if (!g) { refuse("This building is too small for an interior wall."); return; }
@@ -27747,7 +27776,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A press on the plan with the interior wall tool armed: the start of a drawn wall (onPtrMove's
   // "partitionDraw"). Only inside the building; anything else is left to the click.
   const onPlanDown = (e) => {
-    if (!activeTool || !ITEMS[activeTool] || !ITEMS[activeTool].partitionType || planLockedRef.current || pendingRemoval || gateRequired) return;
+    if (!activeTool || !ITEMS[activeTool] || !ITEMS[activeTool].partitionType || ITEMS[activeTool].partitionOff || planLockedRef.current || pendingRemoval || gateRequired) return;
     const pt = getSvgPt(e);
     const fx = (pt.x - mgX) / scale, fy = (pt.y - mgY) / scale;
     if (fx < 0 || fy < 0 || fx > pW / scale || fy > pH / scale) return;
@@ -38386,6 +38415,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 if (!pk[2]) {
                   const iwc = C && C.interiorWalls;
                   if (iwc && typeof iwc === "object" && !Array.isArray(iwc)) return iwc.taxable === false;
+                  if (C && Object.prototype.hasOwnProperty.call(C, "interiorWalls")) return false;   // not set up: a $0 wall
                   const pli = ((C && C.layoutItems) || {})[SS_PARTITION_KEY]; return !!pli && pli.taxable === false;
                 }
                 const pw = items.find((i) => ssIsPartition(i) && String(i.id) === pk[1]);

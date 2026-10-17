@@ -3231,8 +3231,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const rate = Number(row?.rate);
       if (!itemKey) continue;
       // An interior wall (278's partitionWall) is priced on its own tab since 312: Settings → Options →
-      // Interior walls (save_interior_walls), which keeps this row in step for the designer until slice
-      // 2 reads interiorWalls. This action never writes it. A card that only sends the row back unchanged
+      // Interior walls (save_interior_walls, interior_wall_settings). Nothing prices a wall from this
+      // row any more, and this action never writes it. A card that only sends the row back unchanged
       // (production's Interior items card from before 312) is passed over quietly; a change is refused
       // in words that say where the price lives now.
       if (itemKey === "partitionWall") {
@@ -6533,20 +6533,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // walls" on doors and windows, "Allowed on interior walls" on electrical items), which are written
   // column-only so the tab never has to resend either catalog.
   //
-  // THE 278 ROW IS KEPT IN STEP. Until slice 2 the designer and submit-estimate still price a wall
-  // from layout_item_pricing 'partitionWall' (and get_config hides the button while that row has no
-  // rate), so this save mirrors the STANDARD stud's method and rate into it, and the tab's taxable /
-  // internal-only into client_layout_items. The Interior items card no longer lists the wall and
-  // save_layout_pricing no longer writes it, so this is the one writer.
+  // The wall is priced the builder's choice of exactly two ways (Carolyn, 2026-10-17): per lineal ft
+  // of wall, or per sq ft of wall face. 'each' is refused (the table's CHECK refuses it too).
+  // Nothing is mirrored into the 278 row any more: the designer and submit-estimate read this table
+  // (get_config.interiorWalls / interiorWallRates), and a tenant with no row here has no interior walls.
+  // The 278 layout_item_pricing / client_layout_items rows are left as they are, never written or deleted.
   if (action === "save_interior_walls") {
     const p = payload as Record<string, unknown>;
     const STUDS = new Set(["2x4", "2x6"]);
-    const METHODS = new Set(["each", "lineal_ft", "sqft_option"]);
+    const METHODS = new Set(["lineal_ft", "sqft_option"]);
     const HEIGHTS = new Set(["plate", "rafters"]);
     const standardStud = String(p.standardStud ?? "2x4");
     if (!STUDS.has(standardStud)) return json({ error: "Pick 2x4 or 2x6 as your standard framing." }, 400);
     const method = String(p.method ?? "");
-    if (!METHODS.has(method)) return json({ error: "Interior walls are priced each, per foot of wall or per square foot of wall." }, 400);
+    if (!METHODS.has(method)) return json({ error: "Interior walls are priced per lineal foot of wall or per square foot of wall. Pick one." }, 400);
     // A rate is a number >= 0 or genuinely absent. "" means "this size is not offered" and reaches the
     // column as NULL, never as 0: 0 is a wall included at no charge.
     const rateOf = (v: unknown): number | null | undefined => {
@@ -6616,18 +6616,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .eq("client_id", clientId).in("id", ids);
       if (r.error) return dbFail(req, clientId, "save which electrical items go on interior walls", r.error);
     }
-    // The 278 row, kept in step (see above). The all-styles row only; a per-style row, which no card
-    // has ever written, is left alone.
-    const lp = await admin.from("layout_item_pricing").select("id").eq("client_id", clientId)
-      .eq("item_key", "partitionWall").is("style_id", null).maybeSingle();
-    if (lp.error) return dbFail(req, clientId, "save your interior wall price", lp.error);
-    const lpWrite = lp.data?.id
-      ? await admin.from("layout_item_pricing").update({ pricing_method: method, rate: standardRate }).eq("id", lp.data.id).eq("client_id", clientId)
-      : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: "partitionWall", style_id: null, pricing_method: method, rate: standardRate });
-    if (lpWrite.error) return dbFail(req, clientId, "save your interior wall price", lpWrite.error);
-    const cli = await admin.from("client_layout_items").update({ taxable, internal_only: internalOnly })
-      .eq("client_id", clientId).eq("item_key", "partitionWall");
-    if (cli.error) return dbFail(req, clientId, "save your interior wall settings", cli.error);
     return json({ ok: true });
   }
 

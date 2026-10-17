@@ -26,7 +26,7 @@ import { ssPriceGroupId, ssPriceRowKey } from "../_shared/priceRowKey.ts";
 import { applyPriceOverrides, parsePriceOverrides } from "../_shared/priceOverride.ts";
 // Partition walls (migration 278): the clamped reading of itemSummary.partitions and how a wall is charged.
 import {
-  interiorWallRates, partitionCharge, partitionDescription, partitionMaxRiseFt, partitionOpeningDescription, partitionsFromPayload, partitionStud,
+  interiorWallRates, interiorWallTableMissing, partitionCharge, partitionDescription, partitionMaxRiseFt, partitionOpeningDescription, partitionsFromPayload, partitionStud,
 } from "../_shared/partitionPricing.ts";
 import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
@@ -1814,8 +1814,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // that line — which is why these do not go through pushItem, whose line sums every item of a key.
   // partitionsFromPayload clamps every length to the building and every height to the wall this
   // estimate prices (the anon key reaches this function). The wall is charged by the builder's method
-  // on the partitionWall row (partitionCharge: per foot, per square foot of wall, or each); an
-  // unpriced wall still gets its $0 line, because it is on the plan. A door or window is priced from
+  // (partitionCharge: per lineal foot or per square foot of wall); an unpriced wall still gets its $0
+  // line, because it is on the plan. A door or window is priced from
   // fixture_items by its id, like the doors[] and windows[] lines above, except that nothing in the
   // body is ever a price: an id that is not in this tenant's catalog, or not a door or window, prices
   // nothing. Never netted against a size's inclusions (those are the building's own doors), and no new
@@ -1823,31 +1823,39 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //
   // INTERIOR WALLS V2 (2026-10-17): a wall is a segment at any angle, framed in 2x4 or 2x6 and as tall
   // as the stud wall, a stated height, or the roof's underside ("to the rafters"). The rate is the one
-  // for its stud size in interior_wall_settings (slice 1); until that table exists for this tenant (a
-  // failed read or no row) the 278 partitionWall layout row is the standard 2x4 rate, exactly as
-  // before. A wall to the rafters is charged by its face area held between the wall's and the roof's
-  // (partitionMaxRiseFt over the style's own roof). Nothing from the body is a price.
+  // for its stud size in interior_wall_settings (the builder's Interior walls tab). NO ROW = NOT SET
+  // UP (Carolyn, 2026-10-17): the designer offers no Interior wall button, and a wall that reaches
+  // here anyway (a design saved earlier, a hand-built body) gets its $0 line, never a charge. The 278
+  // partitionWall layout row is read ONLY when the table itself does not exist (a database before 312,
+  // where get_config has no interiorWalls key and the designer keeps 278's behaviour). Any other
+  // failed read refuses the estimate, the electrical settings' posture: a wall must never go out at $0
+  // because a read blipped. A wall to the rafters is charged by its face area held between the wall's
+  // and the roof's (partitionMaxRiseFt over the style's own roof). Nothing from the body is a price.
   {
     const rawPartitions = (summary as Record<string, unknown>).partitions;
     let iwRow: Record<string, unknown> | null = null;
+    let iwTableMissing = false;
     if (Array.isArray(rawPartitions) && rawPartitions.length) {
-      try {
-        const iwRes = await supabase.from("interior_wall_settings")
-          .select("standard_stud, pricing_method, rate_2x4, rate_2x6, allow_rafters, taxable")
-          .eq("client_id", clientId).maybeSingle();
-        if (iwRes.error) console.info(`submit-estimate: interior_wall_settings not read (${iwRes.error.message}); the partitionWall layout rate prices the walls`);
-        else iwRow = (iwRes.data as Record<string, unknown> | null) ?? null;
-      } catch (e) {
-        console.info(`submit-estimate: interior_wall_settings not read (${e instanceof Error ? e.message : String(e)}); the partitionWall layout rate prices the walls`);
-      }
+      const iwRes = await supabase.from("interior_wall_settings")
+        .select("standard_stud, pricing_method, rate_2x4, rate_2x6, allow_rafters, taxable")
+        .eq("client_id", clientId).maybeSingle();
+      if (iwRes.error) {
+        if (!interiorWallTableMissing(iwRes.error)) {
+          return json({ error: "Could not read your interior wall settings just now. Try resubmitting in a moment." }, 400);
+        }
+        iwTableMissing = true;
+        console.info(`submit-estimate: interior_wall_settings is not there yet (${iwRes.error.message}); the partitionWall layout rate prices the walls`);
+      } else iwRow = (iwRes.data as Record<string, unknown> | null) ?? null;
     }
     const lp = layoutRates.get("partitionWall");
-    const iw = interiorWallRates(iwRow, lp ?? null);
+    const iw = interiorWallRates(iwRow, lp ?? null, { tableMissing: iwTableMissing });
     const partitions = partitionsFromPayload(rawPartitions,
       { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt,
       { maxRiseFt: partitionMaxRiseFt(styleD3, buildingWidthFt, buildingDepthFt), allowRafters: iw.allowRafters });
     if (partitions.length) {
-      const wallNonTaxable = iw.taxable != null ? iw.taxable === false : layoutTaxable.get("partitionWall") === false;
+      // The tab's flag; the 278 item's only on the pre-312 fallback; nothing to say for a $0 wall.
+      const wallNonTaxable = iw.taxable != null ? iw.taxable === false
+        : iw.source === "layout_item_pricing" ? layoutTaxable.get("partitionWall") === false : false;
       const fxIds = [...new Set(partitions.flatMap((p) => p.openings.map((o) => o.fixtureItemId)).filter((x): x is string => !!x))];
       const fxRows = new Map<string, { name: string; category: string; price: number | null; widthIn: number | null; heightIn: number | null; url: string | null; show: boolean }>();
       if (fxIds.length) {
@@ -1867,7 +1875,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         const ch = partitionCharge(p, iw.method);
         targetItems.push(tagLine({
           name: "Interior Wall", qty: ch.qty, amount: iw.rates[stud] ?? 0,
-          priceId: "", productId: "", attachments: lp ? imgAttachments(lp.imageUrl) : [],
+          priceId: "", productId: "", attachments: lp && iw.source === "layout_item_pricing" ? imgAttachments(lp.imageUrl) : [],
           currency: "USD", type: "one_time", description: partitionDescription(p, stud),
         }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: wallNonTaxable,
              ...(p.id ? { rowKey: ssPriceRowKey("partition", p.id) } : {}) }));

@@ -9,9 +9,11 @@
 //      Interior walls tab). A row sent back unchanged is passed over quietly; a change is refused in
 //      words that say where the price lives now; everything else in the Save still saves.
 //   3. A pricing sheet's Partition Wall column writes no inclusion: a wall is never part of a size's price.
-//   4. save_interior_walls: the method set, the standard stud's rate required, other blanks NULL, a
-//      rafters standard needs rafters offered, the two tick lists written column-only and tenant-scoped
-//      (malformed ids dropped), and the 278 row kept in step with the STANDARD stud's rate.
+//   4. save_interior_walls: the method is per lineal ft or per sq ft ONLY ('each' refused), the
+//      standard stud's rate required, other blanks NULL, a rafters standard needs rafters offered, the
+//      two tick lists written column-only and tenant-scoped (malformed ids dropped), and NOTHING
+//      written to the 278 rows (layout_item_pricing / client_layout_items): no mirror since
+//      2026-10-17, and those rows are never deleted either.
 //   5. save_interior_wall_coverings: validated whole before any write, upsert by id scoped to the
 //      tenant, 409 on a duplicate name, rows not sent back deleted.
 //   6. save_electrical_items and save_fixture pass interior_wall_ok / in_partition through, and only
@@ -192,7 +194,9 @@ Deno.test("save_interior_walls refuses what a wall cannot be, and writes nothing
     [{ rate2x4: "" }, /Enter a rate for a 2x4 wall/],
     [{ standardStud: "2x6", rate2x4: "35", rate2x6: "  " }, /Enter a rate for a 2x6 wall/],
     [{ standardStud: "2x8" }, /2x4 or 2x6/],
-    [{ method: "sqft_building" }, /each, per foot of wall or per square foot of wall/],
+    [{ method: "sqft_building" }, /per lineal foot of wall or per square foot of wall/],
+    [{ method: "each" }, /per lineal foot of wall or per square foot of wall/],
+    [{ method: "" }, /per lineal foot of wall or per square foot of wall/],
     [{ rate2x6: "TBD" }, /has to be a number/],
     [{ rate2x4: "-5" }, /has to be a number/],
     [{ standardHeight: "rafters", allowRafters: false }, /To the rafters/],
@@ -231,22 +235,22 @@ Deno.test("save_interior_walls saves the row, blanks as NULL, and the ticks colu
     [{ interior_wall_ok: true }, [OUTLET_ID], OWN],
     [{ interior_wall_ok: false }, [FAN_ID], OWN],
   ]);
-  // The 278 row, kept in step: nothing priced yet, so it is inserted with the standard rate.
-  const lp = pricingWrites(r.trace);
-  assertEquals(lp.map((w) => [w.verb, w.row]), [["insert", { client_id: OWN, item_key: "partitionWall", style_id: null, pricing_method: "lineal_ft", rate: 35 }]]);
-  const cli = writesTo(r.trace, "client_layout_items");
-  assertEquals(cli.map((w) => [w.row, eqOf(w.ops, "item_key"), eqOf(w.ops, "client_id")]), [[{ taxable: false, internal_only: true }, "partitionWall", OWN]]);
+  // No mirror (2026-10-17): the 278 rows are neither written nor deleted.
+  assertEquals([pricingWrites(r.trace).length, writesTo(r.trace, "client_layout_items").length], [0, 0]);
 });
 
-Deno.test("save_interior_walls mirrors the STANDARD stud's rate into the existing 278 row", async () => {
+Deno.test("save_interior_walls saves per sq ft, and leaves an existing 278 row untouched", async () => {
   const r = await walls({ standardStud: "2x6", method: "sqft_option", rate2x4: "30", rate2x6: "0" }, { priced: [{ item_key: "shelf", rate: 18 }, { item_key: "partitionWall", rate: 35 }] });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const [up] = writesTo(r.trace, "interior_wall_settings");
-  assertEquals([up.row.rate_2x4, up.row.rate_2x6, up.row.standard_stud], [30, 0, "2x6"], "0 is a real rate (included), not a blank");
-  const lp = pricingWrites(r.trace);
-  assertEquals(lp.map((w) => [w.verb, w.row, eqOf(w.ops, "id"), eqOf(w.ops, "client_id")]), [["update", { pricing_method: "sqft_option", rate: 0 }, "lp-1", OWN]]);
+  assertEquals([up.row.pricing_method, up.row.rate_2x4, up.row.rate_2x6, up.row.standard_stud], ["sqft_option", 30, 0, "2x6"], "0 is a real rate (included), not a blank");
+  assertEquals(pricingWrites(r.trace).length, 0, "the 278 row is not touched: no mirror, no delete");
+  assertEquals(writesTo(r.trace, "client_layout_items").length, 0);
   // No tick lists sent: neither catalog is touched.
   assertEquals([writesTo(r.trace, "fixture_items").length, writesTo(r.trace, "electrical_items").length], [0, 0]);
+  // And per lineal ft is the other one.
+  const ft = await walls({ method: "lineal_ft" });
+  assertEquals([ft.status, writesTo(ft.trace, "interior_wall_settings")[0].row.pricing_method], [200, "lineal_ft"]);
 });
 
 // ── save_interior_wall_coverings (312) ────────────────────────────────────────────────────

@@ -52,6 +52,8 @@ const CONFIG = {
     workbench: { label: "Workbench", icon: "🔧", color: "#8B5E3C", width: 4, height: 2, depthIn: 24, shortLabel: "WB", wallOnly: false, wallSnap: true, group: "interior", modelKey: "wallBench", heightOffFloorIn: 36 },
   },
   layoutPricing: { partitionWall: { rate: 22, method: "lineal_ft" }, loft: { rate: 6, method: "sqft_option" }, workbench: { rate: 12, method: "lineal_ft" } },
+  // get_config after 312, the Interior walls tab saved at the same $22 per lineal foot.
+  interiorWalls: { offered: true, standardStud: "2x4", method: "lineal_ft", standardHeight: "plate", allowRafters: true, allowRo: true, studs: { "2x4": { rate: 22 } }, coverings: [] },
   layoutPrices: {},
   electrical: { label: "Electrical Package", price: 850, includePanel: false, outletItemId: "e-out", switchItemId: null, lightItemId: "e-lt",
     outletSpacingFt: 6, lightSpacingFt: 10, outletHeightIn: 18, switchHeightIn: 48, outletAboveBenchIn: 42 },

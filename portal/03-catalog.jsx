@@ -5408,11 +5408,12 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
 // (rough openings, and the door/window "Allowed in interior walls" tick) and what may go ON one (the
 // electrical "Allowed on interior walls" tick). The two tick lists are written column-only by
 // save_interior_walls, so this tab never resends either catalog. The wall used to be one row on
-// Interior items (278); that card no longer lists it.
+// Interior items (278); that card no longer lists it, and nothing is copied from it (Carolyn,
+// 2026-10-17): each builder sets interior walls up here, and until this tab is saved no customer or
+// rep is offered one. The wall is priced the builder's choice of exactly two ways.
 const IW_METHODS = [
-  { value: "lineal_ft", label: "per foot of wall" },
-  { value: "sqft_option", label: "per sq ft of wall face" },
-  { value: "each", label: "each wall" },
+  { value: "lineal_ft", label: "Per lineal ft of wall" },
+  { value: "sqft_option", label: "Per sq ft of wall" },
 ];
 const IW_COVER_METHODS = [
   { value: "sqft_option", label: "per sq ft of that side" },
@@ -5427,6 +5428,7 @@ function InteriorWalls({ viewingLabel = null, clientId = null }) {
   const [elec, setElec] = useState([]);           // electrical items: { id, name, icon, interiorWallOk }
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [saved, setSaved] = useState(true);       // false until this tab has been saved once
 
   const load = async () => {
     const body = scoped({ action: "catalog" });
@@ -5434,8 +5436,9 @@ function InteriorWalls({ viewingLabel = null, clientId = null }) {
       () => sb.functions.invoke("portal-settings", { body }),
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
-    // Null until the tab is first saved (or seeded from the old Interior items price): the table's
-    // own defaults, rates blank = not offered yet.
+    // Null until the tab is first saved (nothing is seeded): the table's own defaults, rates blank,
+    // and interior walls not offered to anyone yet.
+    setSaved(!!data.interiorWalls);
     const w = data.interiorWalls || {};
     const str = (v) => (v != null ? String(v) : "");
     setF({
@@ -5532,7 +5535,9 @@ function InteriorWalls({ viewingLabel = null, clientId = null }) {
           A wall your customer draws inside the building. Pick the framing you build with as standard and
           a rate for each size you offer. <b>Leave a size blank and you don&rsquo;t offer it.</b> Owners,
           admins and reps can switch any wall to the other size in the designer; customers never see the
-          choice. {!offered && <b style={{ color: "#B45309" }}>Customers can&rsquo;t add interior walls until your standard size has a rate.</b>}
+          choice. {!saved
+            ? <b style={{ color: "#B45309" }}>Interior walls aren&rsquo;t offered to your customers or reps until you set a price here and save.</b>
+            : !offered && <b style={{ color: "#B45309" }}>Customers can&rsquo;t add interior walls until your standard size has a rate.</b>}
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
           <div style={{ minWidth: 170 }}>

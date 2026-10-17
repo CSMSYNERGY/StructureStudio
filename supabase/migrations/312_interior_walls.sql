@@ -33,10 +33,11 @@
 --   PART 2   interior_wall_coverings, the builder's own list.
 --   PART 3   fixture_items.in_partition and electrical_items.interior_wall_ok, both boolean not null
 --            default TRUE, so every door, window and electrical item offered today stays offered.
---   PART 4   SEED: a tenant that priced the 278 row (layout_item_pricing 'partitionWall', all styles)
---            gets that method and rate as its 2x4 rate, with 2x4 as the standard and the 278 row's
---            taxable / internal-only. The 278 rows stay where they are (rollback, and the designer
---            still reads them until slice 2).
+--   PART 4   NO SEED (Carolyn, 2026-10-17): interior wall pricing is something each builder sets up
+--            in the Interior walls tab. Every tenant starts with no interior_wall_settings row, so
+--            get_config.interiorWalls is null and interior walls are NOT offered until the builder
+--            saves the tab. The 278 layout_item_pricing / client_layout_items rows stay where they
+--            are (nothing deletes them) but nothing reads them for an interior wall any more.
 --   PART 5   get_config, SPLICED (207/238 anchor-replace, never rewritten):
 --              * a new top-level key `interiorWalls` (shape below), null for a tenant with no row;
 --              * electricalItems gain `interiorWallOk: false`, SPARSE: only for an item ticked off,
@@ -47,10 +48,11 @@
 --
 -- get_config.interiorWalls (the 207 cladding rules: one meaning per null):
 --   { offered,                     -- the standard stud has a rate. Always present.
+--                                  -- null (no row) or offered false = the designer offers no wall.
 --     standardStud: '2x4'|'2x6',
 --     studs: { '2x4'?: {rate}, '2x6'?: {rate} },   -- a key per OFFERED size; the rate is nulled
 --                                                   -- when the tenant hides prices (show_pricing)
---     method: 'each'|'lineal_ft'|'sqft_option',
+--     method: 'lineal_ft'|'sqft_option',   -- per lineal ft of wall, or per sq ft of wall face
 --     allowRo, standardHeight: 'plate'|'rafters', allowRafters,
 --     coverings: [{ id, name, method, rate|null, charged, taxable?: false, internalOnly?: true }],
 --     taxable?: false, internalOnly?: true }
@@ -58,9 +60,10 @@
 --
 -- ── BLAST RADIUS (read on 2026-10-17, read-only) ─────────────────────────────────────────
 -- Two layout_item_pricing rows for 'partitionWall', both all-styles, lineal_ft, $35 (two tenants).
--- No design uses a partition. Every tenant's get_config gains ONE key (interiorWalls); nothing else in
--- it, and nothing in get_fixtures, moves (PART 7 checks both). The designer ignores the new key until
--- slice 2.
+-- They are NOT copied (no seed): those two tenants, like every other, see no interior wall until they
+-- save the Interior walls tab. No design uses a partition. Every tenant's get_config gains ONE key
+-- (interiorWalls, null for all at apply); nothing else in it, and nothing in get_fixtures, moves
+-- (PART 7 checks both).
 --
 -- ── ROLLBACK ────────────────────────────────────────────────────────────────────────────
 -- Ship portal-settings without the Interior walls actions and without in_partition in its catalog read
@@ -93,6 +96,10 @@
 
 begin;
 
+-- Whether this is a first apply (the settings table does not exist yet), for PART 7's no-seed check.
+create temp table m312_fresh on commit drop as
+  select to_regclass('public.interior_wall_settings') is null as fresh;
+
 -- Every tenant's config and fixtures as they are now, for PART 7 to compare against. Dropped at commit.
 create temp table m312_before on commit drop as
   select cc.client_id,
@@ -108,9 +115,10 @@ create table if not exists public.interior_wall_settings (
   -- The builder's standard framing. Owners, admins and reps may override it per wall in the
   -- designer; a customer never sees the choice.
   standard_stud        text not null default '2x4' check (standard_stud in ('2x4', '2x6')),
-  -- The three methods a wall's pricing understands (278's set): each, per foot of wall, per square
-  -- foot of wall face. Its own CHECK, not the shared pricing_method enum (207's reasoning).
-  pricing_method       text not null default 'lineal_ft' check (pricing_method in ('each', 'lineal_ft', 'sqft_option')),
+  -- The builder's choice of exactly two (Carolyn, 2026-10-17): per lineal foot of wall, or per
+  -- square foot of wall face. No 'each' for the wall itself (coverings keep their own three). Its
+  -- own CHECK, not the shared pricing_method enum (207's reasoning).
+  pricing_method       text not null default 'lineal_ft' check (pricing_method in ('lineal_ft', 'sqft_option')),
   -- NULL = that size is not offered; 0 = included. Walls are offered only while the STANDARD size
   -- has a rate (portal-settings refuses a blank one; get_config's `offered` says it).
   rate_2x4             numeric check (rate_2x4 is null or rate_2x4 >= 0),
@@ -193,19 +201,8 @@ comment on column public.electrical_items.interior_wall_ok is
   'Interior walls (312): this item may be placed on an interior wall. Default true. get_config sends interiorWallOk: false only when unticked.';
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
--- PART 4 — SEED from the 278 rows
+-- PART 4 — no seed (each builder sets up the Interior walls tab; see the header)
 -- ═════════════════════════════════════════════════════════════════════════════════════════
--- The all-styles row only (style_id is null), and only the three methods a wall understands (portal-
--- settings never let another be saved for it). `on conflict do nothing`: a re-apply never overwrites a
--- tab the builder has since saved.
-insert into public.interior_wall_settings (client_id, standard_stud, pricing_method, rate_2x4, taxable, internal_only)
-select lp.client_id, '2x4', lp.pricing_method::text, lp.rate,
-       coalesce(cli.taxable, true), coalesce(cli.internal_only, false)
-from public.layout_item_pricing lp
-left join public.client_layout_items cli on cli.client_id = lp.client_id and cli.item_key = 'partitionWall'
-where lp.item_key = 'partitionWall' and lp.style_id is null and lp.rate is not null
-  and lp.pricing_method::text in ('each', 'lineal_ft', 'sqft_option')
-on conflict (client_id) do nothing;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 5 — get_config: interiorWalls, and interiorWallOk on electricalItems
@@ -329,14 +326,12 @@ begin
     raise exception '312: fixture_items.in_partition and electrical_items.interior_wall_ok should both be boolean not null default true';
   end if;
 
-  -- 3. Every tenant that priced the 278 row has its settings row, 2x4 offered.
-  select count(*) into v_n
-  from public.layout_item_pricing lp
-  where lp.item_key = 'partitionWall' and lp.style_id is null and lp.rate is not null
-    and lp.pricing_method::text in ('each', 'lineal_ft', 'sqft_option')
-    and not exists (select 1 from public.interior_wall_settings iw where iw.client_id = lp.client_id);
-  if v_n > 0 then
-    raise exception '312: % tenant(s) priced a partition wall but have no interior_wall_settings row', v_n;
+  -- 3. No seed: a FIRST apply writes no settings row (a re-apply finds the rows builders have saved).
+  if (select fresh from m312_fresh) then
+    select count(*) into v_n from public.interior_wall_settings;
+    if v_n > 0 then
+      raise exception '312: % interior_wall_settings row(s) appeared during a first apply; this migration seeds nothing', v_n;
+    end if;
   end if;
 
   -- 4. Nothing else in any tenant's get_config or get_fixtures moved.
@@ -377,7 +372,8 @@ notify pgrst, 'reload schema';
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- THE RECORD — `db query` prints only the last statement's rows, so this is what the apply shows.
--- Expect on 2026-10-17: true, <tenant count>, 2, 2, 0, 0.
+-- Expect on a first apply: true, <tenant count>, 0, 0, 0, 0 (no seed: nobody has a settings row,
+-- so nobody is offered interior walls until they save the tab).
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 select (to_regclass('public.interior_wall_settings') is not null and to_regclass('public.interior_wall_coverings') is not null) as tables_ready,
        (select count(*) from public.client_configs) as tenants,

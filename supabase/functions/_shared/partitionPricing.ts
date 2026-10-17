@@ -25,10 +25,19 @@
 // Under-reporting is always possible — the caller could simply leave a wall off — so it is not guarded.
 //
 // HOW A WALL IS CHARGED is the builder's method and the rate for its stud size (interior_wall_settings,
-// read by interiorWallRates below; the 278 partitionWall layout row when that table or row is not
-// there), through partitionCharge: per foot of wall, per square foot of wall, or each. The designer's
-// ssPartitionCharge is the same rule line for line, so Details and the estimate agree to the cent;
-// submitEstimatePartitionWiring_test.ts drives both and compares.
+// read by interiorWallRates below), through partitionCharge: per lineal foot of wall or per square foot
+// of wall, the builder's choice of exactly two (Carolyn, 2026-10-17; no "each" for the wall). The
+// designer's ssPartitionCharge is the same rule line for line, so Details and the estimate agree to the
+// cent; submitEstimatePartitionWiring_test.ts drives both and compares.
+//
+// NO SETUP, NO WALLS (2026-10-17). Each builder sets interior wall pricing up on the Interior walls
+// tab; a tenant with no interior_wall_settings row is not offered interior walls (the designer shows
+// no Interior wall button). A wall that still reaches the estimate (a design saved before, or a hand-
+// built body) gets its $0 line, the hidden-until-priced posture of every layout item: it is on the
+// plan, so the estimate says so, and it is never charged. The 278 partitionWall layout row prices a
+// wall ONLY when the interior_wall_settings table itself does not exist (a database before 312), which
+// is the same case in which get_config carries no interiorWalls key and the designer keeps 278's
+// behaviour.
 
 /** More walls than any real shed has; the rest of the list is ignored. */
 export const PARTITION_MAX = 30;
@@ -186,46 +195,79 @@ export function partitionsFromPayload(
   return out;
 }
 
+/** The two ways a builder may price the wall itself (coverings keep their own methods). */
+export type WallMethod = "lineal_ft" | "sqft_option";
+const isWallMethod = (m: unknown): m is WallMethod => m === "lineal_ft" || m === "sqft_option";
+
 /** The builder's interior wall pricing: their standard stud, the method and a rate per offered size. */
 export type InteriorWallRates = {
+  /** The standard stud has a rate: walls are offered. false = no setup, and every wall prices $0. */
+  offered: boolean;
   standardStud: Stud;
-  method: string;
+  method: WallMethod;
   rates: Record<Stud, number | null>;
   allowRafters: boolean;
   /** false when the builder marked the walls not taxable; null = say nothing (the layout row's flag). */
   taxable: boolean | null;
-  source: "interior_wall_settings" | "layout_item_pricing";
+  source: "interior_wall_settings" | "layout_item_pricing" | "none";
+};
+
+/** No setup: nothing offered, nothing charged. */
+const NOT_SET_UP: InteriorWallRates = {
+  offered: false, standardStud: "2x4", method: "lineal_ft", rates: { "2x4": null, "2x6": null },
+  allowRafters: true, taxable: null, source: "none",
 };
 
 /**
- * interior_wall_settings' row for the tenant (slice 1), or — when that table is not there yet, the
- * read failed, or the tenant has no row — the 278 partitionWall layout_item_pricing row as the
- * standard 2x4 rate. A size whose rate is null is not offered.
+ * interior_wall_settings' row for the tenant. No row = the builder has not set interior walls up, so
+ * none are offered or charged (NOT_SET_UP). Only when `opts.tableMissing` (the table does not exist:
+ * a database before 312) is the 278 partitionWall layout_item_pricing row read, as the standard 2x4
+ * rate, exactly as before 312 — and then only for a per-foot or per-square-foot row. A size whose rate
+ * is null is not offered; a row whose method is not one of the two is not offered either.
  */
 export function interiorWallRates(
   // deno-lint-ignore no-explicit-any
   row: Record<string, any> | null | undefined,
   layout: { method: string; rate: number } | null | undefined,
+  opts: { tableMissing?: boolean } = {},
 ): InteriorWallRates {
   if (row && typeof row === "object") {
+    if (!isWallMethod(row.pricing_method)) return { ...NOT_SET_UP, source: "interior_wall_settings" };
     const rate = (v: unknown) => { const n = num(v); return n != null && n >= 0 ? n : null; };
+    const standardStud: Stud = row.standard_stud === "2x6" ? "2x6" : "2x4";
+    const rates = { "2x4": rate(row.rate_2x4), "2x6": rate(row.rate_2x6) };
     return {
-      standardStud: row.standard_stud === "2x6" ? "2x6" : "2x4",
-      method: String(row.pricing_method || "each"),
-      rates: { "2x4": rate(row.rate_2x4), "2x6": rate(row.rate_2x6) },
+      offered: rates[standardStud] != null,
+      standardStud,
+      method: row.pricing_method,
+      rates,
       allowRafters: row.allow_rafters !== false,
       taxable: row.taxable === false ? false : row.taxable === true ? true : null,
       source: "interior_wall_settings",
     };
   }
-  return {
-    standardStud: "2x4",
-    method: layout?.method || "each",
-    rates: { "2x4": layout ? (Number(layout.rate) || 0) : null, "2x6": null },
-    allowRafters: true,
-    taxable: null,
-    source: "layout_item_pricing",
-  };
+  if (opts.tableMissing && layout && isWallMethod(layout.method)) {
+    return {
+      offered: true,
+      standardStud: "2x4",
+      method: layout.method,
+      rates: { "2x4": Number(layout.rate) || 0, "2x6": null },
+      allowRafters: true,
+      taxable: null,
+      source: "layout_item_pricing",
+    };
+  }
+  return { ...NOT_SET_UP };
+}
+
+/** Whether a failed interior_wall_settings read means the table does not exist (a database before 312):
+ *  PostgREST's "not in the schema cache" (PGRST205) or Postgres' undefined_table (42P01). Any other
+ *  failure is a failed read, never a reason to price from the 278 row. */
+export function interiorWallTableMissing(err: { code?: unknown; message?: unknown } | null | undefined): boolean {
+  if (!err) return false;
+  const code = String(err.code ?? "");
+  if (code === "PGRST205" || code === "42P01") return true;
+  return /interior_wall_settings/.test(String(err.message ?? "")) && /does not exist|could not find the table/i.test(String(err.message ?? ""));
 }
 
 /** The stud size a wall is priced at: its own when the builder offers it, else the standard. */
@@ -234,20 +276,19 @@ export function partitionStud(p: { stud: Stud | null }, cfg: InteriorWallRates):
 }
 
 /** The charge for one wall under the builder's method: { qty, method } with the line's unit amount
- *  being the rate. lineal_ft is its length, sqft_option its face (length x height, or the clamped area
- *  under a wall to the rafters; both to the cent), and every other method — "each" and anything a row
- *  could carry that means nothing for a wall — one. */
+ *  being the rate. sqft_option is its face (length x height, or the clamped area under a wall to the
+ *  rafters; both to the cent); lineal_ft, and anything else (interiorWallRates never hands on another
+ *  method with a rate), is its length. There is no "each" for a wall. */
 export function partitionCharge(
   p: { lengthFt: number; heightFt: number; heightMode?: HeightMode; faceAreaSqFt?: number },
   method: string | undefined,
-): { qty: number; method: "lineal_ft" | "sqft_option" | "each" } {
+): { qty: number; method: WallMethod } {
   const len = r2(p.lengthFt);
-  if (method === "lineal_ft") return { qty: len, method };
   if (method === "sqft_option") {
     if (p.heightMode === "rafters" && Number.isFinite(p.faceAreaSqFt)) return { qty: r2(Math.max(r2(p.faceAreaSqFt as number), len * p.heightFt)), method };
     return { qty: r2(len * p.heightFt), method };
   }
-  return { qty: 1, method: "each" };
+  return { qty: len, method: "lineal_ft" };
 }
 
 /** Feet in feet-and-inches, to the inch — the designer's ssPartitionFtIn. */

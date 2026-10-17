@@ -29,9 +29,17 @@
 //   J. QUOTE: Get Quote sends itemSummary.partitions with the length, the height and the door by its
 //      catalog id, and floorPlanItems carries the wall with no `wall`.
 //   K. THE PORTAL (312): Interior items no longer lists the wall and its Save never sends one; the
-//      Interior walls tab shows the seeded 2x4 rate, sends the framing, the door/window and electrical
-//      ticks and the ordered coverings on Save, and refuses a blank standard rate before sending.
-//      Every catalog read asks for the unpriced items (withUnpriced).
+//      Interior walls tab shows the saved 2x4 rate, offers exactly two methods ("Per lineal ft of
+//      wall" / "Per sq ft of wall", no each), sends the framing, the door/window and electrical ticks
+//      and the ordered coverings on Save, and refuses a blank standard rate before sending. A builder
+//      who has never saved the tab (interiorWalls null; nothing is seeded) is told walls are not
+//      offered until they save, and saving per sq ft sends sqft_option (K9-K11). Every catalog read
+//      asks for the unpriced items (withUnpriced).
+//   U. NOT SET UP (2026-10-17): get_config's interiorWalls is null (the builder never saved the tab),
+//      even though the 278 layout row is priced. The public designer and a rep's designer offer NO
+//      Interior wall button; a saved design that already holds a wall still loads it and draws it,
+//      and (in the rep's) Details prices it at $0. A builder who saved the tab but never priced the 278 row (its
+//      layout item hidden until priced) IS offered the button: the tab decides. SS_PARTITIONS_ONLY_U=1 runs only this (and L).
 //   M. INTERIOR WALLS V2 (2026-10-17), on a rep's designer (canOverridePrice): press-drag draws a wall
 //      that snaps to 45 degrees; with Shift it keeps its own angle; a wall drawn up to another's body
 //      lands on it (a T); every wall is two parallel lines turned to its angle on the plan, and the PDF
@@ -56,7 +64,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, BASE, REF,
+  launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, showOptTab, BASE, REF,
 } from "./lib.mjs";
 
 const CLIENT = "harness-partitions";
@@ -94,6 +102,16 @@ export const CONFIG_IW = {
   ...CONFIG,
   interiorWalls: { offered: true, standardStud: "2x4", method: "lineal_ft", standardHeight: "plate", allowRafters: true, allowRo: true,
     studs: { "2x4": { rate: 22 }, "2x6": { rate: 28 } }, coverings: [] },
+};
+// get_config after 312 for a builder who never saved the Interior walls tab: interiorWalls null, the
+// 278 layout row still priced (as two live tenants' are). No wall may be offered.
+export const CONFIG_UNSET = { ...CONFIG, interiorWalls: null };
+// A builder who saved the tab but never priced the 278 row: get_config marks that layout item
+// noPalette (hidden until priced) and has no partitionWall rate. The tab must still offer the wall.
+export const CONFIG_TAB_ONLY = {
+  ...CONFIG_IW,
+  layoutItems: { ...CONFIG.layoutItems, partitionWall: { ...CONFIG.layoutItems.partitionWall, noPalette: true } },
+  layoutPricing: { loft: CONFIG.layoutPricing.loft, workbench: CONFIG.layoutPricing.workbench },
 };
 const fx = (o) => ({ colorMode: "fixed", sortOrder: 0, imageUrl: null, opLeft: false, opRight: false, opDouble: false, opSlideUp: false, opDefault: null,
   swingIn: false, swingOut: false, swingDefault: null, hasTrimColor: false, sillIn: null, ...o });
@@ -238,6 +256,7 @@ const run = async () => {
       await page.close();
     }
     if (process.env.SS_PARTITIONS_ONLY_A) return;
+    if (process.env.SS_PARTITIONS_ONLY_U) { await unsetRun(ctx, ok, allErrors); ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | ")); return; }
     if (process.env.SS_PARTITIONS_ONLY_O) { await openingsRun(ctx, ok, shots, allErrors); ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | ")); return; }
 
     // ── B-J. The portal's designer, a blank 12 x 32 ──────────────────────────────────────────
@@ -467,6 +486,9 @@ const run = async () => {
     // ── O. Doors and windows centred in a partition's own thickness ────────────────────────────
     await openingsRun(ctx, ok, shots, allErrors);
 
+    // ── U. A builder who has not set interior walls up ────────────────────────────────────────────
+    await unsetRun(ctx, ok, allErrors);
+
     // ── K. The portal's Interior items card and Interior walls tab ───────────────────────────────────────────────────
     await portalRun(browser, ok, shots, allErrors);
 
@@ -646,6 +668,86 @@ async function v2Run(ctx, ok, shots, allErrors) {
   }
 }
 
+// ── U ───────────────────────────────────────────────────────────────────────────────────────
+// A saved design with one wall across the building at y = 16, on a builder with no Interior walls row.
+const U_WALL = { id: 401, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 16, x2Ft: 12, y2Ft: 16, heightMode: "plate", heightIn: null,
+  stud: null, covers: { a: null, b: null }, openings: [] };
+async function unsetRun(ctx, ok, allErrors) {
+  // The palette's own tool button (not a Details row's or the selection's), looked for on every
+  // Options tab of the palette.
+  const wallButton = async (page) => {
+    const btn = page.locator("button.ssd-tool").filter({ hasText: /Interior wall/ }).first();
+    if (await btn.isVisible().catch(() => false)) return true;
+    const keys = await page.locator("[data-ss-opt-tab]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-opt-tab")));
+    for (const k of keys) {
+      await showOptTab(page, k);
+      if (await btn.isVisible().catch(() => false)) return true;
+    }
+    return false;
+  };
+  // U1-U2: the public designer, a saved design that already holds a wall.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_UNSET, fixtures: FIXTURES, rpc: { load_design: [designRow([U_WALL])] } });
+    try {
+      await openDesigner(page, CLIENT);
+      await page.goto(`${BASE}/?client=${CLIENT}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 30000 });
+      await settle(page, 1500);
+      ok("U1 not set up: the public designer offers no Interior wall button, though the 278 row is priced", !(await wallButton(page)));
+      const ps = await partitions(page);
+      const drawn = await page.locator('[data-ss-partition="401"]').count();
+      ok("U2 ...and a saved design's wall still loads and draws (never dropped)", ps.length === 1 && ps[0].id === 401 && drawn > 0, `${JSON.stringify(ps)} drawn ${drawn}`);
+    } finally {
+      allErrors.push(...errors.map((e) => "U1-2: " + e));
+      await page.close();
+    }
+  }
+  // U3-U4: a rep's designer (embedded, canOverridePrice) on the same builder and design: Details prices
+  // the wall at $0, and no button either.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_UNSET, fixtures: FIXTURES, rpc: { load_design: [designRow([U_WALL])] } });
+    const url = `${BASE}/__harness_partitions_unset.html`;
+    await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html", body: embeddedPage({ canOverridePrice: true }) }));
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => typeof window.StructureStudio === "function", null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 60000 });
+      await settle(page, 1500);
+      const dtTog = page.locator(".ssd-dt-tog").first();
+      if (!(await page.locator(".ssd-dt").count()) && await dtTog.count()) { await dtTog.click(); await settle(page, 400); }
+      const dt = (await page.locator(".ssd-dt").first().innerText().catch(() => "")).replace(/\s+/g, " ");
+      ok("U3 Details prices the saved wall at $0 (the server's $0 line), never at the 278 row's $22",
+        /Interior wall/.test(dt) && dt.includes("12' long") && dt.includes("$0.00 / ft") && !dt.includes("$22.00 / ft"), dt.slice(0, 500));
+      ok("U4 not set up: a rep's designer offers no Interior wall button either", !(await wallButton(page)));
+    } finally {
+      allErrors.push(...errors.map((e) => "U3-4: " + e));
+      await page.close();
+    }
+  }
+  // U5: the tab saved, the 278 row never priced (its layout item hidden until priced): offered.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_TAB_ONLY, fixtures: FIXTURES, rpc: { load_design: [designRow([])] } });
+    try {
+      await openDesigner(page, CLIENT);
+      await page.goto(`${BASE}/?client=${CLIENT}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 30000 });
+      await settle(page, 1500);
+      ok("U5 the tab saved, the old 278 row never priced: the Interior wall button IS offered (the tab decides)", await wallButton(page));
+    } finally {
+      allErrors.push(...errors.map((e) => "U5: " + e));
+      await page.close();
+    }
+  }
+}
+
 // ── O ───────────────────────────────────────────────────────────────────────────────────────
 // A saved design, so the walls and their openings are exact: a diagonal 2x4 wall from (1, 10) to
 // (11, 20) holding a plank door, a Classic trim door and a window, and a straight 2x6 wall across at
@@ -799,7 +901,8 @@ async function portalRun(browser, ok, shots, allErrors) {
   const catalogs = [];
   // As portal-settings' catalog answers after 312: the partition wall is still an item (priced, so it
   // is listed), but the Interior items card leaves it out; the Interior walls tab reads its own row,
-  // seeded from the 278 price ($35 per foot, 2x4), one covering, a door, a window and two electrical items.
+  // as the builder saved it ($35 per foot, 2x4), one covering, a door, a window and two electrical
+  // items. K9 onward answers null: a builder who has never saved the tab (nothing is seeded).
   const lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }, { item_key: "partitionWall", pricing_method: "lineal_ft", rate: 35, image_url: null }];
   const items = () => [
     { key: "workbench", label: "Workbench", archived: false, internalOnly: false, taxable: true, wallSnap: true, depthIn: null, heightOffFloorIn: 36, hiddenUntilPriced: false },
@@ -807,6 +910,7 @@ async function portalRun(browser, ok, shots, allErrors) {
     { key: "partitionWall", label: "Partition Wall", archived: false, internalOnly: false, taxable: true, wallSnap: false, depthIn: null, heightOffFloorIn: null, hiddenUntilPriced: true },
   ];
   const iw = { standard_stud: "2x4", pricing_method: "lineal_ft", rate_2x4: 35, rate_2x6: null, standard_height: "plate", allow_rafters: true, allow_rough_openings: true, taxable: true, internal_only: false };
+  let iwNow = iw;
   const covers = [{ id: "00000000-0000-4000-8000-0000000000c1", name: "Drywall", pricing_method: "sqft_option", rate: 2.5, taxable: true, internal_only: false, active: true, sort_order: 10 }];
   const fixtures = [
     { id: "00000000-0000-4000-8000-0000000000d1", category: "door", name: "Walk door", in_partition: true, archived: false },
@@ -842,7 +946,7 @@ async function portalRun(browser, ok, shots, allErrors) {
         catalogs.push(body);
         return jsonR(route, { ok: true, clientId: CLIENT, styles: [], sizes: [], items: items(), inclusions: [], layoutPricing: lp,
           colors: [], fixtures, wallHeights: [], insulation: [], insulationEnabled: false, electricalItems: elec,
-          interiorWalls: iw, interiorWallCoverings: covers });
+          interiorWalls: iwNow, interiorWallCoverings: iwNow ? covers : [] });
       case "save_layout_pricing":
       case "save_interior_walls":
       case "save_interior_wall_coverings":
@@ -880,7 +984,12 @@ async function portalRun(browser, ok, shots, allErrors) {
       ["Framing & price", "Wall coverings", "Doors allowed in interior walls", "Allowed on interior walls", "Save interior walls"].every((t) => text.toLowerCase().includes(t.toLowerCase())));
     const rate4 = page.locator('input[type="number"]').nth(0);
     const rate6 = page.locator('input[type="number"]').nth(1);
-    ok("K3 the seeded 2x4 rate shows; 2x6 is blank (not offered)", (await rate4.inputValue()) === "35" && (await rate6.inputValue()) === "" && (await rate6.getAttribute("placeholder")) === "not offered");
+    ok("K3 the saved 2x4 rate shows; 2x6 is blank (not offered)", (await rate4.inputValue()) === "35" && (await rate6.inputValue()) === "" && (await rate6.getAttribute("placeholder")) === "not offered");
+    const methodSel = page.locator('select:has(option[value="sqft_option"]):has(option[value="lineal_ft"])').first();
+    const methods = await methodSel.locator("option").evaluateAll((os) => os.map((o) => [o.value, o.textContent]));
+    ok("K3b the wall is priced exactly two ways: per lineal ft or per sq ft of wall (no each)",
+      JSON.stringify(methods) === JSON.stringify([["lineal_ft", "Per lineal ft of wall"], ["sqft_option", "Per sq ft of wall"]]), JSON.stringify(methods));
+    ok("K3c a saved tab says nothing about walls not being offered", !/until you set a price here and save/.test(text));
     await page.screenshot({ path: join(shots, "K-interior-walls.png"), fullPage: true });
     // Offer 2x6 at $42, untick the door and the fan, add OSB included, and save.
     await rate6.fill("42");
@@ -910,6 +1019,28 @@ async function portalRun(browser, ok, shots, allErrors) {
     await settle(page, 600);
     ok("K7 a blank standard rate is refused before anything is sent", saves.length === n && (await page.locator("body").innerText()).includes("Enter a rate for a 2x4 wall"));
     ok("K8 every catalog read asks for the unpriced items (withUnpriced)", catalogs.length > 0 && catalogs.every((b) => b.withUnpriced === true), JSON.stringify(catalogs.map((b) => b.withUnpriced)));
+
+    // K9-K11: a builder who has never saved the tab (no row: interiorWalls null, nothing seeded).
+    iwNow = null;
+    await go("/settings/interior");
+    await settle(page, 600);
+    await go("/settings/interior-walls");
+    await page.waitForFunction(() => document.body.innerText.includes("Framing & price"), null, { timeout: 20000 }).catch(() => {});
+    await settle(page, 800);
+    const unsetText = await page.locator("body").innerText();
+    ok("K9 not set up: the tab says interior walls are not offered until a price is saved, and both rates are blank",
+      /aren.t offered to your customers or reps until you set a price here and save/.test(unsetText)
+        && (await page.locator('input[type="number"]').nth(0).inputValue()) === "" && (await page.locator('input[type="number"]').nth(1).inputValue()) === "",
+      unsetText.slice(0, 300));
+    await page.locator('input[type="number"]').nth(0).fill("4.25");
+    await page.locator('select:has(option[value="sqft_option"]):has(option[value="lineal_ft"])').first().selectOption("sqft_option");
+    const s0 = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    for (let i = 0; i < 25 && saves.length < s0 + 2; i++) await settle(page, 200);
+    const w2 = saves.slice(s0).find((b) => b.action === "save_interior_walls");
+    ok("K10 saving per sq ft sends sqft_option with the 2x4 rate", !!w2 && w2.method === "sqft_option" && w2.rate2x4 === "4.25" && w2.standardStud === "2x4", JSON.stringify(w2));
+    const c2 = saves.slice(s0).find((b) => b.action === "save_interior_wall_coverings");
+    ok("K11 ...with no coverings (none on file)", !!c2 && Array.isArray(c2.rows) && c2.rows.length === 0, JSON.stringify(c2));
   } finally {
     await ctx.close();
   }

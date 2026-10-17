@@ -5,14 +5,16 @@
 // pg_get_functiondef printed them live on 2026-10-17). Then check what the file promises:
 //   * interior_wall_settings and interior_wall_coverings exist, RLS on, owner read only, no anon grant;
 //   * fixture_items.in_partition and electrical_items.interior_wall_ok default TRUE;
-//   * the seed copies a tenant's all-styles 278 rate and method into rate_2x4 (2x4 standard), with
-//     the 278 row's taxable / internal-only, and seeds nobody else;
+//   * NO SEED (Carolyn, 2026-10-17): no tenant gets a settings row, not even one that priced the
+//     278 row, so every get_config carries interiorWalls: null (walls not offered) until the builder
+//     saves the tab; the 278 rows are left where they are;
 //   * every tenant's get_config gains exactly one key, interiorWalls (null without a row), and
 //     get_fixtures does not move at all;
 //   * the sparse flags: inPartition: false for an unticked door or window only, interiorWallOk: false
 //     for an unticked electrical item only; coverings emitted active and rated, prices nulled for a
 //     tenant that hides them while `offered` / `charged` survive;
-//   * the table checks (bad stud, a rafters standard with rafters not offered);
+//   * the table checks (bad stud, 'each' or any method but lineal_ft / sqft_option for the wall, a
+//     rafters standard with rafters not offered);
 //   * a re-apply changes nothing and never overwrites a builder's saved tab;
 //   * the header's ROLLBACK really takes the splices back out;
 //   * the anchors really abort the whole apply when the live body has drifted (mutants).
@@ -229,9 +231,9 @@ const ROLLBACK = () => {
     for (const c of TENANTS) before[c] = { cfg: JSON.stringify(await cfgOf(db, c)), fix: JSON.stringify(await fixOf(db, c)) };
     const { err, record } = await apply(db);
     ok(err === null, "312 applied cleanly, assertions included", err);
-    ok(record && record.tables_ready === true && Number(record.tenants) === 4 && Number(record.settings_rows) === 2
-      && Number(record.walls_offered) === 2 && Number(record.fixtures_not_in_walls) === 0 && Number(record.electrical_not_on_walls) === 0,
-      "THE RECORD reads true, 4, 2, 2, 0, 0", JSON.stringify(record));
+    ok(record && record.tables_ready === true && Number(record.tenants) === 4 && Number(record.settings_rows) === 0
+      && Number(record.walls_offered) === 0 && Number(record.fixtures_not_in_walls) === 0 && Number(record.electrical_not_on_walls) === 0,
+      "THE RECORD reads true, 4, 0, 0, 0, 0", JSON.stringify(record));
 
     console.log("tables, RLS and grants");
     const rls = await rows(db, "select relname, relrowsecurity from pg_class where relname in ('interior_wall_settings','interior_wall_coverings') order by relname");
@@ -243,26 +245,28 @@ const ROLLBACK = () => {
     const cols = await rows(db, "select table_name, column_default, is_nullable from information_schema.columns where (table_name, column_name) in (('fixture_items','in_partition'),('electrical_items','interior_wall_ok')) order by table_name");
     ok(cols.length === 2 && cols.every((c) => c.column_default === "true" && c.is_nullable === "NO"), "in_partition and interior_wall_ok: not null default true", JSON.stringify(cols));
 
-    console.log("the seed");
-    const seeded = await rows(db, "select client_id, standard_stud, pricing_method, rate_2x4::float8 r4, rate_2x6, standard_height, allow_rafters, allow_rough_openings, taxable, internal_only from public.interior_wall_settings order by client_id");
-    ok(JSON.stringify(seeded) === JSON.stringify([
-      { client_id: "acme-sheds", standard_stud: "2x4", pricing_method: "lineal_ft", r4: 35, rate_2x6: null, standard_height: "plate", allow_rafters: true, allow_rough_openings: true, taxable: false, internal_only: false },
-      { client_id: "cedar-co", standard_stud: "2x4", pricing_method: "each", r4: 400, rate_2x6: null, standard_height: "plate", allow_rafters: true, allow_rough_openings: true, taxable: true, internal_only: true },
-    ]), "the all-styles 278 rate becomes the 2x4 rate, with its method, taxable and internal-only; nobody else is seeded", JSON.stringify(seeded));
+    console.log("no seed");
+    ok((await one(db, "select count(*)::int n from public.interior_wall_settings")).n === 0,
+      "no tenant gets a settings row, not even the two that priced the 278 row");
     ok((await one(db, "select count(*)::int n from public.layout_item_pricing where item_key = 'partitionWall'")).n === 3, "the 278 rows stay where they are");
 
     console.log("get_config and get_fixtures");
     for (const c of TENANTS) {
       const cfg = await cfgOf(db, c);
       ok(without(cfg) === before[c].cfg, `${c}: nothing in get_config moved but the new key`);
+      ok("interiorWalls" in cfg && cfg.interiorWalls === null, `${c}: interiorWalls is null (not set up, so not offered)`);
       ok(JSON.stringify(await fixOf(db, c)) === before[c].fix, `${c}: get_fixtures is byte-for-byte unchanged`);
     }
+    // The builders now save their tabs (what portal-settings save_interior_walls writes).
+    await db.exec(`insert into public.interior_wall_settings (client_id, standard_stud, pricing_method, rate_2x4, taxable, internal_only) values
+      ('acme-sheds', '2x4', 'lineal_ft', 35, false, false),
+      ('cedar-co', '2x4', 'sqft_option', 4, true, true)`);
     const acme = (await cfgOf(db, "acme-sheds")).interiorWalls;
     ok(same(acme, { studs: { "2x4": { rate: 35 } }, method: "lineal_ft", allowRo: true, offered: true, coverings: [], allowRafters: true, standardStud: "2x4", standardHeight: "plate", taxable: false }),
       "acme-sheds: offered, 2x4 at $35/ft, plate height, rafters allowed, not taxable", JSON.stringify(acme));
     const cedar = (await cfgOf(db, "cedar-co")).interiorWalls;
-    ok(cedar.offered === true && JSON.stringify(cedar.studs) === JSON.stringify({ "2x4": { rate: null } }) && cedar.internalOnly === true,
-      "cedar-co hides prices: still offered, the 2x4 key is there, its rate is null; internal only", JSON.stringify(cedar));
+    ok(cedar.offered === true && cedar.method === "sqft_option" && JSON.stringify(cedar.studs) === JSON.stringify({ "2x4": { rate: null } }) && cedar.internalOnly === true,
+      "cedar-co hides prices: still offered, per sq ft, the 2x4 key is there, its rate is null; internal only", JSON.stringify(cedar));
     ok((await cfgOf(db, "bravo-barns")).interiorWalls === null && "interiorWalls" in (await cfgOf(db, "bravo-barns")), "bravo-barns (no row): interiorWalls is null");
 
     console.log("the sparse flags and the coverings");
@@ -295,6 +299,10 @@ const ROLLBACK = () => {
     const refused = async (sql) => { try { await db.exec(sql); return false; } catch (_) { return true; } };
     ok(await refused("insert into public.interior_wall_settings (client_id, standard_stud) values ('bravo-barns', '2x8')"), "a 2x8 standard is refused");
     ok(await refused("insert into public.interior_wall_settings (client_id, pricing_method) values ('bravo-barns', 'sqft_building')"), "a method a wall does not understand is refused");
+    ok(await refused("insert into public.interior_wall_settings (client_id, pricing_method, rate_2x4) values ('bravo-barns', 'each', 400)"), "'each' is refused for the wall (per lineal ft or per sq ft only)");
+    ok(String((await one(db, "select column_default d from information_schema.columns where table_name = 'interior_wall_settings' and column_name = 'pricing_method'")).d).startsWith("'lineal_ft'"), "the wall's method defaults to lineal_ft");
+    ok(!(await refused("insert into public.interior_wall_coverings (client_id, name, pricing_method, rate) values ('cedar-co', 'Pegboard', 'each', 90)")), "a covering may still be priced each");
+    await db.exec("delete from public.interior_wall_coverings where client_id = 'cedar-co' and name = 'Pegboard'");
     ok(await refused("insert into public.interior_wall_settings (client_id, standard_height, allow_rafters) values ('bravo-barns', 'rafters', false)"), "a 'rafters' standard with rafters not offered is refused");
     ok(await refused("insert into public.interior_wall_settings (client_id, rate_2x6) values ('bravo-barns', -1)"), "a negative rate is refused");
     ok(await refused("insert into public.interior_wall_coverings (client_id, name) values ('acme-sheds', 'Drywall')"), "a duplicate covering name is refused");
@@ -348,12 +356,14 @@ const ROLLBACK = () => {
     ok((await one(db, "select count(*)::int n from information_schema.columns where table_name = 'fixture_items' and column_name = 'in_partition'")).n === 0, "...and the new column does not survive it");
   }
   {
-    // A copy whose seed forgets the tenants that priced the wall: check 3 must notice.
-    const sql = MIG().replace("where lp.item_key = 'partitionWall' and lp.style_id is null and lp.rate is not null\n  and lp.pricing_method::text in ('each', 'lineal_ft', 'sqft_option')\non conflict", "where false\non conflict");
-    ok(sql !== MIG(), "(the mutant formed: no seed)");
+    // A copy that slips a seed back in: check 3 must notice.
+    const anchor = "-- PART 4 — no seed (each builder sets up the Interior walls tab; see the header)\n-- ═════════════════════════════════════════════════════════════════════════════════════════\n";
+    const sql = MIG().replace(anchor, anchor + "insert into public.interior_wall_settings (client_id, rate_2x4) select client_id, 35 from public.layout_item_pricing where item_key = 'partitionWall' and style_id is null;\n");
+    ok(sql !== MIG(), "(the mutant formed: a seed slipped back in)");
     const db = await fresh();
     const { err } = await apply(db, sql);
-    ok(err && /priced a partition wall but have no interior_wall_settings row/.test(err), "a missing seed row aborts the apply", err);
+    ok(err && /appeared during a first apply; this migration seeds nothing/.test(err), "a seed aborts the apply", err);
+    ok((await one(db, "select to_regclass('public.interior_wall_settings') r")).r === null, "...and nothing of the migration survives it");
   }
   {
     // A copy whose interiorWalls block leaks into another key: "nothing else moved" must notice.
