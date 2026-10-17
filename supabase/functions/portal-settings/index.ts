@@ -596,6 +596,10 @@ const GATES: GateTable = {
   save_inventory_photos:      { area: "inventory", level: "edit" },
   shop_settings:              { area: "inventory", level: "view" },
   list_shop_requests:         { area: "inventory", level: "view" },
+  // AI background change (migration 312): spends the builder's wallet, so edit, not view.
+  photo_bg_info:              { area: "inventory", level: "view" },
+  photo_bg_start:             { area: "inventory", level: "edit" },
+  photo_bg_status:            { area: "inventory", level: "edit" },
   mark_shop_request:          { area: "inventory", level: "edit" },
   save_shop_settings:         { area: "inventory", level: "edit" },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
@@ -8223,6 +8227,164 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl,
       })),
     });
+  }
+
+  // ── AI background change on a lot photo (migration 312, FramedUp's recipe) ─────────────────
+  // photo_bg_info  → is it set up, and what does one cost this builder.
+  // photo_bg_start → wallet hold, then one fal.ai GPT Image 2 edit job. Returns a job id.
+  // photo_bg_status→ polls fal; on success the new image is ADDED beside the original
+  //                  (ai_edited, source_photo_id) and the hold is captured; on failure released.
+  // One at a time per builder: the wallet allows one live hold per meter (wallet_tx_one_hold).
+  if (action === "photo_bg_info" || action === "photo_bg_start" || action === "photo_bg_status") {
+    const FAL_KEY = Deno.env.get("FAL_AI_API_KEY") ?? "";
+    const BG_MODEL = "openai/gpt-image-2/edit";
+    const BG_METER = "photo_background_change";
+    const [{ data: meter }, { data: csEx }, { data: walletRow }] = await Promise.all([
+      admin.from("usage_prices").select("price_cents, active").eq("kind", BG_METER).maybeSingle(),
+      admin.from("client_settings").select("billing_exempt").eq("client_id", clientId).maybeSingle(),
+      admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
+    ]);
+    // Non-billable builders get metered AI free (migration 228's promise); wallet_hold itself only
+    // honours metered_exempt, so billing_exempt is read here and the hold skipped.
+    const exempt = csEx?.billing_exempt === true || walletRow?.metered_exempt === true;
+    const ready = !!FAL_KEY && !!meter?.active;
+
+    if (action === "photo_bg_info") {
+      return json({ ok: true, ready, priceCents: exempt ? 0 : (meter?.price_cents ?? null), exempt,
+        reason: !FAL_KEY ? "not_configured" : (!meter?.active ? "not_priced" : null) });
+    }
+
+    const releaseHold = async (holdId: number | null, reason: string) => {
+      if (holdId) await admin.rpc("wallet_release", { p_hold_id: holdId, p_reason: reason.slice(0, 200) }).then(() => {}, () => {});
+    };
+
+    if (action === "photo_bg_start") {
+      if (!FAL_KEY) return json({ error: "Background changes aren't set up yet — CSM Synergy is finishing the setup." }, 503);
+      if (!meter?.active) return json({ error: "Background changes aren't switched on yet — CSM Synergy is finishing the setup." }, 503);
+      const photoId = String(payload.photoId ?? "").trim();
+      const scene = String(payload.scene ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
+      if (!scene) return json({ error: "Describe the background you want." }, 400);
+      const idemRaw = String(payload.idempotencyKey ?? "").trim();
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(idemRaw)) return json({ error: "Missing request key — reload the page and try again." }, 400);
+      const { data: photo } = await admin.from("inventory_unit_photos").select("id, unit_id, storage_key")
+        .eq("client_id", clientId).eq("id", photoId).maybeSingle();
+      if (!photo) return json({ error: "Photo not found." }, 404);
+      const { count: have } = await admin.from("inventory_unit_photos")
+        .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", photo.unit_id);
+      if ((have ?? 0) >= INVENTORY_PHOTO_MAX) return json({ error: `This building already has ${INVENTORY_PHOTO_MAX} photos. Remove one first — the new one is added beside the original.` }, 400);
+
+      let holdId: number | null = null;
+      if (!exempt) {
+        const { data: hold, error: hErr } = await admin
+          .rpc("wallet_hold", { p_client_id: clientId, p_kind: BG_METER, p_idem: `photobg:${photoId}:${idemRaw}`.slice(0, 120), p_user: userId ?? null })
+          // deno-lint-ignore no-explicit-any
+          .maybeSingle() as { data: any; error: any };
+        if (hErr) return dbFail(req, clientId, "check your wallet", hErr);
+        const err = hold?.err ?? null;
+        if (err === "insufficient_funds") {
+          return json({ error: `A background change costs $${((hold?.price_cents ?? 0) / 100).toFixed(2)} and your wallet has $${((hold?.balance_after ?? 0) / 100).toFixed(2)}. Add funds in Settings → Billing, then try again.`, code: "insufficient_funds" }, 402);
+        }
+        if (err === "hold_in_flight") return json({ error: "Another background change is still running — wait for it to finish." }, 409);
+        if (err === "hold_replayed") return json({ error: "That change was already made — refresh to see it.", code: "already_charged" }, 409);
+        if (err) return json({ error: "Background changes aren't switched on yet — CSM Synergy is finishing the setup." }, 503);
+        holdId = hold?.hold_id ?? null;
+        await runAutoTopup(admin, clientId, req, { fn: "portal-settings" }).catch(() => {});
+      }
+
+      const sourceUrl = admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(photo.storage_key).data.publicUrl;
+      // FramedUp's prompt, word for word in its "keep the building" mode (generate-image, 2026-10).
+      const photoStyle = "A candid real-estate photograph taken with a DSLR camera: natural ambient daylight, true-to-life muted colors, realistic sky with natural gradation, subtle imperfections of a real place. Sharp focus, no haze or blur. The building rests naturally on the ground with a soft, realistic contact shadow and lighting/perspective consistent with the scene.";
+      const prompt = `Keep the building in the provided photo EXACTLY as it is — same shape, size, materials, siding, doors, windows, roof, trim, proportions, and camera angle. Replace ONLY the background and setting with: ${scene}. ${photoStyle}`;
+      let sub: { request_id?: string; status_url?: string; response_url?: string } = {};
+      try {
+        const r = await fetch(`https://queue.fal.run/${BG_MODEL}`, {
+          method: "POST",
+          headers: { "Authorization": `Key ${FAL_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, image_urls: [sourceUrl], image_size: "landscape_4_3", num_images: 1, output_format: "png", quality: "medium" }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!r.ok) {
+          const detail = (await r.text().catch(() => "")).slice(0, 300);
+          await releaseHold(holdId, `fal submit ${r.status}`);
+          await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_submit", message: `fal submit failed (${r.status})`, context: { body: detail } });
+          return json({ error: "The image service didn't accept that photo. You weren't charged — try again in a minute." }, 502);
+        }
+        sub = await r.json();
+      } catch (e) {
+        await releaseHold(holdId, "fal submit threw");
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_submit", message: `fal submit threw: ${(e as Error).message}` });
+        return json({ error: "The image service didn't answer. You weren't charged — try again in a minute." }, 502);
+      }
+      const { data: job, error: jErr } = await admin.from("inventory_photo_ai_edits").insert({
+        client_id: clientId, unit_id: photo.unit_id, source_photo_id: photo.id, scene, model: BG_MODEL,
+        fal_request_id: sub.request_id ?? null, status_url: sub.status_url ?? null, response_url: sub.response_url ?? null,
+        hold_id: holdId, requested_by: userId ?? null,
+      }).select("id").single();
+      if (jErr) { await releaseHold(holdId, "job insert failed"); return dbFail(req, clientId, "start that change", jErr); }
+      await audit("portal_photo_bg_start", 1, `photo=${photo.id} job=${job.id}`);
+      return json({ ok: true, jobId: job.id });
+    }
+
+    // photo_bg_status
+    const jobId = String(payload.jobId ?? "").trim();
+    const { data: job } = await admin.from("inventory_photo_ai_edits").select("*").eq("client_id", clientId).eq("id", jobId).maybeSingle();
+    if (!job) return json({ error: "Change not found." }, 404);
+    const photoUrl = async (id: string | null) => {
+      if (!id) return null;
+      const { data: p } = await admin.from("inventory_unit_photos").select("id, storage_key").eq("id", id).maybeSingle();
+      return p ? { id: p.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl, aiEdited: true } : null;
+    };
+    if (job.status === "done") return json({ ok: true, status: "done", photo: await photoUrl(job.result_photo_id) });
+    if (job.status === "failed") return json({ ok: true, status: "failed", error: job.error || "That change didn't work. You weren't charged." });
+    const fail = async (why: string, shown: string) => {
+      await releaseHold(job.hold_id, why);
+      await admin.from("inventory_photo_ai_edits").update({ status: "failed", error: shown, updated_at: new Date().toISOString() })
+        .eq("id", job.id).eq("status", "queued");
+      await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_failed", message: why.slice(0, 300), severity: "info" });
+      return json({ ok: true, status: "failed", error: shown });
+    };
+    // The wallet sweeps a hold after 10 minutes; give up before that so the release is ours.
+    if (Date.now() - Date.parse(job.created_at) > 8 * 60_000) return fail("timed out after 8 minutes", "That took too long and was cancelled. You weren't charged — try again.");
+    if (!FAL_KEY || !job.status_url || !job.response_url) return fail("no key or no fal urls", "That change couldn't be checked. You weren't charged.");
+    const st = await fetch(job.status_url, { headers: { "Authorization": `Key ${FAL_KEY}` }, signal: AbortSignal.timeout(15_000) })
+      .then((r) => r.ok ? r.json() : null).catch(() => null);
+    if (!st || st.status !== "COMPLETED") {
+      if (st && (st.status === "FAILED" || st.status === "ERROR")) return fail(`fal status ${st.status}`, "The image service couldn't change that photo. You weren't charged.");
+      return json({ ok: true, status: "working" });
+    }
+    const result = await fetch(job.response_url, { headers: { "Authorization": `Key ${FAL_KEY}` }, signal: AbortSignal.timeout(20_000) })
+      .then((r) => r.ok ? r.json() : null).catch(() => null);
+    const imgUrl = result?.images?.[0]?.url;
+    if (!imgUrl || !/^https:\/\//.test(imgUrl)) return fail("COMPLETED without an image url", "The image service returned nothing. You weren't charged.");
+    const bytes = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) }).then((r) => r.ok ? r.arrayBuffer() : null).catch(() => null);
+    if (!bytes || bytes.byteLength < 1000) return fail("result download failed", "The new photo couldn't be saved. You weren't charged.");
+    const ct = String(result?.images?.[0]?.content_type || "image/png");
+    const ext = ct.includes("jpeg") ? "jpg" : ct.includes("webp") ? "webp" : "png";
+    const key = `${clientId}/${job.unit_id}/${crypto.randomUUID()}.${ext}`;
+    const { error: upErr } = await admin.storage.from(INVENTORY_PHOTOS).upload(key, new Uint8Array(bytes), { contentType: ext === "jpg" ? "image/jpeg" : `image/${ext}` });
+    if (upErr) return fail(`upload failed: ${upErr.message}`, "The new photo couldn't be saved. You weren't charged.");
+    // Right after its source photo, so the pair sits together; the builder can make it the cover.
+    const { data: src } = await admin.from("inventory_unit_photos").select("sort_order").eq("id", job.source_photo_id ?? "").maybeSingle();
+    const { data: added, error: insErr } = await admin.from("inventory_unit_photos").insert({
+      client_id: clientId, unit_id: job.unit_id, storage_key: key, source_photo_id: job.source_photo_id,
+      ai_edited: true, sort_order: (src?.sort_order ?? 999) + 0,
+    }).select("id").single();
+    if (insErr) { await admin.storage.from(INVENTORY_PHOTOS).remove([key]).catch(() => {}); return fail(`photo row failed: ${insErr.message}`, "The new photo couldn't be saved. You weren't charged."); }
+    // Claim the job first, so two overlapping polls can never add two photos or capture twice.
+    const { data: claimed } = await admin.from("inventory_photo_ai_edits")
+      .update({ status: "done", result_photo_id: added.id, updated_at: new Date().toISOString() })
+      .eq("id", job.id).eq("status", "queued").select("id");
+    if (!claimed?.length) {
+      await admin.from("inventory_unit_photos").delete().eq("id", added.id);
+      await admin.storage.from(INVENTORY_PHOTOS).remove([key]).catch(() => {});
+      const { data: again } = await admin.from("inventory_photo_ai_edits").select("result_photo_id").eq("id", job.id).maybeSingle();
+      return json({ ok: true, status: "done", photo: await photoUrl(again?.result_photo_id ?? null) });
+    }
+    if (job.hold_id) {
+      const { error: capErr } = await admin.rpc("wallet_capture", { p_hold_id: job.hold_id, p_cost_cents: null, p_usage: { model: job.model }, p_ref_id: job.id });
+      if (capErr) await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_capture", message: `capture failed: ${capErr.message}` });
+    }
+    return json({ ok: true, status: "done", photo: { id: added.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(key).data.publicUrl, aiEdited: true } });
   }
 
   // Purchase requests from the shop's cart (migration 311). Newest first; handled ones stay
