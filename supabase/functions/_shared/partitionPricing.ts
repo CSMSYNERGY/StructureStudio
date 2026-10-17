@@ -35,7 +35,7 @@
 // no Interior wall button). A wall that still reaches the estimate (a design saved before, or a hand-
 // built body) gets its $0 line, the hidden-until-priced posture of every layout item: it is on the
 // plan, so the estimate says so, and it is never charged. The 278 partitionWall layout row prices a
-// wall ONLY when the interior_wall_settings table itself does not exist (a database before 312), which
+// wall ONLY when the interior_wall_settings table itself does not exist (a database before 313), which
 // is the same case in which get_config carries no interiorWalls key and the designer keeps 278's
 // behaviour.
 
@@ -221,8 +221,8 @@ const NOT_SET_UP: InteriorWallRates = {
 /**
  * interior_wall_settings' row for the tenant. No row = the builder has not set interior walls up, so
  * none are offered or charged (NOT_SET_UP). Only when `opts.tableMissing` (the table does not exist:
- * a database before 312) is the 278 partitionWall layout_item_pricing row read, as the standard 2x4
- * rate, exactly as before 312 — and then only for a per-foot or per-square-foot row. A size whose rate
+ * a database before 313) is the 278 partitionWall layout_item_pricing row read, as the standard 2x4
+ * rate, exactly as before 313 — and then only for a per-foot or per-square-foot row. A size whose rate
  * is null is not offered; a row whose method is not one of the two is not offered either.
  */
 export function interiorWallRates(
@@ -260,7 +260,7 @@ export function interiorWallRates(
   return { ...NOT_SET_UP };
 }
 
-/** Whether a failed interior_wall_settings read means the table does not exist (a database before 312):
+/** Whether a failed interior_wall_settings read means the table does not exist (a database before 313):
  *  PostgREST's "not in the schema cache" (PGRST205) or Postgres' undefined_table (42P01). Any other
  *  failure is a failed read, never a reason to price from the 278 row. */
 export function interiorWallTableMissing(err: { code?: unknown; message?: unknown } | null | undefined): boolean {

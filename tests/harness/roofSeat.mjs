@@ -98,7 +98,7 @@ const CONFIG = {
   options: [], colors: [], claddingOptions: {}, wallHeightOptions: {},
   showPricing: true, view3d: true,
   layoutItems: PLAN_ITEMS, layoutPricing: { loft: { rate: 6, method: "sqft_option" }, partitionWall: { rate: 22, method: "lineal_ft" } }, layoutPrices: {},
-  // get_config after 312, the Interior walls tab saved at the same $22 per lineal foot.
+  // get_config after 313, the Interior walls tab saved at the same $22 per lineal foot.
   interiorWalls: { offered: true, standardStud: "2x4", method: "lineal_ft", standardHeight: "plate", allowRafters: true, allowRo: true, studs: { "2x4": { rate: 22 } }, coverings: [] },
   electrical: null, insulation: [],
   electricalItems: [

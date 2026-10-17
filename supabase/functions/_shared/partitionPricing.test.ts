@@ -93,7 +93,7 @@ Deno.test("rates: the Interior walls tab's row; no row = not set up; the layout 
   const unset = interiorWallRates(null, { method: "lineal_ft", rate: 35 });
   assertEquals(unset, { offered: false, standardStud: "2x4", method: "lineal_ft", rates: { "2x4": null, "2x6": null }, allowRafters: true, taxable: null, source: "none" });
   assertEquals(interiorWallRates(undefined, undefined).source, "none");
-  // The table missing (a database before 312): the 278 row is the standard 2x4 rate, as before 312.
+  // The table missing (a database before 313): the 278 row is the standard 2x4 rate, as before 313.
   const legacy = interiorWallRates(null, { method: "lineal_ft", rate: 35 }, { tableMissing: true });
   assertEquals(legacy, { offered: true, standardStud: "2x4", method: "lineal_ft", rates: { "2x4": 35, "2x6": null }, allowRafters: true, taxable: null, source: "layout_item_pricing" });
   assertEquals(interiorWallRates(null, null, { tableMissing: true }).offered, false, "no 278 row either: nothing");

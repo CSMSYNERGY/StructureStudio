@@ -1,11 +1,11 @@
-// The interior wall's settings (278's partition wall, given its own tab by 312), driven through the
+// The interior wall's settings (278's partition wall, given its own tab by 313), driven through the
 // SHIPPED portal-settings handler.
 //
 // WHAT IS PINNED:
 //   1. The catalog read tells the card which items stay out of the customer's palette until priced
 //      (hiddenUntilPriced), and an UNPRICED partition wall is listed only for a read that asks
-//      (withUnpriced). It also carries the Interior walls tab's two reads (312).
-//   2. save_layout_pricing never writes the partition wall any more (312: it is priced on the
+//      (withUnpriced). It also carries the Interior walls tab's two reads (313).
+//   2. save_layout_pricing never writes the partition wall any more (313: it is priced on the
 //      Interior walls tab). A row sent back unchanged is passed over quietly; a change is refused in
 //      words that say where the price lives now; everything else in the Save still saves.
 //   3. A pricing sheet's Partition Wall column writes no inclusion: a wall is never part of a size's price.
@@ -125,7 +125,7 @@ async function call(body: Record<string, unknown>, world: World = {}) {
 const pricingWrites = (t: Trace) => t.writes.filter((w) => w.table === "layout_item_pricing");
 const writesTo = (t: Trace, table: string) => t.writes.filter((w) => w.table === table);
 const save = (rows: Record<string, unknown>[], world?: World) => call({ action: "save_layout_pricing", rows }, world);
-// The beta card from before 312 sent partitionAware; it buys nothing now.
+// The beta card from before 313 sent partitionAware; it buys nothing now.
 const saveAware = (rows: Record<string, unknown>[], world?: World) => call({ action: "save_layout_pricing", rows, partitionAware: true }, world);
 
 Deno.test("the catalog tells the card which items stay hidden until priced", async () => {
@@ -133,7 +133,7 @@ Deno.test("the catalog tells the card which items stay hidden until priced", asy
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const by = Object.fromEntries(r.body.items.map((i: any) => [i.key, i.hiddenUntilPriced]));
   assertEquals(by, { workbench: false, shelf: true, partitionWall: true });
-  // The Interior walls tab's reads (312): nothing on file yet.
+  // The Interior walls tab's reads (313): nothing on file yet.
   assertEquals([r.body.interiorWalls, r.body.interiorWallCoverings], [null, []]);
 });
 
@@ -148,7 +148,7 @@ Deno.test("an unpriced partition wall is listed only for a read that asks; a pri
   assertEquals(noShelf.body.items.map((i: any) => i.key), ["workbench", "shelf"]);
 });
 
-Deno.test("save_layout_pricing never writes a partition wall (312); the rest of the Save still saves", async () => {
+Deno.test("save_layout_pricing never writes a partition wall (313); the rest of the Save still saves", async () => {
   const world: World = { priced: [{ item_key: "partitionWall", rate: 35 }] };
   for (const send of [save, saveAware]) {
     const r = await send([
@@ -179,7 +179,7 @@ Deno.test("a pricing sheet's Partition Wall column writes no inclusion; the othe
   assertEquals(inc.map((w) => [w.verb, w.row?.item_key]), [["upsert", "workbench"]]);
 });
 
-// ── save_interior_walls (312) ─────────────────────────────────────────────────────────────
+// ── save_interior_walls (313) ─────────────────────────────────────────────────────────────
 const DOOR_ID = "00000000-0000-4000-8000-0000000000d1";
 const WIN_ID = "00000000-0000-4000-8000-0000000000a1";
 const FAN_ID = "00000000-0000-4000-8000-0000000000f1";
@@ -253,7 +253,7 @@ Deno.test("save_interior_walls saves per sq ft, and leaves an existing 278 row u
   assertEquals([ft.status, writesTo(ft.trace, "interior_wall_settings")[0].row.pricing_method], [200, "lineal_ft"]);
 });
 
-// ── save_interior_wall_coverings (312) ────────────────────────────────────────────────────
+// ── save_interior_wall_coverings (313) ────────────────────────────────────────────────────
 const COVER_ID = "00000000-0000-4000-8000-0000000000c1";
 const covers = (rows: Record<string, unknown>[], world?: World) => call({ action: "save_interior_wall_coverings", rows }, world);
 
@@ -296,7 +296,7 @@ Deno.test("an empty covering list deletes every covering", async () => {
   assertEquals(w.map((x) => [x.verb, argOf(x.ops, "not")]), [["delete", ["id", "in", '("00000000-0000-0000-0000-000000000000")']]]);
 });
 
-// ── The pass-throughs (312) ───────────────────────────────────────────────────────────────
+// ── The pass-throughs (313) ───────────────────────────────────────────────────────────────
 Deno.test("save_electrical_items writes interior_wall_ok only when the row carries it", async () => {
   const r = await call({ action: "save_electrical_items", rows: [
     { id: FAN_ID, name: "Ceiling fan", priceWithPackage: "150", priceStandalone: "250", interiorWallOk: false },

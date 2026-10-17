@@ -4052,7 +4052,7 @@ function ssRemoveFromRow(key, it) {
 //   * the key is an object: the tab decides everything, the Interior wall button included (`offered`);
 //   * the key is there and NULL: this builder has not set interior walls up, so none are offered to a
 //     customer or a rep (`offered` false) and a wall already on a saved design prices at $0;
-//   * the key is ABSENT: a get_config from before migration 312, where the table does not exist
+//   * the key is ABSENT: a get_config from before migration 313, where the table does not exist
 //     either. Today's 278 behaviour holds: the partitionWall layout row (`layoutRate`, the { rate,
 //     method } computeLayoutPricingRows resolves) is the standard 2x4 rate and its own palette flag
 //     decides the button. The server reads the 278 row in exactly that case too (the table missing),
@@ -4282,7 +4282,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   //
   // INTERIOR WALLS V2 (2026-10-17): the rate is the one for the wall's stud size (ssInteriorWallCfg:
   // the builder's Interior walls tab; not set up = $0; the partitionWall row as the 2x4 rate only on a
-  // get_config from before 312), and a wall to the
+  // get_config from before 313), and a wall to the
   // rafters priced per square foot is charged its real face, under the roof the 3D builds or a loft's
   // floor framing (ssPartitionRoofAt2D), never less than its length x the wall. The row reads
   // "Interior wall", the customer's word for it; its key is still ssPriceRowKey "partition".
@@ -24546,7 +24546,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // its key. Not set up (null) or not offered = no button for a customer OR a rep (noPalette, and
     // partitionOff stops a placement however the tool got armed); a placed wall still draws. Offered =
     // the button, whatever 278's hidden-until-priced flag on the layout row says, and the tab's
-    // internal-only. No key at all (a get_config from before 312) = the layout row decides, as before.
+    // internal-only. No key at all (a get_config from before 313) = the layout row decides, as before.
     ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => {
       const iwc = ssInteriorWallCfg(C);
       const gate = iwc.source === "layout" ? {} : { noPalette: !iwc.offered, partitionOff: !iwc.offered, internalOnly: !!iwc.internalOnly };
@@ -38409,7 +38409,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (k === "delivery") return !!(C.delivery) && C.delivery.taxable !== true;
               // A partition wall's row reads the Interior walls tab's flag (get_config interiorWalls,
               // sparse taxable:false), else the Partition Wall item's, and a door or window in one its
-              // catalog row's: the submit-estimate reads for those lines (278, 312).
+              // catalog row's: the submit-estimate reads for those lines (278, 313).
               const pk = /^partition:([^:]+)(?::open:(.+))?$/.exec(k);
               if (pk) {
                 if (!pk[2]) {

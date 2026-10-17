@@ -1826,7 +1826,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // for its stud size in interior_wall_settings (the builder's Interior walls tab). NO ROW = NOT SET
   // UP (Carolyn, 2026-10-17): the designer offers no Interior wall button, and a wall that reaches
   // here anyway (a design saved earlier, a hand-built body) gets its $0 line, never a charge. The 278
-  // partitionWall layout row is read ONLY when the table itself does not exist (a database before 312,
+  // partitionWall layout row is read ONLY when the table itself does not exist (a database before 313,
   // where get_config has no interiorWalls key and the designer keeps 278's behaviour). Any other
   // failed read refuses the estimate, the electrical settings' posture: a wall must never go out at $0
   // because a read blipped. A wall to the rafters is charged by its face area held between the wall's
@@ -1853,7 +1853,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt,
       { maxRiseFt: partitionMaxRiseFt(styleD3, buildingWidthFt, buildingDepthFt), allowRafters: iw.allowRafters });
     if (partitions.length) {
-      // The tab's flag; the 278 item's only on the pre-312 fallback; nothing to say for a $0 wall.
+      // The tab's flag; the 278 item's only on the pre-313 fallback; nothing to say for a $0 wall.
       const wallNonTaxable = iw.taxable != null ? iw.taxable === false
         : iw.source === "layout_item_pricing" ? layoutTaxable.get("partitionWall") === false : false;
       const fxIds = [...new Set(partitions.flatMap((p) => p.openings.map((o) => o.fixtureItemId)).filter((x): x is string => !!x))];

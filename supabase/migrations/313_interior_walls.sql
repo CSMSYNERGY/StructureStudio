@@ -1,18 +1,19 @@
--- 312_interior_walls.sql — Interior walls get their own tab: Settings → Options → Interior →
+-- 313_interior_walls.sql — Interior walls get their own tab: Settings → Options → Interior →
 --                          Interior walls (Interior walls v2, slice 1: data + portal, designer unchanged).
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT, BEFORE the portal-settings deploy that reads it (its
 --    catalog read selects fixture_items.in_partition and the two new tables, so a deploy ahead of
 --    this file fails every Options tab's load). Pipe this file to `supabase db query --linked`
 --    (stdin; see 270's header for why not `--file` or an inline "$(cat …)"), then record it:
---      insert into supabase_migrations.schema_migrations (version, name) values ('312', '312_interior_walls') returning version;
+--      insert into supabase_migrations.schema_migrations (version, name) values ('313', '313_interior_walls') returning version;
 --    NEVER `supabase db push`. The file carries its own begin;/commit;, so a failed check anywhere
 --    takes the whole migration with it. `db query` prints no NOTICE, only the last statement's rows:
 --    THE RECORD at the end is what the apply shows. No row printed means the file did not run. To
 --    see the same row and change nothing, pipe it with the last `commit;` swapped for `rollback;`.
 --
--- NUMBERING: 306 is held by another branch, and 310 (310_inventory_shop) and 311 (311_shop_requests)
--- are in the folder but not in the ledger; this was written as 311 and renumbered when beta took it.
+-- NUMBERING: 306 is held by another branch, and 310 (310_inventory_shop), 311 (311_shop_requests) and
+-- 312 (312_photo_background) are in the folder but not in the ledger; this was written as 311 and
+-- renumbered twice as beta took 311 and then 312.
 -- The live ledger's last row on 2026-10-17 was 309. Read the ledger again before applying.
 --
 -- ── WHY ──────────────────────────────────────────────────────────────────────────────────
@@ -88,7 +89,7 @@
 --   drop table if exists public.interior_wall_settings;
 --   alter table public.fixture_items drop column if exists in_partition;
 --   alter table public.electrical_items drop column if exists interior_wall_ok;
---   delete from supabase_migrations.schema_migrations where version = '312';
+--   delete from supabase_migrations.schema_migrations where version = '313';
 --   notify pgrst, 'reload schema';
 --   commit;
 -- Then check: position('interiorWalls' in pg_get_functiondef('public.get_config(text)'::regprocedure)) = 0
@@ -97,11 +98,11 @@
 begin;
 
 -- Whether this is a first apply (the settings table does not exist yet), for PART 7's no-seed check.
-create temp table m312_fresh on commit drop as
+create temp table m313_fresh on commit drop as
   select to_regclass('public.interior_wall_settings') is null as fresh;
 
 -- Every tenant's config and fixtures as they are now, for PART 7 to compare against. Dropped at commit.
-create temp table m312_before on commit drop as
+create temp table m313_before on commit drop as
   select cc.client_id,
          md5((public.get_config(cc.client_id) - 'interiorWalls')::text) as cfg,
          md5(public.get_fixtures(cc.client_id)::text) as fix
@@ -139,7 +140,7 @@ create table if not exists public.interior_wall_settings (
 );
 
 comment on table public.interior_wall_settings is
-  'Interior walls (312): the builder''s standard stud, a rate per stud size (NULL = not offered), method, standard height and switches. One row per tenant; written only by portal-settings.';
+  'Interior walls (313): the builder''s standard stud, a rate per stud size (NULL = not offered), method, standard height and switches. One row per tenant; written only by portal-settings.';
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 2 — interior_wall_coverings (the builder's own list; 181's electrical_items shape)
@@ -165,7 +166,7 @@ create table if not exists public.interior_wall_coverings (
 create index if not exists interior_wall_coverings_client_idx on public.interior_wall_coverings (client_id, sort_order);
 
 comment on table public.interior_wall_coverings is
-  'Interior walls (312): the coverings a builder offers for each face of an interior wall. rate NULL = not offered, 0 = included. Written only by portal-settings.';
+  'Interior walls (313): the coverings a builder offers for each face of an interior wall. rate NULL = not offered, 0 = included. Written only by portal-settings.';
 
 -- RLS, 181's posture: owner-scoped SELECT, NO write policy — every write goes through portal-settings
 -- on the service role, so the tenant comes from the JWT and is never trusted from the body. anon reads
@@ -194,11 +195,11 @@ revoke all on public.interior_wall_coverings from anon;
 -- read for doors and windows only; a ramp or vent carries the default and nothing reads it.
 alter table public.fixture_items add column if not exists in_partition boolean not null default true;
 comment on column public.fixture_items.in_partition is
-  'Interior walls (312): this door or window may be placed in an interior wall. Default true. get_fixtures sends inPartition: false only when unticked.';
+  'Interior walls (313): this door or window may be placed in an interior wall. Default true. get_fixtures sends inPartition: false only when unticked.';
 
 alter table public.electrical_items add column if not exists interior_wall_ok boolean not null default true;
 comment on column public.electrical_items.interior_wall_ok is
-  'Interior walls (312): this item may be placed on an interior wall. Default true. get_config sends interiorWallOk: false only when unticked.';
+  'Interior walls (313): this item may be placed on an interior wall. Default true. get_config sends interiorWallOk: false only when unticked.';
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 4 — no seed (each builder sets up the Interior walls tab; see the header)
@@ -207,7 +208,7 @@ comment on column public.electrical_items.interior_wall_ok is
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 5 — get_config: interiorWalls, and interiorWallOk on electricalItems
 -- ═════════════════════════════════════════════════════════════════════════════════════════
-do $m312_cfg$
+do $m313_cfg$
 declare
   src     text := pg_get_functiondef('public.get_config(text)'::regprocedure);
   old_blk text;
@@ -220,11 +221,11 @@ begin
     new_blk := $repl$|| case when ei.internal_only then jsonb_build_object('internalOnly', true) else '{}'::jsonb end
              || case when not coalesce(ei.interior_wall_ok, true) then jsonb_build_object('interiorWallOk', false) else '{}'::jsonb end$repl$;
     if position(old_blk in src) = 0 then
-      raise exception '312: the electricalItems internalOnly merge (181) was not found in the LIVE get_config body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
+      raise exception '313: the electricalItems internalOnly merge (181) was not found in the LIVE get_config body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
     end if;
     src := replace(src, old_blk, new_blk);
   else
-    raise notice '312: get_config already emits interiorWallOk';
+    raise notice '313: get_config already emits interiorWallOk';
   end if;
 
   -- (b) interiorWalls, before colors (181's anchor). Prices follow show_pricing; `offered` and the
@@ -262,22 +263,22 @@ begin
       from public.interior_wall_settings iw where iw.client_id = cc.client_id),
     'colors', coalesce(($repl2$;
     if position(old_blk in src) = 0 then
-      raise exception '312: the colors anchor (181) was not found in the LIVE get_config body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
+      raise exception '313: the colors anchor (181) was not found in the LIVE get_config body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
     end if;
     src := replace(src, old_blk, new_blk);
   else
-    raise notice '312: get_config already emits interiorWalls';
+    raise notice '313: get_config already emits interiorWalls';
   end if;
 
   execute src;
 end
-$m312_cfg$;
+$m313_cfg$;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 6 — get_fixtures: inPartition, sparse
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- Anchored on 289's inDoor merge, one line, no line ending: the live body was applied with CRLF.
-do $m312_fix$
+do $m313_fix$
 declare
   src     text := pg_get_functiondef('public.get_fixtures(text)'::regprocedure);
   old_blk text := $anchor$|| case when fi.category = 'window' and coalesce(fi.in_door, false)$anchor$;
@@ -285,15 +286,15 @@ declare
     || case when fi.category = 'window' and coalesce(fi.in_door, false)$repl$;
 begin
   if position('inPartition' in src) > 0 then
-    raise notice '312: get_fixtures already emits inPartition';
+    raise notice '313: get_fixtures already emits inPartition';
     return;
   end if;
   if position(old_blk in src) = 0 then
-    raise exception '312: the inDoor merge (289) was not found in the LIVE get_fixtures body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
+    raise exception '313: the inDoor merge (289) was not found in the LIVE get_fixtures body — re-derive the anchor from a fresh pg_get_functiondef dump before applying';
   end if;
   execute replace(src, old_blk, new_blk);
 end
-$m312_fix$;
+$m313_fix$;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 7 — apply-time assertions
@@ -308,12 +309,12 @@ begin
   select count(*) into v_n from pg_class c join pg_namespace n on n.oid = c.relnamespace
    where n.nspname = 'public' and c.relname in ('interior_wall_settings', 'interior_wall_coverings') and c.relrowsecurity;
   if v_n <> 2 then
-    raise exception '312: row level security is not on for both interior wall tables';
+    raise exception '313: row level security is not on for both interior wall tables';
   end if;
   select count(*) into v_n from pg_policies
    where schemaname = 'public' and tablename in ('interior_wall_settings', 'interior_wall_coverings') and cmd <> 'SELECT';
   if v_n > 0 then
-    raise exception '312: an interior wall table has a write policy; every write goes through portal-settings';
+    raise exception '313: an interior wall table has a write policy; every write goes through portal-settings';
   end if;
 
   -- 2. The two ticks: boolean, not null, default true, so nothing offered today stops being offered.
@@ -323,23 +324,23 @@ begin
        or (table_name = 'electrical_items' and column_name = 'interior_wall_ok'))
      and data_type = 'boolean' and is_nullable = 'NO' and column_default = 'true';
   if v_n <> 2 then
-    raise exception '312: fixture_items.in_partition and electrical_items.interior_wall_ok should both be boolean not null default true';
+    raise exception '313: fixture_items.in_partition and electrical_items.interior_wall_ok should both be boolean not null default true';
   end if;
 
   -- 3. No seed: a FIRST apply writes no settings row (a re-apply finds the rows builders have saved).
-  if (select fresh from m312_fresh) then
+  if (select fresh from m313_fresh) then
     select count(*) into v_n from public.interior_wall_settings;
     if v_n > 0 then
-      raise exception '312: % interior_wall_settings row(s) appeared during a first apply; this migration seeds nothing', v_n;
+      raise exception '313: % interior_wall_settings row(s) appeared during a first apply; this migration seeds nothing', v_n;
     end if;
   end if;
 
   -- 4. Nothing else in any tenant's get_config or get_fixtures moved.
-  select count(*) into v_n from m312_before b
+  select count(*) into v_n from m313_before b
    where b.cfg is distinct from md5((public.get_config(b.client_id) - 'interiorWalls')::text)
       or b.fix is distinct from md5(public.get_fixtures(b.client_id)::text);
   if v_n > 0 then
-    raise exception '312: get_config (outside interiorWalls) or get_fixtures changed for % tenant(s); this migration must move nothing else', v_n;
+    raise exception '313: get_config (outside interiorWalls) or get_fixtures changed for % tenant(s); this migration must move nothing else', v_n;
   end if;
 
   -- 5. Every tenant's get_config carries the key: null without a row, the shape above with one.
@@ -348,12 +349,12 @@ begin
   loop
     got := public.get_config(r.client_id);
     if not (got ? 'interiorWalls') then
-      raise exception '312: get_config(%) has no interiorWalls key', r.client_id;
+      raise exception '313: get_config(%) has no interiorWalls key', r.client_id;
     end if;
     got := got -> 'interiorWalls';
     if r.standard_stud is null then
       if jsonb_typeof(got) <> 'null' then
-        raise exception '312: get_config(%) emits interiorWalls % for a tenant with no settings row', r.client_id, got;
+        raise exception '313: get_config(%) emits interiorWalls % for a tenant with no settings row', r.client_id, got;
       end if;
     elsif got ->> 'standardStud' is distinct from r.standard_stud
        or got ->> 'method' is distinct from r.pricing_method
@@ -361,10 +362,10 @@ begin
        or ((got -> 'studs') ? '2x4') is distinct from (r.rate_2x4 is not null)
        or ((got -> 'studs') ? '2x6') is distinct from (r.rate_2x6 is not null)
        or jsonb_typeof(got -> 'coverings') is distinct from 'array' then
-      raise exception '312: get_config(%) emits interiorWalls as %, which does not match its settings row', r.client_id, got;
+      raise exception '313: get_config(%) emits interiorWalls as %, which does not match its settings row', r.client_id, got;
     end if;
   end loop;
-  raise notice '312: interior wall settings in place; every tenant''s get_config carries interiorWalls and nothing else moved';
+  raise notice '313: interior wall settings in place; every tenant''s get_config carries interiorWalls and nothing else moved';
 end
 $check$;
 

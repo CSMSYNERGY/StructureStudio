@@ -28,7 +28,7 @@
 //      wall to wall — and does not offer it in the 3D palette. A "Look inside" shot.
 //   J. QUOTE: Get Quote sends itemSummary.partitions with the length, the height and the door by its
 //      catalog id, and floorPlanItems carries the wall with no `wall`.
-//   K. THE PORTAL (312): Interior items no longer lists the wall and its Save never sends one; the
+//   K. THE PORTAL (313): Interior items no longer lists the wall and its Save never sends one; the
 //      Interior walls tab shows the saved 2x4 rate, offers exactly two methods ("Per lineal ft of
 //      wall" / "Per sq ft of wall", no each), sends the framing, the door/window and electrical ticks
 //      and the ordered coverings on Save, and refuses a blank standard rate before sending. A builder
@@ -103,7 +103,7 @@ export const CONFIG_IW = {
   interiorWalls: { offered: true, standardStud: "2x4", method: "lineal_ft", standardHeight: "plate", allowRafters: true, allowRo: true,
     studs: { "2x4": { rate: 22 }, "2x6": { rate: 28 } }, coverings: [] },
 };
-// get_config after 312 for a builder who never saved the Interior walls tab: interiorWalls null, the
+// get_config after 313 for a builder who never saved the Interior walls tab: interiorWalls null, the
 // 278 layout row still priced (as two live tenants' are). No wall may be offered.
 export const CONFIG_UNSET = { ...CONFIG, interiorWalls: null };
 // A builder who saved the tab but never priced the 278 row: get_config marks that layout item
@@ -899,7 +899,7 @@ async function portalRun(browser, ok, shots, allErrors) {
   page.on("pageerror", (e) => allErrors.push("K: " + e.message));
   const saves = [];
   const catalogs = [];
-  // As portal-settings' catalog answers after 312: the partition wall is still an item (priced, so it
+  // As portal-settings' catalog answers after 313: the partition wall is still an item (priced, so it
   // is listed), but the Interior items card leaves it out; the Interior walls tab reads its own row,
   // as the builder saved it ($35 per foot, 2x4), one covering, a door, a window and two electrical
   // items. K9 onward answers null: a builder who has never saved the tab (nothing is seeded).

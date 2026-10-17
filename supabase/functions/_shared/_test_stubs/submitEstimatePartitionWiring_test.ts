@@ -6,7 +6,7 @@
 //      taller-wall upgrade included). There is no "each". A tenant that has NOT SET UP the Interior
 //      walls tab (no interior_wall_settings row) is offered no walls; one that reaches the estimate
 //      anyway still prints, at $0, and the designer's Details agree, even with a 278 row priced.
-//      Only a MISSING table (a database before 312) prices from the 278 row; any other failed read
+//      Only a MISSING table (a database before 313) prices from the 278 row; any other failed read
 //      refuses the estimate.
 //   2. CLAMPING. The anon key reaches this function, so a body claiming a 400 ft wall, a 50 ft one in
 //      a 10 ft building or a 40 ft height is charged for the building's own run and its own wall —
@@ -73,7 +73,7 @@ const FIXTURES = [
 
 // `iw` is the tenant's interior_wall_settings row (the Interior walls tab). Left out, the tab is saved
 // with `method` / `rate` as the standard 2x4 (method null = NOT SET UP: no row). "none" = no row,
-// "missing" fails the read the way a missing table does (a database before 312, get_config without
+// "missing" fails the read the way a missing table does (a database before 313, get_config without
 // the key), and "error" fails it any other way. The 278 layout row is always there (ratesOf), as it is
 // live, so every world proves it is ignored unless the table is missing.
 type World = { method?: string | null; rate?: number; wallHeight?: boolean; inclusion?: boolean; iw?: Record<string, unknown> | "none" | "missing" | "error"; d3?: Record<string, unknown> };
@@ -203,8 +203,8 @@ const C = (w: World) => ({
   layoutItems: { partitionWall: { label: "Partition Wall", modelKey: "partition", group: "interior" } },
   sizePricing: { econo: { "10x12": { basePrice: 3000, widthFt: 10, lengthFt: 12 } } },
   buildingStyles: [{ value: "econo", label: "Econo", d3: w.d3 || { wallHeightFt: 8 } }],
-  // get_config's interiorWalls key (312), as the designer reads it, from the same row the server reads:
-  // null without a row, and no key at all only on a database before 312 (the table missing).
+  // get_config's interiorWalls key (313), as the designer reads it, from the same row the server reads:
+  // null without a row, and no key at all only on a database before 313 (the table missing).
   ...(w.iw === "missing" ? {} : { interiorWalls: ((iw) => iw ? {
     offered: (iw.standard_stud === "2x6" ? iw.rate_2x6 : iw.rate_2x4) != null, standardStud: iw.standard_stud, method: iw.pricing_method,
     standardHeight: "plate", allowRafters: iw.allow_rafters !== false,

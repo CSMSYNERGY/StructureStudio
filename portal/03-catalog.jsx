@@ -3873,7 +3873,7 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       priceStandalone: r.price_standalone != null ? String(r.price_standalone) : "",
       taxable: r.taxable !== false, active: r.active !== false,
       internalOnly: r.internal_only === true, sortOrder: r.sort_order || 0,
-      // Allowed on interior walls (312): ticked on the Interior walls tab; carried through this
+      // Allowed on interior walls (313): ticked on the Interior walls tab; carried through this
       // card's save so it survives. Absent reads as yes, the column's default.
       interiorWallOk: r.interior_wall_ok !== false,
     })));
@@ -5104,7 +5104,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
     // no longer shown or archived here. The three electrical devices are not layout items at
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
-    // The interior wall (278's partitionWall) has its own tab since 312 (InteriorWalls), and
+    // The interior wall (278's partitionWall) has its own tab since 313 (InteriorWalls), and
     // save_layout_pricing no longer writes it, so it is not listed here either.
     return (data.items || []).filter((it) => it.key !== "ramp" && it.key !== "partitionWall" && (it.paletteGroup || "interior") === group).map((it) => {
       const p = byKey[it.key] || {};
@@ -5402,7 +5402,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
   );
 }
 
-// ─── Interior walls (migration 312): Settings → Options → Interior walls ───
+// ─── Interior walls (migration 313): Settings → Options → Interior walls ───
 // Four cards on one Save: framing and price (interior_wall_settings), the builder's own wall
 // coverings (interior_wall_coverings, the Electrical card's list pattern), what may go IN a wall
 // (rough openings, and the door/window "Allowed in interior walls" tick) and what may go ON one (the
@@ -5791,7 +5791,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
     // Can go inside a door (289): windows only; absent reads as no, the column's default.
     in_door: d.in_door === true,
-    // Allowed in interior walls (312): doors and windows; absent reads as YES, the column's default.
+    // Allowed in interior walls (313): doors and windows; absent reads as YES, the column's default.
     in_partition: d.in_partition !== false,
     // null = offered on EVERY building style (the living default); an array = only those (272).
     style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
@@ -5855,7 +5855,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Can be used inside a door (289). WINDOW-ONLY on the wire, like the colour list: portal-settings
     // forces it off for every other category, so sending it for a door would be a value it throws away.
     ...(isWindowCat ? { inDoor: r.in_door === true } : {}),
-    // Allowed in interior walls (312): doors and windows only. Ticked on the Interior walls tab; it
+    // Allowed in interior walls (313): doors and windows only. Ticked on the Interior walls tab; it
     // rides every line save so the tick survives a price edit made here.
     ...((isWindowCat || isDoorCat) ? { inPartition: r.in_partition !== false } : {}),
     // Offered on (272), every category, the same collapse: every style ticked, hidden ones
@@ -5997,7 +5997,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // builder can set loft-door heights in bulk (see the edit panel). Adding a column is safe
   // for anyone holding an older sheet: import matches columns BY NAME and an absent one is
   // left untouched, so an old export re-imports exactly as it always did.
-  // "Interior walls" (312): may this door or window go in an interior wall. Doors and windows only;
+  // "Interior walls" (313): may this door or window go in an interior wall. Doors and windows only;
   // a sheet from before it has no such column, and import leaves the tick alone.
   const inWalls = isDoorCat || isWindowCat;
   const HEADERS = hasSwingOp
@@ -6145,7 +6145,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         if (isWindowCat && iSillMode >= 0) {
           row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
         }
-        // Interior walls (312): absent column leaves the tick alone; a blank cell is the default, yes.
+        // Interior walls (313): absent column leaves the tick alone; a blank cell is the default, yes.
         if (inWalls && iInWalls >= 0) row.inPartition = bool(cols, iInWalls, true);
         return row;
       });

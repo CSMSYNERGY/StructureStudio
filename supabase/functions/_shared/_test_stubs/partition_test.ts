@@ -375,7 +375,7 @@ Deno.test("sizes and labels read the way a builder writes them", () => {
 
 // ── The builder's setup (ssInteriorWallCfg, outside the block; lifted from both twins) ─────────────
 // Each builder sets interior walls up on the tab (2026-10-17, no seed). get_config's interiorWalls:
-// an object = the tab; null = not set up (no wall offered, $0); ABSENT = a get_config from before 312
+// an object = the tab; null = not set up (no wall offered, $0); ABSENT = a get_config from before 313
 // (the 278 layout row, as before; the server reads it in exactly that case: the table missing).
 const liftFn = (src: string, name: string, file: string) => {
   const i = src.indexOf(`function ${name}(`), j = i < 0 ? -1 : src.indexOf("\n}\n", i);
@@ -403,7 +403,7 @@ Deno.test("the tab: per lineal ft or per sq ft; 'each' or a standard with no rat
   assertEquals(tab({ internalOnly: true }).internalOnly, true);
 });
 
-Deno.test("no interiorWalls key at all (before 312): the 278 row, as before; a non-wall method prices nothing", () => {
+Deno.test("no interiorWalls key at all (before 313): the 278 row, as before; a non-wall method prices nothing", () => {
   const legacy = iwCfg({ showPricing: true }, { rate: 35, method: "lineal_ft" });
   assertEquals([legacy.offered, legacy.studs["2x4"], legacy.method, legacy.source], [true, 35, "lineal_ft", "layout"]);
   assertEquals(iwCfg({ showPricing: true }, { rate: 400, method: "each" }).studs["2x4"], null);
