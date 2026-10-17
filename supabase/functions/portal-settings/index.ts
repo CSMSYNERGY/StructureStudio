@@ -595,6 +595,8 @@ const GATES: GateTable = {
   inventory_photo_upload_url: { area: "inventory", level: "edit" },
   save_inventory_photos:      { area: "inventory", level: "edit" },
   shop_settings:              { area: "inventory", level: "view" },
+  list_shop_requests:         { area: "inventory", level: "view" },
+  mark_shop_request:          { area: "inventory", level: "edit" },
   save_shop_settings:         { area: "inventory", level: "edit" },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
@@ -8233,6 +8235,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl,
       })),
     });
+  }
+
+  // Purchase requests from the shop's cart (migration 311). Newest first; handled ones stay
+  // visible for 30 days so a builder can see what they already dealt with.
+  if (action === "list_shop_requests") {
+    const since = new Date(Date.now() - 30 * 86400000).toISOString();
+    const { data, error } = await admin.from("shop_requests")
+      .select("id, status, contact_id, name, phone, email, street, city, state, zip, message, pay_in_full, items, total_cents, due_now_cents, notified_at, handled_at, created_at")
+      .eq("client_id", clientId).or(`status.eq.new,created_at.gte.${since}`)
+      .order("created_at", { ascending: false }).limit(50);
+    if (error) {
+      // Before migration 311 the table does not exist: an empty list, not a broken Inventory tab.
+      if (String(error.code) === "42P01" || String(error.code) === "PGRST205") return json({ ok: true, requests: [] });
+      return dbFail(req, clientId, "load your purchase requests", error);
+    }
+    return json({ ok: true, requests: data ?? [] });
+  }
+
+  if (action === "mark_shop_request") {
+    const id = String(payload.id ?? "").trim();
+    const handled = payload.handled !== false;
+    const { error, count } = await admin.from("shop_requests")
+      .update({ status: handled ? "handled" : "new", handled_at: handled ? new Date().toISOString() : null, handled_by: handled ? (userId ?? null) : null }, { count: "exact" })
+      .eq("client_id", clientId).eq("id", id);
+    if (error) return dbFail(req, clientId, "update that request", error);
+    if (!count) return json({ error: "Request not found." }, 404);
+    await audit("portal_mark_shop_request", 1, `id=${id} handled=${handled}`);
+    return json({ ok: true });
   }
 
   // Shop-wide settings.

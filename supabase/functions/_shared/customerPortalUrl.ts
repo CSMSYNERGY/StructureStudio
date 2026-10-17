@@ -33,6 +33,12 @@ function hostFor(req?: Request | null): string {
   return CANONICAL_HOST;
 }
 
+/** The builder's Inventory tab, for the Online Shop's purchase-request email (2026-10-17).
+ *  /portal/inventory on purpose, for the same two-host reason as portalOrderUrl below. */
+export function portalInventoryUrl(req?: Request | null): string {
+  return `https://${hostFor(req)}/portal/inventory`;
+}
+
 export function myQuotesUrl(clientId: string, req?: Request | null): string {
   return `https://${hostFor(req)}/my-quotes?client=${encodeURIComponent(clientId)}`;
 }
