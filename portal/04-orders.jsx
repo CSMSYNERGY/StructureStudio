@@ -4948,7 +4948,7 @@ function ShopSettingsPanel({ clientId, canEdit }) {
           : "Online card payments aren't set up for your account yet, so checkout will send you a purchase request instead of taking payment. Ask CSM Synergy to set up payments."}
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        {canEdit && <button type="button" disabled={saving} onClick={save} style={S.btn(ACCENT, "#FFF")}>{saving ? "Saving…" : "Save shop settings"}</button>}
+        {canEdit && <button type="button" disabled={saving} onClick={save} style={S.btn(ACCENT, "#FFF")}>{saving ? "Saving…" : "Save"}</button>}
         <a href={shopUrl} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>Preview ↗</a>
         <button type="button" onClick={() => copy("link", shopUrl)} style={S.btn("#F1F5F9", "#334155")}>{copied === "link" ? "Copied ✓" : "Copy link"}</button>
         <button type="button" onClick={() => copy("embed", embed)} style={S.btn("#F1F5F9", "#334155")}>{copied === "embed" ? "Copied ✓" : "Copy website embed code"}</button>

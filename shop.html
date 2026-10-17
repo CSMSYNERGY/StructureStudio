@@ -28,7 +28,7 @@ html, body { margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
 body.embed { background: transparent; }
 [hidden] { display: none !important; }
-a { color: var(--accent); }
+a { color: var(--accent-text, var(--accent)); }
 button { font: inherit; }
 .wrap { max-width: 1160px; margin: 0 auto; padding: 0 16px; }
 header.top { background: var(--header-bg); color: #FFF; }
@@ -56,10 +56,10 @@ header.top .tag { opacity: .85; font-size: 13px; }
 .ctitle { font-weight: 800; font-size: 16px; }
 .cmeta { color: var(--muted); font-size: 13px; }
 .cprice { margin-top: auto; padding-top: 8px; font-weight: 800; font-size: 18px; color: var(--ink); }
-.cprice.call { font-size: 14px; color: var(--accent); }
+.cprice.call { font-size: 14px; color: var(--accent-text, var(--accent)); }
 .empty { background: #FFF; border: 1px solid var(--line); border-radius: 14px; padding: 28px 18px; text-align: center; color: var(--muted); margin: 16px 0 28px; }
 /* Detail */
-.back { background: none; border: none; color: var(--accent); font-weight: 700; padding: 14px 0 8px; cursor: pointer; }
+.back { background: none; border: none; color: var(--accent-text, var(--accent)); font-weight: 700; padding: 14px 0 8px; cursor: pointer; }
 .detail { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; padding-bottom: 32px; align-items: start; }
 @media (max-width: 820px) { .detail { grid-template-columns: minmax(0, 1fr); } }
 .gal { background: #FFF; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
@@ -75,7 +75,7 @@ header.top .tag { opacity: .85; font-size: 13px; }
 .panel h2 { font-size: 22px; margin: 0 0 4px; }
 .panel h3 { font-size: 15px; margin: 0 0 10px; }
 .price { font-size: 26px; font-weight: 800; margin: 8px 0 4px; }
-.price.call { font-size: 18px; color: var(--accent); }
+.price.call { font-size: 18px; color: var(--accent-text, var(--accent)); }
 .specs { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 14px; margin: 10px 0 0; }
 .specs dt { color: var(--muted); } .specs dd { margin: 0; font-weight: 600; }
 .desc { white-space: pre-line; color: #334155; margin-top: 12px; font-size: 14px; }
@@ -310,7 +310,23 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     var root = document.documentElement.style;
     var accent = String(b.accentColor || "").trim();
     var first = (accent.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/i) || [])[0];
-    if (first && CSS_OK.test(first)) root.setProperty("--accent", first);
+    if (first && CSS_OK.test(first)) {
+      root.setProperty("--accent", first);
+      // A light brand colour (e.g. #75e6da) fails as a button with white text and as text on
+      // white. Pick dark text on light buttons, and a darkened shade wherever the accent is text.
+      var m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(first);
+      if (m) {
+        var h = m[1].length === 3 ? m[1].replace(/(.)/g, "$1$1") : m[1];
+        var rgb = [0, 2, 4].map(function (i) { return parseInt(h.substr(i, 2), 16); });
+        var lum = rgb.map(function (c) { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); });
+        var L = 0.2126 * lum[0] + 0.7152 * lum[1] + 0.0722 * lum[2];
+        if (L > 0.35) {
+          root.setProperty("--accent-fg", "#0F172A");
+          var k = 0.12 / L;   // scale towards a shade that reads on white (about 6:1)
+          root.setProperty("--accent-text", "rgb(" + rgb.map(function (c) { return Math.round(c * Math.min(1, Math.sqrt(k))); }).join(",") + ")");
+        }
+      }
+    }
     var hdr = String(b.headerBg || "").trim();
     if (hdr && CSS_OK.test(hdr)) root.setProperty("--header-bg", hdr);
     if (!EMBED) {
