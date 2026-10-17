@@ -230,7 +230,7 @@ Deno.serve(withErrorLog("shop-checkout", async (req: Request) => {
     const lines = items.map((i) => `• ${i.label}${i.lotName ? " (" + i.lotName + ")" : ""}: ${money(i.priceCents)}`
       + `${i.deliveryCents != null ? " + delivery " + money(i.deliveryCents) : ""}${i.taxCents != null ? " + tax " + money(i.taxCents) : ""} = ${money(i.totalCents)}`);
     const note = [
-      `Online Shop purchase request — nothing charged.`,
+      `Online Inventory purchase request — nothing charged.`,
       ...lines,
       `Total ${money(totalCents)}; ${payInFull ? "wants to pay in full" : "deposit due " + money(dueNowCents)}.`,
       `Deliver to: ${[address.street, address.city, address.state, address.zip].filter(Boolean).join(", ")}`,

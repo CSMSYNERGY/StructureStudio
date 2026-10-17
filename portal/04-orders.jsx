@@ -4854,7 +4854,11 @@ const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
 // Brittney Weis (Midwest Mini Barns' marketer) asked for this on the 2026-10-12 call in place of
 // a Shopify store, including the option NOT to show prices — so price is per building AND
 // shop-wide. Every write goes through portal-settings; nothing here touches a schedule or a sale.
-const SHOP_PUBLIC_ORIGIN = "https://app.structurestudiosuite.com";
+// The page and embed are served by whichever host the builder is on: beta previews beta, the app
+// previews the app. A hard-coded production host showed "page not found" from beta until a
+// promotion carried shop.html there (2026-10-17).
+const shopPublicOrigin = () => (/^https:\/\/(app|beta)\.structurestudiosuite\.com$/.test(window.location.origin)
+  ? window.location.origin : "https://app.structurestudiosuite.com");
 
 function ShopSettingsPanel({ clientId, canEdit }) {
   const [s, setS] = useState(null);
@@ -4879,10 +4883,10 @@ function ShopSettingsPanel({ clientId, canEdit }) {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_shop_settings", settings: s } });
     setSaving(false);
     if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "That didn't save.") }); return; }
-    setMsg({ ok: s.enabled ? "Saved. Your shop is live." : "Saved. Your shop is switched off." });
+    setMsg({ ok: s.enabled ? "Saved. Your Online Inventory is live." : "Saved. Your Online Inventory is switched off." });
   };
-  const shopUrl = `${SHOP_PUBLIC_ORIGIN}/shop?client=${encodeURIComponent(clientId)}`;
-  const embed = `<div data-ss-shop="${clientId}"></div>\n<script src="${SHOP_PUBLIC_ORIGIN}/shop-embed.js" async></script>`;
+  const shopUrl = `${shopPublicOrigin()}/shop?client=${encodeURIComponent(clientId)}`;
+  const embed = `<div data-ss-shop="${clientId}"></div>\n<script src="${shopPublicOrigin()}/shop-embed.js" async></script>`;
   const copy = async (what, text) => {
     try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(null), 1600); } catch (_e) { window.prompt("Copy this:", text); }
   };
@@ -4896,7 +4900,7 @@ function ShopSettingsPanel({ clientId, canEdit }) {
   );
   return (
     <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
-      {check("enabled", "Shop is live", "show buildings marked “List online” at your shop link")}
+      {check("enabled", "Online Inventory is live", "show buildings marked “List online” on your public page")}
       {check("hideAllPrices", "Hide all prices", "every building shows “Call for price” and an inquiry form instead of a price")}
       <div style={row}>
         <div style={{ flex: "1 1 240px" }}>
@@ -4945,8 +4949,8 @@ function ShopSettingsPanel({ clientId, canEdit }) {
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {canEdit && <button type="button" disabled={saving} onClick={save} style={S.btn(ACCENT, "#FFF")}>{saving ? "Saving…" : "Save shop settings"}</button>}
-        <a href={shopUrl} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>Preview shop ↗</a>
-        <button type="button" onClick={() => copy("link", shopUrl)} style={S.btn("#F1F5F9", "#334155")}>{copied === "link" ? "Copied ✓" : "Copy shop link"}</button>
+        <a href={shopUrl} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>Preview ↗</a>
+        <button type="button" onClick={() => copy("link", shopUrl)} style={S.btn("#F1F5F9", "#334155")}>{copied === "link" ? "Copied ✓" : "Copy link"}</button>
         <button type="button" onClick={() => copy("embed", embed)} style={S.btn("#F1F5F9", "#334155")}>{copied === "embed" ? "Copied ✓" : "Copy website embed code"}</button>
       </div>
       {msg && msg.ok && <div style={{ color: "#15803D", fontSize: 13, fontWeight: 600, marginTop: 10 }}>{msg.ok}</div>}
@@ -4978,7 +4982,7 @@ function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
   return (
     <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Shop purchase requests{open.length ? ` — ${open.length} new` : ""}</strong>
+        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Inventory purchase requests{open.length ? ` — ${open.length} new` : ""}</strong>
         <button type="button" onClick={() => setShowHandled((v) => !v)}
           style={{ marginLeft: "auto", background: "none", border: "none", color: "#92400E", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
           {showHandled ? "Hide handled" : "Show handled"}
@@ -5232,7 +5236,6 @@ function InventoryTable({
 }) {
   // The Online Shop's listing tools are inventory:edit (portal-settings GATES agrees).
   const canEditShop = isAdmin || !!(access && access.inventory === "edit");
-  const [shopOpen, setShopOpen] = useState(false);
   const [listingOpen, setListingOpen] = useState({});   // unit id -> listing editor open
   // A STATUS VIEW, deliberately (Carolyn 2026-08-08): "NO SCHEDULING EVER HAPPENS FROM THE
   // INVENTORY PAGE. It should only state the status." The build status follows the Build and
@@ -5456,7 +5459,7 @@ function InventoryTable({
             {meta.label}
           </span>
           {u.listed && (
-            <span title={u.showPriceOnline === false ? "Listed in your Online Shop (price hidden)" : "Listed in your Online Shop"}
+            <span title={u.showPriceOnline === false ? "Listed in your Online Inventory (price hidden)" : "Listed in your Online Inventory"}
               style={{ background: "#ECFDF5", color: "#047857", borderRadius: 14, padding: "3px 9px",
               fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4, whiteSpace: "nowrap" }}>
               ONLINE{(u.photos || []).length ? ` · ${(u.photos || []).length} 📷` : ""}
@@ -5490,12 +5493,11 @@ function InventoryTable({
         count={rows ? (anyFilterOn ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
-          <button type="button" aria-pressed={shopOpen} onClick={() => setShopOpen((v) => !v)}
-            style={S.btn(shopOpen ? "#1E293B" : "#F1F5F9", shopOpen ? "#FFF" : "#334155")}>🛒 Online Shop</button>
+          {/* Settings live under Settings (Carolyn 2026-10-17) — this is only a shortcut there. */}
+          <a href="/settings/online-inventory" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>🛒 Online Inventory settings</a>
           {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New building request</button>}
         </>} />
       <ShopRequestsCard clientId={clientId} canEdit={canEditShop} refreshKey={refreshKey} />
-      {shopOpen && <ShopSettingsPanel clientId={clientId} canEdit={canEditShop} />}
       <input value={query} onChange={(e) => setQuery(e.target.value)}
         placeholder="Search inventory — serial #, building, location, customer…"
         style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 11 }} />

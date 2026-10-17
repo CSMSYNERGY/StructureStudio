@@ -365,7 +365,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
         // interested in this 10×16" starting point.
         if (fromShop && (shopUnit || shopMessage)) {
           const noteBody = [
-            `Online Shop inquiry${shopUnit ? " about " + shopUnit.label : ""}.`,
+            `Online Inventory inquiry${shopUnit ? " about " + shopUnit.label : ""}.`,
             shopMessage ? `They wrote: "${shopMessage}"` : "",
             zip ? `Delivery zip: ${zip}` : "",
           ].filter(Boolean).join("\n");
@@ -482,7 +482,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
         ...(state ? { state } : {}),
         ...(zip ? { postalCode: zip } : {}),
         locationId,
-        source: fromShop ? "StructureStudio Online Shop" : "StructureStudio Designer",
+        source: fromShop ? "StructureStudio Online Inventory" : "StructureStudio Designer",
         tags: fromShop ? ["structurestudio-lead", "inventory-inquiry"] : ["structurestudio-lead"],
       }),
     });

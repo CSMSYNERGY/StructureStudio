@@ -852,6 +852,9 @@ const SETTINGS_TAB_AREA = {
   // those actions is gated settings_structures:edit server-side. Mirror that here or the
   // sub-tab shows up for someone the server will refuse.
   designer: "settings_structures",
+  // Online Inventory (migration 310): shop_settings / save_shop_settings are gated on the
+  // inventory area server-side, so the page follows it — no new area, no access.ts row.
+  "online-inventory": "inventory",
   options: "settings_options",
   colors: "settings_options",
   // The two tabs Colors was split into on 2026-09-11. Same catalog, same area — a split of
@@ -1644,6 +1647,11 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     ["options", "Options", "Add-on items and rates", null],
     ["colors", "Colors", "Paint, shingle, and metal palettes", null],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],
+    // ONLINE INVENTORY (2026-10-17). The public page of lot buildings (shop.html) and its embed.
+    // Carolyn: "Settings are ALWAYS under the settings tab" — it began life as a panel on the
+    // Inventory tab and moved here. Per-building listing (photos, show price) stays on Inventory,
+    // because that is editing a building, not configuring the feature.
+    ["online-inventory", "Online Inventory", "Your public page of lot buildings: switch it on, prices, deposit, tracking and the code for your website", null],
     // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
     // items of their own; they are top tabs inside Company now, along with Locations, Crews
     // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this
@@ -1725,6 +1733,10 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // settings_team holder had the entry added by the spread and taken straight back out —
     // rail showed My Profile alone, and Team was unreachable for the one person it was granted to.
     if (id === "company") return true;
+    // ONLINE INVENTORY needs inventory EDIT, not view. A sales rep reads the lot (inventory:view)
+    // but does not configure the public page, and Settings for a rep is Phone and My Profile only
+    // (tests/phone/ringHours_test.ts pins that).
+    if (id === "online-inventory") return access.inventory === "edit";
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;
   });
