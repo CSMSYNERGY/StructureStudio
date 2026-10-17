@@ -866,6 +866,8 @@ const SETTINGS_TAB_AREA = {
   ramps: "settings_options",
   cladding: "settings_options",
   interior: "settings_options",
+  // Interior walls (311): its own tab beside Interior items, same area — it was a row on that card.
+  "interior-walls": "settings_options",
   electrical: "settings_options",
   insulation: "settings_options",
   delivery: "settings_options",
@@ -1842,6 +1844,8 @@ function ssOptionTabs() {
     // the plan — it is what the walls are made of.
     ["cladding", "Cladding", "Which sidings you offer on each style, and how each is priced", "Exterior"],
     ["interior", "Interior items", "Lofts, workbenches, shelving — anything placed inside", "Interior"],
+    // Interior walls v2 (311): framing, price, coverings, and what may go in or on a wall.
+    ["interior-walls", "Interior walls", "Framing, price, coverings, and what can go in or on a wall", "Interior"],
     ["electrical", "Electrical", "Outlets, switches, lights and panels, and what each adds", "Interior"],
     ["insulation", "Insulation", "Insulation options and how they are priced", "Interior"],
     // SERVICES (Carolyn 2026-09-14, "because we are incorporating tax codes"): things the
