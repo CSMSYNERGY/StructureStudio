@@ -5086,6 +5086,55 @@ function InventoryListingEditor({ unit, canEdit, onChanged }) {
   };
   const makeCover = (p) => move(p.id, photos[0] && photos[0].id);
 
+  // ── AI background change (migration 312, FramedUp's recipe) ──
+  // One at a time: the wallet allows a single live hold per builder for this meter.
+  const [bg, setBg] = useState(null);           // { photo, scene, preset, running, err, jobId }
+  const [bgInfo, setBgInfo] = useState(null);   // { ready, priceCents, exempt, reason }
+  useEffect(() => {
+    if (!canEdit) return;
+    let live = true;
+    sb.functions.invoke("portal-settings", { body: { action: "photo_bg_info" } })
+      .then(({ data }) => { if (live && data && data.ok) setBgInfo(data); }).catch(() => {});
+    return () => { live = false; };
+  }, [canEdit]);
+  const BG_PRESETS = [
+    ["Green backyard", "a well-kept green suburban backyard lawn with a wooden privacy fence and mature trees"],
+    ["Gravel pad", "a level crushed-gravel pad in a tidy rural yard with a farmhouse and trees in the distance"],
+    ["Farm field", "the edge of an open farm field at golden hour with a clear sky"],
+    ["Wooded lot", "a clearing in a hardwood forest with dappled sunlight and fallen leaves"],
+    ["Snowy yard", "a snowy backyard on a bright winter day with evergreen trees"],
+    ["Plain studio", "a seamless plain light-grey photo studio backdrop with soft even lighting"],
+  ];
+  const bgPrice = bgInfo ? (bgInfo.exempt ? "free on your account" : (bgInfo.priceCents != null ? `$${(bgInfo.priceCents / 100).toFixed(2)} from your wallet` : "")) : "";
+  const runBg = async () => {
+    const scene = (bg.scene || "").trim();
+    if (!scene) { setBg((b) => ({ ...b, err: "Pick a background or describe one." })); return; }
+    const key = "bg" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    setBg((b) => ({ ...b, running: true, err: null }));
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "photo_bg_start", photoId: bg.photo.id, scene, idempotencyKey: key } });
+    if (error || !data || !data.jobId) {
+      const why = (data && data.error) || (error ? await fnError(error) : "That didn't start.");
+      setBg((b) => ({ ...b, running: false, err: why }));
+      return;
+    }
+    const jobId = data.jobId;
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "photo_bg_status", jobId } });
+      if (!st || st.status === "working") continue;
+      if (st.status === "done") {
+        // Refresh the photo list from the server, which knows where the new one sits.
+        const r = await savePhotos({});
+        setBg(null);
+        setMsg({ ok: r ? "New background added beside the original. Make it the cover with ★ if you like it." : "New background added." });
+        return;
+      }
+      setBg((b) => b && ({ ...b, running: false, err: st.error || "That change didn't work. You weren't charged." }));
+      return;
+    }
+    setBg((b) => b && ({ ...b, running: false, err: "Still working — check back in a minute." }));
+  };
+
   return (
     <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
       <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "#94A3B8", textTransform: "uppercase", marginBottom: 9 }}>
@@ -5116,6 +5165,7 @@ function InventoryListingEditor({ unit, canEdit, onChanged }) {
             {p.aiEdited && <span style={{ position: "absolute", left: 4, bottom: 4, background: "rgba(15,23,42,.75)", color: "#FFF", fontSize: 9.5, fontWeight: 700, borderRadius: 6, padding: "1px 6px" }}>AI background</span>}
             {canEdit && (
               <div style={{ position: "absolute", right: 3, top: 3, display: "flex", gap: 3 }}>
+                {bgInfo && <button type="button" title="Change the background (AI)" onClick={() => setBg({ photo: p, scene: "", preset: null, running: false, err: null })} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>✨</button>}
                 {i > 0 && <button type="button" title="Make cover photo" onClick={() => makeCover(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>★</button>}
                 <button type="button" title="Remove photo" onClick={() => remove(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>✕</button>
               </div>
@@ -5131,7 +5181,41 @@ function InventoryListingEditor({ unit, canEdit, onChanged }) {
         <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }}
           onChange={(e) => upload(e.target.files)} />
       </div>
-      {photos.length > 1 && canEdit && <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>Drag photos to reorder. The first one is the cover.</div>}
+      {photos.length > 1 && canEdit && <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>Drag photos to reorder. The first one is the cover.{bgInfo ? " ✨ changes a photo's background." : ""}</div>}
+      {bg && (
+        <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <img src={bg.photo.url} alt="" style={{ width: 140, height: 105, objectFit: "cover", borderRadius: 8 }} />
+            <div style={{ flex: "1 1 260px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6 }}>✨ Change the background{bgPrice ? <span style={{ fontWeight: 500, color: "#64748B" }}> — {bgPrice}</span> : null}</div>
+              {!bgInfo.ready ? (
+                <div style={{ fontSize: 13, color: "#B45309" }}>
+                  {bgInfo.reason === "not_configured" ? "Background changes aren't set up yet — CSM Synergy is finishing the setup." : "Background changes aren't switched on yet — CSM Synergy is finishing the setup."}
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                    {BG_PRESETS.map(([label, text]) => (
+                      <button key={label} type="button" disabled={bg.running} onClick={() => setBg((b) => ({ ...b, scene: text, preset: label, err: null }))}
+                        style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 14, padding: "4px 10px", cursor: "pointer",
+                          background: bg.preset === label ? "#1E293B" : "#F1F5F9", color: bg.preset === label ? "#FFF" : "#334155", border: "none" }}>{label}</button>
+                    ))}
+                  </div>
+                  <input value={bg.scene} disabled={bg.running} maxLength={400} onChange={(e) => setBg((b) => ({ ...b, scene: e.target.value, preset: null }))}
+                    placeholder="…or describe it: a gravel driveway beside a red barn on an overcast day"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 8 }} />
+                  <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>The building is kept exactly as it is; only the background changes. The new photo is added beside the original, which is never replaced. Takes about a minute.</div>
+                </>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {bgInfo.ready && <button type="button" disabled={bg.running} onClick={runBg} style={S.btn(ACCENT, "#FFF")}>{bg.running ? "Working… (about a minute)" : "Change background"}</button>}
+                <button type="button" disabled={bg.running} onClick={() => setBg(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+                {bg.err && <span style={{ color: "#B91C1C", fontSize: 13, fontWeight: 600 }}>{bg.err}</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {listed && photos.length === 0 && <div style={{ fontSize: 12, color: "#B45309", marginBottom: 8 }}>Add at least one photo — listings without photos get far fewer inquiries.</div>}
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         {canEdit && <button type="button" disabled={busy === "save"} onClick={saveListing} style={S.btn(ACCENT, "#FFF")}>{busy === "save" ? "Saving…" : "Save listing"}</button>}
