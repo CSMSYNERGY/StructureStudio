@@ -3694,7 +3694,7 @@ function Dashboard({ session }) {
                 purpose. Queueing a build lives on the Build Schedule; loads live on the
                 Delivery Schedule; a sale follows the customer's invoice. */}
             {!gateLocked && activeTab === "inventory" && (
-              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={mirrorAdmin}
+              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={mirrorAdmin} access={mirrorAccess}
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial, unitLifecycle: u.lifecycle })}

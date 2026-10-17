@@ -116,7 +116,8 @@ test("/admin is admin.html, never the app; the app's Admin page lives at /consol
 // ── 3. The designer, the customer page, the console and the assets are untouched ────────
 test("/ and /?client=… stay the public designer; /my-quotes and /admin stay theirs", () => {
   const cases = [["/", "/index.html"], ["/?client=acme-sheds", "/index.html"], ["/?client=acme-sheds&account=quotes", "/index.html"],
-    ["/my-quotes", "/my-quotes.html"], ["/my-quotes?client=acme-sheds", "/my-quotes.html"], ["/admin", "/admin.html"]];
+    ["/my-quotes", "/my-quotes.html"], ["/my-quotes?client=acme-sheds", "/my-quotes.html"], ["/admin", "/admin.html"],
+    ["/shop", "/shop.html"], ["/shop?client=acme-sheds&unit=x", "/shop.html"]];
   for (const [path, asset] of cases) {
     const r = resolveRequest(REDIRECTS, path);
     assert.deepEqual([r.kind, r.asset], ["rewrite", asset], path);
