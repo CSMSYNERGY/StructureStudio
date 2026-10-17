@@ -93,6 +93,22 @@ textarea.t { resize: vertical; min-height: 74px; }
 .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
 .result { margin-top: 10px; background: #F8FAFC; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px; }
 .foot { color: #94A3B8; font-size: 12px; text-align: center; padding: 6px 0 22px; }
+/* Cart (phase 3) */
+.cartbar { position: sticky; top: 0; z-index: 5; background: var(--accent); color: var(--accent-fg); border-radius: 0 0 12px 12px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; font-weight: 700; cursor: pointer; border: none; width: 100%; font-size: 15px; text-align: left; }
+.cartbar span.go { margin-left: auto; text-decoration: underline; }
+.btn.add { background: var(--ink); }
+.citem { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.citem:last-child { border-bottom: none; }
+.citem img { width: 84px; height: 63px; object-fit: cover; border-radius: 8px; background: #E2E8F0; flex: 0 0 auto; }
+.citem .info { flex: 1; min-width: 0; }
+.citem .lines { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.citem .lines div { display: flex; justify-content: space-between; gap: 8px; }
+.citem .lines div strong { color: var(--ink); }
+.rm { background: none; border: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0; text-decoration: underline; }
+.totals div { display: flex; justify-content: space-between; padding: 4px 0; font-size: 15px; }
+.totals .big { font-size: 18px; font-weight: 800; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 10px; }
+.problem { color: var(--err); font-size: 13px; font-weight: 600; margin-top: 4px; }
+label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; margin-top: 10px; cursor: pointer; }
 .center { padding: 60px 16px; text-align: center; color: var(--muted); }
 </style>
 </head>
@@ -105,6 +121,7 @@ textarea.t { resize: vertical; min-height: 74px; }
 </header>
 
 <main class="wrap">
+  <button type="button" class="cartbar" id="cartbar" hidden><span id="cartbarText"></span><span class="go">Review &amp; check out</span></button>
   <div id="screen-loading" class="center">Loading buildings…</div>
   <div id="screen-missing" class="center" hidden>This shop isn't available right now.</div>
 
@@ -141,6 +158,7 @@ textarea.t { resize: vertical; min-height: 74px; }
           <div class="price" id="uPrice"></div>
           <dl class="specs" id="uSpecs"></dl>
           <div class="desc" id="uDesc"></div>
+          <button type="button" class="btn add" id="addBtn" hidden>Add to cart</button>
         </div>
 
         <div class="panel" id="deliveryPanel">
@@ -178,6 +196,53 @@ textarea.t { resize: vertical; min-height: 74px; }
       </div>
     </div>
   </section>
+  <section id="screen-cart" hidden>
+    <button type="button" class="back" id="cartBack">← Keep shopping</button>
+    <div class="detail">
+      <div>
+        <div class="panel">
+          <h3>Your cart</h3>
+          <div id="cartItems"></div>
+          <div class="empty" id="cartEmpty" hidden>Your cart is empty.</div>
+        </div>
+      </div>
+      <div>
+        <form class="panel" id="coForm" novalidate>
+          <h3>Delivery address</h3>
+          <label class="f" for="cStreet">Street</label>
+          <input class="t" id="cStreet" autocomplete="street-address" maxlength="200"/>
+          <div class="row3">
+            <div><label class="f" for="cCity">City</label><input class="t" id="cCity" autocomplete="address-level2" maxlength="100"/></div>
+            <div><label class="f" for="cState">State</label><input class="t" id="cState" maxlength="20" autocomplete="address-level1"/></div>
+            <div><label class="f" for="cZip">Zip</label><input class="t" id="cZip" inputmode="numeric" maxlength="10" autocomplete="postal-code"/></div>
+          </div>
+          <label class="chk" id="payFullRow" hidden><input type="checkbox" id="cPayFull"/> <span>I'd like to pay in full</span></label>
+          <div class="totals" id="totals" style="margin-top:12px"></div>
+          <h3 style="margin-top:16px">Your details</h3>
+          <label class="f" for="cName">Name</label>
+          <input class="t" id="cName" autocomplete="name" maxlength="200"/>
+          <div class="row2">
+            <div><label class="f" for="cPhone">Phone</label><input class="t" id="cPhone" type="tel" autocomplete="tel" maxlength="40"/></div>
+            <div><label class="f" for="cEmail">Email</label><input class="t" id="cEmail" type="email" autocomplete="email" maxlength="200"/></div>
+          </div>
+          <label class="f" for="cMsg">Anything we should know? (optional)</label>
+          <textarea class="t" id="cMsg" maxlength="2000" placeholder="Gate width, slope, when you'd like it delivered…"></textarea>
+          <button type="submit" class="btn" id="coBtn">Send purchase request</button>
+          <div class="note" id="coNote"></div>
+          <div class="msg" id="coMsg" hidden></div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section id="screen-done" hidden>
+    <div class="panel" style="max-width:620px;margin:28px auto">
+      <h2>Request sent — thank you!</h2>
+      <p id="doneText" style="color:#334155"></p>
+      <div class="totals" id="doneTotals"></div>
+      <button type="button" class="btn ghost" id="doneBack">Back to all buildings</button>
+    </div>
+  </section>
   <div class="foot" id="foot"></div>
 </main>
 
@@ -201,7 +266,7 @@ textarea.t { resize: vertical; min-height: 74px; }
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function show(name) {
-    ["loading", "missing", "list", "unit"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
+    ["loading", "missing", "list", "unit", "cart", "done"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
     postHeight();
   }
 
@@ -349,7 +414,9 @@ textarea.t { resize: vertical; min-height: 74px; }
   function go(id) {
     try {
       var url = new URL(location.href);
-      if (id) url.searchParams.set("unit", id); else url.searchParams.delete("unit");
+      url.searchParams.delete("view");
+      if (id === "cart") { url.searchParams.delete("unit"); url.searchParams.set("view", "cart"); }
+      else if (id) url.searchParams.set("unit", id); else url.searchParams.delete("unit");
       history.pushState({}, "", url.toString());
     } catch (e) {}
     route();
@@ -358,10 +425,12 @@ textarea.t { resize: vertical; min-height: 74px; }
   }
   window.addEventListener("popstate", route);
   function route() {
-    var id = null;
-    try { id = new URLSearchParams(location.search).get("unit"); } catch (e) {}
+    var id = null, view = null;
+    try { var sp = new URLSearchParams(location.search); id = sp.get("unit"); view = sp.get("view"); } catch (e) {}
+    if (view === "cart") { current = null; renderCart(); return; }
     var u = id && units.filter(function (x) { return x.id === id; })[0];
     if (u) renderUnit(u); else { current = null; renderList(); show("list"); }
+    renderCartBar();
   }
   $("backBtn").addEventListener("click", function () { go(null); });
 
@@ -407,6 +476,9 @@ textarea.t { resize: vertical; min-height: 74px; }
     $("delResult").hidden = true;
     $("askTitle").textContent = u.sold ? "This one's sold — ask about a similar building" : (p ? "Ask about this building" : "Ask for the price");
     $("askMsg").hidden = true; $("askBtn").disabled = false;
+    var buyable = !u.sold && u.priceCents != null;
+    $("addBtn").hidden = !buyable;
+    $("addBtn").textContent = inCart(u.id) ? "In your cart — check out" : "Add to cart";
     show("unit");
     track("ss_unit_view", { client: clientId, serial: u.serial, size: u.size, style: u.style, price: u.priceCents != null ? u.priceCents / 100 : null });
   }
@@ -468,6 +540,173 @@ textarea.t { resize: vertical; min-height: 74px; }
       say("ok", "Thanks! " + biz + " will be in touch about #" + u.serial + " soon.");
       track("ss_inquiry", { client: clientId, serial: u.serial, size: u.size, style: u.style });
     }).catch(function () { $("askBtn").disabled = false; say("err", "That didn't send. Check your connection and try again."); });
+  });
+
+  // ── Cart (phase 3): unit ids in localStorage per builder. Prices are never stored or trusted
+  // here — shop-checkout prices the cart from the ids every time. ──
+  var CART_KEY = "ss_shop_cart_" + clientId;
+  var CART_MAX = 6;
+  var memCart = [];
+  function cartIds() {
+    try {
+      var v = JSON.parse(localStorage.getItem(CART_KEY) || "[]");
+      return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string"; }).slice(0, CART_MAX) : [];
+    } catch (e) { return memCart.slice(); }
+  }
+  function saveCart(ids) {
+    memCart = ids.slice(0, CART_MAX);
+    try { localStorage.setItem(CART_KEY, JSON.stringify(memCart)); } catch (e) {}
+    renderCartBar();
+  }
+  function inCart(id) { return cartIds().indexOf(id) !== -1; }
+  function unitById(id) { return units.filter(function (x) { return x.id === id; })[0]; }
+  function buyableIds() {
+    return cartIds().filter(function (id) { var u = unitById(id); return u && !u.sold && u.priceCents != null; });
+  }
+  function renderCartBar() {
+    var n = buyableIds().length;
+    $("cartbar").hidden = n === 0 || !$("screen-cart").hidden || !$("screen-done").hidden;
+    $("cartbarText").textContent = "🛒 " + n + " building" + (n === 1 ? "" : "s") + " in your cart";
+    postHeight();
+  }
+  $("cartbar").addEventListener("click", function () { go("cart"); });
+  $("cartBack").addEventListener("click", function () { go(null); });
+  $("doneBack").addEventListener("click", function () { go(null); });
+  $("addBtn").addEventListener("click", function () {
+    var u = current; if (!u) return;
+    if (!inCart(u.id)) {
+      var ids = cartIds();
+      if (ids.length >= CART_MAX) { alertMsg("Your cart can hold up to " + CART_MAX + " buildings."); return; }
+      ids.push(u.id); saveCart(ids);
+      track("ss_add_to_cart", { client: clientId, serial: u.serial, size: u.size, style: u.style, price: u.priceCents / 100 });
+    }
+    go("cart");
+  });
+  function alertMsg(t) { var m = $("askMsg"); m.className = "msg err"; m.textContent = t; m.hidden = false; postHeight(); }
+
+  var lastPriced = null, priceSeq = 0, priceTimer = null;
+  function addr() { return { street: $("cStreet").value.trim(), city: $("cCity").value.trim(), state: $("cState").value.trim(), zip: $("cZip").value.trim() }; }
+  function cents(c) { return c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function line(label, value, cls) { var d = el("div", cls || ""); d.appendChild(el("span", null, label)); d.appendChild(el("strong", null, value)); return d; }
+  function depositLabel(p) {
+    if (p.payInFull) return "Due to buy (paid in full)";
+    if (p.depositMode === "percent") return "Deposit (" + Number(p.depositValue) + "%) to hold it";
+    return "Deposit to hold it";
+  }
+
+  function renderCart() {
+    // Only ids the shop still lists; a building that was unlisted drops out here.
+    saveCart(cartIds().filter(function (id) { return !!unitById(id); }));
+    var s = (shop && shop.shop) || {};
+    var biz = (shop && shop.branding && shop.branding.companyName) || "We";
+    $("payFullRow").hidden = !(s.depositMode !== "full" && s.allowPayInFull !== false);
+    $("coNote").textContent = "Nothing is charged now. " + biz + " will contact you to confirm, then send your estimate.";
+    $("coMsg").hidden = true; $("coBtn").disabled = false;
+    show("cart");
+    $("cartbar").hidden = true;
+    track("ss_begin_checkout", { client: clientId, buildings: buyableIds().length });
+    reprice();
+  }
+
+  function paintCart(p) {
+    var box = $("cartItems"); box.textContent = "";
+    var ids = buyableIds();
+    $("cartEmpty").hidden = ids.length > 0;
+    var byId = {}, probs = {};
+    ((p && p.items) || []).forEach(function (i) { byId[i.unitId] = i; });
+    ((p && p.problems) || []).forEach(function (x) { probs[x.unitId] = x.reason; });
+    ids.forEach(function (id) {
+      var u = unitById(id); if (!u) return;
+      var it = byId[id];
+      var row = el("div", "citem");
+      var img = el("img"); img.alt = ""; if (u.photos && u.photos[0]) img.src = u.photos[0]; row.appendChild(img);
+      var info = el("div", "info");
+      info.appendChild(el("div", "ctitle", unitName(u)));
+      info.appendChild(el("div", "cmeta", "Stock #" + u.serial + (u.locationName ? " · " + u.locationName + " lot" : "")));
+      var lines = el("div", "lines");
+      lines.appendChild(line("Price", cents(it ? it.priceCents : u.priceCents)));
+      if (it) {
+        lines.appendChild(line("Delivery", it.deliveryCents != null ? (it.deliveryCents === 0 ? "Free" : cents(it.deliveryCents)) : "—"));
+        if (it.deliveryNote) lines.appendChild(el("div", "cmeta", it.deliveryNote));
+        lines.appendChild(line(it.taxLabel ? it.taxLabel + " (est.)" : "Sales tax", it.taxCents != null ? cents(it.taxCents) : "On your estimate"));
+      }
+      info.appendChild(lines);
+      if (probs[id]) info.appendChild(el("div", "problem", probs[id] === "sold" ? "Just sold — please remove it." : "No longer available online — please remove it."));
+      var rm = el("button", "rm", "Remove"); rm.type = "button";
+      rm.onclick = function () {
+        saveCart(cartIds().filter(function (x) { return x !== id; }));
+        if (!buyableIds().length) { go(null); return; }
+        reprice();
+      };
+      info.appendChild(rm);
+      row.appendChild(info);
+      box.appendChild(row);
+    });
+    var t = $("totals"); t.textContent = "";
+    if (p && p.items && p.items.length) {
+      t.appendChild(line("Total (estimated)", cents(p.totalCents), "big"));
+      if (p.dueNowCents !== p.totalCents || p.payInFull) t.appendChild(line(depositLabel(p), cents(p.dueNowCents)));
+    }
+    postHeight();
+  }
+
+  function reprice() {
+    var ids = buyableIds();
+    if (!ids.length) { paintCart(null); return; }
+    var seq = ++priceSeq;
+    paintCart(lastPriced);
+    fetch(SUPABASE_URL + "/functions/v1/shop-checkout?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ action: "price", clientId: clientId, unitIds: ids, address: addr(), payInFull: $("cPayFull").checked })
+    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (d) {
+      if (seq !== priceSeq) return;
+      if (!d || d.error) {
+        var m = $("coMsg"); m.className = "msg err"; m.textContent = (d && d.error) || "We couldn't price your cart just now."; m.hidden = false; postHeight();
+        return;
+      }
+      lastPriced = d; paintCart(d);
+    }).catch(function () {});
+  }
+  ["cStreet", "cCity", "cState", "cZip"].forEach(function (id) {
+    $(id).addEventListener("input", function () { clearTimeout(priceTimer); priceTimer = setTimeout(reprice, 700); });
+  });
+  $("cPayFull").addEventListener("change", reprice);
+
+  $("coForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var m = $("coMsg");
+    function say(cls, t) { m.className = "msg " + cls; m.textContent = t; m.hidden = false; postHeight(); }
+    var a = addr();
+    if (!a.city || !a.state || !/^\d{5}/.test(a.zip)) return say("err", "Please enter the delivery city, state and 5-digit zip.");
+    var name = $("cName").value.trim(), phone = $("cPhone").value.trim(), email = $("cEmail").value.trim();
+    if (!name) return say("err", "Please enter your name.");
+    if (phone.replace(/\D/g, "").length < 10) return say("err", "Please enter a 10-digit phone number.");
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("err", "That email doesn't look right.");
+    var ids = buyableIds();
+    if (!ids.length) return say("err", "Your cart is empty.");
+    $("coBtn").disabled = true; say("ok", "Sending…");
+    fetch(SUPABASE_URL + "/functions/v1/shop-checkout?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ action: "request", clientId: clientId, unitIds: ids, address: a, payInFull: $("cPayFull").checked,
+        name: name, phone: phone, email: email, message: $("cMsg").value.trim() })
+    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (d) {
+      if (!d || !d.requestId) {
+        $("coBtn").disabled = false;
+        if (d && d.items) { lastPriced = d; paintCart(d); }
+        return say("err", (d && d.error) || "That didn't send. Please try again.");
+      }
+      var biz = (shop && shop.branding && shop.branding.companyName) || "We";
+      track("ss_reserve", { client: clientId, buildings: d.items.length, value: d.totalCents / 100, deposit: d.dueNowCents / 100 });
+      saveCart([]);
+      $("doneText").textContent = biz + " has your request for " + d.items.map(function (i) { return i.label; }).join(", ")
+        + ". Nothing has been charged — they'll contact you to confirm and send your estimate.";
+      var t = $("doneTotals"); t.textContent = "";
+      t.appendChild(line("Total (estimated)", cents(d.totalCents), "big"));
+      if (d.dueNowCents !== d.totalCents || d.payInFull) t.appendChild(line(depositLabel(d), cents(d.dueNowCents)));
+      show("done");
+      $("cartbar").hidden = true;
+      try { window.scrollTo(0, 0); } catch (err) {}
+    }).catch(function () { $("coBtn").disabled = false; say("err", "That didn't send. Check your connection and try again."); });
   });
 
   load();

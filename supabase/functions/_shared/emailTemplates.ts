@@ -1243,6 +1243,60 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
   };
 }
 
+// ── Online Shop purchase request (2026-10-17) ──────────────────────────────────────────────
+// To the builder's owners/admins when a shopper checks out a cart and online payment is not on.
+// Nothing was charged; the builder follows up. Read by the builder, so their name heads it.
+export interface ShopRequestEmailInput {
+  businessName: string;
+  customerName: string;
+  phone: string;
+  email?: string | null;
+  deliverTo?: string | null;
+  message?: string | null;
+  items: { label: string; totalCents: number | null; note?: string | null }[];
+  totalCents: number | null;
+  dueNowCents: number | null;
+  payInFull: boolean;
+  reviewUrl: string;
+}
+
+export function shopRequestEmail(input: ShopRequestEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const who = oneLine(input.customerName) || "A shopper";
+  const cents = (c: number | null) => (c == null ? "" : formatMoney(c / 100));
+  const n = input.items.length;
+  const leadText = `${who} wants to buy ${n === 1 ? "a building" : n + " buildings"} from your Online Shop. Nothing has been charged — reach out to confirm, then send the estimate from your Inventory tab.`;
+  const rows = [detailRow("Customer", esc(who)), detailRow("Phone", esc(oneLine(input.phone)))];
+  if (input.email) rows.push(detailRow("Email", esc(oneLine(input.email))));
+  if (input.deliverTo) rows.push(detailRow("Deliver to", esc(oneLine(input.deliverTo))));
+  for (const it of input.items) {
+    rows.push(detailRow(esc(oneLine(it.label)), esc([cents(it.totalCents), oneLine(it.note ?? "")].filter(Boolean).join(" · ")) || "—"));
+  }
+  if (input.totalCents != null) rows.push(detailRow("Total (est.)", esc(cents(input.totalCents))));
+  if (input.dueNowCents != null) rows.push(detailRow(input.payInFull ? "They chose to pay in full" : "Deposit due", esc(cents(input.dueNowCents))));
+  const msg = oneLine(input.message ?? "");
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(leadText)}</p>
+            ${msg ? `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><strong>They wrote:</strong> ${esc(msg)}</p>` : ""}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${ctaButton(input.reviewUrl, "Open your Inventory")}`;
+  const text: string[] = [name, "", leadText, ""];
+  if (msg) text.push(`They wrote: ${msg}`, "");
+  text.push(`Customer: ${who}`, `Phone: ${oneLine(input.phone)}`);
+  if (input.email) text.push(`Email: ${oneLine(input.email)}`);
+  if (input.deliverTo) text.push(`Deliver to: ${oneLine(input.deliverTo)}`);
+  for (const it of input.items) text.push(`${oneLine(it.label)}: ${[cents(it.totalCents), oneLine(it.note ?? "")].filter(Boolean).join(" · ")}`);
+  if (input.totalCents != null) text.push(`Total (est.): ${cents(input.totalCents)}`);
+  if (input.dueNowCents != null) text.push(`${input.payInFull ? "Pay in full" : "Deposit due"}: ${cents(input.dueNowCents)}`);
+  text.push("", `Open your Inventory: ${input.reviewUrl}`);
+  return {
+    subject: `Online Shop: ${who} wants to buy ${n === 1 ? input.items[0]?.label || "a building" : n + " buildings"}`,
+    html: htmlShell({ businessName: name, preheader: leadText, bodyHtml }),
+    text: text.join("\n"),
+  };
+}
+
 /** The made-up customer and document the wording screen's Preview shows. Everything else in a
  *  preview is the builder's own: their name, logo, phone, website, terms and style photo. */
 export const PREVIEW_SAMPLE = {

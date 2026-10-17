@@ -4955,6 +4955,73 @@ function ShopSettingsPanel({ clientId, canEdit }) {
   );
 }
 
+// Purchase requests from the shop's cart (migration 311). A shopper checked out without paying
+// (online payment is phase 4): the builder calls them, then sends the estimate from the row below.
+function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
+  const [rows, setRows] = useState(null);
+  const [showHandled, setShowHandled] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async () => {
+    const { data } = await sb.functions.invoke("portal-settings", { body: { action: "list_shop_requests" } });
+    setRows((data && data.requests) || []);
+  }, [clientId]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+  if (!rows || rows.length === 0) return null;
+  const open = rows.filter((r) => r.status === "new");
+  const list = showHandled ? rows : open;
+  const money = (c) => (c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const mark = async (r, handled) => {
+    setBusy(r.id);
+    await sb.functions.invoke("portal-settings", { body: { action: "mark_shop_request", id: r.id, handled } });
+    setBusy(null); load();
+  };
+  return (
+    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Shop purchase requests{open.length ? ` — ${open.length} new` : ""}</strong>
+        <button type="button" onClick={() => setShowHandled((v) => !v)}
+          style={{ marginLeft: "auto", background: "none", border: "none", color: "#92400E", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+          {showHandled ? "Hide handled" : "Show handled"}
+        </button>
+      </div>
+      {list.length === 0 && <div style={{ fontSize: 13, color: "#92400E" }}>Nothing new. Handled requests stay here for 30 days.</div>}
+      {list.map((r) => (
+        <div key={r.id} style={{ background: "#FFF", border: "1px solid #FDE68A", borderRadius: 10, padding: "10px 12px", marginTop: 8, opacity: r.status === "handled" ? 0.6 : 1 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "baseline" }}>
+            <strong>{r.name}</strong>
+            <a href={"tel:" + r.phone} style={{ color: ACCENT, fontWeight: 700 }}>{r.phone}</a>
+            {r.email && <a href={"mailto:" + r.email} style={{ color: ACCENT }}>{r.email}</a>}
+            <span style={{ color: "#64748B", fontSize: 12 }}>{fmtDate(r.created_at)}</span>
+            {canEdit && (
+              <button type="button" disabled={busy === r.id} onClick={() => mark(r, r.status !== "handled")}
+                style={{ ...S.btn(r.status === "handled" ? "#F1F5F9" : ACCENT, r.status === "handled" ? "#334155" : "#FFF"), marginLeft: "auto", padding: "5px 11px", fontSize: 12 }}>
+                {r.status === "handled" ? "Reopen" : "Mark handled"}
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#475569", marginTop: 4 }}>
+            Deliver to {[r.street, r.city, r.state, r.zip].filter(Boolean).join(", ")}
+          </div>
+          {(r.items || []).map((it) => (
+            <div key={it.unitId} style={{ fontSize: 13, marginTop: 4 }}>
+              <strong>{it.label}</strong>{it.lotName ? <span style={{ color: "#94A3B8" }}> · {it.lotName}</span> : null}
+              {" — "}{money(it.priceCents)}
+              {it.deliveryCents != null ? <> + delivery {money(it.deliveryCents)}</> : null}
+              {it.taxCents != null ? <> + tax {money(it.taxCents)}</> : null}
+              {" = "}<strong>{money(it.totalCents)}</strong>
+            </div>
+          ))}
+          <div style={{ fontSize: 13, marginTop: 6 }}>
+            Total <strong>{money(r.total_cents)}</strong> · {r.pay_in_full ? "wants to pay in full" : <>deposit <strong>{money(r.due_now_cents)}</strong></>}
+            <span style={{ color: "#94A3B8" }}> · nothing charged</span>
+          </div>
+          {r.message && <div style={{ fontSize: 13, color: "#334155", marginTop: 4, fontStyle: "italic" }}>“{r.message}”</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function InventoryListingEditor({ unit, canEdit, onChanged }) {
   const [listed, setListed] = useState(!!unit.listed);
   const [showPrice, setShowPrice] = useState(unit.showPriceOnline !== false);
@@ -5343,6 +5410,7 @@ function InventoryTable({
             style={S.btn(shopOpen ? "#1E293B" : "#F1F5F9", shopOpen ? "#FFF" : "#334155")}>🛒 Online Shop</button>
           {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New building request</button>}
         </>} />
+      <ShopRequestsCard clientId={clientId} canEdit={canEditShop} refreshKey={refreshKey} />
       {shopOpen && <ShopSettingsPanel clientId={clientId} canEdit={canEditShop} />}
       <input value={query} onChange={(e) => setQuery(e.target.value)}
         placeholder="Search inventory — serial #, building, location, customer…"
