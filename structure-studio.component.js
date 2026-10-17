@@ -38382,7 +38382,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (k === "delivery") return !!(C.delivery) && C.delivery.taxable !== true;
               // A partition wall's row reads the Interior walls tab's flag (get_config interiorWalls,
               // sparse taxable:false), else the Partition Wall item's, and a door or window in one its
-              // catalog row's: the submit-estimate reads for those lines (278, 311).
+              // catalog row's: the submit-estimate reads for those lines (278, 312).
               const pk = /^partition:([^:]+)(?::open:(.+))?$/.exec(k);
               if (pk) {
                 if (!pk[2]) {

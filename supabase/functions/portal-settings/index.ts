@@ -351,7 +351,7 @@ const GATES: GateTable = {
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
   save_electrical_items:          { area: "settings_options", level: "edit" },
-  // Interior walls (311): the Interior walls tab's two saves.
+  // Interior walls (312): the Interior walls tab's two saves.
   save_interior_walls:            { area: "settings_options", level: "edit" },
   save_interior_wall_coverings:   { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
@@ -2650,7 +2650,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // whole catalog read fails on the unknown column.
       // in_door (289): a window's "Can be used inside a door" tick. The same applies: 289 is applied
       // BEFORE this function is deployed, or every portal's catalog read fails.
-      // in_partition (311): "Allowed in interior walls". Same rule: 311 is applied first.
+      // in_partition (312): "Allowed in interior walls". Same rule: 312 is applied first.
       admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
@@ -2669,8 +2669,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
       // is simply one offering no site work yet.
       admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
-      // Interior walls (311): the tab's settings row (null until first saved or seeded from the 278
-      // partition price) and the builder's covering list. 311 is applied BEFORE this deploy.
+      // Interior walls (312): the tab's settings row (null until first saved or seeded from the 278
+      // partition price) and the builder's covering list. 312 is applied BEFORE this deploy.
       admin.from("interior_wall_settings").select("standard_stud, pricing_method, rate_2x4, rate_2x6, standard_height, allow_rafters, allow_rough_openings, taxable, internal_only").eq("client_id", clientId).maybeSingle(),
       admin.from("interior_wall_coverings").select("id, name, pricing_method, rate, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order").order("name"),
       // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
@@ -2724,7 +2724,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
       foundation: foundationRes.data ?? [],
-      // Interior walls (311). Null settings = a tenant who has never saved the tab; the card falls
+      // Interior walls (312). Null settings = a tenant who has never saved the tab; the card falls
       // back to the table's defaults.
       interiorWalls: iwSettingsRes.data ?? null,
       interiorWallCoverings: iwCoveringsRes.data ?? [],
@@ -3230,10 +3230,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
-      // An interior wall (278's partitionWall) is priced on its own tab since 311: Settings → Options →
+      // An interior wall (278's partitionWall) is priced on its own tab since 312: Settings → Options →
       // Interior walls (save_interior_walls), which keeps this row in step for the designer until slice
       // 2 reads interiorWalls. This action never writes it. A card that only sends the row back unchanged
-      // (production's Interior items card from before 311) is passed over quietly; a change is refused
+      // (production's Interior items card from before 312) is passed over quietly; a change is refused
       // in words that say where the price lives now.
       if (itemKey === "partitionWall") {
         const ex = exByKey.get(itemKey);
@@ -6409,7 +6409,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         sort_order: Number(r?.sortOrder) || 0,
         updated_at: new Date().toISOString(),
       };
-      // Allowed on interior walls (311), presence-guarded: a card that never sends it (production's,
+      // Allowed on interior walls (312), presence-guarded: a card that never sends it (production's,
       // or the Interior walls tab's own flag save, which writes the column directly) leaves the tick
       // alone on an update, and a new row takes the column's default, true.
       if (r && Object.prototype.hasOwnProperty.call(r, "interiorWallOk") && r.interiorWallOk !== undefined) {
@@ -6528,7 +6528,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
-  // ── Interior walls (311): Settings → Options → Interior walls ──────────────────────────────
+  // ── Interior walls (312): Settings → Options → Interior walls ──────────────────────────────
   // One row per tenant, upserted whole, plus the two tick lists the tab shows ("Allowed in interior
   // walls" on doors and windows, "Allowed on interior walls" on electrical items), which are written
   // column-only so the tab never has to resend either catalog.
@@ -6631,7 +6631,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
-  // The builder's own list of wall coverings (311): save_electrical_items' shape. Upsert by id (a
+  // The builder's own list of wall coverings (312): save_electrical_items' shape. Upsert by id (a
   // rename is an update), a name clash is a 409 in words, and a row the editor did not send back is
   // deleted: it is the builder's own list, and a removed row is expected to be gone.
   if (action === "save_interior_wall_coverings") {
@@ -7033,7 +7033,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     } else if (has("inDoor")) {
       rec.in_door = row?.inDoor === true;
     }
-    // Allowed in interior walls (311): doors and windows, presence-guarded the same way, so a sheet
+    // Allowed in interior walls (312): doors and windows, presence-guarded the same way, so a sheet
     // without the column or an older portal leaves the builder's tick alone. The column defaults TRUE,
     // so only an explicit false takes an item out of the interior-wall pickers. A ramp or vent is never
     // written: nothing reads it for them.

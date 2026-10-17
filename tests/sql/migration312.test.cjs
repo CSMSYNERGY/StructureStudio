@@ -1,7 +1,7 @@
-// Execute migration 311 (Interior walls, slice 1) for real in PGlite (Postgres compiled to WASM, in
+// Execute migration 312 (Interior walls, slice 1) for real in PGlite (Postgres compiled to WASM, in
 // memory) on top of the tables it touches or reads, cut to their live columns, with get_fixtures
 // created from 289's own statement saved with CRLF line endings (the live body has them) and
-// get_config cut to the two blocks 311 splices (electricalItems and the start of colors, as
+// get_config cut to the two blocks 312 splices (electricalItems and the start of colors, as
 // pg_get_functiondef printed them live on 2026-10-17). Then check what the file promises:
 //   * interior_wall_settings and interior_wall_coverings exist, RLS on, owner read only, no anon grant;
 //   * fixture_items.in_partition and electrical_items.interior_wall_ok default TRUE;
@@ -22,14 +22,14 @@
 //
 // Run (from the repo root):
 //   npm install --prefix tests/sql        once (@electric-sql/pglite only)
-//   node tests/sql/migration311.test.cjs  exit 0 = ALL CHECKS PASSED
+//   node tests/sql/migration312.test.cjs  exit 0 = ALL CHECKS PASSED
 // MIG_FILE=<path> applies another copy of the migration (e.g. a deliberately broken one).
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/311_interior_walls.sql"), "utf8").replace(/\r/g, "");
+const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/312_interior_walls.sql"), "utf8").replace(/\r/g, "");
 
 // get_fixtures as it is live: 289's own create statement (the live prosrc md5 on 2026-10-17 was
 // 289's c23b2e457c56312b84866937ad982fac once \r is removed), stored WITH CRLF, as live.
@@ -215,20 +215,20 @@ const ROLLBACK = () => {
   const t = MIG();
   const i = t.indexOf("--   begin;\n--   do $rb$");
   const j = t.indexOf("--   commit;", i);
-  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 311's header moved; re-point the test");
+  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 312's header moved; re-point the test");
   return t.slice(i, j + "--   commit;".length).split("\n").map((l) => l.replace(/^--   ?/, "")).join("\n")
     // There is no ledger in PGlite.
-    .replace("delete from supabase_migrations.schema_migrations where version = '311';", "");
+    .replace("delete from supabase_migrations.schema_migrations where version = '312';", "");
 };
 
 (async () => {
-  console.log("migration 311: applies on the live shape");
+  console.log("migration 312: applies on the live shape");
   {
     const db = await fresh();
     const before = {};
     for (const c of TENANTS) before[c] = { cfg: JSON.stringify(await cfgOf(db, c)), fix: JSON.stringify(await fixOf(db, c)) };
     const { err, record } = await apply(db);
-    ok(err === null, "311 applied cleanly, assertions included", err);
+    ok(err === null, "312 applied cleanly, assertions included", err);
     ok(record && record.tables_ready === true && Number(record.tenants) === 4 && Number(record.settings_rows) === 2
       && Number(record.walls_offered) === 2 && Number(record.fixtures_not_in_walls) === 0 && Number(record.electrical_not_on_walls) === 0,
       "THE RECORD reads true, 4, 2, 2, 0, 0", JSON.stringify(record));
@@ -320,10 +320,10 @@ const ROLLBACK = () => {
     for (const c of TENANTS) ok(without(await cfgOf(db, c)) === before[c].cfg && !("interiorWalls" in (await cfgOf(db, c))), `${c}: get_config is back to what it was`);
     ok((await one(db, "select to_regclass('public.interior_wall_settings') r")).r === null, "...and the tables are gone");
     const again = await apply(db);
-    ok(again.err === null, "311 applies again after a rollback", again.err);
+    ok(again.err === null, "312 applies again after a rollback", again.err);
   }
 
-  console.log("migration 311: a drifted body aborts the whole apply (mutants)");
+  console.log("migration 312: a drifted body aborts the whole apply (mutants)");
   {
     const colors = COLORS_BLOCK.replace("    'colors', coalesce((", "    'colors', (select coalesce((").replace("'[]'::jsonb),\n    'showPricing'", "'[]'::jsonb)),\n    'showPricing'");
     ok(colors !== COLORS_BLOCK, "(the mutant formed: get_config without 181's colors anchor)");

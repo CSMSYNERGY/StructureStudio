@@ -28,7 +28,7 @@
 //      wall to wall — and does not offer it in the 3D palette. A "Look inside" shot.
 //   J. QUOTE: Get Quote sends itemSummary.partitions with the length, the height and the door by its
 //      catalog id, and floorPlanItems carries the wall with no `wall`.
-//   K. THE PORTAL (311): Interior items no longer lists the wall and its Save never sends one; the
+//   K. THE PORTAL (312): Interior items no longer lists the wall and its Save never sends one; the
 //      Interior walls tab shows the seeded 2x4 rate, sends the framing, the door/window and electrical
 //      ticks and the ordered coverings on Save, and refuses a blank standard rate before sending.
 //      Every catalog read asks for the unpriced items (withUnpriced).
@@ -797,7 +797,7 @@ async function portalRun(browser, ok, shots, allErrors) {
   page.on("pageerror", (e) => allErrors.push("K: " + e.message));
   const saves = [];
   const catalogs = [];
-  // As portal-settings' catalog answers after 311: the partition wall is still an item (priced, so it
+  // As portal-settings' catalog answers after 312: the partition wall is still an item (priced, so it
   // is listed), but the Interior items card leaves it out; the Interior walls tab reads its own row,
   // seeded from the 278 price ($35 per foot, 2x4), one covering, a door, a window and two electrical items.
   const lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }, { item_key: "partitionWall", pricing_method: "lineal_ft", rate: 35, image_url: null }];
