@@ -39,6 +39,12 @@
 //   N. TO THE RAFTERS under the style's gable: the 3D wall's top follows the roof's underside along
 //      its whole length (no gap, no poke-through) and, under a loft on the plate, stops at the loft's
 //      floor framing; its per-sq-ft Details row is the true face area.
+//   O. DOORS AND WINDOWS IN THE PARTITION'S OWN THICKNESS (2026-10-17): a saved design with a diagonal
+//      2x4 wall (a plank door, a Classic trim door and a window) and a straight 2x6 wall (a roll-up, a
+//      double plank door and a window). In 3D every opening's door or window (leaf, hardware, sash,
+//      glass) lies within the wall's thickness and is centred on its line, and its casing within the
+//      thickness plus the casing's own reach; shots from both faces and from above.
+//      SS_PARTITIONS_ONLY_O=1 runs only this (and L).
 //   L. zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -232,6 +238,7 @@ const run = async () => {
       await page.close();
     }
     if (process.env.SS_PARTITIONS_ONLY_A) return;
+    if (process.env.SS_PARTITIONS_ONLY_O) { await openingsRun(ctx, ok, shots, allErrors); ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | ")); return; }
 
     // ── B-J. The portal's designer, a blank 12 x 32 ──────────────────────────────────────────
     const page = await ctx.newPage();
@@ -457,6 +464,9 @@ const run = async () => {
     // ── M, N. Interior walls v2 on a rep's designer ─────────────────────────────────────────────
     await v2Run(ctx, ok, shots, allErrors);
 
+    // ── O. Doors and windows centred in a partition's own thickness ────────────────────────────
+    await openingsRun(ctx, ok, shots, allErrors);
+
     // ── K. The portal's Interior items card and Interior walls tab ───────────────────────────────────────────────────
     await portalRun(browser, ok, shots, allErrors);
 
@@ -632,6 +642,133 @@ async function v2Run(ctx, ok, shots, allErrors) {
     await page.screenshot({ path: join(shots, "N-3d-rafters.png") });
   } finally {
     allErrors.push(...errors.map((e) => "M-N: " + e));
+    await page.close();
+  }
+}
+
+// ── O ───────────────────────────────────────────────────────────────────────────────────────
+// A saved design, so the walls and their openings are exact: a diagonal 2x4 wall from (1, 10) to
+// (11, 20) holding a plank door, a Classic trim door and a window, and a straight 2x6 wall across at
+// y = 26 holding a roll-up, a double plank door and a window. Thickness: 3.5 in and 5.5 in, bare.
+const FIXTURES_O = {
+  ...FIXTURES,
+  items: [...FIXTURES.items,
+    fx({ id: "d-classic", name: "Classic Door", category: "door", price: 450, widthIn: 36, heightIn: 80, planLabel: "CL", doorStyle: "classic", opLeft: true, opRight: true, opDefault: "left" }),
+    fx({ id: "d-roll", name: "Roll-up 4x6", category: "door", price: 700, widthIn: 48, heightIn: 72, planLabel: "RU", doorStyle: "rollup", opSlideUp: true, opDefault: "slideup" }),
+  ],
+};
+const O_DOOR = (id, fxId, name, centerFt, extra = {}) => ({ id, kind: "door", fixtureItemId: fxId, name, planLabel: name.slice(0, 4).toUpperCase(), widthIn: 36, heightIn: 80, swing: "out", operation: "left", price: 300, centerFt, ...extra });
+const O_WIN = (id, centerFt) => ({ id, kind: "window", fixtureItemId: "w-23", name: "2x3 Window", planLabel: "W23", widthIn: 24, heightIn: 36, sillIn: 42, price: 120, centerFt });
+const O_WALLS = [
+  { id: 301, type: "partitionWall", wall: null, x1Ft: 1, y1Ft: 10, x2Ft: 11, y2Ft: 20, heightMode: "plate", heightIn: null, stud: "2x4", covers: { a: null, b: null },
+    openings: [O_DOOR(1, "d-int", "Interior Door", 3), O_DOOR(2, "d-classic", "Classic Door", 7.25, { operation: "right" }), O_WIN(3, 11.25)] },
+  { id: 302, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 26, x2Ft: 12, y2Ft: 26, heightMode: "plate", heightIn: null, stud: "2x6", covers: { a: null, b: null },
+    openings: [O_DOOR(1, "d-roll", "Roll-up 4x6", 2.75, { widthIn: 48, heightIn: 72, operation: "slideup" }), O_DOOR(2, "d-int", "Interior Door", 6.75, { operation: "double" }), O_WIN(3, 10.25)] },
+];
+const O_T = { 301: 3.5 / 12, 302: 5.5 / 12 };
+async function openingsRun(ctx, ok, shots, allErrors) {
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await stubSupabase(page, { config: CONFIG_IW, fixtures: FIXTURES_O, rpc: { load_design: [designRow(O_WALLS)] } });
+  const url = `${BASE}/__harness_partitions_o.html`;
+  await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html", body: embeddedPage() }));
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => typeof window.StructureStudio === "function", null, { timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 60000 });
+    await settle(page, 1500);
+    const editBtn = page.getByRole("button", { name: /Edit in 3D/ });
+    if (!(await editBtn.count()) || !(await editBtn.first().isVisible().catch(() => false))) {
+      const show = page.getByRole("button", { name: /Show 3D/ });
+      if (await show.count()) { await show.first().click(); await settle(page, 800); }
+    }
+    await editBtn.first().click();
+    await page.waitForFunction(() => {
+      const E = window.__ss3dEngine;
+      return !!(E && E.model && E.model.interiorGroup && E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition).length >= 2);
+    }, null, { timeout: 90000 });
+    await settle(page, 1500);
+    // Every mesh's box corners, as offsets across each wall's line (its normal) from the wall's centre
+    // line: per opening group (the door or window) and per trim piece, beside the bare wall's own.
+    const walls = O_WALLS.map((w) => {
+      const len = Math.hypot(w.x2Ft - w.x1Ft, w.y2Ft - w.y1Ft), ux = (w.x2Ft - w.x1Ft) / len, uy = (w.y2Ft - w.y1Ft) / len;
+      return { id: w.id, O: [w.x1Ft - W / 2, w.y1Ft - L / 2], U: [ux, uy], N: [-uy, ux], len };
+    });
+    const got = await page.evaluate((walls) => {
+      const E = window.__ss3dEngine;
+      E.scene.updateMatrixWorld(true);
+      const V = E.camera.position.constructor;
+      const groups = E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition);
+      return walls.map((w) => {
+        // Which group is this wall: the one whose wall meshes' centres lie on its line.
+        const span = (objs) => {
+          let lo = Infinity, hi = -Infinity, alo = Infinity, ahi = -Infinity;
+          objs.forEach((o) => {
+            if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+            const b = o.geometry.boundingBox;
+            for (let k = 0; k < 8; k++) {
+              const v = new V(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(o.matrixWorld);
+              const n = (v.x - w.O[0]) * w.N[0] + (v.z - w.O[1]) * w.N[1], a = (v.x - w.O[0]) * w.U[0] + (v.z - w.O[1]) * w.U[1];
+              lo = Math.min(lo, n); hi = Math.max(hi, n); alo = Math.min(alo, a); ahi = Math.max(ahi, a);
+            }
+          });
+          return { lo, hi, alo, ahi };
+        };
+        const meshesOf = (g) => { const out = []; g.traverse((o) => { if (o.isMesh) out.push(o); }); return out; };
+        const g = groups.find((gr) => { const s = span(meshesOf(gr)); return Math.abs(s.lo + s.hi) < 0.6 && s.ahi - s.alo > w.len - 0.6 && s.ahi - s.alo < w.len + 0.8; });
+        if (!g) return { id: w.id, found: false };
+        const ops = g.children.filter((c) => c.userData && c.userData.ssPartitionOpening).map((c) => ({ kind: c.userData.ssPartitionOpening, oid: c.userData.oid, meshes: meshesOf(c).length, ...span(meshesOf(c)) }));
+        const trim = meshesOf(g).filter((o) => o.userData && o.userData.ssPartitionTrim);
+        return { id: w.id, found: true, ops, trim: trim.length ? span(trim) : null };
+      });
+    }, walls);
+    for (const w of got) {
+      const T = O_T[w.id], name = w.id === 301 ? "the diagonal 2x4 wall" : "the straight 2x6 wall";
+      ok(`O1 ${name}: three openings each built in a group of their own`, w.found && w.ops.length === 3 && w.ops.every((o) => o.meshes > 0), JSON.stringify(w.ops && w.ops.map((o) => [o.kind, o.oid, o.meshes])));
+      for (const o of (w.ops || [])) {
+        ok(`O2 ${name}: opening ${o.oid} (${o.kind}) lies within the wall's ${(T * 12).toFixed(1)} in thickness, centred on its line`,
+          o.lo >= -T / 2 - 0.005 && o.hi <= T / 2 + 0.005 && Math.abs((o.lo + o.hi) / 2) <= 0.01,
+          `across ${o.lo.toFixed(3)}..${o.hi.toFixed(3)} ft vs ±${(T / 2).toFixed(3)}`);
+      }
+      ok(`O3 ${name}: the casings, sill and stool stand the same on both faces, a casing's reach past them`,
+        !!w.trim && Math.abs(w.trim.lo + w.trim.hi) <= 0.01 && w.trim.hi <= T / 2 + 0.065 && w.trim.hi >= T / 2,
+        w.trim ? `${w.trim.lo.toFixed(3)}..${w.trim.hi.toFixed(3)}` : "none");
+    }
+    // Shots: each wall from side a, from side b and from above, close on its openings.
+    const inside = page.getByRole("button", { name: /Look inside/ });
+    if (await inside.count()) { await inside.first().click(); await settle(page, 1500); }
+    const aim = async (file, target, cam) => {
+      await page.evaluate(({ target, cam }) => {
+        const E = window.__ss3dEngine;
+        E.controls.minDistance = 0.5;   // the viewer keeps an orbit outside the building; these are close-ups
+        E.camera.fov = 62; E.camera.updateProjectionMatrix();
+        E.controls.target.set(...target);
+        E.camera.position.set(...cam);
+        E.controls.update();
+        E.render();
+      }, { target, cam });
+      await settle(page, 700);
+      await page.screenshot({ path: join(shots, file) });
+    };
+    for (const w of walls) {
+      const tag = w.id === 301 ? "diag-2x4" : "straight-2x6";
+      const wall = O_WALLS.find((x) => x.id === w.id);
+      for (const o of wall.openings) {
+        const c = [w.O[0] + w.U[0] * o.centerFt, w.O[1] + w.U[1] * o.centerFt];
+        const what = `${tag}-${o.kind}${o.id}`;
+        const hw = o.widthIn / 24, at = (k, n) => [c[0] + w.U[0] * k + w.N[0] * n, c[1] + w.U[1] * k + w.N[1] * n];
+        const t = at(0, 0), ya = at(1.5, 5.5), yb = at(-1.5, -5.5), ty = o.kind === "window" ? 5 : 3.4;
+        await aim(`O-${what}-side-a.png`, [t[0], ty, t[1]], [ya[0], ty + 1.6, ya[1]]);
+        await aim(`O-${what}-side-b.png`, [t[0], ty, t[1]], [yb[0], ty + 1.6, yb[1]]);
+        // Down the opening at a slant from beyond one end, from each face: the far jamb's return shows
+        // how deep the leaf (or sash) sits behind each face of the wall.
+        const ja = at(-hw + 0.2, 0), ca = at(hw + 3.2, 1.6), cb = at(hw + 3.2, -1.6);
+        await aim(`O-${what}-jamb-a.png`, [ja[0], ty, ja[1]], [ca[0], ty + 0.8, ca[1]]);
+        await aim(`O-${what}-jamb-b.png`, [ja[0], ty, ja[1]], [cb[0], ty + 0.8, cb[1]]);
+      }
+    }
+  } finally {
+    allErrors.push(...errors.map((e) => "O: " + e));
     await page.close();
   }
 }

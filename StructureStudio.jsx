@@ -4076,10 +4076,12 @@ function ssInteriorWallCfg(C, layoutRate) {
   };
 }
 // The stud size a wall is PRICED at: its own when the builder offers that size, else the standard
-// (_shared/partitionPricing.ts partitionStud, the same rule).
+// (_shared/partitionPricing.ts partitionStud, the same rule). "Offers" is offeredStuds, not a rate in
+// hand: get_config names an offered size with its rate nulled for a tenant that hides prices, and the
+// server, which reads the real rates, would still price that wall at its own size.
 function ssInteriorWallStud(p, iw) {
   const s = ssPartitionStud(p, iw.standardStud);
-  return iw.studs[s] != null ? s : iw.standardStud;
+  return iw.offeredStuds.indexOf(s) >= 0 ? s : iw.standardStud;
 }
 // The wall as it is priced: v2's shape, and a wall "to the rafters" at stud wall height when the
 // builder does not offer that (the server's allowRafters rule).
@@ -11970,7 +11972,7 @@ function buildShed3DModel(THREE, p) {
       // lies flat on the door face on all four walls with no second code path. The sign corrects
       // the end walls, whose local +X runs against the wall's own direction; a box is symmetric,
       // so -th and pi-th are the same rotation and that one flip is the whole correction.
-      const turn = (wf.U[0] !== 0) ? 1 : -1;
+      const turn = wf.turn != null ? wf.turn : (wf.U[0] !== 0) ? 1 : -1;
       const brace = (x0, yy0, x1, yy1) => {
         const dx = x1 - x0, dy = yy1 - yy0, len = Math.hypot(dx, dy);
         if (len < 0.25) return;
@@ -12079,7 +12081,7 @@ function buildShed3DModel(THREE, p) {
     // Braces and the diamond sit at 0.125 (face 0.15), a hair BEHIND the frame's face at 0.16: a brace
     // runs on under the stile or rail it meets, and the frame then covers its end instead of z-fighting
     // it. A brace is plankDoorLeaf's: one wallBox turned in the wall plane (see the sign note there).
-    const turn = (wf.U[0] !== 0) ? 1 : -1;
+    const turn = wf.turn != null ? wf.turn : (wf.U[0] !== 0) ? 1 : -1;
     const bt = Math.min(F * 0.8, fw * 0.14);
     const brace = (x0, yy0, x1, yy1, part) => {
       const dx = x1 - x0, dy = yy1 - yy0, len = Math.hypot(dx, dy);
@@ -16296,13 +16298,19 @@ function buildShed3DModel(THREE, p) {
   // and windows the way buildOneWall splits a wall: a full-height piece between openings, the wall
   // under a window and a header over each one. The door is plankDoorLeaf (the roll-up for a slide-up or
   // roll-up catalog door) and the window d3WindowFill (at this wall's thickness), on a frame laid along
-  // the partition, so they are the same door and window the outside walls draw. NO itemId on the
+  // the partition, so they are the same door and window the outside walls draw, each centred in the
+  // partition's own thickness (see THE DOOR OR WINDOW IN ITS OWN THICKNESS below). NO itemId on the
   // group: the 3D editor cannot pick it up, which is the v1 rule — it is placed and moved on the plan.
   const buildPartition3D = (it0, itemsNow) => {
     const it = ssPartitionNormalize(it0), pg = ssPartitionGeom(it);
     const pcfg = itemTypes[it.type] || {};
     const Hp = ssPartitionHeightFt(it, Hplate), PT = ssPartitionThicknessFt(it, pcfg.standardStud);
     const wf = { O: [pg.x1 - bldgW / 2, pg.y1 - bldgH / 2], U: [pg.ux, pg.uy], N: [pg.nx, pg.ny] };
+    // wallBox turns a box so its own +x runs along U, except an axis-aligned U, where an outside wall's
+    // rule turns it: +x then runs AGAINST a partition drawn north or west. The plank and trim leaves
+    // turn a brace by this sign (wf.turn), so a Z brace rises from the hinge side whichever way it was drawn.
+    const lx = wf.U[0] === 0 ? [0, -1] : wf.U[1] ? wf.U : [1, 0];
+    wf.turn = lx[0] * wf.U[0] + lx[1] * wf.U[1] < 0 ? -1 : 1;
     const g = new THREE.Group();
     g.userData = { partition: true };
     // Every material here is the partition's OWN. rebuildInterior disposes the interior group's
@@ -16356,6 +16364,32 @@ function buildShed3DModel(THREE, p) {
       mesh.position.set(wf.O[0], 0, wf.O[1]);
       return mesh;
     };
+    // THE DOOR OR WINDOW IN ITS OWN THICKNESS (2026-10-17). The leaves and the window are the outside
+    // walls' builders, whose depth ladder runs from the slab's back (-0.08 ft) out to the latch lever on
+    // the outside face (0.19 ft) for a wall T thick. Laid on the partition's line as they are, a door stood
+    // proud of a stud-deep wall's side a and sank into side b. So each opening's door or window is built
+    // in a group of its own (userData.ssPartitionOpening, which tests/harness/partitions.mjs measures),
+    // and that group slid along N until the whole assembly, measured, is centred on the wall's line: inside
+    // the thickness on both faces, at any angle. The casing, and a window's sill board and stool, are
+    // drawn here on both faces, centred (userData.ssPartitionTrim): an interior wall has a room each side.
+    const V3 = new THREE.Vector3();
+    const seat = (dg) => {
+      dg.updateMatrixWorld(true);
+      let lo = Infinity, hi = -Infinity;
+      dg.traverse((m) => {
+        if (!m.isMesh) return;
+        if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+        const b = m.geometry.boundingBox;
+        for (let k = 0; k < 8; k++) {
+          V3.set(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(m.matrixWorld);
+          const n = (V3.x - wf.O[0]) * wf.N[0] + (V3.z - wf.O[1]) * wf.N[1];
+          lo = Math.min(lo, n); hi = Math.max(hi, n);
+        }
+      });
+      if (isFinite(lo)) { const c = (lo + hi) / 2; dg.position.set(-wf.N[0] * c, 0, -wf.N[1] * c); }
+      g.add(dg);
+    };
+    const trimOn = (m) => { m.userData.ssPartitionTrim = true; g.add(m); };
     const { solid, holes } = ssPartitionPieces(it);
     solid.forEach(([a0, a1]) => g.add(piece(wm, a0, a1, 0)));
     holes.forEach(({ o, a0, a1 }) => {
@@ -16365,10 +16399,21 @@ function buildShed3DModel(THREE, p) {
       const y0 = Math.max(0, Math.min(sp[0] / 12, top - 0.5));
       if (y0 > 0.01) g.add(wallBox(wm, wf, a0, a1, 0, y0, 0, PT));
       if (roofLine || Hp - top > 0.01) g.add(piece(wm, a0, a1, top));
-      g.add(wallBox(pTrim, wf, a0 - f, a0, y0, top + f, 0, cd));
-      g.add(wallBox(pTrim, wf, a1, a1 + f, y0, top + f, 0, cd));
-      g.add(wallBox(pTrim, wf, a0 - f, a1 + f, top, top + f, 0, cd));
-      if (o.kind === "window") { d3WindowFill(g, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f, undefined, PT); return; }
+      trimOn(wallBox(pTrim, wf, a0 - f, a0, y0, top + f, 0, cd));
+      trimOn(wallBox(pTrim, wf, a1, a1 + f, y0, top + f, 0, cd));
+      trimOn(wallBox(pTrim, wf, a0 - f, a1 + f, top, top + f, 0, cd));
+      const dg = new THREE.Group();
+      dg.userData = { ssPartitionOpening: o.kind === "window" ? "window" : "door", oid: o.id };
+      if (o.kind === "window") {
+        // The sill board under the casing and a stool on BOTH faces, where an outside window has its
+        // nose on the outside only; then the sash, glass and grilles (d3WindowFill's inset mode draws
+        // exactly those) at this wall's thickness.
+        trimOn(wallBox(pTrim, wf, a0 - f, a1 + f, y0 - f, y0, 0, cd));
+        trimOn(wallBox(pTrim, wf, a0 - f - 0.03, a1 + f + 0.03, y0 - 0.06, y0 + 0.02, 0, PT + 0.12));
+        d3WindowFill(dg, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f, true, PT);
+        seat(dg);
+        return;
+      }
       const look = fixtureDoorStyle({ fixtureItemId: o.fixtureItemId });
       const doorMat = mat(D3_COLORS.door), ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
       const y1d = top - 0.05, field = look === "auto" ? "plank" : look;
@@ -16383,16 +16428,18 @@ function buildShed3DModel(THREE, p) {
         const legs = o.operation === "double"
           ? [[a0 + 0.05, m - 0.03, "a0", false], [m + 0.03, a1 - 0.05, "a1", true]]
           : [[a0 + 0.05, a1 - 0.05, o.operation === "right" ? "a1" : "a0", true]];
-        legs.forEach(([la0, la1, hg, lt]) => trimDoorLeaf(g, wf, doorMat, pTrim, ironMat, la0, la1, ty0, y1d, hg, lt, look, null));
-        trimDoorSurround(g, wf, { a0, a1, y0, y1: top }, pTrim, 0, false);
+        legs.forEach(([la0, la1, hg, lt]) => trimDoorLeaf(dg, wf, doorMat, pTrim, ironMat, la0, la1, ty0, y1d, hg, lt, look, null));
+        trimDoorSurround(dg, wf, { a0, a1, y0, y1: top }, pTrim, 0, false);
+        seat(dg);
         return;
       }
-      if (look === "rollup" || o.operation === "slideup") rollUpCurtain(g, wf, doorMat, doorMat, a0 + 0.05, a1 - 0.05, 0.05, y1d);
+      if (look === "rollup" || o.operation === "slideup") rollUpCurtain(dg, wf, doorMat, doorMat, a0 + 0.05, a1 - 0.05, 0.05, y1d);
       else if (o.operation === "double") {
         const m = (a0 + a1) / 2;
-        plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, a0 + 0.05, m - 0.03, 0.05, y1d, "a0", false, field);
-        plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, m + 0.03, a1 - 0.05, 0.05, y1d, "a1", true, field);
-      } else plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, a0 + 0.05, a1 - 0.05, 0.05, y1d, o.operation === "right" ? "a1" : "a0", true, field);
+        plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, a0 + 0.05, m - 0.03, 0.05, y1d, "a0", false, field);
+        plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, m + 0.03, a1 - 0.05, 0.05, y1d, "a1", true, field);
+      } else plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, a0 + 0.05, a1 - 0.05, 0.05, y1d, o.operation === "right" ? "a1" : "a0", true, field);
+      seat(dg);
     });
     g.traverse((o) => { if (o.isMesh && o.material === trimMat) o.material = pTrim; });
     interiorGroup.add(g);
@@ -38331,11 +38378,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (k.indexOf("foundation:") === 0) { const o = resolveFoundation(C, k.slice(11)); return !!o && o.taxable === false; }
               // Delivery is taxed only when Settings → Options → Delivery says so (ss_tax_delivery).
               if (k === "delivery") return !!(C.delivery) && C.delivery.taxable !== true;
-              // A partition wall's row reads the Partition Wall item's flag, and a door or window in one
-              // its catalog row's: the two submit-estimate reads for those lines (278).
+              // A partition wall's row reads the Interior walls tab's flag (get_config interiorWalls,
+              // sparse taxable:false), else the Partition Wall item's, and a door or window in one its
+              // catalog row's: the submit-estimate reads for those lines (278, 311).
               const pk = /^partition:([^:]+)(?::open:(.+))?$/.exec(k);
               if (pk) {
-                if (!pk[2]) { const pli = ((C && C.layoutItems) || {})[SS_PARTITION_KEY]; return !!pli && pli.taxable === false; }
+                if (!pk[2]) {
+                  const iwc = C && C.interiorWalls;
+                  if (iwc && typeof iwc === "object" && !Array.isArray(iwc)) return iwc.taxable === false;
+                  const pli = ((C && C.layoutItems) || {})[SS_PARTITION_KEY]; return !!pli && pli.taxable === false;
+                }
                 const pw = items.find((i) => ssIsPartition(i) && String(i.id) === pk[1]);
                 const po = pw && (pw.openings || []).find((o) => String(o.id) === pk[2]);
                 const f = po && (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && String(x.id) === String(po.fixtureItemId));
