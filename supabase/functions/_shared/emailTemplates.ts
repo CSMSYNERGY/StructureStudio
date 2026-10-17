@@ -1265,7 +1265,7 @@ export function shopRequestEmail(input: ShopRequestEmailInput): EmailContent {
   const who = oneLine(input.customerName) || "A shopper";
   const cents = (c: number | null) => (c == null ? "" : formatMoney(c / 100));
   const n = input.items.length;
-  const leadText = `${who} wants to buy ${n === 1 ? "a building" : n + " buildings"} from your Online Shop. Nothing has been charged — reach out to confirm, then send the estimate from your Inventory tab.`;
+  const leadText = `${who} wants to buy ${n === 1 ? "a building" : n + " buildings"} from your Online Inventory. Nothing has been charged — reach out to confirm, then send the estimate from your Inventory tab.`;
   const rows = [detailRow("Customer", esc(who)), detailRow("Phone", esc(oneLine(input.phone)))];
   if (input.email) rows.push(detailRow("Email", esc(oneLine(input.email))));
   if (input.deliverTo) rows.push(detailRow("Deliver to", esc(oneLine(input.deliverTo))));
@@ -1291,7 +1291,7 @@ export function shopRequestEmail(input: ShopRequestEmailInput): EmailContent {
   if (input.dueNowCents != null) text.push(`${input.payInFull ? "Pay in full" : "Deposit due"}: ${cents(input.dueNowCents)}`);
   text.push("", `Open your Inventory: ${input.reviewUrl}`);
   return {
-    subject: `Online Shop: ${who} wants to buy ${n === 1 ? input.items[0]?.label || "a building" : n + " buildings"}`,
+    subject: `Online Inventory: ${who} wants to buy ${n === 1 ? input.items[0]?.label || "a building" : n + " buildings"}`,
     html: htmlShell({ businessName: name, preheader: leadText, bodyHtml }),
     text: text.join("\n"),
   };

@@ -5129,6 +5129,12 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {/* `advanced` is the Advanced mode switch (06-3d.jsx AdvancedModeCard), null where it must not show. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} view3d={view3d} canBill={canBill} advanced={advanced} />}
+      {sub === "online-inventory" && (
+        <div style={S.card}>
+          <CardHead title="Online Inventory" />
+          <ShopSettingsPanel clientId={clientId} canEdit={isAdmin || !access || access.inventory === "edit"} />
+        </div>
+      )}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}
