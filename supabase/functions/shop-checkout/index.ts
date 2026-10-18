@@ -551,7 +551,7 @@ Deno.serve(withErrorLog("shop-checkout", async (req: Request) => {
   const email = str(body?.email, 200);
   const message = str(body?.message, 2000);
   if (!name) return json({ error: "Please enter your name." }, 400);
-  if (phone.replace(/\D/g, "").length < 10) return json({ error: "Please enter a 10-digit phone number." }, 400);
+  { const d = phone.replace(/\D/g, ""); if (!(d.length === 10 || (d.length === 11 && d.startsWith("1")))) return json({ error: "Please enter a 10-digit US phone number." }, 400); }
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "That email doesn't look right." }, 400);
   if (!haveAddress) return json({ error: "Please enter the delivery city, state and zip." }, 400);
 

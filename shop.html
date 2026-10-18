@@ -386,6 +386,8 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     if (cents == null) return null;
     return "$" + Math.round(cents / 100).toLocaleString("en-US");
   }
+  // A US number: 10 digits, or 11 starting with 1 (the code sender and the CRM both read it that way).
+  function usPhoneOk(p) { var d = String(p || "").replace(/\D/g, ""); return d.length === 10 || (d.length === 11 && d.charAt(0) === "1"); }
   function titleCase(s) { return String(s || "").replace(/\b([a-z])/g, function (m) { return m.toUpperCase(); }); }
   function unitName(u) { return u.title || [u.size, titleCase(u.style)].filter(Boolean).join(" ") || ("Building #" + u.serial); }
 
@@ -628,7 +630,7 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     function say(cls, t) { m.className = "msg " + cls; m.textContent = t; m.hidden = false; postHeight(); }
     var name = $("aName").value.trim(), phone = $("aPhone").value.trim();
     if (!name) return say("err", "Please enter your name.");
-    if (phone.replace(/\D/g, "").length < 10) return say("err", "Please enter a 10-digit phone number.");
+    if (!usPhoneOk(phone)) return say("err", "Please enter a 10-digit US phone number (check for an extra digit).");
     var email = $("aEmail").value.trim();
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("err", "That email doesn't look right.");
     $("askBtn").disabled = true;
@@ -788,7 +790,7 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     if (!a.city || !a.state || !/^\d{5}/.test(a.zip)) return say("err", "Please enter the delivery city, state and 5-digit zip.");
     var name = $("cName").value.trim(), phone = $("cPhone").value.trim(), email = $("cEmail").value.trim();
     if (!name) return say("err", "Please enter your name.");
-    if (phone.replace(/\D/g, "").length < 10) return say("err", "Please enter a 10-digit phone number.");
+    if (!usPhoneOk(phone)) return say("err", "Please enter a 10-digit US phone number (check for an extra digit).");
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return say("err", "That email doesn't look right.");
     var ids = buyableIds();
     if (!ids.length) return say("err", "Your cart is empty.");
@@ -847,7 +849,7 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
   }
   $("sendCodeBtn").addEventListener("click", function () {
     var phone = $("cPhone").value.trim();
-    if (phone.replace(/\D/g, "").length < 10) { payMsg("err", "Enter your 10-digit phone number above first."); return; }
+    if (!usPhoneOk(phone)) { payMsg("err", "Enter a 10-digit US phone number above first (check for an extra digit)."); return; }
     $("sendCodeBtn").disabled = true; payMsg("ok", "Sending…");
     callAuth({ action: "request_code", clientId: clientId, channel: "sms", phone: phone, name: $("cName").value.trim() }).then(function (r) {
       $("sendCodeBtn").disabled = false;
