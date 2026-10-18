@@ -393,6 +393,9 @@ const GATES: GateTable = {
   // The serial counter is shared by Inventory and Orders but is configured from a Settings
   // card; branding is where that card lives, and it is an owner/admin-shaped decision.
   save_serial_start: { area: "settings_branding", level: "edit" },
+  // The Serial Numbers card's read (316): starting number, an example, and which styles and
+  // colours still have no code. Same card, same area as save_serial_start.
+  get_serial_setup: { area: "settings_branding", level: "view" },
   // Settings → Company → Payments (workstream 1 phase 4): a READ-ONLY summary of the card account
   // CSM sets up in Admin (admin-catalog set_payments). The Company area, as the tab's own
   // SETTINGS_TAB_AREA entry says, so no new area: _shared/access.ts and its SQL twin
@@ -3516,14 +3519,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       imageUrl = pub.publicUrl;
     }
     const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
+    // Serial code (316). Settings → Structures requires it in the form; it stays optional HERE
+    // because the Advanced page's "Save as a new style" copies a style whose code is already
+    // taken (codes are unique per builder). A style created without one is listed on the Serial
+    // Numbers card until the builder adds it.
+    const code = String(payload.code ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || null;
     // INSERT then retry on a unique-violation (23505) for a per-client key collision. The
     // global building_style_catalog key-reservation was removed with that table in 030.
     let key = base, n = 1;
     for (let attempt = 0; attempt < 50; attempt++) {
       const ins = await admin.from("building_styles").insert(
-        { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
+        { client_id: clientId, key, label, code, image_url: imageUrl, sort_order: 0, active: true })
         .select("id, key").maybeSingle();
       if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
+      // A duplicate CODE is the builder's to fix, not a key to retry around.
+      if (ins.error.code === "23505" && /code_uniq/.test(String(ins.error.message ?? ""))) {
+        return json({ error: `Another style already uses the serial code "${code}". Each style needs its own.` }, 409);
+      }
       if (ins.error.code !== "23505") return dbFail(req, clientId, "create that building style", ins.error);
       key = `${base}-${++n}`;
     }
@@ -3952,6 +3964,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the partial unique index treat un-coded styles as un-set instead of as duplicates.
     if ("code" in payload) {
       updates.code = String(payload.code ?? "").trim().toUpperCase().slice(0, 4) || null;
+      // REQUIRED since 316 (Carolyn 2026-10-18): a style's code can be changed, never removed.
+      if (!updates.code) return json({ error: "A serial code is required for every style (e.g. LBA)." }, 400);
     }
     if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
       const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
@@ -3973,6 +3987,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { error, count } = await admin.from("building_styles")
       .update(updates, { count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
+    if (error && error.code === "23505" && /code_uniq/.test(String(error.message ?? ""))) {
+      return json({ error: `Another style already uses the serial code "${updates.code}". Each style needs its own.` }, 409);
+    }
     if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
@@ -6828,6 +6845,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (Object.prototype.hasOwnProperty.call(row, "code")) {
         rec.code = String(row.code ?? "").trim().toUpperCase().slice(0, 4) || null;
       }
+      // REQUIRED since 316 (Carolyn 2026-10-18) on every colour that can appear in a serial:
+      // siding, trim and roof. A door-only colour is exempt. Enforced on a NEW colour, and on an
+      // existing one whose code this save would blank; an existing un-coded colour saved by a
+      // client that sends no code key is left as it is (the Serial Numbers card lists it).
+      {
+        const inSerial = rec.siding === true || rec.trim === true || rec.shingle === true || rec.metal === true;
+        const blanking = Object.prototype.hasOwnProperty.call(row, "code") && !rec.code;
+        if (inSerial && (blanking || (!isExisting && !rec.code))) {
+          skipped.push(`${label}: needs a serial code (siding, trim and roof colours are part of every serial number)${unchanged}`);
+          i++; continue;
+        }
+      }
       if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
         const dr = Number(row.doorRate);
         rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
@@ -7836,6 +7865,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return await taxCodesResponse();
   }
 
+  // ── Full serial setup (316): what the Serial Numbers card shows ────────────────
+  // The starting building number, a worked example in the builder's own codes, and every
+  // ACTIVE style and serial-bearing colour that still has no code (those print XXX / XX).
+  if (action === "get_serial_setup") {
+    const [csRes, stRes, coRes] = await Promise.all([
+      admin.from("client_settings").select("next_serial").eq("client_id", clientId).maybeSingle(),
+      admin.from("building_styles").select("label, code, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("label, code, active, siding, trim, shingle, metal").eq("client_id", clientId).order("sort_order"),
+    ]);
+    if (stRes.error) return dbFail(req, clientId, "load your styles", stRes.error);
+    if (coRes.error) return dbFail(req, clientId, "load your colors", coRes.error);
+    const blank = (v: unknown) => !String(v ?? "").trim();
+    // deno-lint-ignore no-explicit-any
+    const styles = (stRes.data ?? []).filter((r: any) => r.active !== false);
+    // deno-lint-ignore no-explicit-any
+    const colors = (coRes.data ?? []).filter((r: any) => r.active !== false && (r.siding || r.trim || r.shingle || r.metal));
+    // deno-lint-ignore no-explicit-any
+    const sample = (rows: any[], pred: (r: any) => boolean, fallback: string) => {
+      const hit = rows.find((r) => !blank(r.code) && pred(r));
+      return hit ? String(hit.code).toUpperCase() : fallback;
+    };
+    const nextSerial = csRes.data?.next_serial ?? null;
+    const now = new Date();
+    const mmyy = String(now.getUTCMonth() + 1).padStart(2, "0") + String(now.getUTCFullYear() % 100).padStart(2, "0");
+    const example = `${mmyy}-${sample(styles, () => true, "LBA")}-1216-`
+      + sample(colors, (r) => !r.shingle && !r.metal, "RE")
+      + sample(colors, (r) => r.trim && !r.shingle && !r.metal, "BU")
+      + sample(colors, (r) => r.shingle || r.metal, "WH") + "M"
+      + `-${nextSerial ?? "25698"}`;
+    return json({
+      ok: true,
+      nextSerial,
+      example,
+      // deno-lint-ignore no-explicit-any
+      missingStyles: styles.filter((r: any) => blank(r.code)).map((r: any) => String(r.label)),
+      // deno-lint-ignore no-explicit-any
+      missingColors: colors.filter((r: any) => blank(r.code)).map((r: any) => String(r.label)),
+    });
+  }
+
   // ── Serial sequence starting number ──────────────────────────────────────────
   if (action === "save_serial_start") {
     const n = Math.round(Number(payload.nextSerial));
@@ -8473,7 +8542,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "list_inventory") {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
-        .select("id, serial, design_short_code, location_id, asking_price_cents, "
+        .select("id, serial, full_serial, design_short_code, location_id, asking_price_cents, "
           + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at, "
           + "listed, show_price_online, public_title, public_description")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
@@ -8623,7 +8692,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
 
       return {
-        id: u.id, serial: u.serial, shortCode: u.design_short_code,
+        id: u.id, serial: u.serial, fullSerial: u.full_serial ?? null, shortCode: u.design_short_code,
         locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
         askingPriceCents: u.asking_price_cents,
         // ── Axis 1: where it is on the build ladder ──
@@ -15100,7 +15169,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("change_orders")
         .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
         .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
-      admin.from("orders").select("total_cents, pretax_subtotal_cents")
+      admin.from("orders").select("total_cents, pretax_subtotal_cents, building_serial")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("client_settings")
         .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, co_fee_label, email_template_copy")
@@ -15126,6 +15195,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           address: csRes.data?.business_address ?? null,
         },
         estimateNumber: String(inv.invoice_number),
+        // The building's full serial (316), the same tag the order carries.
+        serialNumber: ordRes.data?.building_serial ?? null,
         dateIso: new Date().toISOString(),
         // "Bill to" and the letterhead logo, the same as send_invoice prints (2026-10-05).
         customer: pdfCustomerFrom(d.contact, shortCode),
@@ -16764,6 +16835,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
             const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
             const snapLines = amended.lines;
+            // The building's full serial (316): minted when the order row was created, so it is
+            // there by now. A failed read only costs the line on the document.
+            const { data: serRow } = await admin.from("orders").select("building_serial")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
             const pdfBytes = await buildQuotePdf({
               docKind: "invoice",
               business: {
@@ -16773,6 +16848,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 address: cur0?.business_address ?? null,
               },
               estimateNumber: invNumber,
+              serialNumber: serRow?.building_serial ?? null,
               dateIso: nowIso(),
               // "Bill to": the customer on the design, and the letterhead logo (2026-10-05).
               customer: pdfCustomerFrom(d.contact, shortCode),

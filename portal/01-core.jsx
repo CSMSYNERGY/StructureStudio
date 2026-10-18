@@ -3455,6 +3455,13 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
 // Where a quote's building came from, shown behind the building name (Carolyn, 2026-08-02).
 // PER VERSION, not per design: one customer can be quoted a lot building (v1 = Inventory)
 // and then a fresh custom build (v2 = New) on the same quote.
+// Does this colour appear in a building serial number (316)? Siding, trim and roof colours do;
+// a door-only colour never does. The same predicate as portal-settings' save_colors and
+// get_serial_setup, so the screen and the server agree on which codes are required.
+function ssColorNeedsCode(c) {
+  return !!(c && (c.siding || c.trim || c.shingle || c.metal));
+}
+
 function SourceChip({ unitId, serial, lifecycle = null }) {
   const inv = Boolean(unitId);
   // "already on the lot" became a lie the day a building could be quoted before it was built,

@@ -103,6 +103,10 @@ export interface EstimatePdfInput {
    *  (letterhead, table, totals, terms) is deliberately identical: the SS quote and the SS
    *  invoice describe the same sale and must not drift apart visually or numerically. */
   docKind?: "estimate" | "invoice";
+  /** The building's full serial number (orders.building_serial, migration 316), e.g.
+   *  1027-LBA-1216-REBUWHM-25698. Printed under the issue date when present; absent or blank
+   *  draws nothing, so every document without one is byte-for-byte what it was. */
+  serialNumber?: string | null;
   /**
    * Sales tax (migration 127). ABSENT renders the original two-row Subtotal/Total block,
    * byte for byte — which is what every pre-tax document, and every GHL-mode estimate, still
@@ -390,6 +394,11 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   y -= 20;
   page.drawText(`Issued: ${fmtDate(issued)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: INK });
   y -= 14;
+  const serialText = sanitizeText(input?.serialNumber).trim();
+  if (serialText) {
+    page.drawText(`Serial #: ${serialText}`, { x: MARGIN, y: y - 10, size: 10, font: bold, color: INK });
+    y -= 14;
+  }
   if (!isInvoice) {
     // An invoice is a bill, not an offer — no validity window.
     page.drawText(`Valid until: ${fmtDate(validUntil)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: GRAY });

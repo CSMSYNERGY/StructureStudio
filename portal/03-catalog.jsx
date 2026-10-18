@@ -2549,6 +2549,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [fileKey, setFileKey] = useState(0);
   // building-style manager state
   const [styleName, setStyleName] = useState("");
+  const [styleCode, setStyleCode] = useState("");      // serial code, required (316)
   const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
   const [styleBusy, setStyleBusy] = useState(false);
   const [styleFileKey, setStyleFileKey] = useState(0);
@@ -2636,14 +2637,17 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   };
   const addStyle = async () => {
     if (!styleName.trim()) return;
+    // Serial code is REQUIRED (Carolyn 2026-10-18: "make sure we are requiring a code for each
+    // style and color so that we always have a full serial number").
+    if (!styleCode.trim()) { setMsg({ err: "Add a serial code for this style (e.g. LBA) — it is part of every building's serial number." }); return; }
     setStyleBusy(true); setMsg(null);
     try {
-      const body = { action: "create_style", label: styleName.trim() };
+      const body = { action: "create_style", label: styleName.trim(), code: styleCode.trim() };
       if (styleImg) { body.imageBase64 = styleImg.base64; body.imageContentType = styleImg.contentType; }
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       const added = styleName.trim();
-      setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
+      setStyleName(""); setStyleCode(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
       await load();
       setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the Excel template below.` });
     } catch (e) { setMsg({ err: e.message }); }
@@ -2710,6 +2714,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const saveEdit = async () => {
     const s = editStyle;
     if (!s || !editName.trim()) return;
+    if (!editCode.trim()) { setMsg({ err: "A serial code is required for every style." }); return; }
     setStyleBusy(true); setMsg(null);
     try {
       const body = { action: "update_style", styleId: s.id, label: editName.trim(), code: editCode.trim() };
@@ -2905,16 +2910,15 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             <span style={S.lbl}>Name</span>
             <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 10 }} />
             {/* Serial code (163). Carolyn @57:20: "all of their buildings have codes. They
-                come up with them. LBA. Okay. Stands for Lofted Barn." Optional -- a style
-                with no code still sells, its serials just read XXX in this position rather
-                than shifting every later segment left. */}
-            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code</label>
+                come up with them. LBA. Okay. Stands for Lofted Barn." REQUIRED since 316
+                (2026-10-18): Save stays off until it is filled. */}
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code <span style={{ color: "#DC2626" }}>*</span></label>
             <input value={editCode} maxLength={4}
               onChange={(e) => setEditCode(e.target.value.toUpperCase().slice(0, 4))}
               placeholder="e.g. LBA"
               style={{ ...S.input, marginBottom: 4, textTransform: "uppercase" }} />
             <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 0, marginBottom: 14, lineHeight: 1.5 }}>
-              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>0826<b>LBA</b>1016REBLDWS5000</code>.
+              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>1027-<b>LBA</b>-1216-REBUWHM-25698</code>.
             </p>
             <span style={S.lbl}>Photo</span>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
@@ -2928,7 +2932,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button onClick={() => setEditStyle(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim()) ? 0.55 : 1 }}>
+              <button onClick={saveEdit} disabled={styleBusy || !editName.trim() || !editCode.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim() || !editCode.trim()) ? 0.55 : 1 }}>
                 {styleBusy ? "Saving…" : "Save changes"}
               </button>
             </div>
@@ -3007,7 +3011,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       {/* Shown on the row, not just inside Edit: the code is the thing a
                           builder cross-checks against their paper list, and opening six
                           dialogs to read six codes is the friction that stops them being set. */}
-                      {s.code && <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>}
+                      {s.code
+                        ? <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>
+                        : <span title="Serial numbers for this style read XXX until you add a code — click Edit" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, color: "#B91C1C", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 5, padding: "2px 6px" }}>Needs serial code</span>}
                     </div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
                         setting one needs the live 3D preview, so it lives in
@@ -3033,11 +3039,14 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             )}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input value={styleName} onChange={(e) => setStyleName(e.target.value)} placeholder="Building style name (e.g. Lofted Barn)" style={{ ...S.input, minWidth: 220 }} />
+              <input value={styleCode} maxLength={4} onChange={(e) => setStyleCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4))}
+                placeholder="Serial code *" title="Required — your short code for this style, e.g. LBA. It is part of every building's serial number."
+                style={{ ...S.input, width: 120, textTransform: "uppercase" }} />
               <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer", display: "inline-block" }}>
                 {styleImg ? "Image selected ✓" : "Choose image"}
                 <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
               </label>
-              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim() || !styleCode.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim() || !styleCode.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
             </div>
           </div>
         )}
@@ -7160,6 +7169,10 @@ Anything not shown here will be removed from their account.`)) return;
         if (badRate(r.door_rate)) bad.push(`${name} door price ("${r.door_rate}")`);
       });
       if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.join(", ")}.`);
+      // Serial code is REQUIRED on every siding, trim and roof colour (316, Carolyn 2026-10-18).
+      // A door-only colour never appears in a serial, so it is exempt.
+      const noCode = rows.filter((r) => ssColorNeedsCode(r) && !String(r.code || "").trim()).map((r) => r.label || "unnamed colour");
+      if (noCode.length) throw new Error(`Nothing was saved — every siding, trim and roof colour needs a serial code (it is part of each building's serial number). Missing: ${noCode.join(", ")}.`);
       const colors = rows.map((r, i) => ({
         id: r.id || undefined, label: r.label,
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
@@ -7240,7 +7253,7 @@ Anything not shown here will be removed from their account.`)) return;
             </colgroup>
             <thead><tr>
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
-              <th style={thc} title="Your short code for this colour. It becomes a segment of every building serial number, e.g. the RE, BL and DW in 0826LBA1016REBLDWS5000.">Code</th>
+              <th style={thc} title="Required for siding, trim and roof colours. Your short code for this colour becomes part of every building serial number, e.g. the RE, BU and WH in 1027-LBA-1216-REBUWHM-25698.">Code *</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
               {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
@@ -7273,8 +7286,10 @@ Anything not shown here will be removed from their account.`)) return;
                   <td style={tdc}>
                     <input type="text" value={r.code || ""} maxLength={4}
                       placeholder={(r.label || "").replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase() || "??"}
-                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().slice(0, 4))}
-                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase" }} />
+                      title={ssColorNeedsCode(r) && !String(r.code || "").trim() ? "Required — part of every building serial number" : undefined}
+                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4))}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase",
+                        ...(ssColorNeedsCode(r) && !String(r.code || "").trim() ? { borderColor: "#DC2626", background: "#FEF2F2" } : {}) }} />
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}

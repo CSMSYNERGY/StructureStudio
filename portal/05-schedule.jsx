@@ -4314,54 +4314,89 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
 }
 
 // ─── Building serial numbers (Settings → Company → Business Details) ───
-// ONE shared per-builder sequence: every inventory building, and every customer building the
-// first time it reaches the build board, takes the next number in creation order and keeps it
-// (one number per building, migration 284).
+// ONE shared per-builder sequence of BUILDING NUMBERS: every inventory building, and every
+// customer building at its sale, takes the next number and keeps it (284, 316).
 //
-// Reads the number from `list_locations`, which returns it alongside the lots — that action is
-// named for its main payload, not its only one, and a second endpoint for one integer was not
-// worth it. That shared read is also why this card and LocationsCard can be on different tabs
-// without either knowing about the other.
+// Since 316 (Carolyn 2026-10-18) each building also has a FULL serial,
+//   1027-LBA-1216-REBUWHM-25698   (MMYY-STYLE-SIZE-SIDING TRIM ROOF S/M-BUILDING NUMBER)
+// issued at the sale and frozen. This card shows the format in the builder's own codes, asks for
+// the starting number (required: a sale is not numbered until it is set), and lists every style
+// and colour still missing a code, because those print as XXX / XX on the tag.
 function SerialNumbersCard() {
   const [nextSerial, setNextSerial] = useState("");
+  const [setup, setSetup] = useState(null);   // { nextSerial, example, missingStyles, missingColors }
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }).then(({ data, error }) => {
-      if (!alive) return;
-      if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load the serial number." }); return; }
-      setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
-    });
-    return () => { alive = false; };
-  }, []);
+  const load = () => sb.functions.invoke("portal-settings", { body: { action: "get_serial_setup" } }).then(({ data, error }) => {
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load your serial number settings." }); return; }
+    setSetup(data);
+    setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
+  });
+  useEffect(() => { load(); }, []);
   const saveSerial = async () => {
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
     setBusy(false);
     if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
     setMsg({ ok: `Next building will be #${data.nextSerial}.` });
+    load();
   };
+  const unset = setup && setup.nextSerial == null;
+  const missS = (setup && setup.missingStyles) || [];
+  const missC = (setup && setup.missingColors) || [];
+  const seg = (txt, label) => (
+    <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+      <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 17, fontWeight: 800, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "4px 8px" }}>{txt}</span>
+      <span style={{ fontSize: 10.5, color: "#64748B", fontWeight: 600, textAlign: "center", maxWidth: 110, lineHeight: 1.3 }}>{label}</span>
+    </span>
+  );
+  const parts = setup && setup.example ? setup.example.split("-") : ["1027", "LBA", "1216", "REBUWHM", "25698"];
+  const dash = <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, color: "#94A3B8", alignSelf: "flex-start", paddingTop: 6 }}>-</span>;
   return (
     <div style={S.card}>
       <div style={S.h2}>Building Serial Numbers</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        Every inventory building, and every customer building the first time it reaches your build
-        board, takes the next number in one shared sequence. A building keeps its number for good.
+        Every building gets a full serial number when it is sold (or added to inventory). It prints on
+        the invoice, shows on the order and in Inventory, and never changes after that.
       </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", marginBottom: 6 }}>
+        {seg(parts[0], "Month + year")}{dash}
+        {seg(parts[1], "Style code")}{dash}
+        {seg(parts[2], "Size")}{dash}
+        {seg(parts[3], "Siding · trim · roof codes + S/M (shingle/metal)")}{dash}
+        {seg(parts[4], "Building number")}
+      </div>
+      <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 16 }}>Example built from your own codes and next building number.</div>
+
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <span style={S.lbl}>Next serial #</span>
-          <input style={{ ...S.input, fontSize: 18, fontWeight: 800, width: 140, fontVariantNumeric: "tabular-nums" }}
-            value={nextSerial} inputMode="numeric"
+          <span style={S.lbl}>Next building # <span style={{ color: "#DC2626" }}>*</span></span>
+          <input style={{ ...S.input, fontSize: 18, fontWeight: 800, width: 140, fontVariantNumeric: "tabular-nums", ...(unset ? { borderColor: "#DC2626" } : {}) }}
+            value={nextSerial} inputMode="numeric" placeholder="e.g. 12047"
             onChange={(e) => setNextSerial(e.target.value.replace(/\D/g, "").slice(0, 9))} />
         </div>
         <button type="button" onClick={saveSerial} disabled={busy || !nextSerial} style={S.btn(ACCENT, "#FFF")}>Save</button>
         <span style={{ fontSize: 12, color: "#94A3B8", maxWidth: 420, lineHeight: 1.5 }}>
-          Set this once to match your shop's count: if your last build was <strong>#12046</strong>, enter <strong>12047</strong>.
+          Set this once to match your shop's count: if your last building was <strong>#12046</strong>, enter <strong>12047</strong>.
           It advances on its own and can never go backwards past a used number.
         </span>
       </div>
+      {unset && (
+        <div style={{ ...S.err, marginTop: 12 }}>
+          Set your starting building number. Until you do, new sales don't get a serial number.
+        </div>
+      )}
+      {setup && (missS.length > 0 || missC.length > 0) && (
+        <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#991B1B", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, marginTop: 12, lineHeight: 1.55 }}>
+          <div style={{ fontWeight: 800, marginBottom: 4 }}>Missing serial codes — these print as XXX / XX on the serial number</div>
+          {missS.length > 0 && <div><strong>Styles</strong> (Settings → Structures → Edit): {missS.join(", ")}</div>}
+          {missC.length > 0 && <div><strong>Colors</strong> (Settings → Colors, Code column): {missC.join(", ")}</div>}
+          <div style={{ color: "#B91C1C", marginTop: 4 }}>Once you add a code, serials already issued with XX in that spot fill in automatically.</div>
+        </div>
+      )}
+      {setup && missS.length === 0 && missC.length === 0 && (
+        <div style={{ ...S.okMsg, marginTop: 12 }}>Every style and color has a serial code.</div>
+      )}
       {msg && msg.ok && <div style={{ ...S.okMsg, marginTop: 12 }}>{msg.ok}</div>}
       {msg && msg.err && <div style={{ ...S.err, marginTop: 12 }}>{msg.err}</div>}
     </div>

@@ -3156,16 +3156,16 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
               only finding out by opening the page is exactly why this got looked at.
 
               Monospace and select-all because the whole job of this string is to be copied
-              onto a physical tag without a transcription error. Before the building is built
-              there is deliberately no preview: the first block IS the build date, so a
-              preview would print a number that later changes, and a serial that changes after
-              someone has written it on a building is worse than one that arrives late. */}
+              onto a physical tag without a transcription error. Since 316 (2026-10-18) it is
+              issued WHEN THE ORDER IS CREATED and frozen (MMYY-STYLE-SIZE-COLORS-NUMBER), so it
+              can ride the first invoice. Absent means the builder has not set a starting
+              building number yet (316 will not number a sale against an unset counter). */}
           <div style={{ fontSize: 11.5, marginTop: 6 }}>
             {o.building_serial ? (
               <span title="This building's serial number — write this on the tag"
                 style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
             ) : (
-              <span style={{ color: "#94A3B8" }}>Serial assigned when the building is marked built</span>
+              <span style={{ color: "#94A3B8" }}>No serial yet — set your starting building number in Settings → Business Details</span>
             )}
           </div>
         </div>
@@ -4277,16 +4277,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       Monospace and selectable because the whole job of this string is to be
                       copied onto a physical tag without a transcription error.
 
-                      Before the building is built there is deliberately NO fake serial here.
-                      The date block IS the build date, so a preview would print a number that
-                      later changes -- and a serial that changes after someone has written it
-                      on a building is worse than one that arrives late. The absent state says
-                      when it will appear instead. */}
+                      Since 316 it is issued when the order is created and frozen; absent means
+                      no starting building number is set yet. */}
                   <div style={{ fontSize: 12, marginTop: 5 }}>
                     {o.building_serial ? (
                       <span title="This building's serial number — write this on the tag" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
                     ) : (
-                      <span style={{ color: "#94A3B8" }}>Serial number is assigned when the building is marked built.</span>
+                      <span style={{ color: "#94A3B8" }}>No serial yet — set your starting building number in Settings → Business Details.</span>
                     )}
                   </div>
                 </div>
@@ -5400,7 +5397,7 @@ function InventoryTable({
     if (locFilter !== "all" && String(u.locationId || "") !== locFilter) return false;
     const q = query.trim().toLowerCase();
     if (!q) return true;
-    const hay = ["#" + u.serial, String(u.serial), titleCase(u.style || ""), u.size || "", u.locationName || "",
+    const hay = ["#" + u.serial, String(u.serial), u.fullSerial || "", titleCase(u.style || ""), u.size || "", u.locationName || "",
       u.roofType || "", u.roofColor || "", u.bodyColor || "", u.trimColor || "", u.soldFirstName || "",
       ...(u.estimates || []).map((e) => (e.name || "") + " " + (e.estimateNumber ? "EST-" + e.estimateNumber : ""))].join(" ").toLowerCase();
     return hay.includes(q);
@@ -5623,7 +5620,12 @@ function InventoryTable({
                 return (
                   <React.Fragment key={u.id}>
                     <tr>
-                      <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>#{u.serial}</td>
+                      <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+                        #{u.serial}
+                        {/* The full serial (316) — what goes on the building's tag. */}
+                        {u.fullSerial && <div title="Full serial number — write this on the tag"
+                          style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, fontWeight: 700, color: "#475569", whiteSpace: "nowrap", userSelect: "all", marginTop: 2 }}>{u.fullSerial}</div>}
+                      </td>
                       <td style={S.td}><strong>{[titleCase(u.style || ""), u.size].filter(Boolean).join(" ") || "—"}</strong></td>
                       <td style={S.td}>{u.roofType ? <>{u.roofType}{u.roofColor ? <span style={{ color: "#94A3B8" }}> · {u.roofColor}</span> : null}</> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={S.td}>{(u.bodyColor || u.trimColor) ? <>{u.bodyColor || "—"}<span style={{ color: "#94A3B8" }}> / {u.trimColor || "—"}</span></> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
