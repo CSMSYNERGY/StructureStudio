@@ -26647,11 +26647,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setActiveTool(null); setToast(null);
       return;
     }
-    // An INCLUDED catalog door/window chip is armed → drop that EXACT fixture here (no picker).
+    // An INCLUDED catalog door/window chip is armed → drop that EXACT fixture here.
     // Included ramps are doorSnap and handled in the doorSnap branch below.
     if (cfg.includedFixture && !cfg.doorSnap) {
       const fx = cfg.includedFixture;
       const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY, spanPx) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY, spanPx);
+      // AN INCLUDED DOOR OR WINDOW GETS THE SAME CHOICES AS A BOUGHT ONE (Carolyn 2026-10-18:
+      // "when a door is included and we go to place it the color options do not display" — same
+      // with windows). This path used to place straight away with the defaults, so a customer
+      // could never pick an included door's color, swing or window, or an included window's
+      // color or shutters. When there is anything to choose, open the normal picker holding
+      // only this one fixture; placePickedDoor/placePickedWindow then write the same item
+      // (same fixtureItemId), so the inclusion still nets it. With nothing to choose it still
+      // drops in one click below. Vents have no picker.
+      if (fx.category !== "vent") {
+        const isWin = fx.category === "window";
+        const hasChoice = isWin
+          ? (windowColorsFor(fx, windowColorList).length > 1 || dressColorList.length > 0)
+          : (((fx.colorMode === "paint" || fx.colorMode === "match") && doorPaintColors.length > 1)
+            || !!(fx.swingIn && fx.swingOut)
+            || [fx.opRight, fx.opLeft, fx.opDouble, fx.opSlideUp].filter(Boolean).length > 1
+            || offeredDoorWindows.length > 0);
+        if (hasChoice) {
+          if (isWin) setWindowPick({ wall: w, ptx: pt.x, pty: pt.y, fixtures: [fx] });
+          else setDoorPick({ wall: w, ptx: pt.x, pty: pt.y, fixtures: [fx] });
+          setActiveTool(null); setToast(null);
+          return;
+        }
+      }
       const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : fx.category === "vent" ? 12 : 36)) / 12;
       // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
       // overhangs the building corner; refuse up front, as the door picker does
@@ -26929,7 +26952,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setSelectedId(ni.id);
     setActiveTool(null);
     setToast(null);
-  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, paintColors, notchKey]);
+  }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, dressColorList, offeredDoorWindows, paintColors, notchKey]);
 
   // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
@@ -36424,9 +36447,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
       <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={doorPick.partitionId != null ? partitionDoors : offeredDoors} showPricing={!!C.showPricing} doorColors={doorPick.partitionId != null ? [] : doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && doorPick.partitionId == null && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} doorWindows={doorPick.partitionId != null ? [] : offeredDoorWindows} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={doorPick.fixtures || (doorPick.partitionId != null ? partitionDoors : offeredDoors)} showPricing={!!C.showPricing} doorColors={doorPick.partitionId != null ? [] : doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && !doorPick.fixtures && doorPick.partitionId == null && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} doorWindows={doorPick.partitionId != null ? [] : offeredDoorWindows} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={offeredRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={offeredWindows} showPricing={!!C.showPricing} windowColors={windowPick.partitionId != null ? [] : windowColorList} dressColors={windowPick.partitionId != null ? [] : dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && windowPick.partitionId == null && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={windowPick.fixtures || offeredWindows} showPricing={!!C.showPricing} windowColors={windowPick.partitionId != null ? [] : windowColorList} dressColors={windowPick.partitionId != null ? [] : dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && !windowPick.fixtures && windowPick.partitionId == null && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
