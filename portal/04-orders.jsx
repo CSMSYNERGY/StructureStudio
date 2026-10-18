@@ -4982,7 +4982,7 @@ function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
   return (
     <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Inventory purchase requests{open.length ? ` — ${open.length} new` : ""}</strong>
+        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Inventory purchases &amp; requests{open.length ? ` — ${open.length} new` : ""}</strong>
         <button type="button" onClick={() => setShowHandled((v) => !v)}
           style={{ marginLeft: "auto", background: "none", border: "none", color: "#92400E", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
           {showHandled ? "Hide handled" : "Show handled"}
@@ -4992,6 +4992,9 @@ function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
       {list.map((r) => (
         <div key={r.id} style={{ background: "#FFF", border: "1px solid #FDE68A", borderRadius: 10, padding: "10px 12px", marginTop: 8, opacity: r.status === "handled" ? 0.6 : 1 }}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "baseline" }}>
+            {r.kind === "purchase"
+              ? <span style={{ background: "#DCFCE7", color: "#166534", borderRadius: 10, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>PAID ONLINE</span>
+              : <span style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 10, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>REQUEST</span>}
             <strong>{r.name}</strong>
             <a href={"tel:" + r.phone} style={{ color: ACCENT, fontWeight: 700 }}>{r.phone}</a>
             {r.email && <a href={"mailto:" + r.email} style={{ color: ACCENT }}>{r.email}</a>}
@@ -5015,10 +5018,17 @@ function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
               {" = "}<strong>{money(it.totalCents)}</strong>
             </div>
           ))}
-          <div style={{ fontSize: 13, marginTop: 6 }}>
-            Total <strong>{money(r.total_cents)}</strong> · {r.pay_in_full ? "wants to pay in full" : <>deposit <strong>{money(r.due_now_cents)}</strong></>}
-            <span style={{ color: "#94A3B8" }}> · nothing charged</span>
-          </div>
+          {r.kind === "purchase" ? (
+            <div style={{ fontSize: 13, marginTop: 6 }}>
+              Total <strong>{money(r.total_cents)}</strong> · <strong style={{ color: "#166534" }}>paid {money(r.paid_cents)} by card</strong>
+              <span style={{ color: "#64748B" }}> · the invoice is waiting for your approval in Orders — approve it and the customer gets it to sign</span>
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, marginTop: 6 }}>
+              Total <strong>{money(r.total_cents)}</strong> · {r.pay_in_full ? "wants to pay in full" : <>deposit <strong>{money(r.due_now_cents)}</strong></>}
+              <span style={{ color: "#94A3B8" }}> · nothing charged</span>
+            </div>
+          )}
           {r.message && <div style={{ fontSize: 13, color: "#334155", marginTop: 4, fontStyle: "italic" }}>“{r.message}”</div>}
         </div>
       ))}

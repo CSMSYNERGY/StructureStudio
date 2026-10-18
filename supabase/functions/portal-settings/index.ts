@@ -8394,7 +8394,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "list_shop_requests") {
     const since = new Date(Date.now() - 30 * 86400000).toISOString();
     const { data, error } = await admin.from("shop_requests")
-      .select("id, status, contact_id, name, phone, email, street, city, state, zip, message, pay_in_full, items, total_cents, due_now_cents, notified_at, handled_at, created_at")
+      .select("id, status, kind, paid_cents, design_codes, contact_id, name, phone, email, street, city, state, zip, message, pay_in_full, items, total_cents, due_now_cents, notified_at, handled_at, created_at")
       .eq("client_id", clientId).or(`status.eq.new,created_at.gte.${since}`)
       .order("created_at", { ascending: false }).limit(50);
     if (error) {

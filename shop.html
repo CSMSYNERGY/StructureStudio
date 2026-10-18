@@ -247,6 +247,29 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
           </div>
           <label class="f" for="cMsg">Anything we should know? (optional)</label>
           <textarea class="t" id="cMsg" maxlength="2000" placeholder="Gate width, slope, when you'd like it delivered…"></textarea>
+          <!-- PAY ONLINE (phase 4, Carolyn 2026-10-17): pay first, sign the invoice after. Shown only
+               when the builder takes cards online (shop-checkout pay_setup). -->
+          <div id="paySection" hidden>
+            <h3 style="margin-top:16px">Pay online</h3>
+            <div id="verifyBox">
+              <div class="note" style="margin-top:0">We'll text a 6-digit code to the phone number above to confirm it's you.</div>
+              <button type="button" class="btn ghost" id="sendCodeBtn">Text me a code</button>
+              <div id="codeRow" hidden>
+                <label class="f" for="cCode">Code</label>
+                <input class="t" id="cCode" inputmode="numeric" maxlength="8" autocomplete="one-time-code"/>
+                <button type="button" class="btn ghost" id="verifyBtn">Confirm code</button>
+              </div>
+            </div>
+            <div id="cardBox" hidden>
+              <div class="note" id="verifiedNote" style="margin-top:0"></div>
+              <label class="f">Card</label>
+              <div id="cardFrameWrap"></div>
+              <label class="chk"><input type="checkbox" id="cConsent"/> <span id="consentText"></span></label>
+              <button type="button" class="btn" id="payBtn" disabled>Pay now</button>
+            </div>
+            <div class="msg" id="payMsg" hidden></div>
+            <div class="note" style="text-align:center;margin-top:10px">or</div>
+          </div>
           <button type="submit" class="btn" id="coBtn">Send purchase request</button>
           <div class="note" id="coNote"></div>
           <div class="msg" id="coMsg" hidden></div>
@@ -690,6 +713,7 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     $("cartbar").hidden = true;
     track("ss_begin_checkout", { client: clientId, buildings: buyableIds().length });
     reprice();
+    initPay();
   }
 
   function paintCart(p) {
@@ -748,7 +772,7 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
         var m = $("coMsg"); m.className = "msg err"; m.textContent = (d && d.error) || "We couldn't price your cart just now."; m.hidden = false; postHeight();
         return;
       }
-      lastPriced = d; paintCart(d);
+      lastPriced = d; paintCart(d); updatePayBtn();
     }).catch(function () {});
   }
   ["cStreet", "cCity", "cState", "cZip"].forEach(function (id) {
@@ -793,6 +817,124 @@ label.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; m
     }).catch(function () { $("coBtn").disabled = false; say("err", "That didn't send. Check your connection and try again."); });
   });
 
+
+  // ── PAY ONLINE (phase 4, Carolyn 2026-10-17): verify the phone, card in Fiserv's own frame
+  // (card numbers never touch this page), tick the sentence the server composed, pay. The builder
+  // then sends the invoice and the customer signs it — nothing is signed here. ──
+  var SESSION_KEY = "ss_shop_session_" + clientId;
+  var paySetup = null, payToken = null, payExpiry = null, payTokenAt = 0, cardFrame = null;
+  function sessionToken() { try { return localStorage.getItem(SESSION_KEY) || ""; } catch (e) { return ""; } }
+  function setSession(t) { try { if (t) localStorage.setItem(SESSION_KEY, t); else localStorage.removeItem(SESSION_KEY); } catch (e) {} }
+  function payMsg(cls, t) { var m = $("payMsg"); m.className = "msg " + cls; m.textContent = t; m.hidden = !t; postHeight(); }
+  function callAuth(body) {
+    return fetch(SUPABASE_URL + "/functions/v1/customer-auth?forceFunctionRegion=us-east-1", { method: "POST", headers: HEADERS, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { return { status: r.status, d: d }; }); });
+  }
+  function initPay() {
+    if (paySetup !== null) { showPay(); return; }
+    fetch(SUPABASE_URL + "/functions/v1/shop-checkout?forceFunctionRegion=us-east-1", { method: "POST", headers: HEADERS, body: JSON.stringify({ action: "pay_setup", clientId: clientId }) })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (d) { paySetup = d && d.ok ? d : false; showPay(); })
+      .catch(function () { paySetup = false; showPay(); });
+  }
+  function showPay() {
+    var on = !!paySetup;
+    $("paySection").hidden = !on;
+    $("coBtn").textContent = on ? "Send a purchase request instead" : "Send purchase request";
+    $("coBtn").className = on ? "btn ghost" : "btn";
+    if (on && sessionToken()) { $("verifyBox").hidden = true; mountCard(); }
+    postHeight();
+  }
+  $("sendCodeBtn").addEventListener("click", function () {
+    var phone = $("cPhone").value.trim();
+    if (phone.replace(/\D/g, "").length < 10) { payMsg("err", "Enter your 10-digit phone number above first."); return; }
+    $("sendCodeBtn").disabled = true; payMsg("ok", "Sending…");
+    callAuth({ action: "request_code", clientId: clientId, channel: "sms", phone: phone, name: $("cName").value.trim() }).then(function (r) {
+      $("sendCodeBtn").disabled = false;
+      if (r.status >= 400 || (r.d && r.d.error)) { payMsg("err", (r.d && r.d.error) || "We couldn't send a code just now. Try again in a minute."); return; }
+      $("codeRow").hidden = false; payMsg("ok", "Code sent — check your texts."); $("cCode").focus();
+    });
+  });
+  $("verifyBtn").addEventListener("click", function () {
+    var code = $("cCode").value.replace(/\D/g, "");
+    if (code.length < 4) { payMsg("err", "Enter the code we texted you."); return; }
+    $("verifyBtn").disabled = true;
+    callAuth({ action: "verify_code", clientId: clientId, channel: "sms", phone: $("cPhone").value.trim(), code: code, name: $("cName").value.trim() }).then(function (r) {
+      $("verifyBtn").disabled = false;
+      if (!r.d || !r.d.token) { payMsg("err", (r.d && r.d.error) || "That code didn't work. Check it and try again."); return; }
+      setSession(r.d.token); payMsg("", "");
+      $("verifyBox").hidden = true; mountCard();
+      track("ss_phone_verified", { client: clientId });
+    });
+  });
+  function mountCard() {
+    $("cardBox").hidden = false;
+    $("verifiedNote").textContent = "Phone confirmed. Enter your card below.";
+    if (cardFrame) return;
+    var tk = paySetup.tokenizer || {};
+    cardFrame = document.createElement("iframe");
+    cardFrame.title = "Card details";
+    cardFrame.setAttribute("scrolling", "no"); cardFrame.setAttribute("frameborder", "0");
+    cardFrame.style.cssText = "width:100%;border:0;display:block;height:" + (tk.cardHeight || 265) + "px";
+    cardFrame.src = tk.cardUrl;
+    $("cardFrameWrap").appendChild(cardFrame);
+    updatePayBtn(); postHeight();
+  }
+  // Only the frame Fiserv served may hand us a token; the origin comes from our own server.
+  window.addEventListener("message", function (e) {
+    if (!paySetup || !cardFrame || e.origin !== paySetup.tokenizer.origin || e.source !== cardFrame.contentWindow) return;
+    var m = null; try { m = JSON.parse(e.data); } catch (err) { return; }
+    if (m && (m.validationError || (m.errorCode && String(m.errorCode) !== "0"))) { payToken = null; updatePayBtn(); payMsg("err", m.validationError || m.errorMessage || "Check your card details."); return; }
+    var tok = m && (m.token || m.message);
+    if (!tok) return;
+    payToken = String(tok); payExpiry = m.expiry || null; payTokenAt = Date.now(); payMsg("", ""); updatePayBtn();
+  }, false);
+  function updatePayBtn() {
+    var p = lastPriced;
+    $("consentText").textContent = (p && p.consentText) || "";
+    var ready = !!(p && p.items && p.items.length && !(p.problems || []).length && p.consentText && payToken && $("cConsent").checked);
+    $("payBtn").disabled = !ready;
+    $("payBtn").textContent = p && p.dueNowCents ? "Pay " + cents(p.dueNowCents) + " now" : "Pay now";
+  }
+  $("cConsent").addEventListener("change", updatePayBtn);
+  function resetCard(msg) {
+    payToken = null; if (cardFrame && cardFrame.parentNode) cardFrame.parentNode.removeChild(cardFrame); cardFrame = null; mountCard(); if (msg) payMsg("err", msg);
+  }
+  $("payBtn").addEventListener("click", function () {
+    var p = lastPriced, a = addr();
+    var name = $("cName").value.trim(), email = $("cEmail").value.trim();
+    if (!name) { payMsg("err", "Please enter your name."); return; }
+    if (!a.city || !a.state || !/^\d{5}/.test(a.zip)) { payMsg("err", "Please enter the delivery city, state and 5-digit zip."); return; }
+    if (Date.now() - payTokenAt > 110000) { resetCard("For your security, please enter your card again."); return; }
+    $("payBtn").disabled = true; payMsg("ok", "Processing your payment… don't close this page.");
+    fetch(SUPABASE_URL + "/functions/v1/shop-checkout?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ action: "purchase", clientId: clientId, unitIds: buyableIds(), address: a, payInFull: $("cPayFull").checked,
+        name: name, phone: $("cPhone").value.trim(), email: email, message: $("cMsg").value.trim(),
+        token: sessionToken(), account: payToken, expiry: payExpiry, postal: a.zip.slice(0, 5),
+        consent: true, consentText: p.consentText })
+    }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { return { status: r.status, d: d }; }); }).then(function (r) {
+      var d = r.d || {};
+      if (r.status === 401) { setSession(""); $("verifyBox").hidden = false; $("cardBox").hidden = true; $("codeRow").hidden = true; payMsg("err", d.error || "Please confirm your phone again."); return; }
+      if (d.paid && d.paid.length) {
+        var biz = (shop && shop.branding && shop.branding.companyName) || "We";
+        track("ss_purchase", { client: clientId, buildings: d.paid.length, value: d.paid.reduce(function (s, x) { return s + x.totalCents; }, 0) / 100, paid: d.paid.reduce(function (s, x) { return s + x.paidCents; }, 0) / 100 });
+        var paidIds = buyableIds().filter(function (id) { var u = unitById(id); return u && d.paid.some(function (x) { return x.label.indexOf("#" + u.serial + " ") === 0; }); });
+        saveCart(cartIds().filter(function (id) { return paidIds.indexOf(id) === -1; }));
+        $("doneText").textContent = "Thank you! " + biz + " has your payment for " + d.paid.map(function (x) { return x.label; }).join(", ")
+          + ". They'll send your invoice to sign, and you'll arrange delivery with them." + (d.failure ? " Not completed: " + d.failure.label + " — " + d.failure.error : "");
+        var t = $("doneTotals"); t.textContent = "";
+        d.paid.forEach(function (x) { t.appendChild(line(x.label + " (estimate " + x.estimateNumber + ")", "Paid " + cents(x.paidCents))); });
+        show("done"); $("cartbar").hidden = true;
+        try { window.scrollTo(0, 0); } catch (err) {}
+        return;
+      }
+      if (d.items) { lastPriced = d; paintCart(d); }
+      if (d.failure && d.failure.newCardNeeded) { resetCard(d.failure.error + " Please enter your card again."); return; }
+      payMsg("err", (d.failure && d.failure.error) || d.error || "The payment didn't go through. You weren't charged.");
+      updatePayBtn();
+    }).catch(function () { payMsg("err", "We lost the connection. Check your email before trying again — the payment may have gone through."); });
+  });
   load();
 })();
 </script>
