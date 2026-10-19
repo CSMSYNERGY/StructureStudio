@@ -37,6 +37,10 @@
 //        again." with Ready on offer; Ready and a new swipe are then charged
 //     P6 Card, then Swipe, then Bank / ACH, then Card: Key it in again; then Swipe and Bank / ACH,
 //        and the bank charge, 300 s after its token, carries rail ach and NO entry
+//     P8 swipe refused by the frame: the modal shows CardPointe's own code and words after "didn't get a
+//        clean read" (the frame's 1001, then CardSecure's NNNN), with card-like runs cut and track-shaped
+//        words dropped, on screen and in the swipe_refused row (warn); 20 s of silence after the reader
+//        starts typing files swipe_no_answer; nothing is charged
 //     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
 //        frame is NOT loaded again and the server's sentence shows without "Key the card in
 //        again"; that same frame's next token is then charged
@@ -89,6 +93,7 @@ const TOKENIZER = {
 const S = { minted: 0, payNext: null, chargeNext: null, payments: [] };
 const fnCalls = [];         // { fn, body } for customer-pay / portal-payments
 const loads = { card: 0, swipe: 0 };   // tokenizer frame loads: each one is a NEW frame
+const logRows = [];                    // log_error bodies (P8 reads the swipe rows)
 const offBox = [];          // non-local requests that were aborted
 
 const MQ_OVERRIDE = process.env.SS_MY_QUOTES ? readFileSync(process.env.SS_MY_QUOTES, "utf8") : null;
@@ -142,7 +147,7 @@ const handler = async (route) => {
   if (req.method() === "OPTIONS") return route.fulfill({ status: 200, headers: { ...H, "access-control-allow-headers": "*", "access-control-allow-methods": "*" }, body: "" });
   let body = {};
   try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
-  if (url.includes("/rest/v1/rpc/log_error")) return json(route, null);
+  if (url.includes("/rest/v1/rpc/log_error")) { logRows.push(body); return json(route, null); }
   if (url.includes("/rest/v1/rpc/")) return json(route, false);
   if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role: "owner", user_id: USER.id }]);
   if (url.includes("/rest/v1/orders")) {
@@ -555,6 +560,89 @@ try {
     await until(() => callsOf("portal-payments", "charge").length > charges + 1, 6000)
     && lastOf("portal-payments", "charge").payToken === tok2 && tok2 !== tok && loads.card === before,
     sent(lastOf("portal-payments", "charge"), tok2));
+
+  // P8: a swipe the frame refuses shows CardPointe's own reason, and files it without card data.
+  {
+    const postRaw = async (payload) => {
+      let f = null;
+      for (const end = Date.now() + 8000; !f && Date.now() < end; await page.waitForTimeout(100)) {
+        f = page.frames().filter((x) => !x.isDetached() && x.url().startsWith(TOK_ORIGIN) && x.url().includes("swipeonly=true")).pop() || null;
+      }
+      if (!f) return false;
+      await f.waitForLoadState("domcontentloaded").catch(() => {});
+      await f.evaluate((m) => window.parent.postMessage(JSON.stringify(m), "*"), payload);
+      return true;
+    };
+    const MISS = "The reader didn't get a clean read. Press Ready and swipe again.";
+    const rowsSince = (n, code) => logRows.slice(n).filter((r) => r.p_code === code);
+    const ready = async () => {
+      await tap(modal.getByRole("button", { name: "Ready to swipe" }));
+      await until(async () => (await textOf(modal)).includes("Ready — swipe the card now"), 4000);
+    };
+    modal = await openModal();
+    const swipeLoads = loads.swipe;
+    await modal.getByRole("button", { name: "Swipe", exact: true }).click();
+    await until(async () => loads.swipe > swipeLoads, 4000);
+    await until(async () => (await textOf(modal)).includes("Ready — swipe the card now"), 4000);
+    charges = callsOf("portal-payments", "charge").length;
+
+    // The frame's own verdict, in the shape its script posts it: validationError, errorCode 1001, entry manual.
+    let n = logRows.length;
+    await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
+    ok("P8: a validationError shows the frame's code and words after the clean-read sentence",
+      await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 1001, Invalid Account Number)"), 4000), await brief(modal));
+    const v = rowsSince(n, "swipe_refused")[0] || {};
+    ok("P8: ...and files one swipe_refused row (warn, kind validation, code 1001, entry manual, the frame's host)",
+      rowsSince(n, "swipe_refused").length === 1 && v.p_severity === "warn" && v.p_context && v.p_context.kind === "validation"
+      && v.p_context.errorCode === "1001" && v.p_context.reason === "Invalid Account Number" && v.p_context.entry === "manual"
+      && v.p_context.frame === new URL(TOK_ORIGIN).host, JSON.stringify(v.p_context || null));
+
+    // CardSecure's answer (NNNN::words) with card-like numbers in the words: every run of 4+ digits goes.
+    await ready();
+    n = logRows.length;
+    const SPACED = "4111 1111 1111 1111", DASHED = "4111-1111-1111-1111", SHORT = "4111111", HEXISH = "ABCDEF0123456789ABCDEF";
+    await postRaw({ errorCode: "0007", errorMessage: "Unable to decrypt ref " + [SHORT, SPACED, DASHED, HEXISH].join(" "), entry: "swipe" });
+    const shown = await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 0007, Unable to decrypt ref"), 4000);
+    let txt = await textOf(modal);
+    ok("P8: an errorCode shows the 4-digit code and the words", shown, await brief(modal));
+    ok("P8: ...with every 4+ digit run (plain, spaced, dashed) and the hex run cut from the screen",
+      ![SHORT, SPACED, DASHED, HEXISH, "1111"].some((x) => txt.includes(x)));
+    const e = rowsSince(n, "swipe_refused")[0] || {};
+    // The fields that carry CardPointe's words (the test order id and url are 1111..., so not those).
+    const eJson = JSON.stringify([e.p_message, e.p_context && e.p_context.reason, e.p_context && e.p_context.errorCode]);
+    ok("P8: ...and from the swipe_refused row (kind error, code 0007)",
+      !!e.p_context && e.p_context.kind === "error" && e.p_context.errorCode === "0007" && ![SHORT, SPACED, DASHED, HEXISH, "1111"].some((x) => eJson.includes(x)),
+      JSON.stringify(e.p_context || null));
+
+    // Words shaped like track data are dropped whole; only the code stays.
+    await ready();
+    n = logRows.length;
+    await postRaw({ errorCode: "0008", errorMessage: "%*4111********1111^DOE/JOHN^2512*?", entry: "swipe" });
+    const trackShown = await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 0008)"), 4000);
+    txt = await textOf(modal);
+    const t = rowsSince(n, "swipe_refused")[0] || {};
+    ok("P8: words shaped like track data are dropped from the screen and the row; the code stays",
+      trackShown && !txt.includes("DOE") && !!t.p_context && t.p_context.reason === null && t.p_context.errorCode === "0008"
+      && !JSON.stringify(t).includes("DOE"), JSON.stringify(t.p_context || null));
+
+    // Silence after the reader starts typing: the 20 s timer files swipe_no_answer.
+    await ready();
+    n = logRows.length;
+    await postRaw({ cardTyping: true });
+    await page.waitForTimeout(200);
+    await ff(21_000);
+    ok("P8: a read with no answer says it didn't go through",
+      await until(async () => (await textOf(modal)).includes("That swipe didn't go through."), 4000), await brief(modal));
+    const s = rowsSince(n, "swipe_no_answer")[0] || {};
+    ok("P8: ...and files one swipe_no_answer row (warn, waited 20 s)",
+      rowsSince(n, "swipe_no_answer").length === 1 && s.p_severity === "warn" && s.p_context && s.p_context.waitedMs === 20000,
+      JSON.stringify(s.p_context || null));
+
+    await page.waitForTimeout(300);
+    ok("P8: nothing was charged and Charge is off", callsOf("portal-payments", "charge").length === charges && await offOf(chargeBtn(modal)));
+    await modal.screenshot({ path: join(shotsDir("cardTokenAge"), "P8-swipe-refused.png") }).catch(() => {});
+    await tap(modal.getByRole("button", { name: "Cancel" }));
+  }
 
   // ── R: Refund on a payment row ────────────────────────────────────────────────────────────────
   const now = await page.evaluate(() => new Date().toISOString());

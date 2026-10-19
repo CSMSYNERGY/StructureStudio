@@ -3785,6 +3785,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           if (frameRef.current !== f || payTokenRef.current) return;
           setArmed(false);
           setTokenErr("That swipe didn't go through. Press Ready and swipe again, or key the card in.");
+          // Filed too (warn), beside swipe_refused below: silence is what a reader keyed for the
+          // other system looks like, so support needs the two told apart. No card data.
+          if (window.ssLogError) window.ssLogError("portal", "A swipe got no answer from the card reader frame", "swipe_no_answer",
+            { waitedMs: READ_WAIT_MS, orderId: o.id }, "warn");
         }, READ_WAIT_MS);
       }
       // Every answer below ends the swipe attempt, so each one disarms: "Press Ready" has to be
@@ -3792,13 +3796,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // A swipe's frame text is about typed numbers ("Invalid Account Number" for a half read),
       // so the reader gets its own sentence; the keyed form keeps the frame's own words.
       const swipeMiss = "The reader didn't get a clean read. Press Ready and swipe again.";
-      if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(entry === "swipe" ? swipeMiss : m.validationError); setArmed(false); return; }
+      // ...but that sentence alone hid WHY the frame refused (2026-10-19, the first real VP3350
+      // swipe of a Fiserv test card: a complete read, refused, and nothing to tell a half read
+      // from a reader keyed for the live system). So a swipe refusal also shows CardPointe's own
+      // code and words, and files them (warn) for support. Only the frame's answer travels: never
+      // the swipe, the token or the card. The words are free text (CardSecure's after "NNNN::"),
+      // so anything shaped like track data blanks them, and every run of 4+ digits (spaced or
+      // dashed too) and of 12+ hex is cut, in case a frame ever echoes part of what it was given.
+      // How to read the code: 1001 "Invalid Account Number" is the FRAME's own verdict (it did not
+      // recognise the reader's output as a swipe; nothing reached CardSecure, so it says nothing
+      // about the reader's keys); a 4-digit code with other words is CardSecure's answer.
+      const swipeRefused = (kind, rawCode, rawWords) => {
+        const str = (v) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
+        let said = str(rawWords);
+        if (/[%^;=?*|]/.test(said)) said = "";
+        said = said.replace(/[0-9A-Fa-f]{12,}/g, "…").replace(/\d(?:[\s-]?\d){3,}/g, "…").trim().slice(0, 120);
+        const code = str(rawCode).replace(/[^0-9A-Za-z-]/g, "").slice(0, 12);
+        const shown = [code ? "code " + code : "", said].filter(Boolean).join(", ");
+        let frame = "";
+        try { frame = new URL((payOpts && payOpts.tokenizer && payOpts.tokenizer.origin) || "").host; } catch (_e) { /* no origin */ }
+        if (window.ssLogError) window.ssLogError("portal", "A swipe was refused by the card reader frame", "swipe_refused",
+          { kind, errorCode: code || null, reason: said || null, entry: typeof m.entry === "string" ? m.entry.slice(0, 10) : null, frame, orderId: o.id }, "warn");
+        return shown ? swipeMiss + " (CardPointe: " + shown + ")" : swipeMiss;
+      };
+      if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(entry === "swipe" ? swipeRefused("validation", m.errorCode, m.validationError) : m.validationError); setArmed(false); return; }
       // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
       // indistinguishable from a strange token and the button would arm on nothing.
       if (m && m.errorCode && String(m.errorCode) !== "0") {
         stopReadTimer();
         setPayToken(null);
-        setTokenErr(entry === "swipe" ? swipeMiss : (m.errorMessage || "That card wasn't accepted — check the number."));
+        setTokenErr(entry === "swipe" ? swipeRefused("error", m.errorCode, m.errorMessage) : (m.errorMessage || "That card wasn't accepted — check the number."));
         setArmed(false);
         return;
       }
