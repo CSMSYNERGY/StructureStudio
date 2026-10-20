@@ -3673,6 +3673,25 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [frameReady, setFrameReady] = useState(false);
   const readTimerRef = useRef(null);   // the reader typed, no token yet: see the message listener
   const landTimerRef = useRef(null);   // the trap's "the burst is over" debounce
+  // How many reader keys this attempt reached the PAGE instead of the card box (a count, never
+  // the keys). 2026-10-20: two real swipes came back 1001 "manual" although the reader's output
+  // ends like ID TECH's 02...03 swipe, which the frame accepts whole; a lost START would do that.
+  const outsideKeysRef = useRef(0);
+  // When this attempt's Ready was pressed, its reader frame loaded, and the reader's first key
+  // arrived (page or frame), in ms: a swipe started before the frame has focus loses its start.
+  const swipeTimesRef = useRef({ ready: 0, load: 0, firstKey: 0 });
+  const swipeTiming = () => {
+    const s = swipeTimesRef.current;
+    return {
+      readyToLoadMs: s.ready && s.load ? s.load - s.ready : null,
+      loadToFirstKeyMs: s.load && s.firstKey ? s.firstKey - s.load : null,
+    };
+  };
+  const noteFirstKey = () => { if (!swipeTimesRef.current.firstKey) swipeTimesRef.current.firstKey = Date.now(); };
+  // A new attempt starts counting from nothing: Ready, the Swipe chip, closing the modal, and each
+  // filed refusal (a second swipe into the same frame must not repeat the first one's numbers).
+  const resetSwipeCounts = (ready = 0) => { outsideKeysRef.current = 0; swipeTimesRef.current = { ready, load: 0, firstKey: 0 }; };
+  const endSwipeAttempt = () => { outsideKeysRef.current = 0; swipeTimesRef.current.firstKey = 0; };
   const stopReadTimer = () => { if (readTimerRef.current) { clearTimeout(readTimerRef.current); readTimerRef.current = null; } };
   // How long a read may take, from the reader's FIRST key, before the page says Fiserv refused it.
   // The frame says "typing" once per read and nothing at the end of one, so this window has to
@@ -3778,6 +3797,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       //   * Until it fires the page stays armed: "Press Ready" mid-read reloads the frame and
       //     throws the read away.
       if (m && m.cardTyping === true && entry === "swipe" && !payTokenRef.current) {
+        noteFirstKey();
         stopReadTimer();
         const f = frameRef.current;
         readTimerRef.current = setTimeout(() => {
@@ -3788,7 +3808,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           // Filed too (warn), beside swipe_refused below: silence is what a reader keyed for the
           // other system looks like, so support needs the two told apart. No card data.
           if (window.ssLogError) window.ssLogError("portal", "A swipe got no answer from the card reader frame", "swipe_no_answer",
-            { waitedMs: READ_WAIT_MS, orderId: o.id }, "warn");
+            { waitedMs: READ_WAIT_MS, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
+          endSwipeAttempt();
         }, READ_WAIT_MS);
       }
       // Every answer below ends the swipe attempt, so each one disarms: "Press Ready" has to be
@@ -3816,7 +3837,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         let frame = "";
         try { frame = new URL((payOpts && payOpts.tokenizer && payOpts.tokenizer.origin) || "").host; } catch (_e) { /* no origin */ }
         if (window.ssLogError) window.ssLogError("portal", "A swipe was refused by the card reader frame", "swipe_refused",
-          { kind, errorCode: code || null, reason: said || null, entry: typeof m.entry === "string" ? m.entry.slice(0, 10) : null, frame, orderId: o.id }, "warn");
+          { kind, errorCode: code || null, reason: said || null, entry: typeof m.entry === "string" ? m.entry.slice(0, 10) : null, frame, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
+        endSwipeAttempt();
         return shown ? swipeMiss + " (CardPointe: " + shown + ")" : swipeMiss;
       };
       if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(entry === "swipe" ? swipeRefused("validation", m.errorCode, m.validationError) : m.validationError); setArmed(false); return; }
@@ -3946,13 +3968,38 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // elsewhere leaves focus HERE, where this trap catches the swipe and says so.
   useEffect(() => {
     if (!armed) return;
+    // One row per burst (warn): how many keys missed the box. The count only, never the keys. Filed
+    // when the burst ends: 1.5 s after its last key, or sooner if the attempt ends first (the frame
+    // refusing the rest of the swipe disarms, and that cleanup must not lose the row).
+    // `burst` is this arming's own count: a Ready pressed mid-burst zeroes outsideKeysRef before
+    // this cleanup runs, and the row must still say how many keys that burst lost.
+    // Its own first-key time too: a refusal filed meanwhile zeroes the shared one. Filed once:
+    // a key that slips in between the timer and the re-render must not file a second row.
+    let burst = 0, burstFirstAt = 0;
+    const fileMissed = () => {
+      if (!burst) return;
+      const keys = burst; burst = 0;
+      const { ready, load } = swipeTimesRef.current;
+      if (window.ssLogError) window.ssLogError("portal", "Reader keys reached the page, not the card box", "swipe_missed_frame",
+        { keys, readyToLoadMs: ready && load ? load - ready : null,
+          loadToFirstKeyMs: load && burstFirstAt ? burstFirstAt - load : null,
+          frameLoadedFirst: !!load && load <= burstFirstAt, orderId: o.id }, "warn");
+    };
+    // A real reader is a USB keyboard: each capital hex letter comes with its own Shift keydown.
+    // Those are swallowed like any key but not counted, so the count is characters. The names are
+    // compared, never kept.
+    const MODIFIERS = ["Shift", "Control", "Alt", "Meta", "CapsLock"];
     const swallow = (ev) => {
       ev.preventDefault(); ev.stopPropagation();
+      if (!MODIFIERS.includes(ev.key)) {
+        outsideKeysRef.current += 1; burst += 1; noteFirstKey();
+        if (!burstFirstAt) burstFirstAt = Date.now();
+      }
       setTokenErr("That swipe didn't land in the card box. Press Ready, then swipe again.");
       // Stay armed while the reader is still typing, so the rest of its burst is swallowed too,
       // then disarm 1.5 s after the LAST key so Ready works again at once instead of in a minute.
       if (landTimerRef.current) clearTimeout(landTimerRef.current);
-      landTimerRef.current = setTimeout(() => { landTimerRef.current = null; setArmed(false); }, 1500);
+      landTimerRef.current = setTimeout(() => { landTimerRef.current = null; setArmed(false); fileMissed(); }, 1500);
     };
     document.addEventListener("keydown", swallow, true);
     // An indefinitely armed page is one where the next thing anyone types disappears. A read
@@ -3961,7 +4008,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     return () => {
       document.removeEventListener("keydown", swallow, true);
       clearTimeout(t);
-      if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; }
+      if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; fileMissed(); }
     };
     // armCount: a re-arm while armed (a click on the reader's frame) starts the minute again.
   }, [armed, armCount]);
@@ -3971,6 +4018,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // come here.
   const armReader = () => {
     stopReadTimer();
+    resetSwipeCounts(Date.now());
     setArmCount((n) => n + 1); setFrameReady(false);
     setPayToken(null); setPayExpiry(null); setTokenErr("");
     setArmed(true);
@@ -3983,6 +4031,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const closePay = () => {
     setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
     setTokenErr(""); setSurcharge(null); setArmed(false); setFrameReady(false); stopReadTimer(); setEntry("keyed"); clearAch();
+    resetSwipeCounts();
     setBillName(""); setBillStreet(""); setBillZip(""); setBillErr("");
   };
 
@@ -4697,7 +4746,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
                         // The one already chosen does nothing: it reloads no frame, so dropping the
                         // arm (or the card) there left the reader typing into this button, unheard.
-                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); }}
+                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); resetSwipeCounts(); }}
                           style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                       ))}
                     </div>
@@ -4720,7 +4769,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       ref={frameRef}
                       title="Payment details"
                       src={entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
-                      onLoad={() => setFrameReady(true)}
+                      onLoad={() => { if (entry === "swipe" && !swipeTimesRef.current.load) swipeTimesRef.current.load = Date.now(); setFrameReady(true); }}
                       // Height is SERVED (cpTokenizerHeight) so this modal and my-quotes.html
                       // cannot drift. Too short is a dead form, not a cosmetic issue: at the
                       // original 128px the CVV sat below the fold of a non-scrolling frame. The

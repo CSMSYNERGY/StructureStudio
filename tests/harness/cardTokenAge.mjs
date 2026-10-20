@@ -40,7 +40,8 @@
 //     P8 swipe refused by the frame: the modal shows CardPointe's own code and words after "didn't get a
 //        clean read" (the frame's 1001, then CardSecure's NNNN), with card-like runs cut and track-shaped
 //        words dropped, on screen and in the swipe_refused row (warn); 20 s of silence after the reader
-//        starts typing files swipe_no_answer; nothing is charged
+//        starts typing files swipe_no_answer; keys that reach the page are counted (swipe_missed_frame,
+//        keysOutsideFrame), never kept; nothing is charged
 //     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
 //        frame is NOT loaded again and the server's sentence shows without "Key the card in
 //        again"; that same frame's next token is then charged
@@ -637,6 +638,63 @@ try {
     ok("P8: ...and files one swipe_no_answer row (warn, waited 20 s)",
       rowsSince(n, "swipe_no_answer").length === 1 && s.p_severity === "warn" && s.p_context && s.p_context.waitedMs === 20000,
       JSON.stringify(s.p_context || null));
+
+    // A swipe whose START reaches the page (focus outside the card box) and whose rest the frame
+    // refuses: the page counts the keys it caught (never the keys), files swipe_missed_frame for the
+    // burst as soon as the attempt ends, and the frame's swipe_refused row carries the same count.
+    await ready();
+    await modal.getByText("Take a payment").first().click();
+    n = logRows.length;
+    const typedAt = Date.now();
+    await page.keyboard.type("02AB");
+    await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
+    const filedFast = await until(async () => rowsSince(n, "swipe_refused").length > 0 && rowsSince(n, "swipe_missed_frame").length > 0, 1200);
+    const filedIn = Date.now() - typedAt;
+    const pr = rowsSince(n, "swipe_refused")[0] || {};
+    const pm = rowsSince(n, "swipe_missed_frame")[0] || {};
+    ok("P8: keys that reached the page are counted on the swipe_refused row (keysOutsideFrame 4)",
+      !!pr.p_context && pr.p_context.keysOutsideFrame === 4, JSON.stringify(pr.p_context || null));
+    ok("P8: ...the frame's answer ends the burst: swipe_missed_frame (warn, keys 4) is filed at once, not by the 1.5 s timer",
+      filedFast && filedIn < 1400 && pm.p_severity === "warn" && pm.p_context && pm.p_context.keys === 4, `${filedIn} ms ` + JSON.stringify(pm.p_context || null));
+    ok("P8: ...neither row holds the keys",
+      !JSON.stringify(pm).includes("02AB") && !JSON.stringify(pr).includes("02AB"));
+    ok("P8: ...with the timings: Ready to frame load, and frame load to the first key (ms)",
+      !!pr.p_context && typeof pr.p_context.readyToLoadMs === "number" && pr.p_context.readyToLoadMs >= 0
+      && typeof pr.p_context.loadToFirstKeyMs === "number" && typeof pm.p_context.loadToFirstKeyMs === "number"
+      && pm.p_context.frameLoadedFirst === true, JSON.stringify(pm.p_context || null));
+    await page.waitForTimeout(1800);
+    ok("P8: ...and only one swipe_missed_frame row for that burst", rowsSince(n, "swipe_missed_frame").length === 1);
+
+    // A second swipe into the same frame, with no Ready: it starts from zero, not the first one's count.
+    n = logRows.length;
+    await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
+    await until(async () => rowsSince(n, "swipe_refused").length > 0, 4000);
+    const p2 = rowsSince(n, "swipe_refused")[0] || {};
+    ok("P8: a second refusal without Ready doesn't repeat the first one's count (keysOutsideFrame 0)",
+      !!p2.p_context && p2.p_context.keysOutsideFrame === 0, JSON.stringify(p2.p_context || null));
+
+    // The whole swipe reaches the page and the frame never answers: the 1.5 s timer files it, and
+    // the Shift that comes with a capital letter is swallowed but not counted.
+    await ready();
+    await modal.getByText("Take a payment").first().click();
+    n = logRows.length;
+    await page.keyboard.type("02AB");
+    await page.keyboard.down("Shift"); await page.keyboard.press("C"); await page.keyboard.up("Shift");
+    await page.waitForTimeout(2000);
+    const tm = rowsSince(n, "swipe_missed_frame");
+    ok("P8: with no frame answer, the timer files one swipe_missed_frame row: 5 characters, Shift not counted",
+      tm.length === 1 && tm[0].p_context && tm[0].p_context.keys === 5, JSON.stringify(tm.map((r) => r.p_context)));
+    ok("P8: ...the modal says the swipe didn't land, and Ready is on offer again",
+      (await textOf(modal)).includes("That swipe didn't land in the card box.") && (await modal.getByRole("button", { name: "Ready to swipe" }).count()) === 1,
+      await brief(modal));
+
+    // Ready starts the count again.
+    await ready();
+    n = logRows.length;
+    await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
+    await until(async () => rowsSince(n, "swipe_refused").length > 0, 4000);
+    const pz = rowsSince(n, "swipe_refused")[0] || {};
+    ok("P8: Ready starts the count again (keysOutsideFrame 0)", !!pz.p_context && pz.p_context.keysOutsideFrame === 0, JSON.stringify(pz.p_context || null));
 
     await page.waitForTimeout(300);
     ok("P8: nothing was charged and Charge is off", callsOf("portal-payments", "charge").length === charges && await offOf(chargeBtn(modal)));
