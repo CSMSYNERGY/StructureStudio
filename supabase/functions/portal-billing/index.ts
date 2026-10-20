@@ -4,8 +4,14 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
-import { GATEWAY, TOKENIZATION_KEY, nmiConfigured, nmiPost, isGatewayUnknown } from "../_shared/nmi.ts";
-import { chargeTopup, MIN_TOPUP_CENTS, MAX_TOPUP_CENTS } from "../_shared/walletTopup.ts";
+import { GATEWAY, TOKENIZATION_KEY, nmiConfigured, nmiPost, nmiPostCof, isGatewayUnknown } from "../_shared/nmi.ts";
+import { chargeTopup, MIN_TOPUP_CENTS, MAX_TOPUP_CENTS, type TopupCof } from "../_shared/walletTopup.ts";
+import {
+  AUTO_TOPUP_DAILY_MAX, COF_CONSENT_TEMPLATES, cardFromPayload, cofCardPhrase, cofConsentForBrowser, cofMoney,
+  cofRecurringPhrase, cofTodayPhrase, consentCoversOperatorTopups, consentProblem, recordConsent, renderCofConsent,
+  stampConsent,
+} from "../_shared/cofConsent.ts";
+import { sendTopupReceipt } from "../_shared/walletReceipt.ts";
 import {
   FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
 } from "../_shared/foundingPricing.ts";
@@ -39,6 +45,8 @@ const GATES: GateTable = {
   // charge, but it AUTHORISES unattended charges, so it is not a lesser permission.
   topup:          { area: "settings_billing", level: "edit" },
   topup_settings: { area: "settings_billing", level: "edit" },
+  // Replacing the card on file (317). It changes what every renewal and top-up charges.
+  update_card:    { area: "settings_billing", level: "edit" },
   // The wallet's full ledger (usage billing, 259). A READ, so view level: the same people who
   // see the wallet card and its ten-line list in `status`. That list sits behind `mine`, which
   // also keeps it from an operator without can_bill; resolveTenant lets such an operator make
@@ -71,7 +79,32 @@ const GATES: GateTable = {
 //       yearly only, a monthly plan anywhere in planIds is refused (409, code
 //       "founding_annual_only") — see _shared/foundingPricing.ts.
 //   { action: "cancel", subscriptionId }
+//   { action: "topup", amountCents, confirmChargeCents, paymentToken?, card?, consent?, cardholderPresent? }
+//   { action: "topup_settings", enabled, thresholdCents?, amountCents?, consent? }
+//   { action: "update_card", paymentToken, card?, consent }
 //   { action: "wallet_transactions", filter?, cursor?, limit?, from?, to?, format?: "csv", tz? }
+//
+// ══ STORED CREDENTIALS (Visa/Mastercard COF framework, migration 317) ══
+// Every sale on a card this function keeps says who started it and where it sits in an agreement
+// (_shared/nmi.ts cofFields):
+//   subscribe        each feature's first-period sale is that subscription's initial recurring
+//                    CIT (customer + stored + billing_method), kept on billing_subscriptions. A
+//                    NEW card is stored by the first of those sales (customer_vault=add_customer),
+//                    so a decline stores nothing. A fully credited upgrade, which charges nothing,
+//                    runs a $0 validate as its initial instead of skipping it.
+//   topup            the builder's first top-up is the card's UNSCHEDULED initial (customer +
+//                    stored), kept on billing_customers; later ones are customer + used.
+//   operators        must say whether the builder asked on the phone (cardholderPresent): yes is a
+//                    CIT, no is a merchant-initiated top-up that names the unscheduled initial and
+//                    sends the owners a receipt. A new subscription needs the builder, so no is
+//                    refused there.
+//   update_card      a $0 validate that replaces the vaulted card and becomes the new unscheduled
+//                    initial (NMI: a card change is a new initial transaction).
+// And every agreement a builder makes is recorded (billing_consents) BEFORE the charge it covers,
+// with the sentence from _shared/cofConsent.ts rendered from the server's own numbers: the first
+// card entry or first top-up, each subscription checkout, switching automatic top-ups on, and a
+// card replacement. A request without the ticked box (`consent: { version, accepted: true }`) is
+// refused before anything is touched.
 //       → { rows[], next_cursor } — or, with format "csv", { csv, rows, truncated }.
 //       The wallet ledger, 50 lines a page, newest first. See _shared/walletLedger.ts.
 //
@@ -286,10 +319,49 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     for (const t of expandFeature(planById.get(s.plan_id)?.feature)) liveFeatures.add(t);
   }
 
-  // Card on file? (NMI Customer Vault id — never sent to the browser.)
-  const { data: vaultRow } = await admin
-    .from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle();
-  const vaultId: string | null = vaultRow?.vault_id ?? null;
+  // Card on file? (NMI Customer Vault id — never sent to the browser.) With 317's columns: the
+  // vault's unscheduled initial and the card's last 4. Against a database 317 has not reached the
+  // select is refused whole (42703), so read the vault id alone and hold every card action below
+  // (cofReady): charging without somewhere to keep the initial is the defect 317 fixes.
+  let vaultRow: Record<string, unknown> | null = null;
+  let cofReady = true;
+  {
+    const full = await admin.from("billing_customers")
+      .select("vault_id, unscheduled_initial_txn, card_last4, card_brand").eq("client_id", clientId).maybeSingle();
+    if (full.error?.code === "42703") {
+      cofReady = false;
+      vaultRow = (await admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle()).data ?? null;
+    } else {
+      vaultRow = full.data ?? null;
+    }
+  }
+  const vaultId: string | null = vaultRow?.vault_id ? String(vaultRow.vault_id) : null;
+  const unscheduledInitial: string | null = vaultRow?.unscheduled_initial_txn ? String(vaultRow.unscheduled_initial_txn) : null;
+  const cardLast4: string | null = typeof vaultRow?.card_last4 === "string" ? vaultRow.card_last4 : null;
+  const cardBrand: string | null = typeof vaultRow?.card_brand === "string" ? vaultRow.card_brand : null;
+
+  // THE AGREEMENT BEHIND THE CARD'S CURRENT UNSCHEDULED INITIAL (317): the topup_card or
+  // card_update row stamped with that very transaction. Read once, on demand, and only where it
+  // decides something:
+  //   * a builder's top-up is a LATER one (customer + used) only when such an agreement exists.
+  //     An initial without one (a first top-up from the pre-317 tab, or a stamp that failed) makes
+  //     the next top-up a first top-up again: the box is asked for and recorded, and that sale
+  //     becomes the initial. Without this, the card could never get a covering agreement.
+  //   * an operator's "owner did not ask" top-up needs one in wording that disclosed it
+  //     (consentCoversOperatorTopups).
+  // A read that fails counts as no agreement: the builder is asked again, the operator refused.
+  let agreementVersions: string[] | null = null;
+  const agreementsBehindInitial = async (): Promise<string[]> => {
+    if (agreementVersions) return agreementVersions;
+    if (!unscheduledInitial) return (agreementVersions = []);
+    const { data, error } = await admin.from("billing_consents").select("wording_version")
+      .eq("client_id", clientId).in("kind", ["topup_card", "card_update"]).eq("transaction_id", unscheduledInitial)
+      .limit(5);
+    agreementVersions = error || !Array.isArray(data) ? [] : data.map((r: { wording_version?: unknown }) => String(r.wording_version ?? ""));
+    return agreementVersions;
+  };
+  const topupAgreementOnFile = async () => (await agreementsBehindInitial()).length > 0;
+  const ownerAgreedToOperatorTopups = async () => (await agreementsBehindInitial()).some((v) => consentCoversOperatorTopups(v));
 
   // ── Entitlement: may this tenant use the portal, and which features? ──────────
   // Computed HERE, not in the browser: client_settings (which holds billing_exempt)
@@ -740,12 +812,32 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           if (!withPricing.error) return withPricing;
           return await admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order");
         };
+        type WalletRow = {
+          balance_cents?: number | null; held_cents?: number | null; metered_exempt?: boolean | null;
+          auto_topup_enabled?: boolean | null; auto_topup_threshold_cents?: number | null; auto_topup_amount_cents?: number | null;
+          auto_topup_last_at?: string | null; auto_topup_disabled_reason?: string | null; auto_topup_consent_id?: number | null;
+        };
+        const walletCols: string = "balance_cents, held_cents, metered_exempt, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at, auto_topup_disabled_reason"
+          + (cofReady ? ", auto_topup_consent_id" : "");
         const [acct, price, txs] = await Promise.all([
-          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at, auto_topup_disabled_reason").eq("client_id", clientId).maybeSingle(),
+          // 317's consent column only once 317 is there (cofReady): a select naming a missing
+          // column is refused whole, and this one carries the balance.
+          admin.from("wallet_accounts").select(walletCols).eq("client_id", clientId).maybeSingle() as unknown as PromiseLike<{ data: WalletRow | null }>,
           meterRead(),
           admin.from("wallet_transactions").select("id, kind, amount_cents, meter_kind, state, memo, created_at")
             .eq("client_id", clientId).in("state", ["posted", "held"]).order("created_at", { ascending: false }).limit(10),
         ]);
+        // How many merchant-initiated top-ups the last 24 hours have used of the daily cap (317),
+        // so the tab can say "daily limit reached" instead of looking switched on and silent.
+        // Read only while automatic top-ups are on.
+        let autoCount: number | null = null;
+        if (cofReady && acct.data?.auto_topup_enabled) {
+          const { data: recent } = await admin.from("billing_charge_attempts").select("id")
+            .eq("client_id", clientId).eq("cof", "mit_unscheduled")
+            .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+            .limit(AUTO_TOPUP_DAILY_MAX + 1);
+          autoCount = Array.isArray(recent) ? recent.length : null;
+        }
         // A COST-PLUS meter (calls and texts, 259) has no price to show: what a builder pays is
         // Twilio's real cost times the markup, per call or text. Its price_cents is 0, which this
         // card printed as "No charge" — the opposite of true. Send the sentence instead, and a
@@ -772,9 +864,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             thresholdCents: acct.data?.auto_topup_threshold_cents ?? null,
             amountCents: acct.data?.auto_topup_amount_cents ?? null,
             lastAt: acct.data?.auto_topup_last_at ?? null,
-            // Why it switched itself off, if it did. This is the ONLY surface that tells a
-            // builder their card was declined on an unattended charge — there is no email.
+            // Why it switched itself off, if it did: a declined card, or (317) an auto top-up
+            // switched on before agreements were recorded. A full sentence, shown as written.
             disabledReason: acct.data?.auto_topup_disabled_reason ?? null,
+            // Whether it can be switched on at all: it needs the builder's own first top-up,
+            // which is the transaction the card networks link automatic top-ups to.
+            ready: Boolean(unscheduledInitial),
+            agreed: Boolean(acct.data?.auto_topup_consent_id),
+            dailyMax: AUTO_TOPUP_DAILY_MAX,
+            chargesLast24h: autoCount,
           },
           meters,
           transactions: (txs.data ?? []).map((t: any) => ({
@@ -814,6 +912,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           wallet,
           upgradeCredits,
           hasCard: Boolean(vaultId),
+          // Which card, for "your card ending 1234". Null last4 for a card saved before 317.
+          card: vaultId ? { last4: cardLast4, brand: cardBrand } : null,
+          // The agreement sentences (one copy, _shared/cofConsent.ts), and whether a top-up
+          // still needs one: true until the builder's own first top-up has gone through.
+          // operatorTopupAllowed: whether an operator may add funds without the owner asking
+          // (the owner's agreement covers it); only asked, and only true, for an operator.
+          cof: {
+            ...cofConsentForBrowser(),
+            topupNeedsAgreement: !unscheduledInitial || !(await topupAgreementOnFile()),
+            operatorTopupAllowed: operator ? await ownerAgreedToOperatorTopups() : false,
+          },
           discount: { percent: discountPct, features: discountFeatures },
           plans: publicPlans,
           // `paid_through` rides along because current_period_end is NOT the next renewal once
@@ -835,6 +944,43 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (!configured) {
     return json({ error: "Billing is not configured yet. Contact CSM Synergy." }, 503);
   }
+  // See the vault read above: no card action runs against a database without 317. Cancelling
+  // only ends charges, so it is the one write that does not wait.
+  if (!cofReady && action !== "cancel") {
+    return json({ error: "Card payments are being updated. Try again in a few minutes." }, 503);
+  }
+
+  // OPERATORS SAY WHO ASKED (317). When an operator charges a tenant's stored card the card
+  // networks must be told whether the cardholder asked for it (a phone order, cardholder-
+  // initiated) or not (merchant-initiated), and only the operator knows. So they must say, every
+  // time: `cardholderPresent: true | false`, the Billing tab's "the builder asked for this on the
+  // phone" choice. Absent, nothing is charged.
+  const operatorSaid = (): boolean | null =>
+    payload?.cardholderPresent === true ? true : payload?.cardholderPresent === false ? false : null;
+  const OPERATOR_MUST_SAY = "Say whether the builder asked for this charge on the phone, then try again.";
+
+  // ⏳ TRANSITION (317): THE OLDER BILLING TAB. This function serves production the moment it is
+  // deployed, but the Billing tab that sends `consent` and `cardholderPresent` reaches production
+  // only at the next promotion (one Supabase project, two frontends: see the work log). Refusing
+  // the older tab would leave every production checkout saying "tick the box" with no box on the
+  // screen. So a request carrying none of `cofTab` (the version marker the new tab puts on EVERY
+  // card request, so a new tab that needs no box is never mistaken for the old one), `consent` and
+  // `cardholderPresent`, which only the old tab sends, is served as it was:
+  // with the right COF fields (those are this function's, not the page's), without an agreement
+  // row, an operator's charge taken as made with the owner on the phone (the use the operator path
+  // was built for), and an info row filed so it is visible when the last such request stops.
+  // COF_REQUIRE_CONSENT=1, set once main carries the new tab, ends it: then those requests are
+  // refused like any other without the box. Switching automatic top-ups ON is never served this
+  // way: an agreement to unattended charges is exactly what must not be assumed.
+  const strictCof = (Deno.env.get("COF_REQUIRE_CONSENT") ?? "").trim() === "1";
+  const oldTabShape = payload?.cofTab === undefined && payload?.consent === undefined && payload?.cardholderPresent === undefined;
+  const fromOlderTab = !strictCof && oldTabShape;
+  const noteOlderTab = (what: string) =>
+    admin.from("app_errors").insert({
+      source: "edge:portal-billing", severity: "info", code: "cof_older_billing_tab",
+      message: `${action} from a Billing tab older than 317: ${what}. Set COF_REQUIRE_CONSENT=1 once production runs the new tab.`,
+      client_id: clientId,
+    }).then(() => undefined, () => undefined);
 
   if (action === "subscribe") {
     const planIds: string[] = Array.isArray(payload?.planIds)
@@ -939,29 +1085,35 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       return json({ error: "Simple Layout is the required base plan — add it (or the Suite) to your selection." }, 400);
     }
 
-    // Card: reuse the vault, or create it from a fresh Collect.js token.
-    let vault = vaultId;
-    if (!vault) {
-      if (!paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
-      let cust: Record<string, string>;
-      try {
-        cust = await nmiPost({
-          customer_vault: "add_customer",
-          payment_token: paymentToken,
-          first_name: String(payload?.firstName || ""),
-          last_name: String(payload?.lastName || ""),
-          email: String(payload?.email || userEmail || ""),
-          merchant_defined_field_1: clientId,
-        });
-      } catch (e) {
-        return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
+    // ── The card, and who agreed (317) ───────────────────────────────────────────────────
+    // A card on file is reused. A NEW card is no longer vaulted here, ahead of any charge: it
+    // rides on the first feature's sale below (customer_vault=add_customer), which NMI stores
+    // only "if the transaction is successful", so a decline leaves nothing on file.
+    let vault: string | null = vaultId;
+    const newCard = !vault;
+    if (newCard && !paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
+    if (operator) {
+      // A new subscription is a new recurring agreement, and only the cardholder can make one.
+      // On the phone, the operator is taking it for them (a cardholder-initiated phone order);
+      // without them there is nobody to agree, and no merchant-initiated way to start a series.
+      const said = fromOlderTab ? true : operatorSaid();
+      if (said === null) return json({ error: OPERATOR_MUST_SAY, code: "cardholder_present_required" }, 400);
+      if (said === false) {
+        return json({ error: "A new subscription needs the builder's agreement. Ask them on the phone, or have them subscribe from their own Billing tab." }, 409);
       }
-      vault = cust.customer_vault_id;
-      if (!vault) return json({ error: "Gateway did not return a customer vault id." }, 502);
-      const { error: vErr } = await admin.from("billing_customers")
-        .upsert({ client_id: clientId, vault_id: vault, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
-      if (vErr) return json({ error: vErr.message }, 500);
+      // ...and the agreement is the sentence the Billing tab shows the operator to READ OUT, with
+      // their tick that the owner agreed to it. The row stored below is that sentence, attested.
+      if (!fromOlderTab) {
+        const problem = consentProblem(payload);
+        if (problem) return json({ error: "Read the agreement to the owner and tick the box once they agree, then try again.", code: "consent_required" }, 400);
+      }
+    } else if (!fromOlderTab) {
+      // The builder ticks the agreement box at checkout, card on file or not: every new
+      // subscription is a new recurring agreement.
+      const problem = consentProblem(payload);
+      if (problem) return json({ error: problem, code: "consent_required" }, 400);
     }
+    const enteredCard = cardFromPayload(payload);
 
     // ── What the card is charged TODAY ──────────────────────────────────────────────
     // Registering a recurring subscription never charges anything. NMI starts the clock at
@@ -1039,6 +1191,48 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     const yyyymmdd = (d: Date) =>
       `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
 
+    // ── THE AGREEMENT, recorded before any money moves (317) ─────────────────────────────
+    // The sentence the Billing tab showed beside the box, rendered again here from the server's
+    // own numbers: today's charge (already proven equal to the browser's by confirmChargeCents)
+    // and what renews, per interval. The plans, amounts and first renewal dates go in `terms`.
+    // Refused, nothing is charged: the auditStrict rule, for the cardholder's side of it.
+    const yearlyCents = chosen.filter((p) => p!.billing_interval === "annual").reduce((s, p) => s + chargeCentsFor(p!), 0);
+    const monthlyCents = chosen.filter((p) => p!.billing_interval !== "annual").reduce((s, p) => s + chargeCentsFor(p!), 0);
+    let consentId: number | null = null;
+    if (fromOlderTab) {
+      await noteOlderTab(operator ? "served without a recorded agreement; operator taken as on the phone" : "served without a recorded agreement");
+    } else {
+      try {
+        consentId = await recordConsent(admin, {
+          clientId,
+          kind: "subscription",
+          wording: renderCofConsent(COF_CONSENT_TEMPLATES.subscription, {
+            card: cofCardPhrase(newCard, newCard ? enteredCard.last4 : cardLast4),
+            today: cofTodayPhrase(dueTodayTotal),
+            recurring: cofRecurringPhrase(yearlyCents, monthlyCents),
+          }),
+          terms: {
+            due_today_cents: dueTodayTotal,
+            credit_cents: creditCents,
+            plans: chosen.map((p) => ({
+              id: p!.id, interval: p!.billing_interval, charge_cents: chargeCentsFor(p!), setup_fee_cents: p!.setup_fee_cents || 0,
+              first_renewal: (upgrade && p!.id === upgrade.plan!.id ? extendedRenewalOf(p!.billing_interval, chargeCentsFor(p!)).at : renewalOf(p!.billing_interval)).toISOString(),
+            })),
+            ...(operator ? { attested_by: "operator", via: "phone", read_to_owner: true } : {}),
+          },
+          userId, userEmail: userEmail || null,
+          cardLast4: newCard ? enteredCard.last4 : cardLast4,
+          req,
+        });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
+    }
+    const initialsTaken: string[] = [];
+    // The single-call alternative NMI documents for linking a subscription to its initial sale.
+    // Dark until Deposyt confirms it does more than copy payment details: see the registration.
+    const linkSourceTxn = (Deno.env.get("NMI_SUB_SOURCE_TXN") ?? "").trim() === "1";
+
     // One recurring subscription per feature, sequentially; report partial failures.
     //
     // ONE gateway form since 2026-08-24: the custom-amount form (plan_amount). The charged
@@ -1066,6 +1260,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // take money for features behind a portal that is about to be locked.
     const orderedChosen = [...chosen].sort((a, b) => Number(b!.required) - Number(a!.required));
     let baseFailed = false;
+    let newCardTried = false;
+    let newCardUnknown = false;
     for (const p of orderedChosen) {
       const chargeCents = chargeCentsFor(p!);
       const pct = discountForFeature(p!.feature);
@@ -1082,6 +1278,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
 
       if (baseFailed && !p!.required && !liveFeatures.has(requiredFeatures[0] ?? "")) {
         failed.push({ planId: p!.id, error: "Skipped - the required base plan could not be started, and this feature would be unusable without it." });
+        continue;
+      }
+      // A new card is stored by the first approved initial below. If that one was declined, the
+      // card is not on file and its one-use token is spent: nothing else in this cart can be paid.
+      if (!vault && newCardTried) {
+        failed.push({
+          planId: p!.id,
+          error: newCardUnknown
+            ? "Skipped - we could not confirm the first charge, so nothing else was charged."
+            : "Skipped - your card was not saved because the first charge did not go through. Nothing else was charged.",
+        });
         continue;
       }
       // A 100% discount reaches the gateway as plan_amount "0.00", which either errors or
@@ -1131,16 +1338,18 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       // Inserting the 'open' row is also the concurrency guard: a simultaneous second
       // request hits the partial unique index and stops here, before any charge.
       const { data: attempt, error: attErr } = await admin.from("billing_charge_attempts")
-        .insert({ client_id: clientId, plan_id: p!.id, orderid: `ss_first_${clientId}_${p!.id}` })
+        .insert({ client_id: clientId, plan_id: p!.id, orderid: `ss_first_${clientId}_${p!.id}`, cof: "cit_initial_recurring" })
         .select("id").maybeSingle();
       if (attErr || !attempt) {
         failed.push({ planId: p!.id, error: "Another checkout for this feature is already in progress. Give it a moment, then refresh." });
         if (p!.required) baseFailed = true;
         continue;
       }
+      // What the processor said about the COF flags, written with the outcome (317).
+      let cofSeen: { billing_method?: string | null; cof_supported?: string | null } = {};
       const closeAttempt = (state: string, detail: string | null, txn: string | null) =>
         admin.from("billing_charge_attempts")
-          .update({ state, detail, sale_txn: txn, closed_at: new Date().toISOString() })
+          .update({ state, detail, sale_txn: txn, closed_at: new Date().toISOString(), ...cofSeen })
           .eq("id", attempt.id).then(() => undefined, () => undefined);
 
       // Per-FEATURE sale + registration, so a failure can be unwound feature-by-feature:
@@ -1148,38 +1357,111 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       // feature got, and the catch reverses exactly that much.
       let saleTxn: string | null = null;
       let regSubId: string | null = null;
+      // The subscription's initial (317): the sale, or a fully credited upgrade's $0 validate.
+      // Kept apart from saleTxn because only a SALE moved money, and the unwind below reverses
+      // saleTxn: voiding a validate would report "may not have been reversed" for nothing.
+      let initialTxn: string | null = null;
+      // A vault this iteration created, so the unwind can remove it if it never got recorded.
+      let vaultCreatedHere: string | null = null;
       try {
-        // 1. Charge the first period (plus this feature's setup fee) NOW.
-        //    UNLESS a credit already covers it: firstCents === 0 here can only be a fully
-        //    credited upgrade (the misconfiguration case was refused above), and sending a
-        //    $0.00 sale to NMI either errors or books a meaningless zero transaction. The
-        //    honest record of "they already paid for this time" is the absence of a charge
-        //    plus the billing_upgrade_credits row, not a $0 receipt.
-        if (firstCents > 0) {
+        // 1. The subscription's INITIAL RECURRING CIT (317), sent as such: initiated_by=customer,
+        //    stored_credential_indicator=stored, billing_method (nmiPostCof falls back from
+        //    'initial_recurring' to 'recurring' if the processor refuses the newer value).
+        //    Normally the sale of the first period (plus this feature's setup fee), NOW.
+        //    A fully credited upgrade (firstCents === 0; the misconfiguration case was refused
+        //    above) charges nothing, and a $0.00 sale either errors or books a meaningless zero
+        //    transaction, so it runs a $0 VALIDATE instead: NMI's initial for a period that is
+        //    not charged ("for a free trial, the initial transaction will be a validate").
+        //    A NEW card rides on the first of these (customer_vault=add_customer).
+        const charging = firstCents > 0;
+        const addingCard = !vault;
+        if (addingCard) newCardTried = true;
         try {
-          const sale = await nmiPost({
-            type: "sale",
-            amount: (firstCents / 100).toFixed(2),
-            customer_vault_id: vault,
+          const { res, billingMethod, cofSupported, fellBack, refusedWith } = await nmiPostCof({
+            type: charging ? "sale" : "validate",
+            ...(charging ? { amount: (firstCents / 100).toFixed(2) } : {}),
+            ...(addingCard
+              ? {
+                customer_vault: "add_customer",
+                payment_token: paymentToken,
+                first_name: String(payload?.firstName || ""),
+                last_name: String(payload?.lastName || ""),
+                email: String(payload?.email || userEmail || ""),
+                merchant_defined_field_1: clientId,
+              }
+              : { customer_vault_id: vault as string }),
             orderid: `ss_first_${clientId}_${p!.id}`,
-            order_description: `StructureStudio ${p!.name} (${p!.billing_interval}) - first ${p!.billing_interval === "annual" ? "year" : "month"}${(p!.setup_fee_cents || 0) > 0 ? " + setup" : ""}${discounted ? `, ${pct}% off` : ""}`,
-          });
-          saleTxn = sale.transactionid || null;
+            order_description: `StructureStudio ${p!.name} (${p!.billing_interval}) - ${charging ? `first ${p!.billing_interval === "annual" ? "year" : "month"}${(p!.setup_fee_cents || 0) > 0 ? " + setup" : ""}${discounted ? `, ${pct}% off` : ""}` : "card check, period covered by credit"}`,
+          }, "cit_initial_recurring");
+          initialTxn = res.transactionid || null;
+          if (charging) saleTxn = initialTxn;
+          cofSeen = { billing_method: billingMethod, cof_supported: cofSupported };
+          if (fellBack) {
+            await admin.from("app_errors").insert({
+              source: "edge:portal-billing", severity: "warn", code: "nmi_initial_recurring_fallback",
+              message: `${clientId} ${p!.id}: the processor refused billing_method=initial_recurring (${refusedWith}); the initial went through as 'recurring'. Set the NMI_INITIAL_RECURRING_METHOD secret to "recurring" to stop sending the refused value first.`,
+              client_id: clientId,
+            }).then(() => undefined, () => undefined);
+          }
+          if (addingCard) {
+            // The card is stored now. Record it before anything else can fail: a vault nobody
+            // knows about is a stored card with no owner. Failing here unwinds today's sale.
+            const newVault = String(res.customer_vault_id || "").trim();
+            if (!newVault) throw new Error("The payment gateway did not return a card on file.");
+            vaultCreatedHere = newVault;
+            const now = new Date().toISOString();
+            const { error: vErr } = await admin.from("billing_customers").upsert({
+              client_id: clientId, vault_id: newVault, updated_at: now,
+              card_last4: enteredCard.last4, card_brand: enteredCard.brand, card_saved_at: now,
+              // A NEW card has no top-up agreement yet. Clearing this also undoes a first top-up
+              // racing this checkout on another card (both saw no card on file): its initial
+              // must never be named for this card's vault.
+              unscheduled_initial_txn: null, unscheduled_initial_at: null,
+            }, { onConflict: "client_id" });
+            if (vErr) throw new Error(`Your card could not be saved (${vErr.message}).`);
+            vault = newVault;
+            vaultCreatedHere = null;
+          }
         } catch (se) {
+          if (vaultCreatedHere || saleTxn) throw se;   // money or a card moved: the unwind below
           if (isGatewayUnknown(se)) {
             // The card MAY have been charged and we cannot know. Do not guess, do not
             // retry, do not tell the customer nothing happened. The closed_unknown row
             // blocks every further attempt for this plan until support reconciles.
-            await closeAttempt("closed_unknown", `sale outcome unverifiable: ${(se as Error).message}`, null);
+            await closeAttempt("closed_unknown", `${charging ? "sale" : "validate"} outcome unverifiable: ${(se as Error).message}${addingCard ? " | this request also stored a NEW card (customer_vault=add_customer): a vault may exist" : ""}`, null);
+            if (addingCard) {
+              // The sale carried the card, so the gateway may hold a vault nobody here knows
+              // about. Support needs to find it, then record it on billing_customers or delete it.
+              newCardUnknown = true;
+              await admin.from("app_errors").insert({
+                source: "edge:portal-billing", severity: "error", code: "new_card_unverifiable",
+                message: `${clientId}: the first sale of a new card (orderid ss_first_${clientId}_${p!.id}) is unverifiable, and it also stored the card. Look it up at the gateway; if a customer vault was created (merchant_defined_field_1 = ${clientId}), record it on billing_customers or delete it. ${(se as Error).message}`,
+                client_id: clientId,
+              }).then(() => undefined, () => undefined);
+            }
             failed.push({ planId: p!.id, error: "We could not confirm whether your card was charged. Do NOT try again - contact CSM Synergy and we will confirm and finish the setup." });
             if (p!.required) baseFailed = true;
             continue;
           }
-          await closeAttempt("closed_declined", (se as Error).message, null);
-          failed.push({ planId: p!.id, error: (se as Error).message });
+          // A refused billing_method whose 'recurring' retry failed too (nmiPostCof keeps the first
+          // refusal on the error): the warning ops needs is filed all the same.
+          const refusedWith = (se as { refusedWith?: string }).refusedWith;
+          if (refusedWith) {
+            await admin.from("app_errors").insert({
+              source: "edge:portal-billing", severity: "warn", code: "nmi_initial_recurring_fallback",
+              message: `${clientId} ${p!.id}: the processor refused billing_method=initial_recurring (${refusedWith}), and the retry with 'recurring' failed too: ${(se as Error).message}. Set the NMI_INITIAL_RECURRING_METHOD secret to "recurring".`,
+              client_id: clientId,
+            }).then(() => undefined, () => undefined);
+          }
+          await closeAttempt("closed_declined", refusedWith ? `${(se as Error).message} (after initial_recurring was refused: ${refusedWith})` : (se as Error).message, null);
+          failed.push({
+            planId: p!.id,
+            error: charging
+              ? (se as Error).message
+              : `Your bank did not accept a $0 check on your card on file (${(se as Error).message}). Replace the card in the Wallet tab, then try again.`,
+          });
           if (p!.required) baseFailed = true;
           continue;
-        }
         }
         // 2. Register the recurring so its first gateway charge is the RENEWAL.
         //    day_of_month alone is ambiguous about the first charge (subscribe ON the
@@ -1204,7 +1486,14 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           // stored, just not shown there. Don't remove this on the strength of that
           // screen; check the payload.
           plan_name: discounted ? `${p!.gateway_plan_id}_${pct}OFF` : p!.gateway_plan_id,
-          customer_vault_id: vault,
+          customer_vault_id: vault as string,
+          // NO COF FIELDS: add_subscription takes none. NMI's Recurring module charges each
+          // renewal itself, flagged merchant-initiated and recurring. source_transaction_id is
+          // NMI's documented way to "associate payment information with a Subscription record"
+          // from a transaction, which may or may not be how it links renewals to this initial;
+          // sent beside customer_vault_id (the live-proven form) it is undocumented, so it stays
+          // behind NMI_SUB_SOURCE_TXN=1 until Deposyt says what it does.
+          ...(linkSourceTxn && initialTxn ? { source_transaction_id: initialTxn } : {}),
           merchant_defined_field_1: clientId,
           orderid: `ss_${clientId}_${p!.id}`,
           order_description: discounted
@@ -1224,11 +1513,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             status: "active",
             current_period_start: new Date().toISOString(),
             current_period_end: renewal.toISOString(),   // period 1 is PAID (the sale above)
+            // This subscription's own recurring initial, sent flagged (317).
+            initial_transaction_id: initialTxn,
+            initial_cof_flagged: initialTxn ? true : null,
           }, { onConflict: "id" })
           .select("id, plan_id, status, price_cents, list_price_cents, current_period_start, current_period_end, canceled_at, created_at")
           .maybeSingle();
         if (insErr) throw new Error(insErr.message);
-        await closeAttempt("closed_ok", null, saleTxn);
+        // closed_ok carries the INITIAL, the validate included: it is the record of how this
+        // subscription's agreement started, and support reads the attempt row first.
+        await closeAttempt("closed_ok", saleTxn ? null : "no charge: credit covered the period; $0 validate as the initial", initialTxn);
+        if (initialTxn) initialsTaken.push(initialTxn);
         created.push(row);
 
         // ── The upgrade completes HERE, and only here ────────────────────────────────
@@ -1295,6 +1590,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             catch (re) { unwindErrors.push(`void AND refund of ${saleTxn} failed: ${(re as Error).message}`); }
           }
         }
+        if (vaultCreatedHere) {
+          // The card this sale stored was never recorded on our side. Remove it: a stored card
+          // nobody can see is one nobody can cancel. A failure is filed, and changes nothing
+          // about the money (no charge runs off a vault this tenant's row does not name).
+          try { await nmiPost({ customer_vault: "delete_customer", customer_vault_id: vaultCreatedHere }); }
+          catch (ve) {
+            await admin.from("app_errors").insert({
+              source: "edge:portal-billing", severity: "error", code: "orphan_vault",
+              message: `${clientId}: card vault ${vaultCreatedHere} was created at checkout but never recorded, and deleting it failed: ${(ve as Error).message}. Delete it at the gateway.`,
+              client_id: clientId,
+            }).then(() => undefined, () => undefined);
+          }
+        }
         if (unwindErrors.length) {
           // Money moved (or a registration stands) and could not be reversed automatically.
           // Never silent: durable app_errors row, the attempt stays closed_unknown (which
@@ -1313,6 +1621,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         if (p!.required) baseFailed = true;
       }
     }
+    // The agreement backs every subscription this checkout started; the first one's initial is
+    // the transaction it names, and `terms.plans` lists the rest.
+    await stampConsent(admin, consentId, initialsTaken[0] ?? null);
     if (created.length === 0) {
       return json({ error: `Subscription failed: ${failed.map((f) => f.error).join("; ")}` }, 402);
     }
@@ -1354,39 +1665,97 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       }
     }
 
-    // Card: reuse the vault, or create one from a fresh Collect.js token.
-    let vault = vaultId;
-    if (!vault) {
-      if (!paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
-      let cust: Record<string, string>;
-      try {
-        cust = await nmiPost({
-          customer_vault: "add_customer",
-          payment_token: paymentToken,
-          first_name: String(payload?.firstName || ""),
-          last_name: String(payload?.lastName || ""),
-          email: String(payload?.email || userEmail || ""),
-          merchant_defined_field_1: clientId,
-        });
-      } catch (e) {
-        return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
-      }
-      vault = cust.customer_vault_id;
-      if (!vault) return json({ error: "Gateway did not return a customer vault id." }, 502);
-      const { error: vErr } = await admin.from("billing_customers")
-        .upsert({ client_id: clientId, vault_id: vault, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
-      if (vErr) return json({ error: vErr.message }, 500);
+    // ── What kind of charge this is (317) ──────────────────────────────────────────────
+    //   builder, no card on file      → stores the card with this sale; it becomes the vault's
+    //                                   unscheduled initial (cit_initial_unscheduled)
+    //   builder, card, no initial yet → the card was saved by a subscription; this first top-up
+    //                                   starts the top-up agreement (cit_initial_unscheduled)
+    //   builder, card + initial       → cit_used, naming the initial
+    //   operator, builder on the phone → cit_used (a phone order)
+    //   operator, builder not asking  → mit_unscheduled, which needs the initial; owners get a receipt
+    // The first two need the builder's ticked agreement; nothing else does.
+    if (!vaultId && !paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
+    let cof: TopupCof;
+    if (operator) {
+      const said = fromOlderTab ? true : operatorSaid();
+      if (said === null) return json({ error: OPERATOR_MUST_SAY, code: "cardholder_present_required" }, 400);
+      if (said) cof = "cit_used";
+      else if (!unscheduledInitial) {
+        return json({
+          error: "This card has no top-up agreement yet, so it can only be charged with the owner on the phone. The owner can also add funds once themselves, which sets it up.",
+          code: "needs_first_topup",
+        }, 409);
+      } else if (!(await ownerAgreedToOperatorTopups())) {
+        // A merchant-initiated charge must be one the stored agreement disclosed. The owner's
+        // first top-up (or card replacement) may predate the wording that names this use, or have
+        // come from the older Billing tab, which recorded no agreement at all.
+        return json({
+          error: "The owner's card agreement does not cover top-ups CSM Synergy adds without them asking. Charge it with the owner on the phone, or ask them to add funds or replace their card from their own Billing tab, which asks for their agreement.",
+          code: "needs_owner_agreement",
+        }, 409);
+      } else cof = "mit_unscheduled";
+    } else {
+      // A later top-up only when the current initial has its agreement on file (see
+      // agreementsBehindInitial). The pre-317 tab keeps the plain rule: it cannot show a box.
+      cof = unscheduledInitial && (fromOlderTab || await topupAgreementOnFile()) ? "cit_used" : "cit_initial_unscheduled";
+    }
+    const firstTopup = cof === "cit_initial_unscheduled";
+    if (firstTopup && !fromOlderTab) {
+      const problem = consentProblem(payload);
+      if (problem) return json({ error: problem, code: "consent_required" }, 400);
+    }
+    if (fromOlderTab && (firstTopup || operator)) {
+      await noteOlderTab(operator ? `operator top-up taken as on the phone (${cof})` : "first top-up served without a recorded agreement");
     }
 
     // Durable audit BEFORE the first gateway call, and refuse if it cannot be written: if we
     // cannot record who charged a client's card, we do not charge it.
     if (operator) {
-      try { await auditStrict("operator_wallet_topup_attempt", amountCents, `vault=${vault}`); }
+      try { await auditStrict("operator_wallet_topup_attempt", amountCents, `vault=${vaultId} cof=${cof}`); }
       catch (e) { return json({ error: (e as Error).message }, 503); }
     }
 
-    const r = await chargeTopup(admin, { clientId, vaultId: vault, amountCents, actorUserId: userId, auto: false });
-    if (operator) audit("operator_wallet_topup_result", amountCents, r.ok ? "ok" : `failed: ${r.error}`);
+    const enteredCard = cardFromPayload(payload);
+    let consentId: number | null = null;
+    if (firstTopup && !fromOlderTab) {
+      try {
+        consentId = await recordConsent(admin, {
+          clientId,
+          kind: "topup",
+          wording: renderCofConsent(COF_CONSENT_TEMPLATES.topup, {
+            card: cofCardPhrase(!vaultId, cardLast4),
+            amount: cofMoney(amountCents),
+          }),
+          terms: { amount_cents: amountCents, new_card: !vaultId },
+          userId, userEmail: userEmail || null,
+          cardLast4: vaultId ? cardLast4 : enteredCard.last4,
+          req,
+        });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
+    }
+
+    const r = await chargeTopup(admin, {
+      clientId,
+      ...(vaultId
+        ? { vaultId }
+        : { newCard: { paymentToken, firstName: String(payload?.firstName || ""), lastName: String(payload?.lastName || ""), email: String(payload?.email || userEmail || "") } }),
+      amountCents, actorUserId: userId, auto: false,
+      cof, initialTxn: unscheduledInitial,
+      card: vaultId ? null : enteredCard,
+      consentId,
+    });
+    if (operator) audit("operator_wallet_topup_result", amountCents, r.ok ? `ok cof=${cof}` : `failed: ${r.error}`);
+    // Every top-up an operator makes is one the owner did not make themselves, on the phone or
+    // not, and the agreement promises a receipt for each: like auto top-up, including when the
+    // card was charged but the balance did not update (chargedTxn).
+    if (operator && (r.ok || r.chargedTxn)) {
+      await sendTopupReceipt(admin, clientId, r.attemptId ?? null, {
+        amountCents, balanceCents: r.ok ? r.balanceCents : null, last4: cardLast4, saleTxn: r.ok ? r.saleTxn : r.chargedTxn ?? null,
+        at: new Date(), trigger: "operator", pendingCredit: !r.ok,
+      }, req, { fn: "portal-billing" }).catch(() => undefined);
+    }
     if (!r.ok) return json({ error: r.error }, r.blocking ? 409 : 402);
     return json({ ok: true, balanceCents: r.balanceCents, alreadyCredited: r.alreadyCredited });
   }
@@ -1399,11 +1768,22 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     const amountCents = payload?.amountCents == null ? null : Number(payload.amountCents);
 
     if (enabled) {
+      // Switching it ON (or changing its amounts) is the builder's agreement to unattended
+      // charges (317), so only the builder can make it. An operator can switch it OFF.
+      if (operator) {
+        return json({ error: "Only the account owner can switch on or change automatic top-ups: it records their agreement to be charged. You can switch them off." }, 403);
+      }
       // A card must already be vaulted. Enabling auto-recharge with no card would arm
       // something that can only ever fail, and its first failure would switch it back off
       // and show a decline message for a card that never existed.
       if (!vaultId) {
         return json({ error: "Add a card first — make a one-off top-up, then switch on automatic top-ups." }, 409);
+      }
+      // And the builder's own first top-up must exist: it is the transaction every automatic
+      // top-up names to the card networks (initial_transaction_id). A card saved by a
+      // subscription does not have one; that sale belongs to the subscription's series.
+      if (!unscheduledInitial) {
+        return json({ error: "Add funds once yourself first. That top-up is the charge your bank links automatic top-ups to.", code: "needs_first_topup" }, 409);
       }
       const ok = (n: number | null) => Number.isInteger(n) && (n as number) >= MIN_TOPUP_CENTS && (n as number) <= MAX_TOPUP_CENTS;
       if (!ok(thresholdCents) || !ok(amountCents)) {
@@ -1411,10 +1791,39 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           error: `Both amounts must be between $${(MIN_TOPUP_CENTS / 100).toFixed(0)} and $${(MAX_TOPUP_CENTS / 100).toLocaleString("en-US")}.`,
         }, 400);
       }
+      // Never served from the older tab (the transition note above): it has no box to tick, and
+      // refreshing production loads that same tab until the next promotion, so say so plainly.
+      if (oldTabShape) {
+        return json({ error: "Automatic top-ups can't be switched on or changed from this page while we update how card agreements work. Please try again after the next portal update, or contact CSM Synergy.", code: "consent_required" }, 400);
+      }
+      const problem = consentProblem(payload);
+      if (problem) return json({ error: problem, code: "consent_required" }, 400);
     }
     if (operator) {
       try { await auditStrict("operator_wallet_autotopup_set", amountCents, `enabled=${enabled} threshold=${thresholdCents}`); }
       catch (e) { return json({ error: (e as Error).message }, 503); }
+    }
+
+    // The agreement, recorded before the setting that relies on it. Off clears it: switching
+    // back on is a new agreement, in the words and with the card current at that time.
+    let consentId: number | null = null;
+    if (enabled) {
+      try {
+        consentId = await recordConsent(admin, {
+          clientId,
+          kind: "autoTopup",
+          wording: renderCofConsent(COF_CONSENT_TEMPLATES.autoTopup, {
+            card: cofCardPhrase(false, cardLast4),
+            amount: cofMoney(amountCents as number),
+            threshold: cofMoney(thresholdCents as number),
+            dailyMax: String(AUTO_TOPUP_DAILY_MAX),
+          }),
+          terms: { amount_cents: amountCents, threshold_cents: thresholdCents, daily_max: AUTO_TOPUP_DAILY_MAX, cooldown_minutes: 60, initial_transaction_id: unscheduledInitial },
+          userId, userEmail: userEmail || null, cardLast4, req,
+        });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 503);
+      }
     }
 
     const { error: upErr } = await admin.from("wallet_accounts").upsert({
@@ -1422,6 +1831,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       auto_topup_enabled: enabled,
       auto_topup_threshold_cents: enabled ? thresholdCents : null,
       auto_topup_amount_cents: enabled ? amountCents : null,
+      auto_topup_consent_id: consentId,
       // Turning it back on clears the decline note — it is a record of why it stopped, not a
       // permanent mark, and leaving it would make a working setup look broken.
       auto_topup_disabled_reason: null,
@@ -1429,6 +1839,93 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     }, { onConflict: "client_id" });
     if (upErr) return json({ error: upErr.message }, 500);
     return json({ ok: true });
+  }
+
+  // ── REPLACE THE CARD ON FILE (317) ──────────────────────────────────────────────────────
+  // NMI: a card change must be stored as a NEW initial transaction. A $0 validate with
+  // customer_vault=update_customer replaces the vaulted card only "if the transaction is
+  // successful", and its id becomes the vault's unscheduled initial: the card automatic top-ups
+  // now link to. Subscriptions keep their vault id, so the Recurring module bills the new card
+  // at the next renewal. No money moves, so there is no attempt ledger here.
+  //
+  // The builder's own card only: a token minted in an operator's browser is a card someone at
+  // CSM Synergy typed (the subscribe rule).
+  if (action === "update_card") {
+    const paymentToken = String(payload?.paymentToken || "").trim();
+    if (operator) {
+      return json({ error: "An operator cannot enter a card on a tenant's behalf. Ask the owner to replace their card." }, 400);
+    }
+    if (!vaultId) {
+      return json({ error: "There is no card on file to replace. Add funds or subscribe to add one." }, 409);
+    }
+    if (!paymentToken) return json({ error: "paymentToken is required." }, 400);
+    const problem = consentProblem(payload);
+    if (problem) return json({ error: problem, code: "consent_required" }, 400);
+    const entered = cardFromPayload(payload);
+
+    let consentId: number;
+    try {
+      consentId = await recordConsent(admin, {
+        clientId, kind: "cardUpdate", wording: COF_CONSENT_TEMPLATES.cardUpdate,
+        terms: { replaced_last4: cardLast4 }, userId, userEmail: userEmail || null, cardLast4: entered.last4, req,
+      });
+    } catch (e) {
+      return json({ error: (e as Error).message }, 503);
+    }
+
+    let txn: string | null = null;
+    let cofSupported: string | null = null;
+    try {
+      const { res, cofSupported: cs } = await nmiPostCof({
+        type: "validate",
+        customer_vault: "update_customer",
+        customer_vault_id: vaultId,
+        payment_token: paymentToken,
+        merchant_defined_field_1: clientId,
+        order_description: "StructureStudio card on file replaced",
+      }, "cit_initial_unscheduled");
+      txn = res.transactionid || null;
+      cofSupported = cs;
+    } catch (e) {
+      if (isGatewayUnknown(e)) {
+        // A validate moves no money, but the gateway MAY have replaced the card. Then the
+        // initial we hold belongs to the old one, and an automatic top-up would name it for the
+        // new card. Drop it: automatic top-ups wait for the builder's next top-up, and nothing
+        // is charged in the meantime. The last 4 goes too: the tab shows the card from this row,
+        // and the old card's number may no longer be the one on file. Then say so.
+        await admin.from("billing_customers")
+          .update({ unscheduled_initial_txn: null, unscheduled_initial_at: null, card_last4: null, card_brand: null, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId).then(() => undefined, () => undefined);
+        await admin.from("app_errors").insert({
+          source: "edge:portal-billing", severity: "error", code: "card_update_unknown",
+          message: `${clientId}: card replacement (validate + update_customer on vault ${vaultId}) outcome unverifiable: ${(e as Error).message}. The unscheduled initial was cleared; check the vault's card at the gateway.`,
+          client_id: clientId,
+        }).then(() => undefined, () => undefined);
+        return json({ error: "We could not confirm whether your card was replaced. Nothing was charged. Please enter the new card again: trying again is safe and charges nothing." }, 502);
+      }
+      return json({ error: `Your bank did not accept this card: ${(e as Error).message}` }, 402);
+    }
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await admin.from("billing_customers").update({
+      card_last4: entered.last4, card_brand: entered.brand, card_saved_at: now,
+      unscheduled_initial_txn: txn, unscheduled_initial_at: txn ? now : null, updated_at: now,
+    }).eq("client_id", clientId);
+    await stampConsent(admin, consentId, txn);
+    if (upErr) {
+      // The gateway holds the NEW card while this row still names the OLD card's initial. Clear
+      // that, at least, so no top-up names an initial from a card no longer on file (the
+      // gateway-unknown branch above does the same, for the same reason).
+      await admin.from("billing_customers")
+        .update({ unscheduled_initial_txn: null, unscheduled_initial_at: null, card_last4: null, card_brand: null })
+        .eq("client_id", clientId).then(() => undefined, () => undefined);
+      await admin.from("app_errors").insert({
+        source: "edge:portal-billing", severity: "error", code: "card_update_unrecorded",
+        message: `${clientId}: the gateway replaced the card on vault ${vaultId} (validate ${txn ?? "?"}, cof_supported ${cofSupported ?? "?"}) but billing_customers was not updated: ${upErr.message}. Set card_last4 and unscheduled_initial_txn by hand.`,
+        client_id: clientId,
+      }).then(() => undefined, () => undefined);
+    }
+    return json({ ok: true, card: { last4: entered.last4, brand: entered.brand } });
   }
 
   if (action === "cancel") {

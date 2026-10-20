@@ -2534,8 +2534,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // deletion request requires them gone too. wallet_transactions (every top-up, debit and
         // refund) and usage_charges (each metered call, text and 3D generation) joined the list on
         // 2026-10-05: they are the same kind of record, and were neither wiped nor reported.
+        // billing_consents (migration 317) joined it on 2026-10-20: each row is what the builder
+        // agreed to before a stored card was charged, the evidence a card-network dispute asks
+        // for, so it is kept and counted like the charges it backs.
         const retained: Record<string, number> = {};
-        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges"]) {
+        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents"]) {
           const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
           if (count) retained[t] = count;
         }

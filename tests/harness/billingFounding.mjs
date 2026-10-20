@@ -538,12 +538,22 @@ try {
     const btn = checkoutButton(S.page);
     const label = (await btn.count()) ? (await btn.first().innerText()).trim() : null;
     ok(`g1: the checkout names the builder ("Subscribe ${CLIENT} with card on file")`, label === `Subscribe ${CLIENT} with card on file`, String(label));
+    // 317: with the agreement sentences in `status` (this stub sends none), the operator reads the
+    // owner the sentence and ticks it first; tests/harness/billingCof.mjs drives that. Tick it if shown.
+    const readOut = S.page.locator('[data-cof-consent="subscription-operator"] input');
+    if (await readOut.count()) { await readOut.first().scrollIntoViewIfNeeded(); await readOut.first().check(); }
     if (label) { await btn.first().scrollIntoViewIfNeeded(); await btn.first().click(); }
     await S.page.waitForTimeout(800);
     ok("g1: pressing it asks first, naming whose card is billed", S.dialogs.some((m) => m.includes(`This bills the card ${CLIENT} has on file`)), JSON.stringify(S.dialogs));
     ok("g1: …and a No sends no subscribe", actions(S, "subscribe").length === 0, JSON.stringify(actions(S, "subscribe")));
     const add = S.page.getByRole("button", { name: "$100", exact: true });
-    if (await add.count()) { await add.first().click(); await S.page.getByRole("button", { name: "Add $100", exact: true }).first().click(); }
+    if (await add.count()) {
+      await add.first().click();
+      // 317: the operator says whether the owner asked on the phone before a top-up can go.
+      const asked = S.page.locator('[data-cof-phone="1"] input[type="radio"]');
+      if (await asked.count()) await asked.first().check();
+      await S.page.getByRole("button", { name: "Add $100", exact: true }).first().click();
+    }
     await S.page.waitForTimeout(800);
     ok("g1: a wallet top-up asks first, naming the builder", S.dialogs.some((m) => m.includes(`Add $100 to ${CLIENT}'s wallet?`)), JSON.stringify(S.dialogs));
     ok("g1: …and a No sends no top-up", actions(S, "topup").length === 0, JSON.stringify(actions(S, "topup")));

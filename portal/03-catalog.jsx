@@ -1262,6 +1262,35 @@ const SYNERGY_TEAL = "#1B7895";
 // maxTopupCents) so there is exactly one definition and the UI cannot drift from it.
 const TOPUP_PRESETS = [10000, 25000, 50000];
 
+// ── COF CONSENT (mirrors _shared/cofConsent.ts) ─────────────────────────────────────────────
+// What a builder agrees to when we keep their card (migration 317, the Visa/Mastercard stored-
+// credential rules). The SENTENCES are not here: portal-billing sends them in status.cof.templates
+// from the one copy in _shared/cofConsent.ts, and records the same sentence, filled with ITS OWN
+// numbers, when the box is ticked. These fill the {placeholders} the same way, so what is shown
+// beside the box is what is stored. _shared/cofConsent.test.ts lifts this block out of the shipped
+// file and checks it against the server's functions; plain JS on purpose (no JSX) so it can.
+function cofMoney(cents) {
+  const c = Math.round(Number(cents) || 0);
+  return "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
+}
+function cofCardPhrase(isNewCard, last4) {
+  if (isNewCard) return "this card";
+  return /^\d{4}$/.test(String(last4 == null ? "" : last4)) ? "my card ending " + last4 : "my card on file";
+}
+function cofTodayPhrase(cents) {
+  return cents > 0 ? cofMoney(cents) + " today" : "nothing today";
+}
+function cofRecurringPhrase(yearlyCents, monthlyCents) {
+  const parts = [];
+  if (yearlyCents > 0) parts.push(cofMoney(yearlyCents) + " a year");
+  if (monthlyCents > 0) parts.push(cofMoney(monthlyCents) + " a month");
+  return parts.join(" plus ") || "the renewal price shown";
+}
+function renderCofConsent(template, vars) {
+  return String(template || "").replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m));
+}
+// ── /COF CONSENT ────────────────────────────────────────────────────────────────────────────
+
 // FOUNDING PRICING IS YEARLY ONLY (Carolyn 2026-09-24): "Everybody that comes in has to pay for
 // the full year on whichever selections they make ... leave month so that month is still
 // showing but when they click on it, it doesn't do anything." Founding members are backing the
@@ -1620,6 +1649,21 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const [autoOn, setAutoOn] = useState(false);
   const [autoThreshold, setAutoThreshold] = useState("");
   const [autoAmount, setAutoAmount] = useState("");
+  // STORED-CARD AGREEMENTS (migration 317). Each box is the builder's agreement to how their card
+  // is charged, and portal-billing refuses the request without it. For an operator, the
+  // subscription box is "I read this to the owner and they agreed", and a top-up asks instead
+  // whether the owner asked on the phone (topupPhone; null = not said, and nothing is charged until
+  // it is), which the card networks need to know. Every answer is for ONE charge: they are all
+  // cleared after each attempt, however it ended, and whenever the tab or the viewed tenant changes.
+  const [subAgree, setSubAgree] = useState(false);
+  const [topupAgree, setTopupAgree] = useState(false);
+  const [autoAgree, setAutoAgree] = useState(false);
+  const [topupPhone, setTopupPhone] = useState(null);
+  const [replacing, setReplacing] = useState(false);
+  const [replaceAgree, setReplaceAgree] = useState(false);
+  useEffect(() => {
+    setSubAgree(false); setTopupAgree(false); setAutoAgree(false); setTopupPhone(null); setReplaceAgree(false);
+  }, [section, viewingLabel]);
 
   // The shell's own entitlement is refreshed through ssEntitlementChanged (subscribe and cancel
   // below), which respects the paywall's hold; this only re-reads what this view shows.
@@ -1734,6 +1778,64 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const topupCents = topupSel != null ? topupSel : (Number.isFinite(customCents) ? customCents : null);
   const topupValid = Number.isInteger(topupCents) && topupCents >= minTopup && topupCents <= maxTopup;
 
+  // ── The agreement sentences (317) ──────────────────────────────────────────────────
+  // Filled from the same numbers the server will use: dueTodayCents (proven equal by the
+  // confirmChargeCents handshake), the cart's yearly/monthly totals, the amounts typed here.
+  // An older portal-billing sends no `cof`; then there is no box and nothing to send.
+  const cof = (data && data.cof && data.cof.templates && data.cof.version) ? data.cof : null;
+  const consentBody = cof ? { consent: { version: cof.version, accepted: true } } : {};
+  // On EVERY card request from this tab, box or no box: it is how portal-billing tells this tab
+  // from the pre-317 one it still serves during the transition (see fromOlderTab there).
+  const tabMark = cof ? { cofTab: cof.version } : {};
+  const cardLast4 = (data && data.card && data.card.last4) || null;
+  const cardBrand = (data && data.card && data.card.brand) || null;
+  const subConsentText = cof ? renderCofConsent(cof.templates.subscription, {
+    // Our own account shows the prospect view (see demoView): "this card", as a new builder sees it.
+    card: cofCardPhrase(!(data && data.hasCard) || demoView, cardLast4),
+    today: cofTodayPhrase(dueTodayCents),
+    recurring: cofRecurringPhrase(yrTotal, moTotal),
+  }) : null;
+  // A top-up needs the box until the builder's own first top-up has gone through: that one is
+  // the charge the bank links every automatic top-up to.
+  const topupNeedsAgree = !!cof && !viewingLabel && (!(data && data.hasCard) || !!cof.topupNeedsAgreement);
+  const topupConsentText = cof ? renderCofConsent(cof.templates.topup, {
+    card: cofCardPhrase(!(data && data.hasCard), cardLast4),
+    amount: topupValid ? cofMoney(topupCents) : "the amount I choose",
+  }) : null;
+  const autoCents = (s) => Math.round(Number(s) * 100);
+  const autoConsentText = cof ? renderCofConsent(cof.templates.autoTopup, {
+    card: cofCardPhrase(false, cardLast4),
+    amount: cofMoney(autoCents(autoAmount)),
+    threshold: cofMoney(autoCents(autoThreshold)),
+    dailyMax: String(cof.autoTopupDailyMax),
+  }) : null;
+  // A tick agrees to the sentence as it read WHEN it was ticked. Change the cart or an amount and
+  // the sentence changes, so the tick goes and has to be given again: otherwise the stored
+  // wording (and, for an operator, "I read them this") would be terms nobody agreed to.
+  useEffect(() => { setSubAgree(false); }, [subConsentText]);
+  useEffect(() => { setTopupAgree(false); }, [topupConsentText]);
+  useEffect(() => { setAutoAgree(false); }, [autoConsentText]);
+  // The box beside each sentence. One look, so the four of them read as the same kind of thing.
+  const agreeBox = (checked, set, text, testId) => (
+    <label data-cof-consent={testId} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12, color: "#334155", lineHeight: 1.5, cursor: "pointer", maxWidth: 640 }}>
+      <input type="checkbox" checked={checked} onChange={(e) => set(e.target.checked)} style={{ marginTop: 2, flexShrink: 0 }} />
+      <span>{text}</span>
+    </label>
+  );
+  // Operators: "did the owner ask for this on the phone?", answered every time.
+  const phoneChoice = (allowNo, noLabel) => (
+    <div data-cof-phone="1" style={{ marginTop: 10, fontSize: 12.5, color: "#334155", display: "flex", flexDirection: "column", gap: 4 }}>
+      <label style={{ display: "inline-flex", gap: 7, alignItems: "center", cursor: "pointer" }}>
+        <input type="radio" name="cof-phone" checked={topupPhone === true} onChange={() => setTopupPhone(true)} />
+        The owner is on the phone and asked for this
+      </label>
+      <label style={{ display: "inline-flex", gap: 7, alignItems: "center", cursor: allowNo ? "pointer" : "not-allowed", opacity: allowNo ? 1 : 0.5 }}>
+        <input type="radio" name="cof-phone" disabled={!allowNo} checked={topupPhone === false} onChange={() => setTopupPhone(false)} />
+        {noLabel}
+      </label>
+    </div>
+  );
+
   // Mirror the saved auto-recharge config into the form whenever the server's answer
   // changes. Depends on `data` (the whole payload) rather than the nested fields so it
   // re-syncs after every load(), including the one that follows a successful save.
@@ -1751,13 +1853,26 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
     try {
       // Same handshake as subscribe: the amount on screen is the amount tokenized and the
       // amount charged, and the server refuses if they disagree.
-      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents };
+      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents, ...tabMark };
       if (viewingLabel) {
+        if (topupPhone === null) { setMsg({ err: "Say whether the owner asked for this on the phone." }); setBusy(false); return; }
+        const asked = topupPhone;
+        // The answer is for this one charge: cleared now, whatever the dialog and the server say.
+        setTopupPhone(null);
         if (!window.confirm(`Add ${fmt$(topupCents)} to ${viewingLabel}'s wallet?
 
-This charges the card they have on file.`)) { setBusy(false); return; }
-      } else if (!data.hasCard) {
-        body.paymentToken = await getPaymentToken(topupCents);
+This charges the card they have on file${asked ? "" : ", without them asking: they will be emailed a receipt"}.`)) { setBusy(false); return; }
+        body.cardholderPresent = asked;
+      } else {
+        if (topupNeedsAgree) {
+          if (!topupAgree) { setMsg({ err: "Tick the box to agree to how your card will be charged." }); setBusy(false); return; }
+          Object.assign(body, consentBody);
+        }
+        if (!data.hasCard) {
+          const t = await getPaymentToken(topupCents);
+          body.paymentToken = t.token;
+          body.card = t.card;
+        }
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1771,13 +1886,17 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       setMsg({ ok: r && r.alreadyCredited
         ? "That top-up was already applied — your balance is up to date."
         : `Added ${fmt$(topupCents)} to the wallet.` });
-      setTopupSel(null); setTopupCustom("");
+      setTopupSel(null); setTopupCustom(""); setTopupAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
 
   const saveAutoTopup = async () => {
+    // Switching on (or changing the amounts) is the builder's agreement to unattended charges, so
+    // an operator may only switch them off (the server refuses the rest with the same sentence).
+    if (viewingLabel && autoOn && cof) { setMsg({ err: "Only the owner can switch on or change automatic top-ups: it records their agreement to be charged. You can switch them off." }); return; }
+    if (autoOn && cof && !autoAgree) { setMsg({ err: "Tick the box to agree to automatic top-ups." }); return; }
     setMsg(null); setBusy(true);
     try {
       const body = {
@@ -1785,6 +1904,8 @@ This charges the card they have on file.`)) { setBusy(false); return; }
         enabled: autoOn,
         thresholdCents: autoOn ? Math.round(Number(autoThreshold) * 100) : null,
         amountCents: autoOn ? Math.round(Number(autoAmount) * 100) : null,
+        ...tabMark,
+        ...(autoOn ? consentBody : {}),
       };
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1794,8 +1915,37 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       }
       if (r && r.error) throw new Error(r.error);
       setMsg({ ok: autoOn ? "Automatic top-ups are on." : "Automatic top-ups are off." });
+      setAutoAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  // REPLACE THE CARD (317). A $0 check on the new card, which then takes the old one's place for
+  // renewals, top-ups and automatic top-ups. The builder's own card only, like every card entry.
+  const replaceCard = async () => {
+    if (!replaceAgree) { setMsg({ err: "Tick the box to agree to how the new card will be used." }); return; }
+    setMsg(null); setBusy(true);
+    try {
+      const t = await getPaymentToken(null);
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", {
+        body: { action: "update_card", paymentToken: t.token, card: t.card, ...tabMark, ...consentBody },
+      });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Card replaced. Renewals and top-ups now use the new card. Nothing was charged." });
+      setReplacing(false); setReplaceAgree(false);
+      await load();
+    } catch (e) {
+      setMsg({ err: e.message });
+      // A failed replacement can still change what the server holds (an unverifiable one clears
+      // the card's top-up agreement), so re-read rather than keep showing the state from before.
+      await load();
+    }
     setBusy(false);
   };
 
@@ -1838,7 +1988,15 @@ This charges the card they have on file.`)) { setBusy(false); return; }
             // note already lives on the page's due-today line and the pay button.
             instructionText: `You'll be charged ${fmt$(amountCents)} today.`,
           } : {}),
-          callback: (resp) => resp && resp.token ? settle(resolve, resp.token) : settle(reject, new Error("Card entry was cancelled.")),
+          // The token, and the card's last 4 and type off Collect.js's masked number (317): shown
+          // later as "your card ending 1234" and recorded with the agreement. Nothing else of it.
+          callback: (resp) => {
+            if (!(resp && resp.token)) return settle(reject, new Error("Card entry was cancelled."));
+            const masked = String((resp.card && resp.card.number) || "");
+            const last4 = /\d{4}$/.test(masked) ? masked.slice(-4) : null;
+            const brand = resp.card && typeof resp.card.type === "string" ? resp.card.type : null;
+            settle(resolve, { token: resp.token, card: { last4, brand } });
+          },
         });
         window.CollectJS.startPaymentRequest();
       } catch (e) { return settle(reject, e); }
@@ -1905,7 +2063,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       // so the card can only ever be charged the number that was on screen. dueTodayCents
       // is already cents (the old operator path sent setupTotal * 100, cents times a
       // hundred; never bit only because every setup fee is $0).
-      const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents };
+      const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents, ...tabMark };
       if (viewingLabel) {
         // Real money against THEIR card: confirm with the client named and the amount out loud.
         // A fully-credited upgrade charges nothing, and the dialog has to say THAT rather
@@ -1913,14 +2071,29 @@ This charges the card they have on file.`)) { setBusy(false); return; }
         const what = dueTodayCents === 0 && creditCents > 0
           ? `charge nothing today (${fmt$(creditCents)} credit covers it)`
           : `charge ${fmt$(dueTodayCents)} today`;
+        // A new subscription is a new recurring agreement: the owner has to be on the phone
+        // making it, and the operator reads them the sentence and ticks that they agreed (317).
+        // The server refuses it otherwise; this says so before the dialog. One charge per tick.
+        if (cof && !subAgree) { setMsg({ err: "Read the agreement to the owner and tick the box once they agree." }); setBusy(false); return; }
+        setSubAgree(false);
         if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and ${what}?
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
-      } else if (!data.hasCard) {
-        // The card is still required when nothing is due — it is what the RENEWAL bills.
-        // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
-        // button, which invites "then why do you want my card?".
-        body.paymentToken = await getPaymentToken(dueTodayCents || null);
+        body.cardholderPresent = true;
+        Object.assign(body, consentBody);
+      } else {
+        if (cof) {
+          if (!subAgree) { setMsg({ err: "Tick the box to agree to how your card will be charged." }); setBusy(false); return; }
+          Object.assign(body, consentBody);
+        }
+        if (!data.hasCard) {
+          // The card is still required when nothing is due — it is what the RENEWAL bills.
+          // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
+          // button, which invites "then why do you want my card?".
+          const t = await getPaymentToken(dueTodayCents || null);
+          body.paymentToken = t.token;
+          body.card = t.card;
+        }
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       // Whatever the answer, the server may have started something (a partial success comes back
@@ -1949,7 +2122,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       } else {
         setMsg({ ok: "You're subscribed — thank you!" });
       }
-      setSel({});
+      setSel({}); setSubAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
@@ -2193,10 +2366,19 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                       value={topupCustom} onChange={(e) => { setTopupCustom(e.target.value); setTopupSel(null); }}
                       style={{ border: "none", outline: "none", padding: "7px 4px", fontSize: 13, fontWeight: 700, width: 82, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
                   </div>
-                  <button type="button" onClick={addFunds} disabled={busy || !topupValid}
-                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: busy || !topupValid ? 0.5 : 1, cursor: busy || !topupValid ? "default" : "pointer" }}>
-                    {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
-                  </button>
+                  {(() => {
+                    // Also held until the agreement box is ticked (the first top-up) or, for an
+                    // operator, until they have said whether the owner asked on the phone; and for
+                    // an operator viewing a tenant with no card at all (the note below says why).
+                    const held = busy || !topupValid || (topupNeedsAgree && !topupAgree)
+                      || (!!viewingLabel && (!data.hasCard || topupPhone === null));
+                    return (
+                      <button type="button" onClick={addFunds} disabled={held}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: held ? 0.5 : 1, cursor: held ? "default" : "pointer" }}>
+                        {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
+                      </button>
+                    );
+                  })()}
                 </div>
                 {/* Only complain once something has actually been typed — an empty field is
                     the starting state, not a mistake. */}
@@ -2210,19 +2392,87 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                     ? "Charged to the card on file. Funds are added straight away."
                     : "You'll enter your card in a secure form served by the payment gateway — it never passes through StructureStudio."}
                 </div>
+                {topupNeedsAgree && agreeBox(topupAgree, setTopupAgree, topupConsentText, "topup")}
+                {/* "Not asked" is a merchant-initiated charge, allowed only when the owner's own
+                    agreement covers top-ups CSM Synergy adds (portal-billing says so in
+                    cof.operatorTopupAllowed, and refuses it otherwise). */}
+                {viewingLabel && data.hasCard && phoneChoice(
+                  !!(cof && cof.operatorTopupAllowed),
+                  cof && cof.operatorTopupAllowed
+                    ? "The owner did not ask (they will be emailed a receipt)"
+                    : "Not asked: not possible until the owner adds funds or replaces their card themselves (that records their agreement)",
+                )}
+                {viewingLabel && !data.hasCard && (
+                  <div style={{ fontSize: 12, color: "#92400E", marginTop: 6 }}>
+                    {viewingLabel} has no card on file. The owner has to add funds once themselves.
+                  </div>
+                )}
+
+                {/* THE CARD ON FILE, and replacing it (317). The decline banner below used to say
+                    "Update the card" with no way to do it. A builder only: an operator never
+                    enters a card. */}
+                {data.hasCard && (
+                  <div style={{ marginTop: 12, fontSize: 12.5, color: "#475569", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Card on file: <b>{cardLast4 ? `${cardBrand ? cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1) + " " : ""}ending ${cardLast4}` : "saved"}</b></span>
+                    {/* cof: only a portal-billing that sends the sentences can take update_card. */}
+                    {cof && !viewingLabel && !demoView && !replacing && (
+                      <button type="button" onClick={() => { setReplacing(true); setReplaceAgree(false); }} disabled={busy}
+                        style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                        Replace card
+                      </button>
+                    )}
+                  </div>
+                )}
+                {replacing && cof && (
+                  <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px" }}>
+                    {agreeBox(replaceAgree, setReplaceAgree, cof.templates.cardUpdate, "card-update")}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button type="button" onClick={replaceCard} disabled={busy || !replaceAgree}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: busy || !replaceAgree ? 0.5 : 1 }}>
+                        {busy ? "Working…" : "Enter the new card"}
+                      </button>
+                      <button type="button" onClick={() => setReplacing(false)} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5 }}>
+                        Cancel
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>The new card is checked with your bank, not charged.</div>
+                  </div>
+                )}
 
                 {/* AUTO-RECHARGE. Requires a vaulted card: enabling it without one arms
                     something that can only fail, and its first failure would report a
                     declined card that never existed. */}
                 <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                  {/* The reason is a whole sentence since 317 (a decline says to replace the card;
+                      one switched on before agreements were recorded says to add funds once). */}
                   {w.autoTopup && w.autoTopup.disabledReason && (
                     <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
-                      Automatic top-ups were switched off — {w.autoTopup.disabledReason} Update the card, then switch them back on.
+                      Automatic top-ups are off. {w.autoTopup.disabledReason}
+                    </div>
+                  )}
+                  {/* The daily cap the agreement names (317): on, but not charging until the oldest
+                      of today's automatic top-ups is more than 24 hours old. */}
+                  {w.autoTopup && w.autoTopup.enabled && w.autoTopup.dailyMax && w.autoTopup.chargesLast24h >= w.autoTopup.dailyMax && (
+                    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+                      Daily limit reached: {w.autoTopup.dailyMax} automatic top-ups in the last 24 hours. They start again as the oldest one passes 24 hours. Add funds by hand if you need more now.
                     </div>
                   )}
                   {!data.hasCard ? (
                     <div style={{ fontSize: 12, color: "#94A3B8" }}>
                       Add funds once and your card is kept on file — then you can turn on automatic top-ups.
+                    </div>
+                  ) : (cof && w.autoTopup && w.autoTopup.ready === false && !w.autoTopup.enabled) ? (
+                    // 317: automatic top-ups link to the builder's own first top-up. A card saved by
+                    // a subscription has none yet, and the server refuses to switch them on.
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      {viewingLabel
+                        ? "Automatic top-ups can be switched on by the owner after they add funds once themselves."
+                        : "Add funds once yourself, then you can turn on automatic top-ups. That first top-up is the charge your bank links them to."}
+                    </div>
+                  ) : (viewingLabel && !(w.autoTopup && w.autoTopup.enabled)) ? (
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      Only the owner can switch automatic top-ups on: it records their agreement to be charged.
                     </div>
                   ) : (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 13, color: "#334155" }}>
@@ -2244,12 +2494,16 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                             style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
                         </span>
                       </>)}
-                      <button type="button" onClick={saveAutoTopup} disabled={busy}
-                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+                      <button type="button" onClick={saveAutoTopup} disabled={busy || (autoOn && !!cof && !viewingLabel && !autoAgree)}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy || (autoOn && !!cof && !viewingLabel && !autoAgree) ? 0.6 : 1 }}>
                         Save
                       </button>
                     </div>
                   )}
+                  {/* Switching on, or changing the amounts, is a new agreement to unattended
+                      charges: the sentence names the card, the amounts and the daily limit. */}
+                  {data.hasCard && autoOn && cof && !viewingLabel && !(w.autoTopup && w.autoTopup.ready === false && !w.autoTopup.enabled) &&
+                    agreeBox(autoAgree, setAutoAgree, autoConsentText, "auto-topup")}
                 </div>
               </div>
             )}
@@ -2462,11 +2716,24 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 </p>
               ) : (
                 <>
-                <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
-                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
+                {/* THE AGREEMENT (317): every new subscription is a new recurring agreement, card on
+                    file or not. The sentence says what is charged today and what renews. An
+                    operator is shown the same sentence to READ to the owner on the phone, and
+                    ticks that they did and the owner agreed; that is what the server records. */}
+                {!viewingLabel && cof && cart.length > 0 && agreeBox(subAgree, setSubAgree, subConsentText, "subscription")}
+                {viewingLabel && cof && cart.length > 0 && agreeBox(subAgree, setSubAgree,
+                  `The owner is on the phone, I read them this and they agreed: "${subConsentText}"`, "subscription-operator")}
+                <div />
+                {(() => {
+                  const held = busy || cart.length === 0 || (!!cof && !subAgree);
+                  return (
+                <button type="button" onClick={subscribe} disabled={held}
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: held ? 0.6 : 1 }}>
                   {/* Our own account reads as a brand-new builder: no card on file, nobody viewing-as. */}
                   {busy ? "Working…" : demoView ? "Continue to secure card entry" : (viewingLabel ? `Subscribe ${viewingLabel} with card on file` : (data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"))}
                 </button>
+                  );
+                })()}
                 {demoView && demoNote && (
                   <p style={{ fontSize: 12.5, color: "#1E3A8A", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "8px 12px", marginTop: 10, fontWeight: 600 }}>
                     Demo account. Checkout is off on Structure Studio's own account, so nothing was charged.

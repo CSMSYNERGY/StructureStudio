@@ -249,7 +249,7 @@ Deno.test("source: wipe order, the wallet, and the retained ledgers", () => {
   const wipes = [...DEL.matchAll(/await wipe\("([^"]+)"\)/g)].map((m) => m[1]);
   assertEquals(wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"]);
   const retained = /for \(const t of \[([^\]]+)\]\)/.exec(DEL)?.[1] ?? "";
-  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges"]) {
+  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents"]) {
     assert(retained.includes(`"${t}"`), `${t} is missing from the retained list`);
     assert(!wipes.includes(t), `${t} is a ledger and must not be wiped`);
   }
