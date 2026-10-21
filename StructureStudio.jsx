@@ -39771,27 +39771,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         />
       )}
 
-      {showExport && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
-          <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      {/* THE FLOORPLAN PDF PREVIEW (2026-10-21, Ahsan: "i can not see the buttons it is flowing out of
+          the screen the download buttons"). An 8.5 x 11 page at the modal's 580px width stood ~690px
+          tall on its own, so on a laptop the buttons fell below the screen. The modal is now never
+          taller than the viewport (90vh), the page shrinks to the room between the title and the
+          buttons (scrolling inside as a last resort), and the title and the buttons are bars that never
+          leave it. On document.body, as the pickers are, so nothing round the designer in the portal
+          can make "fixed" mean anything but the screen. */}
+      {showExport && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 12, boxSizing: "border-box" }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
+          <div data-ss-plan-modal="" style={{ background: "#FFF", borderRadius: 16, maxWidth: 580, width: "100%", maxHeight: "90vh", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.2)", boxSizing: "border-box" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ flex: "0 0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "18px 22px 12px" }}>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} — Floorplan PDF</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
               <>
-                <img src={exportUrl} alt="Floor Plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0" }} />
-                <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                  <button onClick={downloadPDF} style={{ flex: 1, ...S.btn("#B91C1C", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PDF</button>
-                  <button onClick={downloadPNG} style={{ flex: 1, ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
-                  <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
-                    style={{ flex: 1, ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
+                <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "auto", padding: "0 22px", display: "flex", justifyContent: "center", alignItems: "flex-start" }}>
+                  <img src={exportUrl} alt="Floor Plan" style={{ display: "block", maxWidth: "100%", maxHeight: "calc(90vh - 190px)", width: "auto", height: "auto", borderRadius: 8, border: "1px solid #E2E8F0", boxSizing: "border-box" }} />
                 </div>
-                <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, textAlign: "center" }}>8.5"×11" letter — attach to your GHL estimate or invoice</p>
+                <div style={{ flex: "0 0 auto", padding: "14px 22px 14px", borderTop: "1px solid #F1F5F9" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    <button onClick={downloadPDF} style={{ flex: "1 1 130px", ...S.btn("#B91C1C", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PDF</button>
+                    <button onClick={downloadPNG} style={{ flex: "1 1 130px", ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
+                    <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
+                      style={{ flex: "1 1 130px", ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
+                  </div>
+                  <p style={{ fontSize: 11, color: "#94A3B8", margin: "10px 0 0", textAlign: "center" }}>8.5"×11" letter — attach to your GHL estimate or invoice</p>
+                </div>
               </>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       </SSDesignerFrame>
     </div>
