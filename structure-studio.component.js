@@ -13660,7 +13660,13 @@ function buildShed3DModel(THREE, p) {
   const gableMesh = new THREE.Mesh(gableGeom,
     (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat);
   rg.add(gableMesh);
+
+  // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
+  // this renderer does — see d3MakeProfYAt.
+  const profYAt = d3MakeProfYAt(dedup, Hr);
   // ── THE TALL BAND OVER AN OPENING ABOVE THE PLATE (2026-10-21) ──────────────────────────────────
+  // (Below the single-slant repaint's region on purpose: shedProfile_test lifts that region, from its
+  // heading to the profYAt line above, and runs it with only the repaint's own bindings.)
   // A new-frame shed's high wall stands to its top (d3WallTops) and may carry an opening above the
   // plate, up to that top (topOver). The wall's box had the hole and the band, in the wall's mid-plane,
   // did not, so the glass, in that same plane, showed the band's siding instead of the room behind it
@@ -13777,10 +13783,6 @@ function buildShed3DModel(THREE, p) {
     return { cut };
   })() : null;
   if (shedBand) shedBand.cut(shedHighBuilt);
-
-  // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
-  // this renderer does — see d3MakeProfYAt.
-  const profYAt = d3MakeProfYAt(dedup, Hr);
   // ── THE ROOF STEP: THE REAR SECTION'S PRISM (d3RoofStep, 2026-09-28) ─────────────────────────────
   // Local z 0 is the BACK wall (a step needs uAxisIsX, see d3RoofStep), so the rear section runs
   // from 0 to the joint at STEP.stepFt on its own profile: the same span and ridge, its eave at
