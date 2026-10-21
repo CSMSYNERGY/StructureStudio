@@ -514,6 +514,45 @@ function checkLoftAttached(l, r, t, b, bldgW, bldgH, otherLoftEdges) {
 // stored page-pixels back into feet — so the formula lives here, called twice
 // (old, new), instead of being inlined once in the render body.
 const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABEL_PAD: 30, RAMP_SPACE_FT: 2 };
+// `text` broken into lines no wider than `maxW` in ctx's current font: at spaces, and a word too long
+// for a line of its own cut where it has to be. Never an empty list. The plan page's bullets
+// (renderExportCanvas) wrap with it.
+function ssWrapCanvasText(ctx, text, maxW) {
+  const out = [];
+  let line = "";
+  String(text == null ? "" : text).split(/\s+/).filter(Boolean).forEach((word) => {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width <= maxW) { line = test; return; }
+    if (line) out.push(line);
+    let w = word;
+    while (w.length > 1 && ctx.measureText(w).width > maxW) {
+      let n = w.length - 1;
+      while (n > 1 && ctx.measureText(w.slice(0, n)).width > maxW) n--;
+      out.push(w.slice(0, n)); w = w.slice(n);
+    }
+    line = w;
+  });
+  if (line || !out.length) out.push(line);
+  return out;
+}
+// THE PRINTED PLAN'S WALL LABELS ("5' TAD", "4' SW @ 7'") KEPT APART (2026-10-21). `labels`, in the
+// order they go down: { cx, cy, w, h, inX, inY } in page px -- the label's middle where it usually sits,
+// its box, and the unit vector into the building. A label that would overlap one already down steps
+// `stepPx` further in, up to `maxSteps` times. Returns each label's step count. Pure.
+function ssWallLabelSteps(labels, stepPx, maxSteps = 3) {
+  const placed = [];
+  return labels.map((l) => {
+    const box = (k) => {
+      const cx = l.cx + l.inX * k * stepPx, cy = l.cy + l.inY * k * stepPx;
+      return [cx - l.w / 2, cy - l.h / 2, cx + l.w / 2, cy + l.h / 2];
+    };
+    const hits = (b) => placed.some((p) => b[0] < p[2] && p[0] < b[2] && b[1] < p[3] && p[1] < b[3]);
+    let k = 0;
+    while (k < maxSteps && hits(box(k))) k++;
+    placed.push(box(k));
+    return k;
+  });
+}
 // Narrowest canvas ROW that can carry the plan and the docked 3D panel side by side:
 // plan floor 560 + gap 12 + panel floor 320 + row padding 40 = 932, rounded to 960.
 // Measured on the ROW, never on window.innerWidth: the portal sidebar is 240px and
@@ -28499,6 +28538,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     });
 
     // Items render in page coordinates directly — same as the SVG.
+    const wallLabels = [];   // a wall item's label goes down after every item (the wall labels, below)
     // Ramps render first so other items (workbench, doors, etc) sit on top of them.
     [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).forEach((item) => {
       const cfg = ITEMS[item.type]; if (!cfg) return;
@@ -28658,10 +28698,42 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // The SVG twin of this suffix is in the item map — read it for why raised doors only.
         const upFt = ssDoorSillFt(item);
         if (upFt) label = `${label} @ ${fmtDimFtIn(upFt)}`;
-        ctx.fillText(label, 0, lblY);
+        if (cfg.wallOnly) wallLabels.push({ item, label, lblY });
+        else ctx.fillText(label, 0, lblY);
       }
       ctx.restore();
     });
+
+    // THE WALL LABELS ("5' TAD", "4' SW @ 7'"), drawn last so no item paints over one, a size up from
+    // the 11px they were (Ahsan, 2026-10-21: "i can not see properly when i clicked floor plan"), and
+    // kept apart and whole: each sits just inside its wall as on the screen plan, slid along the wall
+    // to stay clear of the corners, where the next wall's labels run (a window flush in a corner), and
+    // one that would overlap a label already down steps further in (ssWallLabelSteps). Print only: the
+    // screen plan zooms, a printed page cannot.
+    {
+      const LBL_PX = 12, STEP = LBL_PX + 3;
+      ctx.font = `bold ${LBL_PX}px sans-serif`; ctx.textAlign = "center"; ctx.fillStyle = "#1E293B";
+      const placed = wallLabels.map(({ item, label, lblY }) => {
+        const a = (item.rotation * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+        const w = ctx.measureText(label).width + 4, h = LBL_PX + 2;
+        const y = lblY + (lblY > 0 ? 2 : -1);                       // clear of the 10px bar at 12px
+        const ly = y - LBL_PX * 0.32, sg = lblY > 0 ? 1 : -1;      // the text's middle; into the building
+        const bw = Math.abs(c) * w + Math.abs(s) * h, bh = Math.abs(s) * w + Math.abs(c) * h;
+        let cx = item.x - s * ly, cy = item.y + c * ly;
+        // Along the wall, clear of each corner by the depth of the next wall's label strip.
+        const horiz = Math.abs(c) >= Math.abs(s), half = (horiz ? bw : bh) / 2, corner = WALL_THICKNESS / 2 + LBL_PX + 10;
+        const lo = (horiz ? mgX : mgY) + corner, hi = (horiz ? mgX + pW : mgY + pH) - corner;
+        const mid = horiz ? cx : cy, shift = Math.min(Math.max(mid, lo + half), Math.max(lo + half, hi - half)) - mid;
+        if (horiz) cx += shift; else cy += shift;
+        return { box: { cx, cy, w: bw, h: bh, inX: -s * sg, inY: c * sg }, x: horiz ? shift * c : shift * s, y };
+      });
+      const steps = ssWallLabelSteps(placed.map((p) => p.box), STEP);
+      wallLabels.forEach(({ item, label, lblY }, k) => {
+        ctx.save(); ctx.translate(item.x, item.y); ctx.rotate((item.rotation * Math.PI) / 180);
+        ctx.fillText(label, placed[k].x, placed[k].y + (lblY > 0 ? 1 : -1) * steps[k] * STEP);
+        ctx.restore();
+      });
+    }
 
     // Size labels + FRONT/BACK/LEFT/RIGHT — drawn after items so a centered ramp doesn't paint over the building chrome.
     ctx.fillStyle = "#475569"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
@@ -28677,16 +28749,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ctx.save(); ctx.translate(mgX + pW + 42, mgY + pH / 2); ctx.rotate(Math.PI / 2); ctx.fillText(getDisplayLabel("east", frontWall), 0, 0); ctx.restore();
     }
 
-    // ─── Bottom text band ───
+    // ─── Bottom text band ─── (drawn below, once the list it has to hold is known)
     const TEXT_X = 36;
     const TEXT_RIGHT = cW - 36;
     const TEXT_W = TEXT_RIGHT - TEXT_X;
-    const textTop = TEXT_BAND_TOP;
-    let textY = textTop + 24;
-
-    // Separator
-    ctx.strokeStyle = "#E2E8F0"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(TEXT_X, textTop); ctx.lineTo(TEXT_RIGHT, textTop); ctx.stroke();
 
     // A business first, with the person as Attn (quote to a business entity, 2026-10-21); a name
     // that only repeats the company adds nothing. Without a company, the name as always.
@@ -28697,17 +28763,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       : (contact.name || "Customer");
     const customerAddr = [contact.street, contact.city, contact.state, contact.zip].filter(Boolean).join(", ");
 
-    // Line 1: Name (left) | Size + Style (right)
-    ctx.fillStyle = "#1E293B"; ctx.font = "bold 16px sans-serif";
-    ctx.textAlign = "left"; ctx.fillText(customerName, TEXT_X, textY);
-    ctx.textAlign = "right"; ctx.fillText(`${bldgW}×${bldgH}  ${sel.style || ""}`, TEXT_RIGHT, textY);
-    textY += 22;
-
-    // Line 2-3: Contact info + address
-    ctx.fillStyle = "#64748B"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
     const infoLine = [contact.phone, contact.email].filter(Boolean).join("  •  ");
-    if (infoLine) { ctx.fillText(infoLine, TEXT_X, textY); textY += 17; }
-    if (customerAddr) { ctx.fillText(customerAddr, TEXT_X, textY); textY += 19; }
 
     // Build bullet list (paint + placed items + custom options)
     const bullets = [];
@@ -28734,6 +28790,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : "";
       if (op) parts.push(op);
       if (d.colorLabel) parts.push(d.trimColorLabel ? `${d.colorLabel} / ${d.trimColorLabel} trim` : d.colorLabel);
+      // Its glass, when the door really carries it (ssDoorWindowCount: the look can take it and it fits
+      // the leaf, the rule the 3D and the estimate follow), with the window's pane count when its row
+      // sets one (324). A transom says so; a panel window names itself.
+      const nGlass = ssDoorWindowCount(d, ssDoorLookOf(C.fixtures, d), ssDoorPhotoOf(C.fixtures, d));
+      if (nGlass) {
+        const wName = d.doorWindowName || "Window";
+        const wFx = (Array.isArray(C.fixtures) ? C.fixtures : []).find((f) => f && String(f.id) === String(d.doorWindowId));
+        const pn = wFx ? Number(wFx.panes) : NaN;
+        const glass = ssDoorWindowAtOf(d) === "top"
+          ? `with Transom Window${/^transom( window)?$/i.test(wName.trim()) ? "" : ` (${wName})`}`
+          : `with ${wName} in the upper panel${nGlass > 1 ? "s" : ""}`;
+        parts.push(glass + (pn === 1 ? ", plain glass" : [2, 3, 4, 6].includes(pn) ? `, ${pn} panes` : ""));
+      }
       bullets.push(`${d.doorName || "Door"}${parts.length ? " — " + parts.join(", ") : ""}`);
     });
     // Catalog windows get their own spec bullet (name, size, color) like doors; the plain
@@ -28778,17 +28847,87 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
     });
 
-    // 2-column bullets
-    if (bullets.length > 0) {
-      textY += 6;
-      ctx.fillStyle = "#334155"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
-      const colW = TEXT_W / 2;
-      const half = Math.ceil(bullets.length / 2);
-      for (let i = 0; i < half; i++) {
-        ctx.fillText("•  " + bullets[i], TEXT_X, textY);
-        if (i + half < bullets.length) ctx.fillText("•  " + bullets[i + half], TEXT_X + colW, textY);
-        textY += 18;
+    // THE BAND: name, contact, then the list in two columns (2026-10-21, Ahsan: "i can not see properly
+    // when i clicked floor plan" -- a long door line ran into the other column and off the page). Every
+    // bullet is word-wrapped to its column (ssWrapCanvasText), its later lines under its text, not its
+    // dot; each column runs down on its own, the list split between them in order where the taller
+    // column is shortest (an even split when every bullet is one line, as before), so nothing overlaps
+    // and nothing passes TEXT_RIGHT. A list too long for the band first lifts the band into the empty
+    // page above it -- never over the plan, a south ramp, a note or a line -- then steps the font down
+    // to 11px, and only then ends on "+ N more". This canvas is the plan page of the customer's PDF too.
+    const BAND_BOTTOM = cH - 24;   // the last line's baseline, at most
+    const headH = 24 + 22 + (infoLine ? 17 : 0) + (customerAddr ? 19 : 0) + 6;
+    let floorY = mgY + pH + RAMP_SPACE_FT * scale + BOT_LABEL_PAD + 40;   // the screen frame's own bottom
+    items.forEach((it) => {
+      if (it.type === "textNote") floorY = Math.max(floorY, it.y + (it.heightPx || 40) / 2, it.leader ? it.leader.y : -Infinity);
+      else if (it.type === "line") floorY = Math.max(floorY, it.y1, it.y2);
+      else if (Number.isFinite(it.y)) {
+        const c = ITEMS[it.type] || {};
+        floorY = Math.max(floorY, it.y + (Math.max(Number(it.widthFt || c.width) || 0, Number(it.heightFt || c.height) || 0) * scale) / 2 + 16);
       }
+    });
+    const bandMin = Math.min(TEXT_BAND_TOP, floorY + 16);
+    const layOut = (fontPx, list) => {
+      ctx.font = `${fontPx}px sans-serif`;
+      const dotW = ctx.measureText("•  ").width, colW = TEXT_W / 2, cellW = colW - dotW - 14;
+      const cells = list.map((b) => ssWrapCanvasText(ctx, b, cellW));
+      const total = cells.reduce((n, cl) => n + cl.length, 0);
+      let k = 0, best = Infinity;
+      for (let i = 0, left = 0; i <= cells.length; left += i < cells.length ? cells[i].length : 0, i++) {
+        const tall = Math.max(left, total - left);
+        if (tall <= best) { best = tall; k = i; }   // ties to the later split: the left column the longer
+        if (left >= total - left) break;
+      }
+      const lineH = Math.round(fontPx * 1.38);
+      return { fontPx, lineH, dotW, colW, cols: [cells.slice(0, k), cells.slice(k)], h: best > 0 ? (best - 1) * lineH : 0 };
+    };
+    const roomBelow = (top) => BAND_BOTTOM - (top + headH);
+    let bandTop = TEXT_BAND_TOP, lay = null;
+    if (bullets.length) {
+      for (const f of [13, 12, 11]) {
+        const t = layOut(f, bullets), lift = t.h - roomBelow(TEXT_BAND_TOP);
+        if (lift <= 0 || TEXT_BAND_TOP - lift >= bandMin) { lay = t; bandTop = TEXT_BAND_TOP - Math.max(0, lift); break; }
+      }
+      // Still too long at 11px with the band as high as it goes: the first k, then "+ N more".
+      if (!lay) {
+        bandTop = bandMin;
+        for (let k = bullets.length - 1; k >= 1 && !lay; k--) {
+          const t = layOut(11, bullets.slice(0, k).concat(`+ ${bullets.length - k} more`));
+          if (t.h <= roomBelow(bandTop)) lay = t;
+        }
+      }
+    }
+    let textY = bandTop + 24;
+    ctx.strokeStyle = "#E2E8F0"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(TEXT_X, bandTop); ctx.lineTo(TEXT_RIGHT, bandTop); ctx.stroke();
+    // Line 1: Name (left) | Size + Style (right), the name giving way with an ellipsis rather than run
+    // into the size. Lines 2-3: contact info + address, each kept to the band's width.
+    const fitLine = (s, maxW) => {
+      if (ctx.measureText(s).width <= maxW) return s;
+      let t = s;
+      while (t.length > 1 && ctx.measureText(t + "…").width > maxW) t = t.slice(0, -1);
+      return t + "…";
+    };
+    const sizeStyle = `${bldgW}×${bldgH}  ${sel.style || ""}`;
+    ctx.fillStyle = "#1E293B"; ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "right"; ctx.fillText(sizeStyle, TEXT_RIGHT, textY);
+    ctx.textAlign = "left"; ctx.fillText(fitLine(customerName, TEXT_W - ctx.measureText(sizeStyle).width - 24), TEXT_X, textY);
+    textY += 22;
+    ctx.fillStyle = "#64748B"; ctx.font = "13px sans-serif";
+    if (infoLine) { ctx.fillText(fitLine(infoLine, TEXT_W), TEXT_X, textY); textY += 17; }
+    if (customerAddr) { ctx.fillText(fitLine(customerAddr, TEXT_W), TEXT_X, textY); textY += 19; }
+    if (lay) {
+      textY += 6;
+      ctx.fillStyle = "#334155"; ctx.font = `${lay.fontPx}px sans-serif`; ctx.textAlign = "left";
+      lay.cols.forEach((cells, ci) => {
+        const x = TEXT_X + ci * lay.colW;
+        let y = textY;
+        cells.forEach((ls) => {
+          ctx.fillText("•", x, y);
+          ls.forEach((ln, j) => ctx.fillText(ln, x + lay.dotW, y + j * lay.lineH));
+          y += ls.length * lay.lineH;
+        });
+      });
     }
 
     return canvas;
@@ -39787,27 +39926,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         />
       )}
 
-      {showExport && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
-          <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      {/* THE FLOORPLAN PDF PREVIEW (2026-10-21, Ahsan: "i can not see the buttons it is flowing out of
+          the screen the download buttons"). An 8.5 x 11 page at the modal's 580px width stood ~690px
+          tall on its own, so on a laptop the buttons fell below the screen. The modal is now never
+          taller than the viewport (90vh), the page shrinks to the room between the title and the
+          buttons (scrolling inside as a last resort), and the title and the buttons are bars that never
+          leave it. On document.body, as the pickers are, so nothing round the designer in the portal
+          can make "fixed" mean anything but the screen. */}
+      {showExport && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 12, boxSizing: "border-box" }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
+          <div data-ss-plan-modal="" style={{ background: "#FFF", borderRadius: 16, maxWidth: 580, width: "100%", maxHeight: "90vh", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.2)", boxSizing: "border-box" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ flex: "0 0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "18px 22px 12px" }}>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} — Floorplan PDF</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
               <>
-                <img src={exportUrl} alt="Floor Plan" style={{ width: "100%", borderRadius: 8, border: "1px solid #E2E8F0" }} />
-                <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                  <button onClick={downloadPDF} style={{ flex: 1, ...S.btn("#B91C1C", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PDF</button>
-                  <button onClick={downloadPNG} style={{ flex: 1, ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
-                  <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
-                    style={{ flex: 1, ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
+                <div style={{ flex: "1 1 auto", minHeight: 0, overflow: "auto", padding: "0 22px", display: "flex", justifyContent: "center", alignItems: "flex-start" }}>
+                  <img src={exportUrl} alt="Floor Plan" style={{ display: "block", maxWidth: "100%", maxHeight: "calc(90vh - 190px)", width: "auto", height: "auto", borderRadius: 8, border: "1px solid #E2E8F0", boxSizing: "border-box" }} />
                 </div>
-                <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, textAlign: "center" }}>8.5"×11" letter — attach to your GHL estimate or invoice</p>
+                <div style={{ flex: "0 0 auto", padding: "14px 22px 14px", borderTop: "1px solid #F1F5F9" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    <button onClick={downloadPDF} style={{ flex: "1 1 130px", ...S.btn("#B91C1C", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PDF</button>
+                    <button onClick={downloadPNG} style={{ flex: "1 1 130px", ...S.btn("#1E293B", "#FFF"), padding: 10, fontSize: 14 }}>⬇ Download PNG</button>
+                    <button onClick={() => { fetch(exportUrl).then((r) => r.blob()).then((b) => { navigator.clipboard.write([new ClipboardItem({ "image/png": b })]).catch(() => {}); }); }}
+                      style={{ flex: "1 1 130px", ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: 10, fontSize: 14 }}>📋 Copy</button>
+                  </div>
+                  <p style={{ fontSize: 11, color: "#94A3B8", margin: "10px 0 0", textAlign: "center" }}>8.5"×11" letter — attach to your GHL estimate or invoice</p>
+                </div>
               </>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       </SSDesignerFrame>
     </div>
