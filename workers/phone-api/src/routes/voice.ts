@@ -23,7 +23,9 @@ import { UUID_RE } from "../http";
 import { inRingHours, isOpen } from "../hours";
 import { emergencyDigits, isPremiumRate, parseIdentity, phoneDigits, stripClientPrefix, toE164, toIdentity, type ParsedIdentity } from "../identity";
 import { logFault } from "../log";
-import { armedFor, noticeText, recordedParams, startCallRecording, startForCallId, stopCallRecording } from "../recording";
+import {
+  announcementFor, armedFor, recordedParams, startCallRecording, startForCallId, stopCallRecording, UNANNOUNCED_MARK,
+} from "../recording";
 import type { TwilioParams } from "../twilioSignature";
 import {
   clientNoun, dial, gather, hangup, numberNoun, response, say,
@@ -205,7 +207,8 @@ function memberNouns(env: Env, callId: string, m: { user_id: string; identity: s
 
 /**
  * How a ring answers on a recorded call: `armed` marks the nouns, and `notice` (the first pass
- * only: the caller hears it once) is said before the <Dial>.
+ * only: the caller hears it once; null when the owner turned the announcement off) is said
+ * before the <Dial>.
  */
 interface RecordingTwiml {
   armed: boolean;
@@ -481,8 +484,12 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   events.push({ type: "twiml_served", data: { ms: Date.now() - t0 } });
   // Recorded (../recording.ts): the customer hears the announcement as the <Number>'s whisper,
   // after they pick up and before the bridge, so it lands inside the recording that their answer
-  // starts. The column is written only when true: a call the Worker never armed needs nothing.
+  // starts. With the announcement off there is no whisper: the call is armed and recorded all
+  // the same, marked unannounced. The column is written only when true: a call the Worker never
+  // armed needs nothing.
   const armed = armedFor(env, ctx.recording);
+  const announced = armed && ctx.recording.notice;
+  if (armed && !announced) events.push({ type: UNANNOUNCED_MARK, data: { leg: "out" } });
   ec.waitUntil(insertCall(admin, {
     id: callId, client_id: ctx.client_id, number_id: ctx.number.id,
     contact_id: contactParam || null, direction: "out",
@@ -501,7 +508,7 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   }, [
     numberNoun({
       e164: to,
-      url: armed ? hook(env, "/voice/notice", { call: callId, c: ctx.client_id }) : undefined,
+      url: announced ? hook(env, "/voice/notice", { call: callId, c: ctx.client_id }) : undefined,
       statusCallback: hook(env, "/voice/status", { call: callId, leg: "pstn" }),
     }),
   ]));
@@ -595,13 +602,14 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   let xml: string;
   let rang: string[] = [];
   // Recorded (../recording.ts): the caller hears the announcement before the first ring, or
-  // before an after-hours forward. Never for the 911 callback window, and never for an answer
-  // that is only voicemail (the caller's message is a recording of its own). `announced` says the
-  // TwiML below really carried it: that, and only that, arms the call.
+  // before an after-hours forward, unless the owner turned it off (recorded all the same, marked
+  // unannounced). Never for the 911 callback window, and never for an answer that is only
+  // voicemail (the caller's message is a recording of its own). `armed` says the TwiML below
+  // really rings someone on a recorded call: that, and only that, arms the call.
   const rec: RecordingTwiml = !emergencyUser && info.phone_status === "on" && armedFor(env, info.recording)
-    ? { armed: true, notice: noticeText(env, info.recording) }
+    ? { armed: true, notice: announcementFor(env, info.recording) }
     : NOT_RECORDED;
-  let announced = false;
+  let armed = false;
 
   if (!emergencyUser && info.phone_status !== "on") {
     // The switch is off (paused, or the SQL panic button) but the number still points here:
@@ -618,7 +626,7 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   } else if (!isOpen(info.route.business_hours, info.route.time_zone)) {
     const fwd = info.route.after_hours === "forward" ? guardedRouteForward(env, ec, info) : null;
     xml = fwd ? forwardTwiml(env, callId, info, fwd, rec) : voicemailTwiml(env, callId, info);
-    announced = !!fwd && rec.armed;
+    armed = !!fwd && rec.armed;
   } else {
     // The business is open; each person's own hours (migration 264) narrow it further, in
     // ringSlots, where outside them counts as away.
@@ -630,7 +638,7 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     } else {
       xml = ringTwiml(env, callId, info, plan, rec);
       rang = plan.members.map((m) => m.user_id);
-      announced = rec.armed;
+      armed = rec.armed;
     }
   }
 
@@ -642,10 +650,10 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
       id: callId, client_id: info.client_id, number_id: info.number_id, contact_id: contactId,
       direction: "in", from_e164: from, to_e164: to, twilio_call_sid: p.CallSid ?? null,
       rang_user_ids: rang, status: "ringing",
-      ...(announced ? { recording_armed: true } : {}),
+      ...(armed ? { recording_armed: true } : {}),
     }, [
       { type: "twiml_served", data: { ms: servedMs, rang: rang.length } },
-      ...(announced ? [{ type: "recording_notice", data: { leg: "in" } }] : []),
+      ...(armed ? [{ type: rec.notice ? "recording_notice" : UNANNOUNCED_MARK, data: { leg: "in" } }] : []),
     ]);
   })());
   return xml;
@@ -764,10 +772,10 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
   // 4.
   clearTransfer();
   // Re-rings and forwards on a recorded call mark their nouns (the caller has heard the
-  // announcement already, so it is not said again). Before any voicemail the recording is
-  // stopped and AWAITED: after a transfer nobody took (transfer=1) it is running, and the
-  // greeting and the caller's message must stay out of it. A call nobody ever answered has no
-  // recording, so its voicemail waits on no read.
+  // announcement already, or the owner turned it off, so it is not said here). Before any
+  // voicemail the recording is stopped and AWAITED: after a transfer nobody took (transfer=1) it
+  // is running, and the greeting and the caller's message must stay out of it. A call nobody
+  // ever answered has no recording, so its voicemail waits on no read.
   const rec: RecordingTwiml = { armed: call.recording_armed === true };
   const toVoicemail = async (route: RouteInfo | null) => {
     const [, forUser] = await Promise.all([
@@ -938,8 +946,9 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
       const opened = await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null).is("ended_at", null));
       if (!opened) await patchCall(admin, id, { answered_at: at }, (q) => q.is("answered_at", null));
       // The customer picked up: an armed call starts recording on their leg now, as its
-      // whisper (/voice/notice) plays them the announcement (../recording.ts). Not on a call
-      // already known to have ended (a late answer): there is nothing left to record.
+      // whisper (/voice/notice) plays them the announcement when it is announced
+      // (../recording.ts). Not on a call already known to have ended (a late answer): there is
+      // nothing left to record.
       if (opened || !row.ended_at) {
         await startCallRecording(env, admin, { ...row, twilio_call_sid: row.twilio_call_sid ?? (sid || null) });
       }

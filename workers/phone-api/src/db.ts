@@ -52,14 +52,17 @@ export function must<T>(res: { data: T | null; error: { message?: string; code?:
 }
 
 // ── The business's call recording settings (migration 263) ──────────────────────────
-// Both RPCs return them as `recording`, read from client_settings. Whether a call is ARMED
-// (announced, so it may be recorded) is the Worker's decision: these plus the CALL_RECORDING
-// rail (recording.ts armedFor).
+// Both RPCs return them as `recording`, read from client_settings. Whether a call is ARMED (may
+// be recorded) is the Worker's decision: these plus the CALL_RECORDING rail (recording.ts
+// armedFor). Whether it is announced is `notice` alone (recording.ts announcementFor).
 
 export interface RecordingSettings {
   /** The business turned recording on (client_settings.phone_record_calls). */
   on: boolean;
-  /** Play the announcement. Locked on for now: a call is armed only while this is true. */
+  /**
+   * Play the announcement (client_settings.phone_recording_notice, default on; portal-settings
+   * keeps it on until phase 2). Off, a call is still armed and recorded, unannounced.
+   */
   notice: boolean;
   /** The business's own sentence, or null for the standard one (recording.ts noticeText). */
   notice_text: string | null;
@@ -347,9 +350,10 @@ export interface CallRow {
   /** The leg the call is moving away from. */
   handoff_from_sid?: string | null;
   /**
-   * The TwiML this call ran carried the recording announcement, so it may be recorded
-   * (migration 263, recording.ts). Optional for the same reason as the handoff columns; absent
-   * reads as not armed, and nothing about recording runs for the call.
+   * The TwiML this call ran rang someone on a recorded call, so it may be recorded (migration
+   * 263, recording.ts), announced unless it carries a recording_unannounced mark. Optional for the
+   * same reason as the handoff columns; absent reads as not armed, and nothing about recording
+   * runs for the call.
    */
   recording_armed?: boolean;
 }
