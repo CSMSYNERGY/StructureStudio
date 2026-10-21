@@ -2777,6 +2777,12 @@ Type ${clientId} to close it.`);
     run("close", "twilio_account_close", { confirmClientId: typed.trim() }, () => `${label}'s Twilio account is closed.`);
   };
   const check = async () => { setBusy("check"); await load(true); setBusy(null); };
+  // 2026-10-21 (migration 323): the builder's own Verify service, so their customers' login codes
+  // say "Your <name> verification code is". Made by Create; this re-names it after a name change.
+  const syncLogin = () => run("verify", "twilio_verify_sync", {}, (r) => {
+    const v = r.verifyService || {};
+    return v.outcome === "unchanged" ? `${label}'s login texts already say "${v.name}".` : `${label}'s login texts now say "${v.name}".`;
+  });
 
   const tone = status === "active" ? "good" : status === "suspended" || status === "failed" ? "warn" : status === "closed" ? "danger" : "neutral";
   const row = (k, v) => (
@@ -2813,6 +2819,10 @@ Type ${clientId} to close it.`);
           {sub && row("Key and calling app", <><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.apiKeySid || "no key"}</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.twimlAppSid || "no app"}</span></>)}
           {sub && row("Push credentials", <>{have(acct.push && acct.push.apns_dev, "iPhone dev")}{have(acct.push && acct.push.apns_prod, "iPhone")}{have(acct.push && acct.push.fcm, "Android")}</>)}
           {sub && row("Event Streams", <>{have(acct.sink, "sink")}{have(acct.subscription, "subscription")}</>)}
+          {/* The customer login code text (migration 323). verifyService undefined = an older server. */}
+          {acct.verifyService !== undefined && row("Login text name", acct.verifyService && acct.verifyService.name
+            ? <><span data-adm-login-text>&ldquo;Your {acct.verifyService.name} verification code is&hellip;&rdquo;</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.verifyService.sid}</span></>
+            : <span data-adm-login-text>{sub ? "Our name (Structure Studio) until their own is made: press Sync login text name." : "Our name: Structure Studio."}</span>)}
           {row("Live numbers", <span>{acct.liveNumbers == null ? "unknown" : acct.liveNumbers}</span>)}
           {/* Workstream 2, phase 8: their open "Bring your number" requests (listed on the Builders tab). */}
           {acct.openNumberRequests > 0 && row("Number requests", <AdmChip tone="warn">{`${acct.openNumberRequests} open: see Builders, Bring-your-number requests`}</AdmChip>)}
@@ -2836,6 +2846,7 @@ Type ${clientId} to close it.`);
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
             {canCreate && btn("create", createLabel, create, ACCENT, "#FFF")}
             {sub && acct.accountSid && status !== "closed" && btn("check", "Check token", check, "#F1F5F9", "#334155")}
+            {sub && status === "active" && acct.verifyService !== undefined && btn("verify", "Sync login text name", syncLogin, "#F1F5F9", "#334155")}
             {sub && status === "active" && btn("suspend", "Suspend", suspend, "#FEF3C7", "#92400E")}
             {sub && acct.accountSid && status !== "closed" && btn("close", "Close…", close, "#FEF2F2", "#DC2626")}
           </div>

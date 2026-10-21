@@ -39,6 +39,10 @@ import {
 // 2026-10-12 (C55): create_client makes the new builder's sub-account when TWILIO_SUBACCOUNTS is
 // "on", without ever failing or holding up the create (twilioAtCreate.ts says how).
 import { provisionAtCreate } from "./twilioAtCreate.ts";
+// 2026-10-21 (board 72b1008c, migration 323): each builder's own Verify service inside their sub,
+// named after them, so a customer's login text names the builder. Made by Create and by the card's
+// "Sync login text name" (twilio_verify_sync, one builder or every active sub: the backfill).
+import { syncVerifyService, type VerifySyncResult, verifySyncSentence } from "../_shared/twilioVerifyService.ts";
 // Card payments (workstream 1 phase 3): set_payments refuses a system this deployment has no
 // credentials for, and verify_payments asks the gateway one harmless question. cardpointe.ts is the
 // one CardPointe client and paymentSettings.ts reads the tenant's account; see their importer ledgers.
@@ -147,6 +151,45 @@ function twilioProvisionSentence(r: Extract<EnsureResult, { ok: false }>): strin
     default: return `Twilio stopped at the ${r.step ?? "first"} step (${r.code}). Press Create again: it resumes from there and never makes anything twice.`;
   }
 }
+/** The card's "Login text name" row (migration 323): the builder's own Verify service, masked, and
+ *  the name their customers' login texts carry. null = 323 not applied, or the read failed. */
+// deno-lint-ignore no-explicit-any
+async function verifyServiceView(sb: any, clientId: string): Promise<{ sid: string | null; name: string | null } | null> {
+  try {
+    const r = await sb.from("twilio_accounts").select("verify_service_sid, verify_service_name").eq("client_id", clientId).maybeSingle();
+    if (r?.error) return null;
+    return { sid: maskSid(r?.data?.verify_service_sid), name: r?.data?.verify_service_name ?? null };
+  } catch { return null; }
+}
+
+/** A sync's answer for the console: masked SID, the name, or the sentence and code (never Twilio's words). */
+function verifySyncView(r: VerifySyncResult):
+  | { ok: true; outcome: string; sid: string | null; name: string }
+  | { ok: false; reason: string; code: string; status: number; sentence: string } {
+  return r.ok
+    ? { ok: true, outcome: r.outcome, sid: maskSid(r.sid), name: r.name }
+    : { ok: false, reason: r.reason, code: r.code, status: r.status, sentence: verifySyncSentence(r) };
+}
+
+/** One admin_audit row for a sync (best-effort, masked SID, codes only). */
+async function auditVerify(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  // deno-lint-ignore no-explicit-any
+  identity: any,
+  clientId: string,
+  v: ReturnType<typeof verifySyncView>,
+): Promise<void> {
+  try {
+    await sb.from("admin_audit").insert({
+      action: "twilio_verify_sync", target_client_id: clientId,
+      actor_email: identity?.via === "operator" ? identity.email : null,
+      actor_user_id: identity?.via === "operator" ? identity.userId : null,
+      note: (v.ok ? `via=${identity?.via} ${v.outcome} sid=${v.sid} name=${v.name}` : `via=${identity?.via} refused ${v.reason} code=${v.code}`).slice(0, 2000),
+    });
+  } catch (_e) { /* best-effort: the outcome is also in the response */ }
+}
+
 function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: string): string {
   switch (r.reason) {
     case "no_sub": return "This builder has no sub-account of its own.";
@@ -2233,7 +2276,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           } catch { return null; }
         })();
         const callerId = await (async () => { try { return await callerIdSummary(sb, clientId); } catch { return null; } })();
-        return json({ ok: true, account: { ...account, callerId, openNumberRequests } });
+        return json({ ok: true, account: { ...account, callerId, openNumberRequests, verifyService: await verifyServiceView(sb, clientId) } });
       }
 
       // ── Workstream 2, phase 8: "Bring your number" requests (migration 298) ─────────────────────
@@ -2342,7 +2385,47 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           return json({ error: `${clientId} stays on the parent account: ${why}.`, reason: r.reason }, 409);
         }
         await auditTwilio(`${r.ran ? "provisioned" : "already_active"} sid=${maskSid(r.accountSid)}${r.pushSkipped.length ? ` push_skipped=${r.pushSkipped.join(",")}` : ""}`);
-        return json({ ok: true, pushSkipped: r.pushSkipped, account: await twilioAccountView(sb, clientId, { get }) });
+        // The builder's own login text service rides along (made, adopted or renamed; never fatal to
+        // the account, which is ready either way).
+        const verifyService = verifySyncView(await syncVerifyService(sb, clientId, { get }));
+        if (verifyService.ok) await auditVerify(sb, identity, clientId, verifyService);
+        return json({
+          ok: true, pushSkipped: r.pushSkipped, verifyService,
+          account: { ...await twilioAccountView(sb, clientId, { get }), verifyService: await verifyServiceView(sb, clientId) },
+        });
+      }
+
+      // ── The builder's own Verify service (2026-10-21, migration 323) ─────────────────────────
+      // "Sync login text name" on the card (one builder), or `all: true` for every active sub (the
+      // backfill). Idempotent: a builder whose service is already right costs three GETs and no
+      // write at Twilio. Nothing here bills anyone (a Verify service costs nothing until a code is
+      // sent, and that cost was ours before too), so it is on can_write, not the money grant.
+      case "twilio_verify_sync": {
+        const get = (k: string) => Deno.env.get(k);
+        let ids: string[];
+        if (p.all === true) {
+          const subs = await sb.from("twilio_accounts").select("client_id").eq("kind", "sub").eq("status", "active");
+          if (subs.error && relationMissing(subs.error)) return json({ error: "Migrations 292 and 295 aren't applied on this database yet." }, 503);
+          if (subs.error) throw new Error(`twilio_accounts: ${subs.error.message}`);
+          ids = ((subs.data ?? []) as Array<{ client_id: string }>).map((r) => String(r.client_id)).sort().slice(0, 200);
+        } else {
+          ids = [await assertClient(sb, reqStr(p.clientId, "clientId"))];
+        }
+        const results: Array<{ clientId: string } & ReturnType<typeof verifySyncView>> = [];
+        for (const id of ids) {
+          const view = verifySyncView(await syncVerifyService(sb, id, { get }));
+          await auditVerify(sb, identity, id, view);
+          results.push({ clientId: id, ...view });
+        }
+        if (p.all !== true) {
+          const one = results[0];
+          if (!one.ok) return json({ error: one.sentence, reason: one.reason, code: one.code }, one.status ?? 502);
+          return json({
+            ok: true, verifyService: one,
+            account: { ...await twilioAccountView(sb, ids[0], { get }), verifyService: await verifyServiceView(sb, ids[0]) },
+          });
+        }
+        return json({ ok: true, results });
       }
 
       case "twilio_account_suspend":

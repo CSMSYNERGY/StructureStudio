@@ -32,6 +32,13 @@
 // the parent and a run another one is already doing get none), and an app_errors row for a run
 // that did not finish (codes only: never a secret, never a Twilio message).
 //
+// THE LOGIN TEXT NAME (2026-10-21, migration 323): once the sub is made, the builder's own Verify
+// service is made in it too (_shared/twilioVerifyService.ts syncVerifyService), so their customers'
+// login codes name them from the first one. Inside the same waitUntil'd run, after the sub's own
+// audit row; one admin_audit row ("twilio_verify_sync") when it is made, one warn row when it could
+// not be (the card's "Sync login text name" makes it later). A deployment with no Verify service,
+// a builder with no usable name, or a lock held by another run file nothing.
+//
 // NOT ON THE MONEY GRANT, ON PURPOSE (admin-catalog's can_bill block names this exception). The
 // console's Create needs can_bill; create_client needs can_write. With the switch "on" the builder's
 // own number search, purchase or texting submit makes the same sub with no operator at all, so
@@ -40,6 +47,7 @@
 
 import { provisioningOn, subaccountsMode, type EnvGet } from "../_shared/twilioAccount.ts";
 import { ensureTwilioAccount, maskSid, type EnsureOpts, type EnsureResult } from "../_shared/twilioProvision.ts";
+import { syncVerifyService, type VerifySyncOpts, type VerifySyncResult } from "../_shared/twilioVerifyService.ts";
 
 /** What the create response says about the builder's Twilio account. */
 export type AtCreateOutcome = "created" | "pending" | "skipped" | "failed";
@@ -50,7 +58,7 @@ export const AT_CREATE_WAIT_MS = 1_500;
 
 /** One app_errors row (admin-catalog passes logEdgeError; it never throws). */
 export type AtCreateLog = (row: {
-  fn: string; clientId: string; code: string; severity: "error" | "info"; message: string; context: Record<string, unknown>;
+  fn: string; clientId: string; code: string; severity: "error" | "warn" | "info"; message: string; context: Record<string, unknown>;
 }) => Promise<void>;
 
 export type AtCreateDeps = {
@@ -61,6 +69,9 @@ export type AtCreateDeps = {
   /** Tests only: the run, the wait and the runtime's waitUntil. */
   // deno-lint-ignore no-explicit-any
   ensure?: (admin: any, clientId: string, opts: EnsureOpts) => Promise<EnsureResult>;
+  /** Tests only: the login text service's sync (syncVerifyService). */
+  // deno-lint-ignore no-explicit-any
+  syncVerify?: (admin: any, clientId: string, opts: VerifySyncOpts) => Promise<VerifySyncResult>;
   waitMs?: number;
   keepAlive?: (p: Promise<unknown>) => void;
 };
@@ -119,6 +130,34 @@ async function settle(admin: any, clientId: string, r: EnsureResult, deps: AtCre
   return { outcome: "failed", reason: r.reason, step: r.step, code: r.code };
 }
 
+/** The new builder's own login text service, once their sub is ready. Never throws. */
+// deno-lint-ignore no-explicit-any
+async function verifyAtCreate(admin: any, clientId: string, deps: AtCreateDeps): Promise<void> {
+  let v: VerifySyncResult;
+  try {
+    v = await (deps.syncVerify ?? syncVerifyService)(admin, clientId, { get: deps.get });
+  } catch (_e) {
+    v = { ok: false, reason: "lookup_failed", status: 502, code: "threw" };
+  }
+  if (v.ok) {
+    try {
+      await admin.from("admin_audit").insert({
+        action: "twilio_verify_sync", target_client_id: clientId,
+        actor_email: deps.actor.via === "operator" ? deps.actor.email ?? null : null,
+        actor_user_id: deps.actor.via === "operator" ? deps.actor.userId ?? null : null,
+        note: `via=${deps.actor.via} at=create_client ${v.outcome} sid=${maskSid(v.sid)} name=${v.name}`.slice(0, 2000),
+      });
+    } catch (_e) { /* best-effort */ }
+    return;
+  }
+  if (["not_configured", "no_name", "busy", "switch_off"].includes(v.reason)) return;
+  await deps.log({
+    fn: "admin-catalog", clientId, code: "twilio_verify_sync_failed", severity: "warn",
+    message: `The new builder's login text service was not made at creation (${v.reason}, ${v.code}); their codes use our main service until the console's "Sync login text name" makes it`,
+    context: { at: "create_client", reason: v.reason, code: v.code },
+  }).catch(() => {});
+}
+
 /**
  * Make the new builder's sub-account if the switch says so. Resolves with what to tell the caller;
  * never rejects, and never waits longer than the wait (see the header).
@@ -143,7 +182,9 @@ export async function provisionAtCreate(admin: any, clientId: string, deps: AtCr
         }).catch(() => {});
         return { outcome: "failed", reason: "error", step: null, code: "threw" };
       }
-      return await settle(admin, clientId, r, deps);
+      const out = await settle(admin, clientId, r, deps);
+      if (r.ok && r.kind === "sub") await verifyAtCreate(admin, clientId, deps);
+      return out;
     })().catch((): AtCreateResult => ({ outcome: "failed", reason: "error", step: null, code: "threw" }));
     // Registered before the wait, so the runtime keeps the worker for the audit and error rows too.
     (deps.keepAlive ?? edgeKeepAlive)(work);
