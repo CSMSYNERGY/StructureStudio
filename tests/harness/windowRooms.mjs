@@ -23,14 +23,18 @@
 // and checks, per design:
 //   R1 every built window has exactly one room, except the one with a photo (the photo is the look)
 //   R2 every room lies inside the footprint's inner faces (porch set-back included), no deeper than 2.5 ft
-//   R3 from the middle of the glass, a straight line to each of the room's far corners, and to the corners
-//      half-way in, meets nothing but the window itself: no wall, roof, wing wall or floor in between
-//      (interior items, a loft or a partition, are inside the building and may stand in it)
+//   R3 from the middle of the glass, just behind it and just in front of it, a straight line to each of
+//      the room's far corners, and to the corners half-way in, meets nothing but the window itself: no
+//      wall, roof, wing wall or floor in between (interior items, a loft or a partition, are inside the
+//      building and may stand in it)
 //   R4 the special cases: the narrow building's rooms stop short of the opposite wall (1.65 ft); on the
 //      shed a high window's room is shallower under the falling roof and a low one keeps 2.5 ft; the
 //      gable-end window's room stays under the wall top
 //   R5 the rooms draw only for a camera outside their own wall, and hide in "look inside"
 //   R6 the quote's four-corner sheet and its single 3D picture still render (corners), written out
+//   R7 on the shed, the roof's tall band (in the high wall's mid-plane above the plate) has a hole over
+//      the window above the plate; a scoped rebuild of that wall, as a drag makes, closes it with the
+//      window lowered under the plate and opens it again with the window back up (shedBand, 2026-10-21)
 // Shots and the corner sheet go to the shots folder, named by TAG (default "after"), so a run against
 // the tree before the change gives the matching "before" set (its R checks fail there, as they should).
 //
@@ -127,8 +131,10 @@ const readRooms = (page) => page.evaluate(() => {
   });
 });
 
-// R3: segments from just behind the glass to the room's far and half-way corners, against everything
-// opaque in the scene but the window's own group, the rooms, and the interior (lofts, partitions).
+// R3: segments from just behind the glass, and from just in front of it, to the room's far and half-way
+// corners, against everything opaque in the scene but the window's own group, the rooms, and the
+// interior (lofts, partitions). From in front is what meets anything standing in the pane's own plane:
+// a single-slope roof's tall band, over a window above the plate (shedBand, 2026-10-21).
 const rayCheck = (page) => page.evaluate(async (url) => {
   const THREE = await import(url);
   const E = window.__ss3dEngine;
@@ -156,7 +162,7 @@ const rayCheck = (page) => page.evaluate(async (url) => {
       const n = NRM[g.userData.wall];
       const rb = new THREE.Box3().setFromObject(room), gb = new THREE.Box3().setFromObject(glass);
       const c = rb.getCenter(new THREE.Vector3());
-      const from = gb.getCenter(new THREE.Vector3()).addScaledVector(new THREE.Vector3(...n), -0.03);
+      const froms = [-0.03, 0.03].map((s) => gb.getCenter(new THREE.Vector3()).addScaledVector(new THREE.Vector3(...n), s));
       // The far face is the one on the inward side; half-way is between it and the near face.
       const ax = n[0] ? 0 : 2, farV = n[ax] > 0 ? rb.min.getComponent(ax) : rb.max.getComponent(ax), nearV = n[ax] > 0 ? rb.max.getComponent(ax) : rb.min.getComponent(ax);
       const ox = ax === 0 ? 2 : 0, targets = [];
@@ -166,7 +172,7 @@ const rayCheck = (page) => page.evaluate(async (url) => {
       })));
       const own = new Set(); g.traverse((o) => own.add(o));
       const blocked = [];
-      targets.forEach((t) => {
+      froms.forEach((from) => targets.forEach((t) => {
         const dir = t.clone().sub(from), len = dir.length();
         ray.set(from, dir.normalize()); ray.near = 0; ray.far = len;
         const hit = ray.intersectObjects(solid, false).find((h) => !own.has(h.object));
@@ -175,7 +181,7 @@ const rayCheck = (page) => page.evaluate(async (url) => {
           for (let p = hit.object.parent; p && !hit.object.name; p = p.parent) if (p.name) { tag = p.name + "/" + tag; break; }
           blocked.push(`${tag}@${hit.distance.toFixed(2)}/${len.toFixed(2)}`);
         }
-      });
+      }));
       out.push({ id: g.userData.itemId, wall: g.userData.wall, blocked });
     });
   } finally { sides.forEach((s, m) => { m.side = s; }); }
@@ -316,6 +322,33 @@ async function runDesign(browser, d) {
     ok(`R4 ${tag} under the falling roof a high window's room is shallower (and still there); the low one under the high side keeps 2.5 ft`,
       highs.every((v) => v != null && v >= 0.4) && highs.some((v) => v < ROOM_FT - 0.01) && depthOf("sLow") === ROOM_FT, `${highs.join(",")} low ${depthOf("sLow")}`);
   }
+  // R7: the band's pieces round the hole (ssShedBand) and the prism's drawn triangles (its groups' counts).
+  if (d.key === "shed") {
+    const band = () => page.evaluate(() => {
+      let pieces = 0, tris = 0;
+      window.__ss3dEngine.model.roofGroup.traverse((o) => {
+        if (!o.isMesh) return;
+        if (o.userData && o.userData.ssShedBand) pieces++;
+        else if (o.geometry.type === "ExtrudeGeometry") tris += o.geometry.groups.reduce((s, g) => s + g.count, 0) / 3;
+      });
+      return { pieces, tris };
+    });
+    const live = await readItems(page), hiId = idOf("sHigh");
+    const rebuildAt = (sill) => page.evaluate(({ live, hiId, sill }) => {
+      const E = window.__ss3dEngine;
+      E.model.rebuildWalls(["south"], live.map((it) => (it.id === hiId ? { ...it, sillFt: sill } : it)));
+      E.render();
+    }, { live, hiId, sill });
+    const s0 = await band();
+    await rebuildAt(3.5);
+    const s1 = await band();
+    await rebuildAt(d.wins[hiId - 700][3]);
+    const s2 = await band();
+    const back = (await rayCheck(page)).find((r) => r.id === hiId);
+    ok(`R7 ${tag} the tall band has a hole over the window above the plate; a scoped rebuild closes it under the plate and opens it again`,
+      s0.pieces === 1 && s1.pieces === 0 && s1.tris > s0.tris && s2.pieces === 1 && s2.tris === s0.tris && !!back && back.blocked.length === 0,
+      `pieces ${s0.pieces}/${s1.pieces}/${s2.pieces}, prism triangles ${s0.tris}/${s1.tris}/${s2.tris}, rays ${back ? back.blocked.length : "none"} blocked`);
+  }
   if (d.key === "corners") {
     const g = wins.find((x) => x.id === idOf("gableHigh"));
     ok(`R4 ${tag} the window high in the gable end: its room stays under the 8 ft wall top`, !!(g && g.rooms[0] && g.rooms[0].max[1] <= 8 + 1e-3), g && g.rooms[0] ? g.rooms[0].max[1].toFixed(3) : "no room");
@@ -351,7 +384,8 @@ async function runDesign(browser, d) {
     corners: [["corner", { id: idOf("nE"), dist: 5, skew: 0.9 }], ["corner-straight", { id: idOf("nE"), dist: 5 }], ["picture-straight", { id: idOf("picture"), dist: 8 }],
       ["picture-angle", { id: idOf("picture"), dist: 7, skew: 0.8 }], ["gable-loft", { id: idOf("gableHigh"), dist: 5, skew: 0.45, lift: -0.8 }], ["photo", { id: idOf("photo"), dist: 5, skew: 0.4 }]],
     narrow: [["narrow-angle", { id: idOf("w"), dist: 5, skew: 0.7 }]],
-    shed: [["shed-high", { id: idOf("sHigh"), dist: 5, skew: 0.6, lift: -1 }], ["shed-high-straight", { id: idOf("sHigh"), dist: 5, lift: 0 }]],
+    shed: [["shed-high", { id: idOf("sHigh"), dist: 5, skew: 0.6, lift: -1 }], ["shed-high-straight", { id: idOf("sHigh"), dist: 5, lift: 0 }],
+      ["shed-high-wall", { id: idOf("sHigh"), dist: 13, skew: 0.45, lift: -3.5 }]],
     porch: [["porch-angle", { id: idOf("sE"), dist: 5, skew: -0.7 }]],
     wing: [["wing-notch", { id: idOf("nNotch2"), dist: 6, skew: 0.6 }]],
     many: [["many-straight", { id: idOf("e3"), dist: 9 }], ["many-angle", { id: idOf("e3"), dist: 8, skew: 0.8 }]],

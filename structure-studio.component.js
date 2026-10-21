@@ -11805,7 +11805,8 @@ function buildShed3DModel(THREE, p) {
   // shed's HIGH eave wall is a real clad wall up to the high eave -- battens in phase to its top, no
   // seam at H -- where it used to be a wall to H with the roof prism's vertical side standing in as
   // the rest (that side is still there, inside this wall's box at the wall's mid-plane, and so
-  // hidden); a gable end steps up across a raised centre; the centre's own eave wall stands at Hc.
+  // hidden, cut where an opening above the plate is: shedBand); a gable end steps up across a raised
+  // centre; the centre's own eave wall stands at Hc.
   // A wall a recessed porch has set back stops at H under the roof, and the prism's side closes the
   // opening over it. A wall without `tops` is H end to end, which is every wall of every building
   // without wings or a new-frame shed. `top` is the wall's tallest (model.frame reads it).
@@ -13195,10 +13196,15 @@ function buildShed3DModel(THREE, p) {
       }
       ogs.push(og);
     });
-    return { wg, ogs };
+    return { wg, ogs, ranges };
   };
+  // The new-frame shed's high wall (d3ShedHighWall) and its opening ranges as built: the roof's tall
+  // band leaves a hole over any that reaches above the plate (shedBand, below).
+  const SHED_HIGH = d3ShedHighWall(roofCfg, bldgW, bldgH);
+  let shedHighRanges = null;
   Object.keys(WALLS).forEach((wname) => {
     const built = buildOneWall(wname, items);
+    if (wname === SHED_HIGH) shedHighRanges = built.ranges;
     wallsGroup.add(built.wg);
     built.ogs.forEach((og) => openingsGroup.add(og));
   });
@@ -13534,7 +13540,9 @@ function buildShed3DModel(THREE, p) {
   // holds for the other end as well: the east wall runs north->south like the west one, and the
   // south wall west->east like the north one. Over a new-frame high wall this band sits inside the
   // wall's own box (buildOneWall draws that wall to its top), and shows only where a recessed porch
-  // has set the wall back.
+  // has set the wall back; an opening above the plate cuts it (shedBand, below). `shedBandRuns` keeps
+  // the band's own groups.
+  const shedBandRuns = [];
   if ((roofCfg && roofCfg.type) === "shed" && gableGeom.groups && gableGeom.groups.length === 2) {
     const gpos = gableGeom.attributes.position, guv2 = gableGeom.attributes.uv;
     const caps = gableGeom.groups[0], sides = gableGeom.groups[1];
@@ -13577,14 +13585,85 @@ function buildShed3DModel(THREE, p) {
           let n = 1;
           while (k + n < triTall.length && triTall[k + n] === want) n++;
           gableGeom.addGroup(sides.start + k * 3, n * 3, want ? 0 : 1);
+          if (want) shedBandRuns.push(gableGeom.groups[gableGeom.groups.length - 1]);
           k += n;
         }
       }
     }
   }
   moveCapsFlush();
-  rg.add(new THREE.Mesh(gableGeom,
-    (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat));
+  const gableMesh = new THREE.Mesh(gableGeom,
+    (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat);
+  rg.add(gableMesh);
+  // ── THE TALL BAND OVER AN OPENING ABOVE THE PLATE (2026-10-21) ──────────────────────────────────
+  // A new-frame shed's high wall stands to its top (d3WallTops) and may carry an opening above the
+  // plate, up to that top (topOver). The wall's box had the hole and the band, in the wall's mid-plane,
+  // did not, so the glass, in that same plane, showed the band's siding instead of the room behind it
+  // (glassRoom; tests/harness/windowRooms.mjs, the shed's high south window). So the band leaves a hole
+  // where the wall does, the way the wall's panel-split does: while any of the high wall's openings
+  // reaches above the band's foot, the band's own triangles stop drawing (their groups' counts go to
+  // 0; the arrays stay as built) and one mesh draws the band in pieces round the holes, each piece
+  // those same triangles fitted to its rectangle, so the winding, normals and UVs are the band's own.
+  // With no such opening the band is exactly as built. rebuildWalls re-cuts it whenever it rebuilds
+  // the high wall, so a drag above or below the plate keeps it right. Null on every other roof.
+  const shedBand = SHED_HIGH && shedBandRuns.length ? (() => {
+    const gpos = gableGeom.attributes.position, gnrm = gableGeom.attributes.normal;
+    const tris = [], counts = shedBandRuns.map((g) => g.count);
+    shedBandRuns.forEach((g) => { for (let i = g.start; i < g.start + g.count; i += 3) tris.push(i); });
+    let z0 = Infinity, z1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    tris.forEach((i) => {
+      for (let j = i; j < i + 3; j++) {
+        z0 = Math.min(z0, gpos.getZ(j)); z1 = Math.max(z1, gpos.getZ(j));
+        y0 = Math.min(y0, gpos.getY(j)); y1 = Math.max(y1, gpos.getY(j));
+      }
+    });
+    // A point `a` along the wall in this group's local z (rg's placement, further down).
+    const lzOf = (wf, a) => (uAxisIsX ? wf.O[1] + wf.U[1] * a + L / 2 : L / 2 - (wf.O[0] + wf.U[0] * a));
+    let pieces = null;
+    const cut = (ranges) => {
+      if (pieces) { rg.remove(pieces); pieces.geometry.dispose(); pieces = null; }
+      const wf = WALLS[SHED_HIGH];
+      const holes = (ranges || []).filter((r) => r.y1 > y0 + 0.01).map((r) => {
+        const p = lzOf(wf, r.a0), q = lzOf(wf, r.a1);
+        return [Math.max(z0, Math.min(p, q)), Math.min(z1, Math.max(p, q)), Math.max(y0, r.y0), Math.min(y1, r.y1)];
+      }).filter((h) => h[1] > h[0] + 0.01 && h[3] > h[2] + 0.01).sort((p, q) => p[0] - q[0]);
+      shedBandRuns.forEach((g, k) => { g.count = holes.length ? 0 : counts[k]; });
+      if (!holes.length) return;
+      // Full height between the holes, and under and over each one.
+      const rects = [];
+      let cz = z0;
+      holes.forEach((h) => {
+        if (h[0] > cz + 0.01) rects.push([cz, h[0], y0, y1]);
+        if (h[2] > y0 + 0.01) rects.push([h[0], h[1], y0, h[2]]);
+        if (h[3] < y1 - 0.01) rects.push([h[0], h[1], h[3], y1]);
+        cz = h[1];
+      });
+      if (z1 > cz + 0.01) rects.push([cz, z1, y0, y1]);
+      const nv = rects.length * tris.length * 3;
+      const P = new Float32Array(nv * 3), N = new Float32Array(nv * 3), UV = new Float32Array(nv * 2);
+      let v = 0;
+      rects.forEach(([za, zb, ya, yc]) => tris.forEach((i) => {
+        for (let j = i; j < i + 3; j++, v++) {
+          const z = za + ((gpos.getZ(j) - z0) * (zb - za)) / (z1 - z0), y = ya + ((gpos.getY(j) - y0) * (yc - ya)) / (y1 - y0);
+          P.set([gpos.getX(j), y, z], v * 3);
+          N.set([gnrm.getX(j), gnrm.getY(j), gnrm.getZ(j)], v * 3);
+          // The shed pass's own mapping (u along the wall, v the height, both in feet).
+          UV.set([uAxisIsX ? z : L - z, y], v * 2);
+        }
+      }));
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(P, 3));
+      geo.setAttribute("normal", new THREE.BufferAttribute(N, 3));
+      geo.setAttribute("uv", new THREE.BufferAttribute(UV, 2));
+      pieces = new THREE.Mesh(geo, wallMat);
+      pieces.userData.ssShedBand = true;
+      pieces.castShadow = gableMesh.castShadow;
+      pieces.receiveShadow = gableMesh.receiveShadow;
+      rg.add(pieces);
+    };
+    return { cut };
+  })() : null;
+  if (shedBand) shedBand.cut(shedHighRanges);
 
   // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
   // this renderer does — see d3MakeProfYAt.
@@ -17065,6 +17144,8 @@ function buildShed3DModel(THREE, p) {
         .filter((g) => g.userData && g.userData.wall === wname && !g.userData.gable)
         .forEach((og) => { openingsGroup.remove(og); disposeSubtree(og, sharedMats); });
       const built = buildOneWall(wname, itemsNow);
+      // The roof's tall band follows the high wall's openings (shedBand).
+      if (shedBand && wname === SHED_HIGH) shedBand.cut(built.ranges);
       setShadowFlags(built.wg);
       wallsGroup.add(built.wg);
       built.ogs.forEach((og) => { setShadowFlags(og); openingsGroup.add(og); });
