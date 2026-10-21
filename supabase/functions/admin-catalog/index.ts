@@ -9,6 +9,10 @@ import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
+// Sales tax lookups, operator side (2026-10-21, migration 319): the per-tenant report, and the
+// replay of charges that failed. taxMeter.ts and taxUsage.ts carry the rules and their tests.
+import { retryLookupCharges } from "../_shared/taxMeter.ts";
+import { parseTaxUsageRange, readTaxLookupsInRange, summarizeTaxUsage } from "../_shared/taxUsage.ts";
 // "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
 // imports the same module, so a change to it deploys both functions.
 import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
@@ -308,6 +312,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 // (migration 259 revokes them from anon/authenticated), so the service-role client here is
 // their only reader outside the phone-api worker.
 const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
+// Sales tax lookups (2026-10-21): the report (what each builder's calls cost and were charged) and
+// the replay of failed charges, which posts real debits. Both on the money grant, like phone
+// billing's four, and neither is on READ_ONLY_ACTIONS, so both need can_write too.
+const TAX_BILLING_ACTIONS = new Set(["tax_usage_get", "tax_charge_retry"]);
 
 /** verify_payments: at most one gateway check per builder in this many seconds (see the action). */
 const VERIFY_COOLDOWN_S = 10;
@@ -494,6 +502,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // billing" would be wrong for a read.
     if (PHONE_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
       return json({ error: "This operator account cannot see or change phone and text billing." }, 403);
+    }
+    if (TAX_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
+      return json({ error: "This operator account cannot see or change sales tax billing." }, 403);
     }
     // Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio (its
     // numbers and registrations are billed to our parent account), and closing one releases its
@@ -1437,6 +1448,69 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           ok: true,
           ...summarizePhoneUsage({ range, rows: charges.rows, twilio, settings, names, truncated: charges.truncated }),
         });
+      }
+
+      // ── SALES TAX LOOKUPS, OPERATOR SIDE (2026-10-21, migration 319) ─────────────────────
+      // tax_usage_get: the "Sales tax lookups" card under Admin → Billing. Per builder over a date
+      // range (UTC days, both inclusive; default this month): calls by kind and outcome, charged
+      // count and cents, exempt, the meters' state, and each builder's tax_lookup_enabled switch
+      // (read-only here: it is still set by hand). Counted from tax_lookups, the call ledger, not
+      // from the wallet, which cannot see a disarmed, unpriced or exempt call. On can_bill.
+      case "tax_usage_get": {
+        const range = parseTaxUsageRange(p, new Date());
+        const [read, cs, cfg, meters] = await Promise.all([
+          readTaxLookupsInRange(sb, range.from, range.to),
+          sb.from("client_settings").select("client_id, tax_lookup_enabled, invoice_in_ghl, billing_exempt"),
+          sb.from("client_configs").select("client_id, company_name"),
+          sb.from("usage_prices").select("kind, active, price_cents").in("kind", ["tax_lookup", "tax_invoice"]),
+        ]);
+        if (!read.ok) throw new Error(`tax_lookups: ${String((read.error as any)?.message ?? read.error)}`);
+        if (cs.error) throw new Error(`client_settings: ${cs.error.message}`);
+        if (cfg.error) throw new Error(`client_configs: ${cfg.error.message}`);
+        if (meters.error) throw new Error(`usage_prices: ${meters.error.message}`);
+        const names = new Map<string, string>((cfg.data ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+        return json({
+          ok: true,
+          ...summarizeTaxUsage({
+            range, rows: read.rows, switches: cs.data ?? [], names, meters: meters.data ?? [],
+            truncated: read.truncated, pre319: read.pre319,
+          }),
+        });
+      }
+
+      // tax_charge_retry: replay the charges that failed (charge_state 'error') or never finished
+      // ('pending' for over 15 minutes), oldest first, optionally for one builder, with the SAME
+      // tax_ledger idem key, so a debit that did post is found and linked rather than posted twice.
+      // REFUSED (409) while a candidate's meter is disarmed or priced at 0: nothing is replayed.
+      // It posts real debits, so it asks for confirm: true, and writes its own audit row. On can_bill.
+      case "tax_charge_retry": {
+        if (p.confirm !== true) throw new Error("This replays failed sales tax charges against builders' wallets. Send confirm: true to go ahead.");
+        const clientId = p.clientId == null || p.clientId === "" ? null : reqStr(p.clientId, "clientId");
+        const out = await retryLookupCharges(sb, {
+          clientId,
+          limit: p.limit == null ? undefined : Number(p.limit),
+          actorUserId: identity.via === "operator" ? identity.userId : null,
+        });
+        try {
+          await sb.from("admin_audit").insert({
+            action: "tax_charge_retry",
+            target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: (out.ok
+              ? `via=${identity.via} candidates=${out.candidates} charged=${out.charged} exempt=${out.exempt} still_failed=${out.stillFailed}`
+              : `via=${identity.via} refused=${out.refused}`).slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed replay on a logging failure */ }
+        if (!out.ok && out.refused === "meter_disarmed") {
+          const off = out.meters.filter((m) => !m.active || m.priceCents <= 0).map((m) => m.kind === "tax_lookup" ? "Tax verification" : "Invoice tax check");
+          return json({
+            error: `The ${off.join(" and ")} meter${off.length === 1 ? " is" : "s are"} off or priced at $0, so nothing was retried. The failed charges stay recorded as failed.`,
+            reason: "meter_disarmed", meters: out.meters, candidates: out.candidates,
+          }, 409);
+        }
+        if (!out.ok) return json({ error: "Couldn't read the failed charges, so nothing was retried. Try again in a minute.", reason: "unreadable" }, 503);
+        return json(out);
       }
 
       // ── Avalara credential check (2026-09-17) ─────────────────────────────────────

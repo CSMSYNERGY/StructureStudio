@@ -7,7 +7,7 @@ import { timedFetch, withServerTiming, type ServerTiming } from "../_shared/serv
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
-import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
+import { chargeTaxCalculation, taxChargeMemo, taxLookupIdem } from "../_shared/taxMeter.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
@@ -49,6 +49,8 @@ import {
   type CarryDecision, type TaxLocation,
 } from "../_shared/taxChain.ts";
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
+// This UTC month's lookups and what they took from the wallet, for the Sales tax box (319).
+import { monthTaxUsage } from "../_shared/taxUsage.ts";
 import {
   COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
   searchQuery, TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
@@ -7515,8 +7517,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Every location is listed, inactive ones too, with `active` on each: an inactive lot never
   // prices a quote (taxChain), and the card should be able to say why a rate is not applying.
   // `usage24h` is null when the ledger cannot be counted — unknown, not zero.
+  // `usageMonth` / `spendMonthCents` (2026-10-21, migration 319) are this UTC month's lookups and
+  // what their charges took from the wallet, beside the 24-hour cap; each is null when it cannot be
+  // read (before 319 the spend has no column), never a failed card.
   if (action === "tax_settings") {
-    const [csRes, locRes, usage24h, priceRes, walletRes] = await Promise.all([
+    const [csRes, locRes, usage24h, priceRes, walletRes, month] = await Promise.all([
       admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled, billing_exempt")
         .eq("client_id", clientId).maybeSingle(),
       admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
@@ -7526,6 +7531,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
       admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle()
         .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
+      monthTaxUsage(admin, clientId),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (locRes.error) return dbFail(req, clientId, "load your locations' tax rates", locRes.error);
@@ -7542,6 +7548,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       companyLabel: cs?.ss_tax_label ?? "Sales tax",
       dailyCap: DAILY_TAX_LOOKUP_CAP,
       usage24h,
+      usageMonth: month.lookups,
+      spendMonthCents: month.spendCents,
+      monthStart: month.monthStart,
       lookupPriceCents: priceRes.error ? null : lookupPriceCents(priceRes.data, exempt),
       locations: (locRes.data ?? []).map(locationTaxView),
     });
@@ -14403,7 +14412,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       afterWrite: async () => {
         charge = await chargeLookup(admin, lookup, {
           clientId, kind: VERIFY_TAX_METER, refType: "design", refId: shortCode,
-          memo: `Verified sales tax rate${lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+          // "Tax verification · SST-5021 · Minnesota": the line the builder's Transactions shows.
+          memo: taxChargeMemo({ kind: VERIFY_TAX_METER, quoteNumber: d.ss_quote_number || shortCode, state: address?.state }),
           actorUserId: userId ?? null,
         });
         if (!charge.charged && charge.reason === "error") {
@@ -17100,7 +17110,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             }
             const meter = await chargeLookup(admin, lookup, {
               clientId, kind: "tax_invoice", refType: "invoice", refId: String(invNumber),
-              memo: `Sales tax check on invoice ${invNumber}${lookup.ok && lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+              // "Invoice tax check · Invoice 1042 · Missouri": the line the builder's Transactions shows.
+              memo: taxChargeMemo({ kind: "tax_invoice", invoiceNumber: invNumber, state: addressFrom(c?.contact)?.state }),
               actorUserId: userId ?? null,
             });
             if (!meter.charged && meter.reason === "error") {

@@ -1784,6 +1784,146 @@ function AdmPhoneBilling({ clients }) {
   );
 }
 
+// ── Sales tax lookups (2026-10-21, migration 319) ─────────────────────────────
+// Every Avalara rate lookup a builder made (a Verify press or the invoice-time check), from the
+// call ledger, and what each one was charged: Carolyn 2026-10-19, "connect tax generation API calls
+// to wallet and tracking". READ-ONLY: the meters are armed and the per-builder switch
+// (tax_lookup_enabled) is set by hand for now, and this card shows both as they are. admin-catalog
+// tax_usage_get backs it, on can_bill (an operator without it sees the server's sentence). The
+// counting rules are _shared/taxUsage.ts's, with its tests; this card only formats them. Dates are
+// UTC days, both inclusive, like the phone report's months.
+const taxUsd = (cents) => "$" + (Number(cents || 0) / 100).toFixed(2);
+const TAX_FAILURE_WORDS = {
+  bad_address: "address not found", timeout: "timed out", network: "unreachable", rate_limited: "busy",
+  credentials_rejected: "credentials refused", subscription: "account not set up", malformed: "unreadable answer",
+  not_configured: "not connected",
+};
+
+function AdmTaxLookups() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [from, setFrom] = useState(() => today.slice(0, 8) + "01");
+  const [to, setTo] = useState(today);
+  const [report, setReport] = useState(null);   // null = loading | { err } | payload
+  const seq = useRef(0);
+
+  const load = useCallback(async (f, t) => {
+    const n = ++seq.current;
+    setReport(null);
+    try {
+      const r = await adminApi("tax_usage_get", { from: f, to: t });
+      if (n === seq.current) setReport(r);
+    } catch (e) {
+      if (n === seq.current) setReport({ err: e.message || "Couldn't load the sales tax report." });
+    }
+  }, []);
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) && from <= to;
+  useEffect(() => { if (valid) load(from, to); }, [from, to, valid, load]);
+
+  const rep = report && !report.err ? report : null;
+  const tot = rep && rep.totals;
+  const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
+  const R = { textAlign: "right" };
+  const meterLine = (m) => {
+    const name = m.kind === "tax_lookup" ? "Tax verification (Verify button)" : "Invoice tax check";
+    if (!m.exists) return <>{name}: <span style={{ color: "#B91C1C" }}>missing from the price list</span></>;
+    return <>{name}: {m.armed ? <strong style={{ color: "#15803D" }}>charging {taxUsd(m.priceCents)} a lookup</strong>
+      : m.active ? <span style={{ color: "#92400E" }}>on, but priced at $0, so nothing is charged</span>
+      : <span style={{ color: "#64748B" }}>off, so nothing is charged{m.priceCents > 0 ? ` (price set: ${taxUsd(m.priceCents)})` : ""}</span>}</>;
+  };
+  const failText = (f) => Object.entries(f || {}).map(([k, n]) => `${n} ${TAX_FAILURE_WORDS[k] || k}`).join(", ");
+
+  return (
+    <div style={S.card} data-adm-tax-lookups>
+      <CardHead title="Sales tax lookups"
+        desc="Each verified sales tax lookup (a Verify press on an estimate, or the check when an invoice is sent) is one Avalara call. This shows who made them and what each was charged to their wallet. The switch per builder and the prices are still set by hand." />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <label style={{ fontSize: 12.5, color: "#334155", display: "flex", alignItems: "center", gap: 6 }}>From
+          <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} style={{ ...S.input, width: "auto", padding: "5px 8px" }} />
+        </label>
+        <label style={{ fontSize: 12.5, color: "#334155", display: "flex", alignItems: "center", gap: 6 }}>to
+          <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} style={{ ...S.input, width: "auto", padding: "5px 8px" }} />
+        </label>
+        <button type="button" onClick={() => valid && load(from, to)} disabled={!valid}
+          style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 12px", marginLeft: "auto", opacity: valid ? 1 : 0.5 }}>Refresh</button>
+      </div>
+      {!valid && <div style={{ ...PB_HELP, marginTop: 0, color: "#B91C1C" }}>Pick a start date on or before the end date.</div>}
+      {valid && report === null && <SkelBar w="70%" h={12} />}
+      {report && report.err && <div style={{ ...S.err, marginBottom: 0 }}>{report.err}</div>}
+      {rep && (
+        <>
+          <div style={{ fontSize: 12.5, color: "#334155", lineHeight: 1.6, marginBottom: 12 }}>
+            {rep.meters.map((m) => <div key={m.kind}>{meterLine(m)}</div>)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 14 }}>
+            <AdmBillingStat label="Lookups" value={tot.calls} sub={`${tot.verify} Verify · ${tot.invoice} invoice`} />
+            <AdmBillingStat label="Charged" value={taxUsd(tot.chargedCents)} sub={`${tot.charged} lookup${tot.charged === 1 ? "" : "s"}`} />
+            <AdmBillingStat label="Not charged" value={tot.inactive + tot.unpriced + tot.exempt}
+              sub={`${tot.exempt} non-billable · ${tot.inactive + tot.unpriced} meter off`} />
+            <AdmBillingStat label="Failed lookups" value={tot.failed} sub={tot.failed ? failText(tot.failures) : "none"} />
+          </div>
+          {rep.chargesUnknown && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#92400E" }}>
+              The database doesn't record charges per lookup yet (migration 319 isn't applied), so only the calls are counted.
+            </div>
+          )}
+          {(tot.errors > 0 || tot.pending > 0) && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#B91C1C" }}>
+              {tot.errors > 0 && <>{tot.errors} charge{tot.errors === 1 ? "" : "s"} failed and {tot.errors === 1 ? "was" : "were"} not taken. </>}
+              {tot.pending > 0 && <>{tot.pending} charge{tot.pending === 1 ? " is" : "s are"} unfinished. </>}
+              An operator can replay them (admin-catalog tax_charge_retry); a replay never charges one lookup twice.
+            </div>
+          )}
+          {rep.truncated && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#B91C1C" }}>
+              This range has more lookups than the report reads at once ({rep.rowCount} counted). Pick a shorter range.
+            </div>
+          )}
+          {rep.tenants.length === 0
+            ? <div style={{ fontSize: 13, color: "#64748B" }}>No builder made a lookup in this range, and none has lookups switched on.</div>
+            : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={TH}>Builder</th><th style={TH}>Lookups</th>
+                    <th style={{ ...TH, ...R }}>Verify</th><th style={{ ...TH, ...R }}>Invoice</th>
+                    <th style={{ ...TH, ...R }}>Failed</th><th style={{ ...TH, ...R }}>Charged</th>
+                    <th style={{ ...TH, ...R }}>Amount</th><th style={{ ...TH, ...R }}>Non-billable</th>
+                    <th style={{ ...TH, ...R }}>Charge errors</th>
+                  </tr></thead>
+                  <tbody>
+                    {rep.tenants.map((t) => (
+                      <tr key={t.clientId} data-tax-usage-row={t.clientId}>
+                        <td style={TD}>
+                          <div style={{ fontWeight: 700 }}>{t.companyName}</div>
+                          <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{t.clientId}{t.billingExempt ? " · non-billable" : ""}{t.ssMode ? "" : " · CRM paperwork"}</div>
+                        </td>
+                        <td style={TD}>{t.lookupEnabled ? <AdmChip tone="on">On</AdmChip> : <AdmChip tone="neutral">Off</AdmChip>}</td>
+                        <td style={{ ...TD, ...R }}>{t.verify}</td>
+                        <td style={{ ...TD, ...R }}>{t.invoice}</td>
+                        <td style={{ ...TD, ...R }} title={failText(t.failures)}>{t.failed}</td>
+                        <td style={{ ...TD, ...R }}>{t.charged}</td>
+                        <td style={{ ...TD, ...R }}>{taxUsd(t.chargedCents)}</td>
+                        <td style={{ ...TD, ...R }}>{t.exempt}</td>
+                        <td style={{ ...TD, ...R, color: t.errors + t.pending > 0 ? "#B91C1C" : TD.color }}>{t.errors + t.pending}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          {rep.platform && rep.platform.pings > 0 && (
+            <div style={{ ...PB_HELP, marginTop: 8 }}>
+              Plus {rep.platform.pings} credential check{rep.platform.pings === 1 ? "" : "s"} from this console (not a builder's, never charged).
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── The shell ────────────────────────────────────────────────────────────────
 // Seven sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
 // Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
@@ -1997,6 +2137,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       )}
       {sub === "billing" && <AdmBilling />}
       {sub === "billing" && <AdmPhoneBilling clients={clients} />}
+      {sub === "billing" && <AdmTaxLookups />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
       {sub === "master" && <AdmTaxCodes />}
 

@@ -12,7 +12,11 @@
 // (wallet_tx_one_hold is unique on (client_id, meter_kind), so two staff invoicing at once
 // would collide) — which means taxMeter.ts owns them, and a regression there is real money.
 
-import { chargeTaxCalculation, taxInvoiceIdem, taxLedgerIdem, taxLookupIdem } from "./taxMeter.ts";
+import {
+  chargeColumns, chargeStateOf, chargeTaxCalculation, markChargePending, recordLookupCharge, TAX_CHARGE_STATES,
+  TAX_METER_FOR_LOOKUP, taxChargeMemo, taxInvoiceIdem, taxLedgerIdem, taxLookupIdem,
+} from "./taxMeter.ts";
+import { walletLineLabel } from "./walletLedger.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -22,7 +26,7 @@ const assertEquals = (a: unknown, b: unknown, msg?: string) => {
   if (sa !== sb) throw new Error(msg ? `${msg}: ${sa} !== ${sb}` : `${sa} !== ${sb}`);
 };
 
-type Calls = { rpc: { name: string; args: Record<string, unknown> }[] };
+type Calls = { rpc: { name: string; args: Record<string, unknown> }[]; txReads: unknown[][][] };
 
 /** Minimal service-role stub covering only what chargeTaxCalculation touches. */
 function makeAdmin(opts: {
@@ -34,15 +38,24 @@ function makeAdmin(opts: {
   settingsError?: boolean;
   creditError?: boolean;
   balance?: number;
+  /** The wallet_transactions row the debit's key reads back (migration 319); undefined = none. */
+  txId?: unknown;
+  txError?: boolean;
 }) {
-  const calls: Calls = { rpc: [] };
+  const calls: Calls = { rpc: [], txReads: [] };
   const admin = {
     from(table: string) {
       const chain: Record<string, unknown> = {};
-      const self = () => chain;
-      chain.select = self;
-      chain.eq = self;
+      const ops: unknown[][] = [];
+      if (table === "wallet_transactions") calls.txReads.push(ops);
+      chain.select = (...a: unknown[]) => (ops.push(["select", ...a]), chain);
+      chain.eq = (...a: unknown[]) => (ops.push(["eq", ...a]), chain);
       chain.maybeSingle = () => {
+        if (table === "wallet_transactions") {
+          return Promise.resolve(opts.txError
+            ? { data: null, error: { message: "boom" } }
+            : { data: opts.txId === undefined ? null : { id: opts.txId }, error: null });
+        }
         if (table === "usage_prices") {
           return Promise.resolve(
             opts.priceError
@@ -154,7 +167,7 @@ Deno.test("a MISSING wallet row is not exempt — it is a tenant never charged b
 Deno.test("an armed, priced, non-exempt tenant is debited the price NEGATIVELY", async () => {
   const { admin, calls } = makeAdmin({ price: { price_cents: 250, active: true }, balance: 4750 });
   const r = await chargeTaxCalculation(admin, { ...base, idem: "tax_invoice:acme:SS-1:7", memo: "m", actorUserId: "u1" });
-  assertEquals(r, { charged: true, priceCents: 250, balanceAfterCents: 4750 });
+  assertEquals(r, { charged: true, priceCents: 250, balanceAfterCents: 4750, walletTxId: null });
   assertEquals(calls.rpc.length, 1);
   const { name, args } = calls.rpc[0];
   assertEquals(name, "wallet_credit");
@@ -212,8 +225,9 @@ Deno.test("a lookup key folds an unchanged resubmit but splits on a real rate ch
 });
 
 Deno.test("the two meters can never collide on one key", () => {
-  // Arming both would double-charge; that is meant to be a visible config mistake. The keys
-  // being distinct means it would at least show as two rows rather than one silently winning.
+  // 179's header says arming both would double-charge. Stale since 2026-09-17 (taxMeter.ts, "BOTH
+  // METERS ARMED IS THE INTENDED STATE"): each meter is keyed on its own real call, and both are
+  // meant to be armed. Distinct keys are still what keeps a lookup's charge and an invoice's apart.
   assert(taxInvoiceIdem("acme", "SS-1", 7) !== taxLookupIdem("acme", "SS-1", 0.0725, null));
 });
 
@@ -244,7 +258,7 @@ const ledgerBase = { clientId: "acme", kind: "tax_lookup" as const, refType: "ta
 Deno.test("a lookupId charge is keyed on the tax_lookups row, not on the answer", async () => {
   const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: true }, balance: 490 });
   const r = await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW });
-  assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 490 });
+  assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: null });
   assertEquals(calls.rpc[0].args.p_idem, `tax_ledger:tax_lookup:${ROW}`);
   assertEquals(calls.rpc[0].args.p_meter_kind, "tax_lookup");
   assertEquals(calls.rpc[0].args.p_amount_cents, -10);
@@ -287,5 +301,154 @@ Deno.test("a charge with no usable key posts NOTHING and reads nothing", async (
     const r = await chargeTaxCalculation(spy, { ...ledgerBase, ...key });
     assertEquals(r, { charged: false, reason: "error" }, JSON.stringify(key));
     assertEquals([reads, calls.rpc.length], [0, 0], `${JSON.stringify(key)}: nothing read, nothing posted`);
+  }
+});
+
+// ── The wallet row, read back for the ledger (migration 319) ─────────────────────────
+
+Deno.test("a posted charge names its wallet row, read back by the SAME key it was posted under", async () => {
+  const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: true }, balance: 490, txId: 4242 });
+  const r = await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW });
+  assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: 4242 });
+  assertEquals(calls.txReads.length, 1, "one read of the wallet row");
+  assertEquals(calls.txReads[0], [
+    ["select", "id"], ["eq", "client_id", "acme"], ["eq", "idempotency_key", `tax_ledger:tax_lookup:${ROW}`], ["eq", "state", "posted"],
+  ], "read by tenant, the ledger key and posted: a replay finds the row the first attempt posted");
+});
+
+Deno.test("a wallet row that cannot be read back costs the link, never the charge", async () => {
+  for (const opts of [{ txError: true }, { txId: "not-a-number" }, { txId: -3 }, { txId: 1.5 }, {}]) {
+    const { admin } = makeAdmin({ price: { price_cents: 10, active: true }, balance: 490, ...opts });
+    const r = await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW });
+    assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: null }, JSON.stringify(opts));
+  }
+  // A read that throws is caught too.
+  const { admin } = makeAdmin({ price: { price_cents: 10, active: true }, balance: 490 });
+  const throwing = {
+    rpc: admin.rpc,
+    from: (t: string) => {
+      if (t === "wallet_transactions") throw new Error("socket");
+      return admin.from(t);
+    },
+  };
+  assertEquals(await chargeTaxCalculation(throwing, { ...ledgerBase, lookupId: ROW }), { charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: null });
+});
+
+Deno.test("nothing that is not charged reads the wallet row", async () => {
+  for (const opts of [{ price: { price_cents: 10, active: false } }, { price: { price_cents: 0, active: true } }, { creditError: true }]) {
+    const { admin, calls } = makeAdmin({ txId: 1, ...opts });
+    await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW });
+    assertEquals(calls.txReads.length, 0, JSON.stringify(opts));
+  }
+});
+
+// ── The state each outcome is recorded as (migration 319) ────────────────────────────
+
+Deno.test("every charge outcome maps to one of 319's states, and the columns match its CHECK", () => {
+  const now = new Date("2026-10-21T12:00:00.000Z");
+  assertEquals(TAX_CHARGE_STATES, ["pending", "charged", "exempt", "inactive", "unpriced", "no_rate", "error"], "the list 319's CHECK holds");
+  const cases: [Parameters<typeof chargeStateOf>[0], string][] = [
+    [{ charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: 7 }, "charged"],
+    [{ charged: false, reason: "exempt" }, "exempt"],
+    [{ charged: false, reason: "inactive" }, "inactive"],
+    [{ charged: false, reason: "unknown_meter" }, "inactive"],
+    [{ charged: false, reason: "unpriced" }, "unpriced"],
+    [{ charged: false, reason: "no_rate" }, "no_rate"],
+    [{ charged: false, reason: "error" }, "error"],
+  ];
+  for (const [r, want] of cases) {
+    assertEquals(chargeStateOf(r), want, JSON.stringify(r));
+    const c = chargeColumns(r, now);
+    assertEquals(c.charge_state, want);
+    // 319: charged <=> charged_at <=> charge_cents; a wallet row only on a charged row.
+    assertEquals(c.charged_at != null, want === "charged", `${want}: charged_at`);
+    assertEquals(c.charge_cents != null, want === "charged", `${want}: charge_cents`);
+    if (want !== "charged") assertEquals(c.wallet_tx_id, null, `${want}: wallet_tx_id`);
+  }
+  assertEquals(chargeColumns({ charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: 7 }, now),
+    { charge_state: "charged", charge_cents: 10, wallet_tx_id: 7, charged_at: "2026-10-21T12:00:00.000Z" });
+  assertEquals(TAX_METER_FOR_LOOKUP, { verify: "tax_lookup", invoice: "tax_invoice" });
+});
+
+/** A tax_lookups update recorder for the two state writers. */
+function ledgerAdmin(answer: { data?: unknown; error?: unknown; throws?: boolean } = { data: [{ id: ROW }] }) {
+  const writes: unknown[][][] = [];
+  const admin = {
+    from(table: string) {
+      const ops: unknown[][] = [["table", table]];
+      writes.push(ops);
+      const q: Record<string, unknown> = {};
+      for (const m of ["update", "eq", "is", "or", "select"]) q[m] = (...a: unknown[]) => (ops.push([m, ...a]), q);
+      q.then = (ok: (v: unknown) => unknown, bad: (e: unknown) => unknown) =>
+        (answer.throws ? Promise.reject(new Error("socket")) : Promise.resolve({ data: answer.data ?? null, error: answer.error ?? null })).then(ok, bad);
+      return q;
+    },
+  };
+  return { admin, writes };
+}
+
+Deno.test("recordLookupCharge writes the outcome onto ITS row, and never over a row already charged", async () => {
+  const { admin, writes } = ledgerAdmin();
+  const now = new Date("2026-10-21T12:00:00.000Z");
+  assert(await recordLookupCharge(admin, ROW, { charged: true, priceCents: 10, balanceAfterCents: 490, walletTxId: 9 }, now));
+  assertEquals(writes[0], [
+    ["table", "tax_lookups"],
+    ["update", { charge_state: "charged", charge_cents: 10, wallet_tx_id: 9, charged_at: "2026-10-21T12:00:00.000Z" }],
+    ["eq", "id", ROW],
+    ["or", "charge_state.is.null,charge_state.in.(pending,error)"],
+    ["select", "id"],
+  ]);
+});
+
+Deno.test("recordLookupCharge and markChargePending never throw, and say false when nothing was written", async () => {
+  for (const ans of [{ data: [] }, { error: { code: "42703", message: "column charge_state does not exist" } }, { throws: true }]) {
+    const { admin } = ledgerAdmin(ans);
+    assertEquals(await recordLookupCharge(admin, ROW, { charged: false, reason: "error" }), false, JSON.stringify(ans));
+    assertEquals(await markChargePending(admin, ROW), false, JSON.stringify(ans));
+  }
+  // A bad id is refused before any write.
+  for (const id of ["", "nope", `tax_ledger:tax_lookup:${ROW}`]) {
+    const { admin, writes } = ledgerAdmin();
+    assertEquals(await recordLookupCharge(admin, id, { charged: false, reason: "inactive" }), false);
+    assertEquals(await markChargePending(admin, id), false);
+    assertEquals(writes.length, 0, `${id}: nothing written`);
+  }
+});
+
+Deno.test("markChargePending only moves a row with no state yet, and clears the charge columns", async () => {
+  const { admin, writes } = ledgerAdmin();
+  assert(await markChargePending(admin, ROW));
+  assertEquals(writes[0], [
+    ["table", "tax_lookups"],
+    ["update", { charge_state: "pending", charge_cents: null, wallet_tx_id: null, charged_at: null }],
+    ["eq", "id", ROW],
+    ["is", "charge_state", null],
+    ["select", "id"],
+  ], "an error row being retried keeps its state until the retry has an answer");
+});
+
+// ── The wallet line's words ──────────────────────────────────────────────────────────
+
+Deno.test("a tax debit's memo names the meter, the document and the state", () => {
+  assertEquals(taxChargeMemo({ kind: "tax_lookup", quoteNumber: "SST-5021", state: "Minnesota" }), "Tax verification · SST-5021 · Minnesota");
+  assertEquals(taxChargeMemo({ kind: "tax_invoice", invoiceNumber: 1042, state: "Missouri" }), "Invoice tax check · Invoice 1042 · Missouri");
+  assertEquals(taxChargeMemo({ kind: "tax_invoice", invoiceNumber: "1042", state: "MO" }), "Invoice tax check · Invoice 1042 · MO", "a two-letter state as stored");
+  assertEquals(taxChargeMemo({ kind: "tax_lookup", quoteNumber: null, state: null }), "Tax verification", "missing parts are left out, never blank");
+  assertEquals(taxChargeMemo({ kind: "tax_lookup", quoteNumber: "  ", state: " Ohio " }), "Tax verification · Ohio");
+  assertEquals(taxChargeMemo({ kind: "tax_invoice", invoiceNumber: null, quoteNumber: "SS-ABCD2345EF" }), "Invoice tax check · SS-ABCD2345EF", "no invoice number: the quote");
+  // Control characters (a memo is printed in the ledger and its CSV) are folded out.
+  const dirty = taxChargeMemo({ kind: "tax_lookup", quoteNumber: "SST-1" + String.fromCharCode(10) + "x", state: "Iowa" + String.fromCharCode(0, 7) });
+  assertEquals(dirty, "Tax verification · SST-1 x · Iowa");
+  assert([...dirty].every((c) => c.charCodeAt(0) >= 32), "no control character survives");
+  assert(taxChargeMemo({ kind: "tax_lookup", quoteNumber: "Q".repeat(300), state: "S".repeat(300) }).length <= 200, "capped");
+});
+
+Deno.test("a memo starts with the same name the Billing tab gives the meter", () => {
+  for (const kind of ["tax_lookup", "tax_invoice"] as const) {
+    const fallback = walletLineLabel({ kind: "debit", meter_kind: kind, memo: null });
+    assertEquals(taxChargeMemo({ kind }), fallback, `${kind}: the bare memo is the fallback label`);
+    const memo = taxChargeMemo({ kind, quoteNumber: "SST-9", invoiceNumber: 9, state: "Ohio" });
+    assert(memo.startsWith(fallback + " · "), `${kind}: ${memo}`);
+    assertEquals(walletLineLabel({ kind: "debit", meter_kind: kind, memo }), memo, `${kind}: the Transactions line is the memo`);
   }
 });
