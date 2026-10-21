@@ -50,6 +50,9 @@
 //      stiles, boards and braces stopping below it, the Classic's octagon and diamond shrunk under it,
 //      the slab's upper panel moved down, no strap across the glass, vertical muntins only. The 3D
 //      footer row takes it out and puts it back, and Get Estimate sends doorWindowAt 'top' per leaf.
+//   PN. PANES (migration 324): a window row's own pane count. Transoms at plain glass, 2, 3, 4 and 6
+//      draw 0, 1, 2, 3 and 5 equal-spaced vertical bars and no rail; a wall window set to 4 and a panel
+//      lite set to 3 keep their double-hung rail; an automatic wall window draws as it always did.
 //
 // SS_DOOR_BASELINE=1 prints only the board-and-batten door's digest and exits, which is how
 // PLANK_DIGEST was recorded (on the tree before the generator, where the new looks draw as 'auto').
@@ -744,6 +747,90 @@ async function runTransom3D(browser, rect) {
   await ctx.close();
 }
 
+// ── PN. Panes (migration 324) ─────────────────────────────────────────────────────────────────
+// A window row's own pane count, read live off the catalog: five 2' x 1' transoms set to plain glass,
+// 2, 3, 4 and 6 panes, in five plank doors on the west wall beside an automatic wall window (2 ft: two
+// panes), and on the east wall a wall window set to 4 and a Classic with a panel lite set to 3.
+const pwin = (id, w, h, panes, extra) => ({ ...win(id, `Panes ${panes ?? "auto"} ${id}`, w, h, 50, false), ...(panes != null ? { panes } : {}), ...extra });
+const PNFIX = [
+  ...FIX,
+  ...[1, 2, 3, 4, 6].map((n) => pwin(`w-top${n}`, 24, 12, n, { inDoor: true, doorWindowAt: "top" })),
+  pwin("w-wallAuto", 24, 36, null, {}),
+  pwin("w-wall4", 24, 36, 4, {}),
+  pwin("w-lite3", 18, 24, 3, { inDoor: true }),
+];
+const PNFIXTURES = { ...FIXTURES, items: PNFIX };
+const pnStamp = (id) => { const w = PNFIX.find((f) => f.id === id);
+  return { doorWindowId: w.id, doorWindowName: w.name, doorWindowWidthIn: w.widthIn, doorWindowHeightIn: w.heightIn, doorWindowPrice: w.price, doorWindowAt: w.doorWindowAt === "top" ? "top" : null }; };
+// bars: the vertical bars expected in the glass; rail: the double-hung middle rail (wall and panel windows keep it).
+const PNPLAN = [
+  ...[1, 2, 3, 4, 6].map((n, i) => ({ key: `top${n}`, fx: "d-plank", wall: "west", at: 3 + i * 5, op: "right", dw: pnStamp(`w-top${n}`), bars: n - 1, rail: 0 })),
+  { key: "wallAuto", win: "w-wallAuto", wall: "west", at: 28.5, sillFt: 3.5, bars: 1, rail: 1 },
+  { key: "wall4", win: "w-wall4", wall: "east", at: 6, sillFt: 3.5, bars: 3, rail: 1 },
+  { key: "lite3", fx: "d-classic", wall: "east", at: 14, op: "right", dw: pnStamp("w-lite3"), bars: 2, rail: 1 },
+];
+async function runPanes3D(browser, rect) {
+  const items = PNPLAN.map((d, i) => {
+    const pos = planPos(rect, d);
+    if (d.win) {
+      const fx = PNFIX.find((f) => f.id === d.win);
+      return { id: 500 + i, type: "window", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name,
+        price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, sillFt: d.sillFt, sillMode: "fixed", colorId: null, colorLabel: null, colorHex: null };
+    }
+    const fx = fxOf(d.fx);
+    return { id: 500 + i, type: "fixtureDoor", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name,
+      planLabel: fx.planLabel, price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, swing: "out", operation: d.op, ...NO_COLOR, sillMode: "fixed", ...d.dw };
+  });
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  const CODE = "SS-HARNPANES";
+  const row = {
+    short_code: CODE, status: "draft", selections: { style: "doors", size: SIZE }, items,
+    contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
+    paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
+  };
+  await stubSupabase(page, { config: CONFIG, fixtures: PNFIXTURES, rpc: { load_design: [row] } });
+  await bypassGate(page, CONFIG.clientId);
+  await page.goto(`${BASE}/?client=${encodeURIComponent(CONFIG.clientId)}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+  for (let k = 0; k < 60; k++) { await settle(page, 500); if ((((await readItems(page)) || []).length) >= items.length) break; }
+  await openEditor(page);
+  for (let i = 0; i < PNPLAN.length; i++) {
+    const d = PNPLAN[i], ms = (await doorMeshes(page, items[i].id)) || [], f = frameOf(d.wall);
+    // The glass's own pieces: the door's are tagged "window"; a wall window's group is the window alone.
+    const pieces = d.win ? ms : ms.filter((m) => m.part === "window");
+    const bars = pieces.filter((m) => m.box && near(m.box[0], 0.06, 1e-3) && near(m.box[2], 0.09, 1e-3));
+    const rails = pieces.filter((m) => m.box && near(m.box[1], 0.07, 1e-3) && near(m.box[2], 0.09, 1e-3));
+    ok(`PN ${d.key}: ${d.bars} vertical bar(s)${d.rail ? " and the double-hung rail" : ", no rail"}`, bars.length === d.bars && rails.length === d.rail,
+      `${bars.length} bars, ${rails.length} rails`);
+    if (d.bars > 0) {
+      // Equal panes: the bars split the glass into even widths.
+      const glass = pieces.find((m) => m.transparent);
+      const xs = [glass.min[f.along], ...bars.map((b) => ctr(b, f.along)).sort((a, b) => a - b), glass.max[f.along]];
+      const gaps = xs.slice(1).map((x, k) => x - xs[k]);
+      // A set count is truly equal (bars spaced inside the sash); the automatic one keeps its old spacing.
+      ok(`PN ${d.key}: the panes are equal`, gaps.every((g) => near(g, gaps[0], d.key === "wallAuto" ? 0.1 : 0.005)), gaps.map((g) => g.toFixed(3)).join(","));
+    }
+  }
+  // Pictures: the west wall straight on (five transoms and the automatic wall window), and the east.
+  for (const [name, x] of [["west", -36], ["east", 36]]) {
+    await page.evaluate((x) => { const E = window.__ss3dEngine; E.controls.minDistance = 0.5; E.camera.position.set(x, 4.2, 0); E.controls.target.set(0, 4.2, 0); E.camera.lookAt(0, 4.2, 0); E.camera.updateProjectionMatrix(); E.render(); }, x);
+    await settle(page, 300);
+    await page.screenshot({ path: join(shots, `panes-${name}.png`) });
+  }
+  for (const key of ["top1", "top2", "top3", "top4", "top6", "wallAuto"]) {
+    const i = PNPLAN.findIndex((d) => d.key === key);
+    const clip = await aimAt(page, items[i].id, PNPLAN[i].wall, 1.35);
+    await settle(page, 200);
+    await page.evaluate(() => window.__ss3dEngine.render());
+    await page.screenshot({ path: join(shots, `panes-${key}.png`), clip });
+  }
+  ok("PN no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
 async function main() {
   const { browser } = await launch({ width: 1280, height: 900 });
   const rect = await runPicker(browser);
@@ -957,6 +1044,7 @@ async function main() {
   await runMoney(browser, rect);
   await runTransomPicker(browser, rect);
   await runTransom3D(browser, rect);
+  await runPanes3D(browser, rect);
   await browser.close();
   const fl = failed();
   console.log(fl.length ? `${fl.length} FAILED` : "ALL CHECKS PASSED");

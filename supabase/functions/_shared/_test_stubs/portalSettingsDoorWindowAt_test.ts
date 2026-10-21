@@ -11,6 +11,8 @@
 //      both in one select).
 //   4. Presence-guarded: an older portal or a sheet that sends neither key leaves the stored position
 //      alone, on a save and on an import.
+//   5. Panes (324): a window's pane count, 1/2/3/4/6 or null (automatic), refused in words otherwise,
+//      forced null on every other category, and left alone by a save that does not send it.
 //
 // HOW. portalSettingsPartitionWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts
 // is imported, the import map swaps supabase-js for supabase_stub.ts, and every table is answered from
@@ -147,4 +149,37 @@ Deno.test("import_fixtures: a sheet without the columns leaves the position alon
   const up = written(r.trace, "update")[0], ins = written(r.trace, "insert").flat()[0];
   assert(up && !("door_window_at" in up), JSON.stringify(up));
   assertEquals([ins.in_door, ins.door_window_at], [true, "top"]);
+});
+
+// ─── Panes (324): a window's pane count in 3D, null = automatic ─────────────────────────────────
+Deno.test("the catalog read selects panes", async () => {
+  const r = await call({ action: "catalog" });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const sel = r.trace.reads.filter((x) => x.table === "fixture_items").map((x) => String(argOf(x.ops, "select")[0] ?? ""));
+  assert(sel.some((s) => /\bdoor_window_at, panes, in_partition\b/.test(s)), JSON.stringify(sel));
+});
+
+Deno.test("save_fixture: panes is 1, 2, 3, 4 or 6 on a window, null for automatic, never on anything else", async () => {
+  const panesOf = async (category: string, extra: Record<string, unknown>) => {
+    const r = await call({ action: "save_fixture", category, ...LINE, ...extra });
+    return { status: r.status, body: r.body, row: written(r.trace, "insert")[0] };
+  };
+  for (const n of [1, 2, 3, 4, 6]) assertEquals((await panesOf("window", { panes: n })).row.panes, n, String(n));
+  assertEquals((await panesOf("window", { panes: "3" })).row.panes, 3, "a number sent as text");
+  for (const blank of [null, "", "auto"]) assertEquals((await panesOf("window", { panes: blank })).row.panes, null, `automatic from ${JSON.stringify(blank)}`);
+  assertEquals((await panesOf("window", {})).row.panes, null, "a new line with no key: automatic, the column's default");
+  for (const bad of [0, 5, 7, "two"]) {
+    const r = await panesOf("window", { panes: bad });
+    assertEquals(r.status, 400, `${JSON.stringify(bad)} is refused in words`);
+    assert(/panes must be 1, 2, 3, 4 or 6/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
+    assertEquals(r.row, undefined, "...and nothing is written");
+  }
+  for (const c of ["door", "ramp", "vent"]) assertEquals((await panesOf(c, { panes: 4 })).row.panes, null, c);
+});
+
+Deno.test("save_fixture on a saved window: an older portal that sends no panes leaves it alone", async () => {
+  const older = await call({ action: "save_fixture", category: "window", id: WIN_ID, ...LINE, inDoor: true });
+  assert(!("panes" in written(older.trace, "update")[0]), "no key, no change");
+  const set = await call({ action: "save_fixture", category: "window", id: WIN_ID, ...LINE, panes: 4 });
+  assertEquals(written(set.trace, "update")[0].panes, 4);
 });

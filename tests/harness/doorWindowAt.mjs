@@ -13,6 +13,8 @@
 //      column's check both refuse 'top' on a window that is not in doors)
 //   E. a price-only edit of a panel window still sends inDoor true + doorWindowAt "panel", so the
 //      position rides every save as the tick always did
+//   F. PANES (324): the window editor's Panes select (Automatic, plain glass, 2, 3, 4, 6); a save sends
+//      the count, the list line says it, and Automatic sends null and says nothing
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED. The
 // tenant and its windows are made up, per the public-repo rule.
@@ -90,7 +92,7 @@ async function run(browser) {
         saves.push(body);
         // The row as portal-settings would now read it back.
         const at = stored.findIndex((r) => r.id === body.id);
-        if (at >= 0) stored[at] = { ...stored[at], in_door: body.inDoor === true, door_window_at: body.inDoor === true && body.doorWindowAt === "top" ? "top" : "panel", price: Number(body.price) };
+        if (at >= 0) stored[at] = { ...stored[at], in_door: body.inDoor === true, door_window_at: body.inDoor === true && body.doorWindowAt === "top" ? "top" : "panel", price: Number(body.price), panes: body.panes ?? null };
         return json(route, { ok: true, id: body.id });
       }
       default: return json(route, { ok: true });
@@ -159,6 +161,32 @@ async function run(browser) {
     await settle(page, 400);
     ok("E a price-only save still sends inDoor true and doorWindowAt \"panel\"", saves.length === n + 1 && String(saves[n].price) === "99"
       && saves[n].inDoor === true && saves[n].doorWindowAt === "panel", JSON.stringify(saves[n] && { price: saves[n].price, inDoor: saves[n].inDoor, doorWindowAt: saves[n].doorWindowAt }));
+    // F: Panes (324). The select, its choices, a save that sends the count, and the line that says it.
+    const panes = page.locator("select[data-ss-window-panes]");
+    await rowOf("Door lite").getByRole("button", { name: "Edit" }).click();
+    await settle(page, 300);
+    ok("F the Panes select reads Automatic for a window that never set it", (await panes.count()) === 1 && (await panes.inputValue()) === "");
+    ok("F ...with Automatic, plain glass, 2, 3, 4 and 6", JSON.stringify(await panes.locator("option").allInnerTexts()) === JSON.stringify(["Automatic (by width)", "Plain glass (1 pane)", "2 panes", "3 panes", "4 panes", "6 panes"]),
+      JSON.stringify(await panes.locator("option").allInnerTexts()));
+    await panes.selectOption("4");
+    await settle(page, 200);
+    ok("F choosing 4 says so", (await bodyText()).includes("4 equal panes side by side in 3D."));
+    await page.screenshot({ path: join(shots, "F-panes.png") });
+    n = saves.length;
+    await page.getByRole("button", { name: "Save window", exact: true }).click();
+    for (let i = 0; i < 20 && saves.length === n; i++) await settle(page, 200);
+    await settle(page, 400);
+    ok("F the save sends panes 4", saves.length === n + 1 && saves[n].panes === 4, JSON.stringify(saves[n] && { panes: saves[n].panes }));
+    ok("F ...and the line says \"4 panes\"", (await sum("Door lite")).includes("4 panes"), await sum("Door lite"));
+    await rowOf("Door lite").getByRole("button", { name: "Edit" }).click();
+    await settle(page, 300);
+    await panes.selectOption("");
+    n = saves.length;
+    await page.getByRole("button", { name: "Save window", exact: true }).click();
+    for (let i = 0; i < 20 && saves.length === n; i++) await settle(page, 200);
+    await settle(page, 400);
+    ok("F Automatic sends panes null, and the line says nothing of panes", saves.length === n + 1 && saves[n].panes === null && !(await sum("Door lite")).includes("panes"),
+      JSON.stringify(saves[n] && { panes: saves[n].panes }) + " " + (await sum("Door lite")));
     ok("no page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
   } finally {
     await ctx.close();

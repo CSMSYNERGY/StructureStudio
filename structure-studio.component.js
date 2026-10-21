@@ -11173,6 +11173,15 @@ function buildShed3DModel(THREE, p) {
     if (!fx || !fx.imageUrl) return null;
     return d3FixtureTexture(THREE, fx.imageUrl);
   };
+  // A catalog window's pane count (324: fixture_items.panes, sent by get_fixtures only when set),
+  // resolved live beside its photo and for the same reason: 1, 2, 3, 4 or 6, or null for the
+  // automatic count d3WindowFill has always drawn. A window in a door asks with the window's id.
+  const d3WindowPanesOf = (it) => {
+    if (!it || it.fixtureItemId == null) return null;
+    const fx = fxById.get(String(it.fixtureItemId));
+    const n = fx ? Number(fx.panes) : NaN;
+    return [1, 2, 3, 4, 6].includes(n) ? n : null;
+  };
   // The 3D LOOK a builder picked for a catalog door (186: fixture_items.door_style),
   // resolved live from the catalog beside its photo and for exactly the same reason --
   // switching a door to board-and-batten should improve the designs already saved, not
@@ -12662,10 +12671,18 @@ function buildShed3DModel(THREE, p) {
       // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
       // by width, double-hung rail across the middle. Sash-colored so a black
       // window reads black through the grid, not building-trim.
+      // PANES (migration 324; Ahsan, 2026-10-21: "add the Panes setting"): the window row's own
+      // count when it has one, read live off the catalog like its photo: 1 = plain glass, N = N equal
+      // panes. Unset (every window before 324) keeps the automatic 2-3 columns by width, so nothing
+      // already drawn moves. Only the columns follow it: a double-hung window keeps its middle rail.
       const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
-      const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
+      const pn = d3WindowPanesOf(o.it);
+      const cols = pn || Math.max(2, Math.min(3, Math.round(ww / 1.1)));
+      // A set count splits the GLASS inside the sash evenly, so its panes are truly equal; the
+      // automatic count keeps the spacing it has always had, across the whole opening.
+      const b0 = pn ? o.a0 + s : o.a0, bw = pn ? ww - 2 * s : ww;
       for (let ci = 1; ci < cols; ci++) {
-        const a = o.a0 + (ww * ci) / cols;
+        const a = b0 + (bw * ci) / cols;
         og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
       }
       // A transom in a door (inset "top") has the vertical bars only: a double-hung rail across a
