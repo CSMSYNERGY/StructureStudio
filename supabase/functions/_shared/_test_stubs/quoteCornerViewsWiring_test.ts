@@ -4,8 +4,9 @@
 // WHAT THIS PINS, against the real handler:
 //
 //   1. status hands the Settings card quoteCornerViews from its own tolerant read: the stored
-//      boolean; false for a tenant with no settings row (the column's default); and null when the
-//      database has no such column yet, which hides the switch while every other field still loads.
+//      boolean; TRUE for a tenant with no settings row (the column's default since migration 322,
+//      and what get_config says for that tenant); and null when the database has no such column
+//      yet, which hides the switch while every other field still loads.
 //   2. save writes quote_corner_views only when asked, and only a real boolean: a "true" string, a
 //      1 or a null is refused with a sentence and NO write (a truthy "false" must never turn every
 //      customer's page 2 into something the builder did not choose).
@@ -142,10 +143,10 @@ Deno.test("status hands the Settings card the switch as stored", async () => {
   }
 });
 
-Deno.test("status for a tenant with no settings row: off, the column's default (the switch shows)", async () => {
+Deno.test("status for a tenant with no settings row: on, the column's default since 322 (the switch shows, ticked)", async () => {
   const { status, body } = await drive({ action: "status" }, { noRow: true });
   assertEquals(status, 200, JSON.stringify(body));
-  assertEquals(body.quoteCornerViews, false);
+  assertEquals(body.quoteCornerViews, true);
 });
 
 Deno.test("status on a database without 276: null (the switch hides) and the rest of the portal still boots", async () => {
