@@ -9,12 +9,17 @@
 // the opposite wall (a narrow building), clear of a wing's open ground, and under a roof that comes down
 // going inward (a single-slope roof's high wall).
 //
-// Six saved designs, each opened in the 3D editor with __SS3D_DEBUG:
+// Eight saved designs, each opened in the 3D editor with __SS3D_DEBUG:
 //   corners  10 x 14 gable: a window at both ends of every wall, a 6 ft picture window, a window high in
 //            a gable end over a loft, and a window with a photo
 //   narrow   2 x 6 gable: a window on each long wall, 2 ft apart (sizes are whole feet, parseSize; nothing
 //            narrower than 3 ft ever needs this limit, so it is a guard)
-//   shed     10 x 12 single slope: a window high on every wall, and a low one under the high side
+//   shed     10 x 12 single slope, high side front: a window high on every wall, a low one under the high
+//            side and one across the plate on it
+//   shedSide 10 x 12 single slope, high side left: on the high wall a window pushed up to its top and
+//            one across the plate
+//   step     12 x 16 gable with a roof step (the back 6 ft 1 ft higher): a window pushed up to the back
+//            wall's top and one high on a long wall's rear section
 //   porch    12 x 16 gable, a 4 ft recessed porch: windows at the set-back wall's corners and the side
 //            walls' porch ends
 //   wing     24 x 40 gable with an 8 ft wing along 20 ft of one side: a window at both ends and the middle
@@ -29,12 +34,15 @@
 //      building and may stand in it)
 //   R4 the special cases: the narrow building's rooms stop short of the opposite wall (1.65 ft); on the
 //      shed a high window's room is shallower under the falling roof and a low one keeps 2.5 ft; the
-//      gable-end window's room stays under the wall top
+//      gable-end window's room stays under the wall top; a window pushed up to a tall wall's top keeps
+//      a room whose ceiling comes down with the roof (shedSide, step)
 //   R5 the rooms draw only for a camera outside their own wall, and hide in "look inside"
-//   R6 the quote's four-corner sheet and its single 3D picture still render (corners), written out
-//   R7 on the shed, the roof's tall band (in the high wall's mid-plane above the plate) has a hole over
-//      the window above the plate; a scoped rebuild of that wall, as a drag makes, closes it with the
-//      window lowered under the plate and opens it again with the window back up (shedBand, 2026-10-21)
+//   R6 the quote's four-corner sheet and its single 3D picture still render (corners, shed), written out
+//   R7 on the sheds, the roof prism's tall band (in the high wall's mid-plane above the plate) has a hole
+//      over each window above the plate and its flat bottom (the ceiling at the plate) one under the room
+//      of a window across it; a scoped rebuild of that wall, as a drag makes, closes them with the
+//      windows lowered under the plate and opens them again with the windows back up (shedBand,
+//      2026-10-21)
 // Shots and the corner sheet go to the shots folder, named by TAG (default "after"), so a run against
 // the tree before the change gives the matching "before" set (its R checks fail there, as they should).
 //
@@ -73,8 +81,15 @@ const DESIGNS = [
     wins: [...ends(10, 14), ["west", 7, "w-pic", 3, "picture"], ["north", 5, "w-1824", 6.5, "gableHigh"], ["east", 7, "w-photo", 3.5, "photo"]],
     extra: (px, py) => [{ id: 690, type: "loft", x: px(5), y: py(2), rotation: 0, wall: null, widthFt: 10, heightFt: 4, elevationFt: 5.5 }] },
   { key: "narrow", label: "Rooms Narrow", W: 2, L: 6, d3: gable(), wins: [["west", 3, "w-1824", 3.5, "w"], ["east", 3, "w-1824", 3.5, "e"]] },
-  { key: "shed", label: "Rooms Shed", W: 10, L: 12, d3: { ...gable(), roof: { type: "shed", highSide: "front", pitch: 0.25, overhang: 0.6, eave: "fascia" } },
-    wins: [["north", 5, "w-1824", 7.5, "nHigh"], ["south", 5, "w-1824", 8.5, "sHigh"], ["south", 2, "w-1824", 3.5, "sLow"], ["west", 6, "w-1824", 7.5, "wHigh"], ["east", 6, "w-1824", 7.5, "eHigh"]] },
+  { key: "shed", label: "Rooms Shed", W: 10, L: 12, d3: { ...gable(), roof: { type: "shed", highSide: "front", pitch: 0.25, overhang: 0.6, eave: "fascia" } }, quote: true,
+    band: { wall: "south", keys: ["sHigh", "sMid"] },
+    wins: [["north", 5, "w-1824", 7.5, "nHigh"], ["south", 5, "w-1824", 8.5, "sHigh"], ["south", 2, "w-1824", 3.5, "sLow"], ["west", 6, "w-1824", 7.5, "wHigh"], ["east", 6, "w-1824", 7.5, "eHigh"],
+      ["south", 8, "w-2436", 7.5, "sMid"]] },
+  { key: "shedSide", label: "Rooms Shed Side", W: 10, L: 12, d3: { ...gable(), roof: { type: "shed", highSide: "left", pitch: 0.25, overhang: 0.6, eave: "fascia" } },
+    band: { wall: "west", keys: ["wTop", "wMid"] },
+    wins: [["west", 3, "w-1824", 8.5, "wTop"], ["west", 8.5, "w-2436", 7.5, "wMid"], ["east", 6, "w-1824", 3.5, "eLow"]] },
+  { key: "step", label: "Rooms Step", W: 12, L: 16, d3: gable({ rearStepFt: 6, rearEaveRiseFt: 1 }),
+    wins: [["north", 6, "w-1824", 7.5, "nTop"], ["west", 3, "w-1824", 7.5, "wRear"], ["east", 12, "w-1824", 3.5, "eFront"]] },
   { key: "porch", label: "Rooms Porch", W: 12, L: 16, d3: gable({ porchDepthFt: 4 }), porch: { wall: "south", depth: 4 },
     wins: [["south", 1, "w-2436", 3.5, "sW"], ["south", 11, "w-2436", 3.5, "sE"], ["west", 11, "w-2436", 3.5, "wS"], ["east", 11, "w-2436", 3.5, "eS"], ["north", 6, "w-2436", 3.5, "n"]] },
   { key: "wing", label: "Rooms Wing", W: 24, L: 40, d3: { ...gable({ front: "gable", pitch: 0.5, overhang: 1, wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }] }), siding: "lap", wallHeightFt: 9 },
@@ -124,7 +139,13 @@ const readRooms = (page) => page.evaluate(() => {
     const rooms = [], glass = [];
     g.traverse((o) => {
       if (!o.isMesh) return;
-      if (o.userData && o.userData.ssGlassRoom) rooms.push({ ...box(o), depth: o.geometry.parameters.depth, drawn: o.geometry.drawRange.count > 0, visible: o.visible });
+      if (o.userData && o.userData.ssGlassRoom) {
+        // `drop`: how far the far top edge comes down under the near one (a ceiling that follows the roof).
+        const pa = o.geometry.attributes.position;
+        const ys = [...new Set(Array.from({ length: pa.count }, (_, i) => +pa.getY(i).toFixed(4)))].sort((p, q) => p - q);
+        rooms.push({ ...box(o), depth: o.geometry.parameters.depth, drawn: o.geometry.drawRange.count > 0, visible: o.visible,
+          drop: ys.length > 2 ? +(ys[ys.length - 1] - ys[ys.length - 2]).toFixed(3) : 0 });
+      }
       else if ((Array.isArray(o.material) ? o.material[0] : o.material).transparent) glass.push(box(o));
     });
     return { id: g.userData.itemId, wall: g.userData.wall, rooms, glass };
@@ -163,13 +184,19 @@ const rayCheck = (page) => page.evaluate(async (url) => {
       const rb = new THREE.Box3().setFromObject(room), gb = new THREE.Box3().setFromObject(glass);
       const c = rb.getCenter(new THREE.Vector3());
       const froms = [-0.03, 0.03].map((s) => gb.getCenter(new THREE.Vector3()).addScaledVector(new THREE.Vector3(...n), s));
-      // The far face is the one on the inward side; half-way is between it and the near face.
-      const ax = n[0] ? 0 : 2, farV = n[ax] > 0 ? rb.min.getComponent(ax) : rb.max.getComponent(ax), nearV = n[ax] > 0 ? rb.max.getComponent(ax) : rb.min.getComponent(ax);
-      const ox = ax === 0 ? 2 : 0, targets = [];
-      [farV, (farV + nearV) / 2].forEach((dv) => [rb.min.getComponent(ox), rb.max.getComponent(ox)].forEach((av) => [rb.min.y, rb.max.y].forEach((y) => {
-        const t = new THREE.Vector3(); t.setComponent(ax, dv); t.setComponent(ox, av); t.y = y;
-        targets.push(t.lerp(c, 0.02 / Math.max(0.05, t.distanceTo(c))));
-      })));
+      // The room's own corners (a ceiling that follows the roof is lower at the far face than the box
+      // round it): the far face's, and half-way between each and the near face's at the same end and level.
+      const pa = room.geometry.attributes.position, uniq = new Map();
+      for (let i = 0; i < pa.count; i++) { const v = new THREE.Vector3().fromBufferAttribute(pa, i).applyMatrix4(room.matrixWorld); uniq.set(v.toArray().map((q) => q.toFixed(4)).join(","), v); }
+      const ax = n[0] ? 0 : 2, ox = ax === 0 ? 2 : 0, inw = (v) => -v.getComponent(ax) * n[ax];
+      const corners = [...uniq.values()], dFar = Math.max(...corners.map(inw)), dNear = Math.min(...corners.map(inw));
+      const at = (vs, a) => vs.filter((v) => Math.abs(v.getComponent(ox) - a) < 1e-3).sort((p, q) => p.y - q.y);
+      const far = corners.filter((v) => inw(v) > dFar - 1e-3), near = corners.filter((v) => inw(v) < dNear + 1e-3), targets = [];
+      [rb.min.getComponent(ox), rb.max.getComponent(ox)].forEach((a) => {
+        const nr = at(near, a);
+        at(far, a).forEach((f, k) => { targets.push(f.clone()); if (nr[k]) targets.push(f.clone().lerp(nr[k], 0.5)); });
+      });
+      targets.forEach((t) => t.lerp(c, 0.02 / Math.max(0.05, t.distanceTo(c))));
       const own = new Set(); g.traverse((o) => own.add(o));
       const blocked = [];
       froms.forEach((from) => targets.forEach((t) => {
@@ -273,7 +300,8 @@ async function runQuote(browser, d, items) {
   ok(`R6 ${tag} the quote's default 3D shot and its four-corner sheet (four corner shots) rendered`, !!(caps && caps.sheet && caps.single && caps.sheet.length > 50000 && corners === 4),
     caps ? `sheet ${(caps.sheet || "").length} / single ${(caps.single || "").length}; encoded ${caps.all.join(",")}` : "none");
   const save = (url, name) => { if (url) writeFileSync(join(shots, `${TAG}-${name}`), Buffer.from(url.split(",")[1], "base64")); };
-  if (caps) { save(caps.sheet, "corner-sheet.jpg"); save(caps.single, "quote-3d.jpg"); }
+  const pre = d.corners ? "" : `${d.key}-`;
+  if (caps) { save(caps.sheet, `${pre}corner-sheet.jpg`); save(caps.single, `${pre}quote-3d.jpg`); }
   ok(`R6 ${tag} no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
@@ -322,32 +350,39 @@ async function runDesign(browser, d) {
     ok(`R4 ${tag} under the falling roof a high window's room is shallower (and still there); the low one under the high side keeps 2.5 ft`,
       highs.every((v) => v != null && v >= 0.4) && highs.some((v) => v < ROOM_FT - 0.01) && depthOf("sLow") === ROOM_FT, `${highs.join(",")} low ${depthOf("sLow")}`);
   }
-  // R7: the band's pieces round the hole (ssShedBand) and the prism's drawn triangles (its groups' counts).
-  if (d.key === "shed") {
+  // R4: a window pushed up to a tall wall's top keeps a room, its ceiling coming down with the roof.
+  if (d.key === "shedSide" || d.key === "step") {
+    const g = wins.find((x) => x.id === idOf(d.key === "step" ? "nTop" : "wTop")), r = g && g.rooms[0];
+    ok(`R4 ${tag} the window pushed up to the tall wall's top keeps a room whose ceiling comes down with the roof`, !!(r && r.drop > 0.01 && r.depth >= 0.4),
+      r ? `depth ${r.depth.toFixed(2)}, ceiling down ${r.drop} ft at the far face` : "no room");
+  }
+  // R7: the pieces round the holes (ssShedBand: the band's triangles in its first group, the bottom's in
+  // its second) and the prism's own drawn triangles (its groups' counts).
+  if (d.band) {
     const band = () => page.evaluate(() => {
-      let pieces = 0, tris = 0;
+      let pieces = 0, tris = 0, bandTris = 0, floorTris = 0;
       window.__ss3dEngine.model.roofGroup.traverse((o) => {
         if (!o.isMesh) return;
-        if (o.userData && o.userData.ssShedBand) pieces++;
+        if (o.userData && o.userData.ssShedBand) { pieces++; bandTris += o.geometry.groups[0].count / 3; floorTris += o.geometry.groups[1].count / 3; }
         else if (o.geometry.type === "ExtrudeGeometry") tris += o.geometry.groups.reduce((s, g) => s + g.count, 0) / 3;
       });
-      return { pieces, tris };
+      return { pieces, tris, bandTris, floorTris };
     });
-    const live = await readItems(page), hiId = idOf("sHigh");
-    const rebuildAt = (sill) => page.evaluate(({ live, hiId, sill }) => {
+    const live = await readItems(page), ids = d.band.keys.map(idOf);
+    const rebuildAt = (low) => page.evaluate(({ live, ids, wall, low }) => {
       const E = window.__ss3dEngine;
-      E.model.rebuildWalls(["south"], live.map((it) => (it.id === hiId ? { ...it, sillFt: sill } : it)));
+      E.model.rebuildWalls([wall], low ? live.map((it) => (ids.includes(it.id) ? { ...it, sillFt: 3.5 } : it)) : live);
       E.render();
-    }, { live, hiId, sill });
+    }, { live, ids, wall: d.band.wall, low });
     const s0 = await band();
-    await rebuildAt(3.5);
+    await rebuildAt(true);
     const s1 = await band();
-    await rebuildAt(d.wins[hiId - 700][3]);
+    await rebuildAt(false);
     const s2 = await band();
-    const back = (await rayCheck(page)).find((r) => r.id === hiId);
-    ok(`R7 ${tag} the tall band has a hole over the window above the plate; a scoped rebuild closes it under the plate and opens it again`,
-      s0.pieces === 1 && s1.pieces === 0 && s1.tris > s0.tris && s2.pieces === 1 && s2.tris === s0.tris && !!back && back.blocked.length === 0,
-      `pieces ${s0.pieces}/${s1.pieces}/${s2.pieces}, prism triangles ${s0.tris}/${s1.tris}/${s2.tris}, rays ${back ? back.blocked.length : "none"} blocked`);
+    const back = (await rayCheck(page)).filter((r) => ids.includes(r.id)), blocked = back.reduce((n, r) => n + r.blocked.length, 0);
+    ok(`R7 ${tag} holes in the tall band over the windows above the plate and in the prism's bottom under the room across it; a scoped rebuild closes them and opens them again`,
+      s0.pieces === 1 && s0.bandTris > 0 && s0.floorTris > 0 && s1.pieces === 0 && s1.tris > s0.tris && JSON.stringify(s2) === JSON.stringify(s0) && back.length === ids.length && blocked === 0,
+      `pieces ${s0.pieces}/${s1.pieces}/${s2.pieces}, band + bottom pieces ${s0.bandTris} + ${s0.floorTris} triangles, prism ${s0.tris}/${s1.tris}/${s2.tris}, rays ${blocked} blocked`);
   }
   if (d.key === "corners") {
     const g = wins.find((x) => x.id === idOf("gableHigh"));
@@ -385,7 +420,10 @@ async function runDesign(browser, d) {
       ["picture-angle", { id: idOf("picture"), dist: 7, skew: 0.8 }], ["gable-loft", { id: idOf("gableHigh"), dist: 5, skew: 0.45, lift: -0.8 }], ["photo", { id: idOf("photo"), dist: 5, skew: 0.4 }]],
     narrow: [["narrow-angle", { id: idOf("w"), dist: 5, skew: 0.7 }]],
     shed: [["shed-high", { id: idOf("sHigh"), dist: 5, skew: 0.6, lift: -1 }], ["shed-high-straight", { id: idOf("sHigh"), dist: 5, lift: 0 }],
-      ["shed-high-wall", { id: idOf("sHigh"), dist: 13, skew: 0.45, lift: -3.5 }]],
+      ["shed-high-wall", { id: idOf("sHigh"), dist: 13, skew: 0.45, lift: -3.5 }], ["shed-mid-low", { id: idOf("sMid"), dist: 5, skew: 0.3, lift: -3 }]],
+    shedSide: [["shed-side-top", { id: idOf("wTop"), dist: 5, skew: 0.5, lift: -1 }], ["shed-side-mid", { id: idOf("wMid"), dist: 5, skew: -0.4, lift: -2.5 }],
+      ["shed-side-wall", { id: idOf("wMid"), dist: 13, skew: -0.4, lift: -3.5 }]],
+    step: [["step-top", { id: idOf("nTop"), dist: 5, skew: 0.4, lift: -0.8 }]],
     porch: [["porch-angle", { id: idOf("sE"), dist: 5, skew: -0.7 }]],
     wing: [["wing-notch", { id: idOf("nNotch2"), dist: 6, skew: 0.6 }]],
     many: [["many-straight", { id: idOf("e3"), dist: 9 }], ["many-angle", { id: idOf("e3"), dist: 8, skew: 0.8 }]],
@@ -395,7 +433,7 @@ async function runDesign(browser, d) {
   console.log(`  ${d.key} frame: ${ft.ms} ms, ${ft.calls} draw calls, ${ft.triangles} triangles (${TAG})`);
   ok(`${tag} no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
-  if (d.corners) await runQuote(browser, d, items);
+  if (d.corners || d.quote) await runQuote(browser, d, items);
 }
 
 async function main() {
