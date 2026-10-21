@@ -41,8 +41,8 @@ export const PREFLIGHT_TTL = 600;
  * /token `transcripts`: whether this business's recorded calls are transcribed and summarised
  * (Workers AI, then Claude) and whether its voicemails are transcribed (Twilio), right now. The
  * same three business-wide facts the minute tick reads before it transcribes (cron/transcribe.ts):
- * the call was recorded (armedFor), the business wants transcripts, and the rail is on. One call
- * also needs everyone on it to have allowed it (`ai_consent`, ../aiConsent.ts).
+ * the call was recorded (armedFor, announced or not), the business wants transcripts, and the rail
+ * is on. One call also needs everyone on it to have allowed it (`ai_consent`, ../aiConsent.ts).
  */
 export function transcriptsFor(env: Env, s: RecordingSettings): { calls: boolean; voicemail: boolean } {
   return { calls: armedFor(env, s) && s.transcribe && callTranscribeOn(env), voicemail: transcribeOn(env) };
@@ -199,7 +199,7 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       greeting: greetingOut(s),
     },
     wallet,
-    // Are this business's calls recorded (and announced) right now: its owner's choice and this
+    // Are this business's calls recorded right now (announced or not): its owner's choice and this
     // Worker's CALL_RECORDING rail together (../recording.ts armedFor), so the apps can say
     // "Calls are recorded" in settings. A single call's own state is GET /calls `recording`.
     recording: { on: armedFor(env, ctx.recording) },

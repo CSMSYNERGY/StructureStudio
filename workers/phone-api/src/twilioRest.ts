@@ -218,7 +218,7 @@ export async function recordingMedia(env: Env, recordingSid: string, range: stri
 //
 // Started, paused, resumed and stopped through the REST API on one call leg (the customer's),
 // never by a TwiML `record` attribute: that is how one recording follows the call through hold,
-// transfers and a device switch, and how nothing records a call that did not hear the notice.
+// transfers and a device switch, and how nothing records a call the Worker did not arm.
 
 export interface StartedRecording {
   sid: string;
