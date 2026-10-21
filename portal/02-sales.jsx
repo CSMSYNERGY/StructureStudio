@@ -4564,7 +4564,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const insertQuickSend = (q, channel) => {
     if (!quick || !quick.list || !q) return;
     const email = channel === "email";
-    const fill = { contactName: data.contact && data.contact.name, myName: quick.myName };
+    // The PERSON's name (ssPersonName): a record whose name only repeats its company has no first
+    // name to fill, so {first_name} drops out instead of greeting "Hi Bear" for Bear River Band.
+    const fill = { contactName: ssPersonName(data.contact), myName: quick.myName };
     const next = ssInsertQuickSend(email ? mail.body : text, q, fill, channel);
     const say = email ? setMailMsg : setTextMsg;
     if (next === null) { say({ err: ssQuickSendTooLong(channel) }); return; }
@@ -5500,7 +5502,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {quickSendsOn && (
                         <CrmQuickSendPicker channel="sms" quick={quick} onOpen={loadQuickSends}
                           onInsert={(q) => insertQuickSend(q, "sms")}
-                          fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                          fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                       )}
                       <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
                         {busy ? "Sending…" : "Send text"}
@@ -5593,7 +5595,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   {quickSendsOn && (
                     <CrmQuickSendPicker channel="email" quick={quick} onOpen={loadQuickSends}
                       onInsert={(q) => insertQuickSend(q, "email")}
-                      fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                      fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                   )}
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}

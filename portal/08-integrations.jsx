@@ -1582,7 +1582,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             <div data-ss-email-wording style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
-                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name), {"{first}"} (their first name) and they fill in automatically.
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name), {"{first}"} (their first name), {"{company}"} (their business, when the estimate has one) and they fill in automatically.
                 {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
                     email no longer prints the total, so the customer meets the price on the
                     quote itself. {total} still fills in — saved wording must never print a

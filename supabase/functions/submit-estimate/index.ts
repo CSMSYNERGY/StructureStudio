@@ -36,6 +36,7 @@ import { cladLineName } from "../_shared/claddingLineName.ts";
 // The Roof line's words: a metal roof on standing seam is named (2026-10-06, the profile per design).
 import { effectiveRoofProfile, roofLineDesc } from "../_shared/roofProfile.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
+import { companyOf, ghlContactNameFields, personName } from "../_shared/customerNaming.ts";
 import { resolveRate } from "../_shared/salesTax.ts";
 import {
   agreedTax, carriedTax, carryDecision, chooseDefaultRate, homeLotApplies, stampTax, TAX_LOCATION_COLUMNS,
@@ -656,8 +657,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const r = await fetch("https://services.leadconnectorhq.com/contacts/upsert", {
       method: "POST",
       headers: ghlHeaders,
+      // The name fields through customerNaming.ts: `{ name }` exactly as always without a company;
+      // with one (quote to a business entity), firstName/lastName from the PERSON and companyName,
+      // so the CRM stops greeting "Hi Bear" for Bear River Band.
       body: JSON.stringify({
-        name: contact?.name || "",
+        ...ghlContactNameFields(contact),
         email: contact?.email || "",
         phone: contact?.phone || "",
         locationId,
@@ -2705,7 +2709,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
-  const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
+  // The CRM estimate's title: the business when the quote is for one ("Bear River Band - Barn
+  // 10x12"), else the first word of the name as it always was.
+  const customerCompany = companyOf(contact);
+  const firstName = customerCompany || (contact?.name ? String(contact.name).split(" ")[0] : "Customer");
   const estimateName = `${firstName} - ${styleLabel} ${size}`.trim();
   // Collision-resistant invoice sequence: low 8 digits of the epoch-ms clock
   // (unique within any ~28h window) + 2 random digits to cover two submissions
@@ -2746,7 +2753,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       ...(businessLogoUrl ? { logoUrl: businessLogoUrl } : {}),
     },
     contactDetails: {
-      name: contact?.name || "Unknown",
+      // With a company: the person (or the company when there is none) plus companyName. Without
+      // one, exactly the name it always sent.
+      name: (customerCompany ? personName(contact) || customerCompany : contact?.name) || "Unknown",
+      ...(customerCompany ? { companyName: customerCompany } : {}),
       email: contact?.email || "",
       phoneNo: formattedPhone,
       ...(estimateAddress ? { address: estimateAddress } : {}),
@@ -3520,6 +3530,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // The {customer} token's name, and the building's photo (its own "Image on estimate"
           // switch, and only this builder's own upload, as for the line photos above).
           customerName: String(contact?.name ?? "").trim(),
+          customerCompany: companyOf(contact),
           pictureUrl: emailStylePhoto,
           businessName,
           logoUrl: businessLogoUrl || null,
@@ -3990,6 +4001,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           const content = estimateEmail({
             templateCopy: settings.email_template_copy,
             customerName: String(contact?.name ?? "").trim(),
+            customerCompany: companyOf(contact),
             pictureUrl: emailStylePhoto,
             businessName,
             logoUrl: businessLogoUrl || null,

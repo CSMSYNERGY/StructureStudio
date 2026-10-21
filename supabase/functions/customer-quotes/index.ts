@@ -6,6 +6,7 @@ import { loadAddressStanding, loadOwnedDesigns } from "../_shared/customerIdenti
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, orderCentsAfterAck, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
+import { companyOf } from "../_shared/customerNaming.ts";
 import { consentSentenceChangeOrder, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
@@ -504,6 +505,10 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           acceptedAt: d.accepted_at || null,
           ssQuote: !!d.ss_quote_number,
           changeOrders: cosByCode.get(d.short_code) ?? [],
+          // The business this quote is for (designs.contact.company, 2026-10-21), so the signing
+          // box can say "Signing for <company>". Their own quote's own company, and only when there
+          // is one: a quote without a company carries no such key.
+          ...(companyOf(d?.contact) ? { signingFor: companyOf(d.contact) } : {}),
         }
         : {}),
     }));
