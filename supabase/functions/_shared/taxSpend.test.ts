@@ -430,21 +430,23 @@ Deno.test("chargeLookup: with the meters as they are live (disarmed) a verified 
 
 const states = (f: ReturnType<typeof fakeAdmin>, id: string) => f.chargeWrites.filter(([w]) => w === id).map(([, patch]) => patch.charge_state);
 
-Deno.test("chargeLookup: pending before the attempt, then charged with its cents and wallet row, on ITS row", async () => {
+Deno.test("chargeLookup: pending (with the price) once the rail has passed, then charged with its cents and wallet row, on ITS row", async () => {
   const f = fakeAdmin({ price: ARMED, txId: 77 });
   const lookup: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: "Bibb, GA", ledgerClosed: true };
   const r = await chargeLookup(f.admin, lookup, chargeOpts);
   assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 4900, walletTxId: 77 });
   assertEquals(states(f, lookup.lookupId), ["pending", "charged"]);
   const [, pending, pendingOps] = f.chargeWrites[0];
-  assertEquals(pending, { charge_state: "pending", charge_cents: null, wallet_tx_id: null, charged_at: null });
+  assertEquals(pending, { charge_state: "pending", charge_cents: 10, wallet_tx_id: null, charged_at: null });
   assertEquals(pendingOps.filter((o) => o[0] !== "select"), [["eq", "id", lookup.lookupId], ["is", "charge_state", null]], "only a row with no state yet");
   const [, done, doneOps] = f.chargeWrites[1];
   assertEquals([done.charge_cents, done.wallet_tx_id, typeof done.charged_at], [10, 77, "string"]);
   assert(doneOps.some((o) => o[0] === "or" && o[1] === "charge_state.is.null,charge_state.in.(pending,error)"), "never over a charged row");
-  // The pending write comes before the debit, the outcome after it.
-  const order = f.chains.filter((c) => (c.table === "tax_lookups" && c.ops[0]?.[0] === "update") || c.table === "usage_prices").map((c) => c.table);
-  assertEquals(order[0], "tax_lookups", "pending is written before the meter is even read");
+  // The pending write comes AFTER the meter and both exemptions are read (so a call made while a
+  // meter is off can never be left in a state tax_charge_retry bills), and before the debit's
+  // read-back; the outcome last.
+  const order = f.chains.map((c) => c.table === "tax_lookups" ? `tax_lookups:${c.ops[0]?.[0]}` : c.table);
+  assertEquals(order, ["usage_prices", "wallet_accounts", "client_settings", "tax_lookups:update", "wallet_transactions", "tax_lookups:update"]);
 });
 
 Deno.test("chargeLookup: every uncharged outcome is recorded too — inactive, unpriced, exempt, error, no_rate", async () => {
@@ -459,7 +461,8 @@ Deno.test("chargeLookup: every uncharged outcome is recorded too — inactive, u
     const f = fakeAdmin(opts);
     const l = ok();
     await chargeLookup(f.admin, l, chargeOpts);
-    assertEquals(states(f, l.lookupId!), ["pending", want], JSON.stringify(opts));
+    assertEquals(states(f, l.lookupId!), [want], `${JSON.stringify(opts)}: straight to ${want}, never through pending`);
+    assertEquals(f.chargeWrites[0][1].charge_cents, null, `${want}: no price on an uncharged row`);
   }
   // A failed lookup: no_rate on its row, and still nothing read against the meter.
   const f = fakeAdmin({ price: ARMED });
@@ -479,8 +482,27 @@ Deno.test("chargeLookup: a failed debit is recorded error — what tax_charge_re
   f.admin.rpc = (name: string, args: Record<string, unknown>) =>
     name === "wallet_credit" ? Promise.resolve({ data: null, error: { message: "deadlock" } }) : rpc(name, args);
   const l: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true };
-  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: false, reason: "error" });
+  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: false, reason: "error", attemptCents: 10 });
   assertEquals(states(f, l.lookupId), ["pending", "error"]);
+  assertEquals(f.chargeWrites.map(([, p]) => p.charge_cents), [10, 10], "the error keeps the price it attempted: what the retry replays at");
+});
+
+Deno.test("chargeLookup: a price read that fails is an error with NO price, which tax_charge_retry never replays", async () => {
+  // Nothing said the meter was armed, so nothing may ever bill this call later.
+  const f = fakeAdmin({ price: ARMED });
+  const from = f.admin.from;
+  f.admin.from = (table: string) => {
+    if (table !== "usage_prices") return from(table);
+    // deno-lint-ignore no-explicit-any
+    const q: any = {};
+    for (const m of ["select", "eq"]) q[m] = () => q;
+    q.maybeSingle = () => Promise.resolve({ data: null, error: { message: "down" } });
+    return q;
+  };
+  const l: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true };
+  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: false, reason: "error" });
+  assertEquals(f.chargeWrites.map(([, p]) => [p.charge_state, p.charge_cents]), [["error", null]], "no pending, no price");
+  assertEquals(f.rpcs.length, 0);
 });
 
 Deno.test("chargeLookup: before migration 319 the state writes fail quietly and the charge is unchanged", async () => {

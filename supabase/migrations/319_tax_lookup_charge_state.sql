@@ -1,7 +1,10 @@
 -- 319_tax_lookup_charge_state.sql — what each Avalara lookup cost, written on its own ledger row.
 --
 -- ⛔ APPLY BY HAND, BEFORE deploying portal-settings / submit-estimate / admin-catalog /
---    portal-billing from the same commit. Pipe the FILE to `supabase db query --linked` (stdin or
+--    portal-billing / portal-schedule, each from a tree that CONTAINS origin/beta as it is at
+--    deploy time (this branch was cut before 318's business-entity naming went live; deploying
+--    portal-settings or submit-estimate from a tree without it rolls that back). Before each edge
+--    deploy, download the live function and diff it against origin/beta. Pipe the FILE to `supabase db query --linked` (stdin or
 --    --file; never "$(cat …)" inline, which a leading comment empties), then record it:
 --      insert into supabase_migrations.schema_migrations (version, name) values ('319', '319_tax_lookup_charge_state') returning version, name;
 --    Zero rows back from that insert means another session took 319 first: rename this file.
@@ -22,26 +25,35 @@
 --   charge_state  what happened to the charge. NULL = no charge was decided for this row: a ping,
 --                 a lookup still in flight, or one whose answer never reached a document (a
 --                 Verify press whose quote write was refused is charged nothing).
---                   pending   the charge is being attempted. Written just before the attempt, so a
---                             function that died between the debit and the record leaves a row
---                             an operator can see and replay (the replay is keyed, so safe);
+--                   pending   the debit is about to post. Written only once the meter is armed and
+--                             priced and the tenant is not exempt, immediately before wallet_credit,
+--                             with the price in charge_cents, so a function that died between the
+--                             debit and the record leaves a row an operator can see and replay (the
+--                             replay is keyed, so safe). A call made while a meter is off never
+--                             passes through it;
 --                   charged   a debit posted (or a replay found the one already posted);
 --                   exempt    the tenant is metered_exempt or billing_exempt;
 --                   inactive  the meter is disarmed (or has no usage_prices row at all);
 --                   unpriced  the meter is armed at 0 cents;
 --                   no_rate   the lookup produced no rate, and a failed lookup is never charged;
---                   error     the charge failed: admin-catalog tax_charge_retry replays these
---                             with the SAME tax_ledger idem key, so a debit that did post is
---                             found, not doubled.
---   charge_cents  the price debited, on a charged row only (positive; the wallet row is negative).
+--                   error     the charge failed. WITH charge_cents it failed after the arming rail,
+--                             at that price, and admin-catalog tax_charge_retry may replay it: it
+--                             links a debit already posted under the SAME tax_ledger idem key
+--                             first, and otherwise replays that key at that price only. WITHOUT
+--                             charge_cents it failed before anything said the call was billable (or
+--                             delete_client closed it), and is never replayed.
+--   charge_cents  on a charged row, the price debited (positive; the wallet row is negative); on a
+--                 pending or error row, the price the debit was attempted at; null otherwise.
 --   wallet_tx_id  the wallet_transactions row. BIGINT, not uuid: wallet_transactions.id is
 --                 `bigint generated always as identity` (128), and a foreign key must match it.
 --                 ON DELETE SET NULL: the ledger row outlives a wallet row an operator removes.
 --   charged_at    when the debit posted, on a charged row only.
 --
--- One CHECK holds the shape, so a half-written state cannot exist: charged ⇔ charged_at ⇔
--- charge_cents; a wallet row only on a charged row; a ping never carries a charge (it checks
--- OUR credentials and is platform cost, 244).
+-- One CHECK holds the shape, so a half-written state cannot exist: charged ⇔ charged_at; a charged
+-- or pending row always has charge_cents, and only charged, pending and error rows may; a wallet
+-- row only on a charged row; a ping never carries a charge (it checks OUR credentials and is
+-- platform cost, 244). Every clause is written so a NULL charge_state cannot slip past it (a CHECK
+-- passes on NULL, so `x or charge_state = …` would let a stateless row carry a wallet row).
 --
 -- ── BACKFILL ────────────────────────────────────────────────────────────────────────────────
 -- Every closed verify/invoice row gets a state. A row whose tax_ledger key really is on a posted
@@ -96,9 +108,11 @@ begin
   if not exists (select 1 from pg_constraint where conname = 'tax_lookups_charge_shape_check') then
     alter table public.tax_lookups add constraint tax_lookups_charge_shape_check check (
           (charge_state is not distinct from 'charged') = (charged_at is not null)
-      and (charge_state is not distinct from 'charged') = (charge_cents is not null)
+      and (charge_state is distinct from 'charged' or charge_cents is not null)
+      and (charge_state is distinct from 'pending' or charge_cents is not null)
+      and (charge_cents is null or coalesce(charge_state in ('charged', 'pending', 'error'), false))
       and (charge_cents is null or charge_cents > 0)
-      and (wallet_tx_id is null or charge_state = 'charged')
+      and (wallet_tx_id is null or charge_state is not distinct from 'charged')
       and (kind <> 'ping' or charge_state is null)
     );
   end if;
@@ -106,9 +120,9 @@ end
 $con$;
 
 comment on column public.tax_lookups.charge_state is
-  'Migration 319. What happened to this lookup''s charge: pending | charged | exempt | inactive | unpriced | no_rate | error. NULL = none decided (a ping, in flight, or an answer that reached no document). Written by _shared/taxSpend.ts chargeLookup; error rows are replayed by admin-catalog tax_charge_retry on the same tax_ledger idem key.';
+  'Migration 319. What happened to this lookup''s charge: pending | charged | exempt | inactive | unpriced | no_rate | error. NULL = none decided (a ping, in flight, or an answer that reached no document). Written by _shared/taxMeter.ts (pending, just before the debit) and _shared/taxSpend.ts chargeLookup; pending and priced error rows are replayed by admin-catalog tax_charge_retry on the same tax_ledger idem key at the same price.';
 comment on column public.tax_lookups.charge_cents is
-  'Migration 319. The price debited (positive), on a charged row only.';
+  'Migration 319. On a charged row, the price debited (positive). On a pending or error row, the price the debit was attempted at (an error row without one is never replayed). Null otherwise.';
 comment on column public.tax_lookups.wallet_tx_id is
   'Migration 319. The wallet_transactions row the charge posted (bigint, as that id is). Set null if the wallet row is ever deleted.';
 comment on column public.tax_lookups.charged_at is
@@ -224,13 +238,16 @@ begin
     values (v_t, 'debit', -10, -10, 'tax_lookup', 'posted', 'tax_ledger:tax_lookup:' || v_id::text, now())
     returning id into v_tx;
 
-    -- pending, then charged and linked: the write chargeLookup makes.
-    update public.tax_lookups set charge_state = 'pending' where id = v_id;
+    -- pending at its price, then charged and linked: the writes chargeTaxCalculation and
+    -- chargeLookup make.
+    update public.tax_lookups set charge_state = 'pending', charge_cents = 10 where id = v_id;
     update public.tax_lookups
        set charge_state = 'charged', charge_cents = 10, wallet_tx_id = v_tx, charged_at = now()
      where id = v_id;
+    -- An error that got past the arming rail keeps the price it was attempted at.
+    update public.tax_lookups set charge_state = 'error', charge_cents = 10, wallet_tx_id = null, charged_at = null where id = v_id;
     -- Every state the code writes for an uncharged row is accepted, bare.
-    update public.tax_lookups set charge_state = 'error', charge_cents = null, wallet_tx_id = null, charged_at = null where id = v_id;
+    update public.tax_lookups set charge_state = 'error', charge_cents = null where id = v_id;
     update public.tax_lookups set charge_state = 'exempt' where id = v_id;
     update public.tax_lookups set charge_state = 'inactive' where id = v_id;
     update public.tax_lookups set charge_state = 'unpriced' where id = v_id;
@@ -268,6 +285,26 @@ begin
     exception when check_violation then null;
     end;
     begin
+      update public.tax_lookups set charge_state = 'pending', charge_cents = null where id = v_id;
+      raise exception '319: a pending row without the price it is attempting was accepted';
+    exception when check_violation then null;
+    end;
+    begin
+      update public.tax_lookups set charge_state = 'inactive', charge_cents = 10 where id = v_id;
+      raise exception '319: a price on a row that was never charged or attempted was accepted';
+    exception when check_violation then null;
+    end;
+    begin
+      update public.tax_lookups set charge_state = null, charge_cents = 10 where id = v_id;
+      raise exception '319: a price on a row with no charge state was accepted';
+    exception when check_violation then null;
+    end;
+    begin
+      update public.tax_lookups set charge_state = null, charge_cents = null, wallet_tx_id = v_tx where id = v_id;
+      raise exception '319: a wallet row on a row with no charge state was accepted';
+    exception when check_violation then null;
+    end;
+    begin
       update public.tax_lookups set charge_state = 'inactive' where id = v_ping;
       raise exception '319: a ping was given a charge state';
     exception when check_violation then null;
@@ -290,7 +327,7 @@ begin
     end if;
 
     raise exception using errcode = 'S3190',
-      message = 'pending, charged + linked, every uncharged state; refused: unknown state, half-charged rows, 0 cents, a wallet link or time off a charge, a charged ping, a missing wallet row; a deleted wallet row unlinks';
+      message = 'pending at a price, charged + linked, error at a price, every uncharged state; refused: unknown state, half-charged rows, 0 cents, pending without a price, a price or wallet link or time off a charge, a stateless row with a price or wallet row, a charged ping, a missing wallet row; a deleted wallet row unlinks';
   exception when sqlstate 'S3190' then
     v_out := sqlerrm;
   end;

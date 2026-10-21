@@ -11,7 +11,7 @@ import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_sh
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
 // Sales tax lookups, operator side (2026-10-21, migration 319): the per-tenant report, and the
 // replay of charges that failed. taxMeter.ts and taxUsage.ts carry the rules and their tests.
-import { retryLookupCharges } from "../_shared/taxMeter.ts";
+import { closeTenantTaxCharges, retryLookupCharges } from "../_shared/taxMeter.ts";
 import { parseTaxUsageRange, readTaxLookupsInRange, summarizeTaxUsage } from "../_shared/taxUsage.ts";
 // "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
 // imports the same module, so a change to it deploys both functions.
@@ -1479,10 +1479,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       }
 
       // tax_charge_retry: replay the charges that failed (charge_state 'error') or never finished
-      // ('pending' for over 15 minutes), oldest first, optionally for one builder, with the SAME
-      // tax_ledger idem key, so a debit that did post is found and linked rather than posted twice.
-      // REFUSED (409) while a candidate's meter is disarmed or priced at 0: nothing is replayed.
-      // It posts real debits, so it asks for confirm: true, and writes its own audit row. On can_bill.
+      // ('pending' for over 15 minutes), oldest first, optionally for one builder. Only rows that
+      // got past the arming rail (they carry the price attempted) are candidates; a debit already
+      // posted under the row's tax_ledger key is linked first, never posted twice; a deleted
+      // builder's rows are skipped (orphaned); a replay is charged at the price first attempted or
+      // not at all (price_changed). REFUSED (409) while a meter a row still needs is disarmed or
+      // priced at 0: nothing is charged. It posts real debits, so it asks for confirm: true, and
+      // writes its own audit row. On can_bill. The rules are taxMeter.ts retryLookupCharges.
       case "tax_charge_retry": {
         if (p.confirm !== true) throw new Error("This replays failed sales tax charges against builders' wallets. Send confirm: true to go ahead.");
         const clientId = p.clientId == null || p.clientId === "" ? null : reqStr(p.clientId, "clientId");
@@ -1498,15 +1501,21 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             actor_email: identity.via === "operator" ? identity.email : null,
             actor_user_id: identity.via === "operator" ? identity.userId : null,
             note: (out.ok
-              ? `via=${identity.via} candidates=${out.candidates} charged=${out.charged} exempt=${out.exempt} still_failed=${out.stillFailed}`
+              ? `via=${identity.via} candidates=${out.candidates} charged=${out.charged} linked=${out.linked} exempt=${out.exempt}`
+                + ` still_failed=${out.stillFailed} price_changed=${out.priceChanged} orphaned=${out.orphaned}`
+              : out.refused === "meter_disarmed"
+              ? `via=${identity.via} refused=meter_disarmed linked=${out.linked} orphaned=${out.orphaned}`
               : `via=${identity.via} refused=${out.refused}`).slice(0, 2000),
           });
         } catch (_e) { /* best-effort: never fail a completed replay on a logging failure */ }
         if (!out.ok && out.refused === "meter_disarmed") {
           const off = out.meters.filter((m) => !m.active || m.priceCents <= 0).map((m) => m.kind === "tax_lookup" ? "Tax verification" : "Invoice tax check");
+          const linkedNote = out.linked
+            ? ` ${out.linked} charge${out.linked === 1 ? " that had already posted was" : "s that had already posted were"} linked to ${out.linked === 1 ? "its" : "their"} wallet row.`
+            : "";
           return json({
-            error: `The ${off.join(" and ")} meter${off.length === 1 ? " is" : "s are"} off or priced at $0, so nothing was retried. The failed charges stay recorded as failed.`,
-            reason: "meter_disarmed", meters: out.meters, candidates: out.candidates,
+            error: `The ${off.join(" and ")} meter${off.length === 1 ? " is" : "s are"} off or priced at $0, so nothing was charged. The failed charges stay recorded as failed.${linkedNote}`,
+            reason: "meter_disarmed", meters: out.meters, candidates: out.candidates, linked: out.linked, orphaned: out.orphaned,
           }, 409);
         }
         if (!out.ok) return json({ error: "Couldn't read the failed charges, so nothing was retried. Try again in a minute.", reason: "unreadable" }, 503);
@@ -2533,6 +2542,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // removed the saved card it wipes the billing_customers row that pointed at it, which is the
         // one row that must not outlive the card; the Twilio account row goes with its closed sub.)
         await wipe("tax_code_assignments");
+        // tax_lookups is KEPT (a ledger of calls Avalara billed us for), but a charge of this
+        // builder's still waiting on tax_charge_retry (319: pending, or error with a price) is closed
+        // here, before the wallet goes: replayed after the delete, wallet_credit would create a fresh
+        // wallet for the slug and, if the slug is reused, bill the NEW builder for the old one's call.
+        // retryLookupCharges also skips a deleted builder's rows on its own; this is the second wall.
+        // Best-effort: a database without 319 just has nothing to close, and the delete goes on.
+        const taxChargesClosed = await closeTenantTaxCharges(sb, clientId);
         // wallet_accounts (migration 164) is the BALANCE, keyed by client_id with no FK to anything,
         // so a recreated slug inherited it: a deleted test tenant left $100.00 behind (seen 10-05),
         // which the next tenant on that slug would have spent as its own. The movements stay:
@@ -2743,6 +2759,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
           // Workstream 2: whether the builder's own Twilio sub-account was closed first.
           ...(twilioClosed ? { twilio: { closed: true } } : {}),
+          // Sales tax charges that were waiting on a retry and now never will be (count only).
+          ...(taxChargesClosed ? { taxChargesClosed } : {}),
           ...(Object.keys(retained).length ? { retained } : {}),
           ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
           ...(filesRetained.length || filesLeft.length

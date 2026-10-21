@@ -1872,7 +1872,7 @@ function AdmTaxLookups() {
             <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#B91C1C" }}>
               {tot.errors > 0 && <>{tot.errors} charge{tot.errors === 1 ? "" : "s"} failed and {tot.errors === 1 ? "was" : "were"} not taken. </>}
               {tot.pending > 0 && <>{tot.pending} charge{tot.pending === 1 ? " is" : "s are"} unfinished. </>}
-              An operator can replay them (admin-catalog tax_charge_retry); a replay never charges one lookup twice.
+              An operator can replay the ones that got as far as the wallet (admin-catalog tax_charge_retry), at the price first attempted; a replay never charges one lookup twice.
             </div>
           )}
           {rep.truncated && (

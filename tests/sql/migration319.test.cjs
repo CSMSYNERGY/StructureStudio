@@ -5,8 +5,10 @@
 //   * four charge columns on tax_lookups, wallet_tx_id a BIGINT foreign key to
 //     wallet_transactions(id) with ON DELETE SET NULL (the id is bigint live, not uuid);
 //   * the state list and the one shape CHECK refuse every half-written charge: an unknown state,
-//     charged without its time or its cents, 0 cents, a wallet link or a time on an uncharged
-//     row, and any charge on a ping;
+//     charged without its time or its cents, 0 cents, pending without the price it is attempting,
+//     a price on a row that was neither charged, pending nor error, a wallet link or a time on an
+//     uncharged row, a price or a wallet link on a row with NO state (a CHECK passes on NULL, so
+//     each clause must be NULL-safe), and any charge on a ping;
 //   * THE BACKFILL: a row whose tax_ledger key is on a posted wallet row is charged and linked
 //     (same tenant, same meter, posted, a debit — a near-miss on any of the four is not), a
 //     failed lookup is no_rate, every other closed lookup is inactive, in-flight rows and pings
@@ -33,7 +35,7 @@ const read = (f) => fs.readFileSync(path.join(WT, "supabase/migrations", f), "ut
 const RAW = () => (process.env.MIG_FILE ? fs.readFileSync(process.env.MIG_FILE, "utf8") : fs.readFileSync(path.join(WT, "supabase/migrations/319_tax_lookup_charge_state.sql"), "utf8"));
 const M319 = () => RAW().replace(/\r/g, "");
 const M244 = () => read("244_avalara_tax_lookups.sql");
-const REHEARSAL = "pending, charged + linked, every uncharged state; refused: unknown state, half-charged rows, 0 cents, a wallet link or time off a charge, a charged ping, a missing wallet row; a deleted wallet row unlinks";
+const REHEARSAL = "pending at a price, charged + linked, error at a price, every uncharged state; refused: unknown state, half-charged rows, 0 cents, pending without a price, a price or wallet link or time off a charge, a stateless row with a price or wallet row, a charged ping, a missing wallet row; a deleted wallet row unlinks";
 
 // The live shapes 244 and 319 read, trimmed to their columns. Supabase's default privileges are
 // reproduced so a missing revoke would show up as a grant.
@@ -186,8 +188,12 @@ const snapshot = async (db) => JSON.stringify(await rows(db,
 
   // ── 3. The shape ────────────────────────────────────────────────────────────────────────
   console.log("the shape refuses half-written charges");
-  const A = IDS.A, E = IDS.E;
+  const A = IDS.A, E = IDS.E, D = IDS.D;
   for (const [label, sql] of [
+    ["pending without the price it is attempting", `update public.tax_lookups set charge_state = 'pending' where id = '${A}'`],
+    ["a price on an exempt row", `update public.tax_lookups set charge_state = 'exempt', charge_cents = 10 where id = '${A}'`],
+    ["a price on a row with no state", `update public.tax_lookups set charge_cents = 10 where id = '${D}'`],
+    ["a wallet link on a row with no state", `update public.tax_lookups set wallet_tx_id = ${txB.id} where id = '${D}'`],
     ["an unknown state", `update public.tax_lookups set charge_state = 'billed' where id = '${A}'`],
     ["charged with no time", `update public.tax_lookups set charge_state = 'charged', charge_cents = 10 where id = '${A}'`],
     ["charged with no cents", `update public.tax_lookups set charge_state = 'charged', charged_at = now() where id = '${A}'`],
@@ -204,10 +210,15 @@ const snapshot = async (db) => JSON.stringify(await rows(db,
   }
   const ghost = await refused(db, `update public.tax_lookups set charge_state = 'charged', charge_cents = 10, charged_at = now(), wallet_tx_id = 999999 where id = '${A}'`, /foreign key/);
   ok(ghost.refused, "refused: a link to a wallet row that does not exist", ghost.message);
-  for (const s of ["pending", "exempt", "inactive", "unpriced", "no_rate", "error"]) {
-    const r = await refused(db, `update public.tax_lookups set charge_state = '${s}' where id = '${A}'`);
+  for (const s of ["exempt", "inactive", "unpriced", "no_rate", "error"]) {
+    const r = await refused(db, `update public.tax_lookups set charge_state = '${s}', charge_cents = null where id = '${A}'`);
     ok(!r.refused, `accepted: ${s} on a closed lookup`, r.message);
   }
+  for (const s of ["pending", "error"]) {
+    const r = await refused(db, `update public.tax_lookups set charge_state = '${s}', charge_cents = 10 where id = '${A}'`);
+    ok(!r.refused, `accepted: ${s} carrying the price it attempted`, r.message);
+  }
+  await db.exec(`update public.tax_lookups set charge_state = 'inactive', charge_cents = null where id = '${A}'`);
 
   // ── 4. The posture ──────────────────────────────────────────────────────────────────────
   console.log("service-role only, as 244 left it");
@@ -279,7 +290,15 @@ const snapshot = async (db) => JSON.stringify(await rows(db,
     ["charged without its time", (s) => s.replace("          (charge_state is not distinct from 'charged') = (charged_at is not null)\n      and ", "          "),
       /319: a charged row without charged_at was accepted/],
     ["0 cents allowed", (s) => s.replace("      and (charge_cents is null or charge_cents > 0)\n", ""), /319: a charge of 0 cents was accepted/],
-    ["a wallet link on any row", (s) => s.replace("      and (wallet_tx_id is null or charge_state = 'charged')\n", ""), /319: a wallet row on an uncharged lookup was accepted/],
+    ["a wallet link on any row", (s) => s.replace("      and (wallet_tx_id is null or charge_state is not distinct from 'charged')\n", ""), /319: a wallet row on an uncharged lookup was accepted/],
+    ["the wallet clause NULL-unsafe", (s) => s.replace("(wallet_tx_id is null or charge_state is not distinct from 'charged')", "(wallet_tx_id is null or charge_state = 'charged')"),
+      /319: a wallet row on a row with no charge state was accepted/],
+    ["pending allowed without a price", (s) => s.replace("      and (charge_state is distinct from 'pending' or charge_cents is not null)\n", ""),
+      /319: a pending row without the price it is attempting was accepted/],
+    ["a price on any row", (s) => s.replace("      and (charge_cents is null or coalesce(charge_state in ('charged', 'pending', 'error'), false))\n", ""),
+      /319: a price on a row that was never charged or attempted was accepted/],
+    ["the price clause NULL-unsafe", (s) => s.replace("coalesce(charge_state in ('charged', 'pending', 'error'), false)", "charge_state in ('charged', 'pending', 'error')"),
+      /319: a price on a row with no charge state was accepted/],
     ["pending missing from the states", (s) => s.replace("or charge_state in ('pending', 'charged',", "or charge_state in ('charged',"), /check constraint/],
   ]) {
     const mm = mutate(src);

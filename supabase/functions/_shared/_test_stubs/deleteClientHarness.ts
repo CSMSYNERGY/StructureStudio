@@ -94,6 +94,9 @@ export interface World {
     /** twilio_account_forget fails with this code (PGRST202: migration 295 not applied). */
     forgetError?: string;
   };
+  /** Migration 319: the tenant's tax charges still waiting on tax_charge_retry, which the delete
+   *  closes (taxMeter.ts closeTenantTaxCharges). Absent: none. */
+  taxOpenCharges?: number;
 }
 
 export interface Run {
@@ -136,6 +139,9 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       }
       if (call.op === "update") {
         run.updates.push({ table, payload: call.payload, filters: call.filters });
+        if (table === "tax_lookups") {
+          return { data: Array.from({ length: world.taxOpenCharges ?? 0 }, (_, i) => ({ id: `lookup-${i}` })), error: null };
+        }
         if (table === "twilio_accounts" && world.twilio?.row && eqv("client_id") === TENANT) {
           world.twilio.row = { ...world.twilio.row, ...call.payload };
           return { data: [{ client_id: TENANT }], error: null, count: 1 };
@@ -177,6 +183,7 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       eq: (c: string, v: unknown) => { call.filters.push(["eq", c, v]); return b; },
       neq: (c: string, v: unknown) => { call.filters.push(["neq", c, v]); return b; },
       lt: (c: string, v: unknown) => { call.filters.push(["lt", c, v]); return b; },
+      in: (c: string, v: unknown) => { call.filters.push(["in", c, v]); return b; },
       is: (c: string, v: unknown) => { call.filters.push(["is", c, v]); return b; },
       maybeSingle: () => Promise.resolve(answer()),
       single: () => Promise.resolve(answer()),

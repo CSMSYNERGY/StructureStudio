@@ -11,13 +11,15 @@
 //     builder's tax_lookup_enabled switch and the meters' state; a bad range is a 400 sentence;
 //   * tax_charge_retry needs confirm: true, is REFUSED 409 while a candidate's meter is disarmed
 //     (the live state: nothing replayed, nothing written), replays an error row on the SAME ledger
-//     key when armed, and writes its own audit row either way.
+//     key at the SAME price when armed, links a debit that already posted instead of charging,
+//     skips a deleted builder's rows, and writes its own audit row either way;
+//   * delete_client closes the builder's charges still waiting on a retry, before the wallet goes.
 // Tenants and ids are made up (the repo is public).
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
-import { loadAdminCatalog } from "./deleteClientHarness.ts";
+import { deleteClient, loadAdminCatalog } from "./deleteClientHarness.ts";
 
 const HANDLER = await loadAdminCatalog(false);
 const ADMIN_PASSWORD = "admin-password-test";
@@ -31,7 +33,7 @@ const L2 = "00000000-0000-4000-8000-000000000320";
 type Row = Record<string, any>;
 class Db {
   lookups: Row[] = [
-    { id: L1, client_id: "acme-sheds", kind: "verify", outcome: "ok", charge_state: "error", charge_cents: null, short_code: "SS-AAAA1111", invoice_number: null, region: "OH", called_at: "2026-10-10T12:00:00.000Z" },
+    { id: L1, client_id: "acme-sheds", kind: "verify", outcome: "ok", charge_state: "error", charge_cents: 10, short_code: "SS-AAAA1111", invoice_number: null, region: "OH", called_at: "2026-10-10T12:00:00.000Z" },
     { id: L2, client_id: "acme-sheds", kind: "invoice", outcome: "ok", charge_state: "inactive", charge_cents: null, short_code: "SS-AAAA1111", invoice_number: "1042", region: "OH", called_at: "2026-10-11T12:00:00.000Z" },
     { id: "00000000-0000-4000-8000-000000000321", client_id: "_platform", kind: "ping", outcome: "ok", charge_state: null, called_at: "2026-10-12T12:00:00.000Z" },
     { id: "00000000-0000-4000-8000-000000000322", client_id: "acme-sheds", kind: "verify", outcome: "ok", charge_state: "inactive", called_at: "2026-09-01T12:00:00.000Z" },
@@ -81,6 +83,7 @@ class Db {
       is: (c: string, v: unknown) => { q.f.push((r) => (r[c] ?? null) === v); return b; },
       gte: (c: string, v: string) => { q.f.push((r) => String(r[c]) >= v); return b; },
       lt: (c: string, v: string) => { q.f.push((r) => String(r[c]) < v); return b; },
+      not: (c: string, op: string, v: unknown) => { q.f.push((r) => (op === "is" && v === null ? r[c] != null : true)); return b; },
       or: () => { q.f.push((r) => r.charge_state == null || r.charge_state === "pending" || r.charge_state === "error"); return b; },
       order: () => b,
       limit: (n: number) => { q.lim = n; return b; },
@@ -198,7 +201,7 @@ Deno.test("tax_charge_retry: REFUSED 409 while the meter is disarmed — nothing
   assertEquals(db.credits.length, 0);
   assertEquals(db.lookups[0].charge_state, "error", "the failed charge stays recorded as failed");
   const audit = db.audits.find((x) => x.action === "tax_charge_retry");
-  assert(audit && audit.note === "via=password refused=meter_disarmed", JSON.stringify(db.audits));
+  assert(audit && audit.note === "via=password refused=meter_disarmed linked=0 orphaned=0", JSON.stringify(db.audits));
 });
 
 Deno.test("tax_charge_retry: armed, the error row is replayed on its OWN key and recorded charged", async () => {
@@ -211,9 +214,56 @@ Deno.test("tax_charge_retry: armed, the error row is replayed on its OWN key and
   assertEquals([db.lookups[0].charge_state, db.lookups[0].charge_cents, db.lookups[0].wallet_tx_id], ["charged", 10, 900]);
   assertEquals(db.lookups[1].charge_state, "inactive", "a row that is not waiting on its charge is not touched");
   const audit = db.audits.find((x) => x.action === "tax_charge_retry");
-  assert(audit && audit.target_client_id === "acme-sheds" && audit.note === "via=password candidates=1 charged=1 exempt=0 still_failed=0", JSON.stringify(audit));
+  assert(audit && audit.target_client_id === "acme-sheds"
+    && audit.note === "via=password candidates=1 charged=1 linked=0 exempt=0 still_failed=0 price_changed=0 orphaned=0", JSON.stringify(audit));
   // Pressed again: nothing left to do, nothing charged twice.
   const again = await act(db, { action: "tax_charge_retry", confirm: true });
   assertEquals([again.status, again.body.candidates], [200, 0]);
   assertEquals(db.credits.length, 1);
+});
+
+Deno.test("tax_charge_retry: a debit that already posted is linked, with the meters still OFF, and nothing is charged", async () => {
+  const db = new Db();   // the live meters: disarmed
+  db.wallet = [{ id: 77, client_id: "acme-sheds", idempotency_key: `tax_ledger:tax_lookup:${L1}`, state: "posted", amount_cents: -10, posted_at: "2026-10-10T12:00:05.000Z" }];
+  const r = await act(db, { action: "tax_charge_retry", confirm: true });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals([r.body.candidates, r.body.linked, r.body.charged], [1, 1, 0]);
+  assertEquals(db.credits.length, 0, "the charge path never ran");
+  assertEquals([db.lookups[0].charge_state, db.lookups[0].charge_cents, db.lookups[0].wallet_tx_id, db.lookups[0].charged_at],
+    ["charged", 10, 77, "2026-10-10T12:00:05.000Z"]);
+});
+
+Deno.test("tax_charge_retry: a deleted builder's failed charge is orphaned, never replayed into a new wallet", async () => {
+  const db = new Db();
+  db.prices = [{ kind: "tax_lookup", active: true, price_cents: 10 }, { kind: "tax_invoice", active: true, price_cents: 10 }];
+  db.lookups[0].client_id = "gone-barns";   // no client_configs row: delete_client ran
+  const r = await act(db, { action: "tax_charge_retry", confirm: true });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals([r.body.candidates, r.body.orphaned, r.body.charged], [1, 1, 0]);
+  assertEquals(db.credits.length, 0);
+  assertEquals(db.lookups[0].charge_state, "error", "left as it was, for a person");
+});
+
+Deno.test("tax_charge_retry: a meter repriced since the attempt is not replayed at the new price", async () => {
+  const db = new Db();
+  db.prices = [{ kind: "tax_lookup", active: true, price_cents: 25 }, { kind: "tax_invoice", active: true, price_cents: 25 }];
+  const r = await act(db, { action: "tax_charge_retry", confirm: true });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals([r.body.priceChanged, r.body.charged], [1, 0]);
+  assertEquals(db.credits.length, 0, "never a price the builder did not see when they pressed Verify");
+});
+
+Deno.test("delete_client closes the builder's tax charges still waiting on a retry, before the wallet is wiped", async () => {
+  const r = await deleteClient(HANDLER, { subs: [], vault: null, taxOpenCharges: 2 });
+  assertEquals(r.status, 200, r.raw);
+  assertEquals(r.body.taxChargesClosed, 2, "reported, as a count");
+  const close = r.updates.filter((u) => u.table === "tax_lookups");
+  assertEquals(close.length, 1);
+  assertEquals(close[0].payload, { charge_state: "error", charge_cents: null, wallet_tx_id: null, charged_at: null }, "an error with no price: never replayed");
+  assertEquals(close[0].filters, [["eq", "client_id", "acme-sheds"], ["in", "charge_state", ["pending", "error"]]]);
+  const at = r.log.indexOf("db update tax_lookups");
+  assert(at > 0 && at < r.log.indexOf("db delete wallet_accounts"), `the close runs before the wallet goes: ${r.log.join(" | ")}`);
+  // Nothing to close is not a report line; and a database without 319 does not stop the delete.
+  const none = await deleteClient(HANDLER, { subs: [], vault: null });
+  assertEquals([none.status, "taxChargesClosed" in none.body], [200, false], none.raw);
 });

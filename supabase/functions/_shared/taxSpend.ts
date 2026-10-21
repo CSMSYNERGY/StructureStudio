@@ -59,7 +59,7 @@ import {
 import { stampTax } from "./taxChain.ts";
 import { claimLookup, DAILY_TAX_LOOKUP_CAP, finishLookup, TAX_LOOKUP_MINUTE_WINDOW_SECONDS } from "./taxLookups.ts";
 import {
-  chargeTaxCalculation, markChargePending, recordLookupCharge, type TaxChargeResult, type TaxMeterKind,
+  chargeTaxCalculation, recordLookupCharge, type TaxChargeResult, type TaxMeterKind,
 } from "./taxMeter.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -459,13 +459,15 @@ export function verifiedTax(input: {
  * caller runs this AFTER the document is written (Verify) or the invoice is recorded (invoice
  * check). Never throws; `no_rate` means nothing was attempted.
  *
- * WHAT THE CHARGE DID GOES ON THE ROW (migration 319): `pending` just before the attempt, then
- * the outcome (charged with its cents, wallet row and time; exempt; inactive; unpriced; error),
- * and `no_rate` on the row of a lookup that produced no rate. Both writes are best-effort and
- * never throw: they cannot change the answer the builder gets or the charge, and a write that
- * fails (a database without 319, a blip) costs only the record — the wallet row, keyed on the
- * ledger row, is still the truth. The `error` rows are what admin-catalog tax_charge_retry
- * replays, on the same key.
+ * WHAT THE CHARGE DID GOES ON THE ROW (migration 319): chargeTaxCalculation itself marks the row
+ * `pending` (with the price) only once the meter is armed and priced and the tenant is not exempt,
+ * just before the debit; this then records the outcome (charged with its cents, wallet row and
+ * time; exempt; inactive; unpriced; error, with the price attempted when it got that far), and
+ * `no_rate` on the row of a lookup that produced no rate. A lookup made while a meter is off goes
+ * straight to `inactive` and never passes through a state the retry replays. The writes are
+ * best-effort and never throw: they cannot change the answer the builder gets or the charge, and a
+ * write that fails (a database without 319, a blip) costs only the record. The wallet row, keyed
+ * on the ledger row, is still the truth, and admin-catalog tax_charge_retry links it first.
  */
 export async function chargeLookup(
   admin: Admin,
@@ -478,13 +480,12 @@ export async function chargeLookup(
       if (lookup.lookupId) await recordLookupCharge(admin, lookup.lookupId, none);
       return none;
     }
-    await markChargePending(admin, lookup.lookupId);
     const r = await chargeTaxCalculation(admin, { ...opts, lookupId: lookup.lookupId });
     await recordLookupCharge(admin, lookup.lookupId, r);
     return r;
   } catch {
     // Nothing above throws by contract. If something does, report it the way a failed charge is
-    // reported, so the caller logs it and the row (pending, if that much was written) is retried.
+    // reported, so the caller logs it (a row chargeTaxCalculation had marked pending is retried).
     return { charged: false, reason: "error" };
   }
 }
