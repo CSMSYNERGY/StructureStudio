@@ -1,5 +1,6 @@
 // Call recording (release B2): one dual-channel recording per call, on the CUSTOMER's leg,
-// announced first and started through Twilio's REST API when someone answers.
+// announced first (unless the owner turned the announcement off) and started through Twilio's
+// REST API when someone answers.
 //
 // ── WHY THE CUSTOMER'S LEG, AND WHY REST ───────────────────────────────────────────────────
 // The customer's leg (phone_calls.twilio_call_sid) is the one leg that lasts through hold, warm
@@ -11,15 +12,23 @@
 // ── OFF AT THREE LEVELS ────────────────────────────────────────────────────────────────────
 //   1. env CALL_RECORDING must be exactly "on" (recordingEnvOn);
 //   2. the business's switch is on (client_settings.phone_record_calls: on by default since
-//      migration 287, and only the owner turns it off), with the announcement on (it is locked
-//      on; RecordingSettings.notice);
+//      migration 287, and only the owner turns it off);
 //   3. the call is ARMED (phone_calls.recording_armed): written true by /voice/inbound and
-//      /voice/outbound only when the TwiML they answered with carried the announcement. Never for
-//      an emergency call, the 911 callback window, or a voicemail-only answer. Recording can only
-//      ever START on an armed call, so a setting switched on mid-call cannot record a call that
-//      never heard the notice.
+//      /voice/outbound when the TwiML they answered with rang someone on a recorded call. Never
+//      for an emergency call, the 911 callback window, or a voicemail-only answer. Recording can
+//      only ever START on an armed call, so a setting switched on mid-call cannot record a call
+//      that started unrecorded.
 // Pausing, resuming and stopping do not ask the env rail: a recording already running is still
 // paused on hold and stopped before voicemail after the rail is switched off.
+//
+// ── RECORDED IS NOT ANNOUNCED (2026-10-21) ─────────────────────────────────────────────────
+// The announcement is its own setting (client_settings.phone_recording_notice, default on;
+// RecordingSettings.notice). On, an armed call says it first: the inbound <Say>, the outbound
+// whisper (/voice/notice), and a `recording_notice` mark. Off, the call is armed and recorded all
+// the same, with no <Say> and no whisper, a `recording_unannounced` mark (UNANNOUNCED_MARK) written
+// with the call, and notice_text NULL on its recording row. Transcripts follow the recording, not
+// the announcement. Turning it off is the owner's legal call (all-party-consent states); until
+// portal-settings accepts false (phase 2), every business announces.
 //
 // ── THE LIFE OF ONE RECORDING (phone_call_recordings, migration 263) ───────────────────────
 //   answer      startCallRecording claims the row (insert ... on conflict do nothing: two answer
@@ -70,13 +79,16 @@ export function callTranscribeOn(env: Env): boolean {
 }
 
 /**
- * May a call to or from this business be announced and recorded? The rail, the business's
- * switch and its announcement (locked on), and never an emergency call or the 911 callback
- * window. This is what phone_calls.recording_armed records.
+ * May a call to or from this business be recorded? The rail and the business's switch, and
+ * never an emergency call or the 911 callback window. This is what phone_calls.recording_armed
+ * records. Whether it is ANNOUNCED is announcementFor's question, not this one.
  */
 export function armedFor(env: Env, s: RecordingSettings, emergency = false): boolean {
-  return recordingEnvOn(env) && s.on && s.notice && !emergency;
+  return recordingEnvOn(env) && s.on && !emergency;
 }
+
+/** The call event an armed call that was NOT announced carries, written with the call. */
+export const UNANNOUNCED_MARK = "recording_unannounced";
 
 // ── The announcement ────────────────────────────────────────────────────────────────────
 
@@ -95,6 +107,14 @@ export const STANDARD_NOTICE_TRANSCRIBED = "This call may be recorded and transc
 export function noticeText(env: Env, s: Pick<RecordingSettings, "notice_text" | "transcribe">): string {
   if (s.notice_text && s.notice_text.trim() && noticeSaysRecorded(s.notice_text)) return s.notice_text.trim();
   return s.transcribe && callTranscribeOn(env) ? STANDARD_NOTICE_TRANSCRIBED : STANDARD_NOTICE;
+}
+
+/**
+ * The sentence an armed call says before it rings or bridges, or null when the owner turned the
+ * announcement off: the call is still recorded (armedFor), unannounced.
+ */
+export function announcementFor(env: Env, s: RecordingSettings): string | null {
+  return s.notice ? noticeText(env, s) : null;
 }
 
 /**
@@ -184,14 +204,21 @@ async function claimStart(admin: Admin, call: RecCall, notice: string | null): P
 
 /**
  * The sentence this business's announcement says now, kept on the recording row as what the
- * caller heard (the call's notice played moments before the answer). Null when it cannot be read:
- * the row is still made, and the call's recording_notice mark still says a notice played.
+ * caller heard (the call's notice played moments before the answer). Null for a call that was not
+ * announced: it carries the unannounced mark, or the business has the announcement off now (either
+ * one, so a mark still landing never leaves a sentence nobody heard on the row). Null too when
+ * either cannot be read: the row is still made, and the call's marks still say what played.
  */
-async function noticeSnapshot(env: Env, admin: Admin, clientId: string): Promise<string | null> {
-  const { data, error } = await admin.from("client_settings")
-    .select("phone_recording_notice_text, phone_transcribe_calls").eq("client_id", clientId).maybeSingle();
-  if (error) return null;
-  const s = data as { phone_recording_notice_text?: string | null; phone_transcribe_calls?: boolean } | null;
+async function noticeSnapshot(env: Env, admin: Admin, call: Pick<RecCall, "id" | "client_id">): Promise<string | null> {
+  const [settings, marks] = await Promise.all([
+    admin.from("client_settings")
+      .select("phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls").eq("client_id", call.client_id).maybeSingle(),
+    admin.from("phone_call_events").select("id").eq("call_id", call.id).eq("type", UNANNOUNCED_MARK).limit(1),
+  ]);
+  if (settings.error || marks.error) return null;
+  if (Array.isArray(marks.data) && marks.data.length) return null;
+  const s = settings.data as { phone_recording_notice?: boolean; phone_recording_notice_text?: string | null; phone_transcribe_calls?: boolean } | null;
+  if (s?.phone_recording_notice === false) return null;
   return noticeText(env, { notice_text: s?.phone_recording_notice_text ?? null, transcribe: s?.phone_transcribe_calls !== false });
 }
 
@@ -207,7 +234,7 @@ export async function startCallRecording(env: Env, admin: Admin, call: RecCall):
   if (!twilioConfigured(env)) return "skipped";
   let id: string;
   try {
-    const claimed = await claimStart(admin, call, await noticeSnapshot(env, admin, call.client_id));
+    const claimed = await claimStart(admin, call, await noticeSnapshot(env, admin, call));
     if (!claimed) return "exists";
     if ("existing" in claimed) {
       if (claimed.existing.status !== "paused") return "exists";
@@ -442,11 +469,13 @@ export async function recordingCallback(env: Env, p: TwilioParams, url: URL, sig
 // ── /voice/notice (the outbound announcement) ───────────────────────────────────────────
 
 /**
- * The whisper an armed OUTBOUND call's <Number url> runs: the customer hears it after they pick
- * up and before the two sides are bridged, so it lands inside the recording, which starts on the
- * same answer. ?call is the phone_calls id and ?c the business, for its wording; a read that
- * fails still announces, in the standard words (the call IS armed, or this URL would not be on
- * it). Always valid TwiML: an error here would cost the customer the call.
+ * The whisper an armed, announced OUTBOUND call's <Number url> runs: the customer hears it after
+ * they pick up and before the two sides are bridged, so it lands inside the recording, which
+ * starts on the same answer. ?call is the phone_calls id and ?c the business, for its wording; a
+ * read that fails still announces, in the standard words (the call IS armed and announced, or this
+ * URL would not be on it, so a setting changed since does not silence it). An unannounced call has
+ * no whisper, so never reaches here or writes this mark. Always valid TwiML: an error here would
+ * cost the customer the call.
  */
 export async function noticeTwiml(env: Env, ec: Ctx, url: URL): Promise<string> {
   const callId = url.searchParams.get("call") ?? "";

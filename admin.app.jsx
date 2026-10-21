@@ -221,6 +221,44 @@ function downloadFile(name, text) {
 
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
 
+// What outlived a deleted builder, as sentences for the confirmation (2026-10-21): records kept on
+// purpose, rows and files left behind, steps outside the database still to do by hand, and any that
+// failed. The twin of admDeleteReport in portal/07-admin.jsx; the server sends names and counts only.
+const BY_HAND = {
+  resend_domain: "remove their sending domain at Resend",
+  resend_inbound_domain: "remove their reply domain at Resend",
+  quickbooks: "disconnect QuickBooks at Intuit",
+  twilio_numbers: "release their numbers on our Twilio account",
+  connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
+};
+function failedStep(f) {
+  const [kind, what] = String(f).split(":");
+  if (kind === "storage") return `the file cleanup in ${what}`;
+  if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
+  if (kind === "app_errors") return "clearing the error log";
+  return f;
+}
+function deleteReport(r) {
+  if (!r) return "";
+  const rows = (m) => {
+    const e = Object.entries(m || {});
+    const n = e.reduce((s, [, v]) => s + v, 0);
+    return e.length ? `${n} row${n === 1 ? "" : "s"} in ${e.length} table${e.length === 1 ? "" : "s"} (${e.map(([k, v]) => `${k} ${v}`).join(", ")})` : "";
+  };
+  const withFiles = (rowText, buckets) => [rowText, (buckets || []).length ? `files in ${buckets.join(", ")}` : ""].filter(Boolean).join(", plus ");
+  const files = r.files || {};
+  const c = r.cleanup || {};
+  const out = [];
+  const kept = withFiles(rows(r.retained), files.retained);
+  if (kept) out.push(`Kept on purpose (financial and signed records): ${kept}.`);
+  const left = withFiles(rows(r.leftBehind), files.leftBehind);
+  if (left) out.push(`Left behind (CRM, messages and customer logins wait on a retention decision; the rest is not removed yet): ${left}.`);
+  if ((c.byHand || []).length) out.push(`Still to do by hand: ${c.byHand.map((k) => BY_HAND[k] || k).join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish: ${c.failed.map(failedStep).join("; ")}.`);
+  if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
+  return out.join(" ");
+}
+
 // ─── Read-only impersonation view (operator "view portal as <client>") ───
 // Renders the SAME Designs & Leads table the owner portal shows, from the
 function AdminApp() {
@@ -311,7 +349,8 @@ function AdminApp() {
   // Auto-dismiss clears only the message it announced: the timer captures its own m and
   // the functional update checks identity, so a newer message flashed inside the 2.5s
   // window (e.g. an error from the next action) is never wiped by the stale timer.
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
+  // A `sticky` ok (a delete that left data behind, 2026-10-21) stays until dismissed.
+  const flash = (m) => { setMsg(m); if (m && m.ok) { if (!m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 2500); } else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
   const login = async () => {
     setBusy(true); setMsg(null);
@@ -562,8 +601,8 @@ function AdminApp() {
     }
     setBusy(false);
   };
-  // Operator hard-delete: server wipes the tenant + all its data (catalog,
-  // designs, settings, logins, storage). Guarded by typing the builder id.
+  // Operator hard-delete: server wipes the tenant (catalog, designs, settings, logins, some
+  // storage) and reports what it kept or left behind. Guarded by typing the builder id.
   const deleteClient = async () => {
     const id = sel;
     if (!id || delConfirm.trim() !== id) return;
@@ -580,7 +619,8 @@ function AdminApp() {
         g.vaultDeleted ? "saved card removed" : "",
         g.vaultKept ? "saved card kept, because another builder uses it" : "",
       ].filter(Boolean).join(", ");
-      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}` });
+      const report = deleteReport(r);
+      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}${report ? ` ${report}` : ""}`, sticky: !!report });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -748,7 +788,17 @@ function AdminApp() {
         <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} builders</div></div>
       <div style={S.wrap}>
         {msg && msg.err && <div style={S.err}>{msg.err}</div>}
-        {msg && msg.ok && <div style={S.ok}>{msg.ok}</div>}
+        {msg && msg.ok && (
+          <div style={S.ok}>
+            {msg.ok}
+            {msg.sticky && (
+              <button type="button" onClick={() => setMsg(null)}
+                style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
 
         <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
           <span style={S.lbl}>Builder</span>
@@ -760,7 +810,7 @@ function AdminApp() {
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
           <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a builder first"}>{billOpen ? "Cancel" : "Billing"}</button>
           <button onClick={togglePayments} disabled={!sel} style={S.btn(sel ? "#FEF3C7" : "#F1F5F9", sel ? "#92400E" : "#94A3B8")} title={sel ? `Card payments + merchant id for ${sel}` : "Select a builder first"}>{payOpen ? "Cancel" : "Card payments"}</button>
-          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
               client (portal.html auto-opens ?view= for logged-in operators), on Contacts —
               where the portal's own account switcher lands too. */}
@@ -1128,11 +1178,13 @@ function AdminApp() {
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
-                  This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
-                  pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
-                  uploaded floor-plan &amp; branding files. Any paid plans are cancelled at the payment gateway and their saved
-                  card is removed, so they are never charged again. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates
-                  live in GHL and are not affected.)
+                  This permanently deletes <b>{sel}</b>: designs/leads, building styles &amp; sizes, pricing &amp; inclusions,
+                  layout items, settings (incl. GHL credentials), error logs, owner/team logins, and uploaded floor-plan,
+                  branding and door-photo files. Any paid plans are cancelled at the payment gateway and their saved card is
+                  removed, so they are never charged again. <b>Some data stays:</b> financial and signed records are kept on
+                  purpose, CRM contacts, messages, calls and customer logins wait on a retention decision, and some setup data
+                  and files are not removed yet. The result lists what stayed. <b>This cannot be undone.</b> (GoHighLevel
+                  contacts/estimates live in GHL and are not affected.)
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}

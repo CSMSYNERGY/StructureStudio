@@ -719,6 +719,45 @@ function admGatewayNote(g) {
   return bits.length ? ` Payment gateway: ${bits.join(", ")}.` : "";
 }
 
+// What outlived the builder, as sentences for the same confirmation (2026-10-21): the financial and
+// signed records kept on purpose, the rows and files left behind, steps outside the database a
+// person still has to do, and any that failed. The server derives it from _shared/tenantTables.ts
+// and sends names and counts only. "" when nothing outlived the builder. admin.app.jsx has a twin.
+const ADM_BY_HAND = {
+  resend_domain: "remove their sending domain at Resend",
+  resend_inbound_domain: "remove their reply domain at Resend",
+  quickbooks: "disconnect QuickBooks at Intuit",
+  twilio_numbers: "release their numbers on our Twilio account",
+  connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
+};
+function admFailedStep(f) {
+  const [kind, what] = String(f).split(":");
+  if (kind === "storage") return `the file cleanup in ${what}`;
+  if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
+  if (kind === "app_errors") return "clearing the error log";
+  return f;
+}
+function admDeleteReport(r) {
+  if (!r) return "";
+  const rows = (m) => {
+    const e = Object.entries(m || {});
+    const n = e.reduce((s, [, v]) => s + v, 0);
+    return e.length ? `${n} row${n === 1 ? "" : "s"} in ${e.length} table${e.length === 1 ? "" : "s"} (${e.map(([k, v]) => `${k} ${v}`).join(", ")})` : "";
+  };
+  const withFiles = (rowText, buckets) => [rowText, (buckets || []).length ? `files in ${buckets.join(", ")}` : ""].filter(Boolean).join(", plus ");
+  const files = r.files || {};
+  const c = r.cleanup || {};
+  const out = [];
+  const kept = withFiles(rows(r.retained), files.retained);
+  if (kept) out.push(`Kept on purpose (financial and signed records): ${kept}.`);
+  const left = withFiles(rows(r.leftBehind), files.leftBehind);
+  if (left) out.push(`Left behind (CRM, messages and customer logins wait on a retention decision; the rest is not removed yet): ${left}.`);
+  if ((c.byHand || []).length) out.push(`Still to do by hand: ${c.byHand.map((k) => ADM_BY_HAND[k] || k).join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish: ${c.failed.map(admFailedStep).join("; ")}.`);
+  if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
+  return out.join(" ");
+}
+
 // One destructive action = one dialog = one password prompt. There is deliberately no
 // second "now enter your password" modal and no cached password: delete_client is terminal
 // (the tenant is gone, so "the same action again" cannot happen), so a cache would avoid
@@ -755,9 +794,12 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
         Delete {client.company_name || id} permanently?
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
-        This erases <strong>{id}</strong> from nine tables, deletes every login attached to it, and empties
-        its stored images and branding. Their designer link stops working immediately. Any paid plans are
-        cancelled at the payment gateway and their saved card is removed, so they are never charged again.
+        This erases <strong>{id}</strong>'s catalog and pricing, designs and estimates, settings, and every
+        login attached to it, plus its floor plans, logos and door photos. Their designer link stops working
+        immediately. Any paid plans are cancelled at the payment gateway and their saved card is removed, so
+        they are never charged again. Some data stays: financial and signed records are kept on purpose, CRM
+        contacts, messages, calls and customer logins wait on a retention decision, and some setup data and
+        files are not removed yet. When it finishes you'll see what stayed.
         <strong> This cannot be undone.</strong> To stop offering the account without destroying its data, set a paused billing
         posture instead.
       </div>
@@ -1789,7 +1831,9 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   // after whatever is current — including an error flashed 5s after the save it reports on,
   // gone before anyone could read it. The functional updater checks identity (every flash
   // makes a fresh object), so a superseded timer no-ops instead of clobbering.
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
+  // A `sticky` message (a delete that left data behind, 2026-10-21) stays until dismissed: six
+  // seconds is not long enough to read what was kept.
+  const flash = (m) => { setMsg(m); if (m && m.ok && !m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
   const selRow = (clients || []).find((c) => c.client_id === sel) || null;
   const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
   const needsClient = active[3] === "client";
@@ -1934,7 +1978,17 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 
       {bootErr && <div style={S.err}>{bootErr}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
-      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.ok && (
+        <div style={S.okMsg}>
+          {msg.ok}
+          {msg.sticky && (
+            <button type="button" onClick={() => setMsg(null)}
+              style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
       {sub === "clients" && <AdmNumberRequests onPick={pickClient} onFlash={flash} />}
       {sub === "clients" && (
@@ -2895,8 +2949,8 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       <div style={{ ...S.card, background: "#FEE2E2", border: "1px solid #DC2626" }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#991B1B", letterSpacing: 0.3, marginBottom: 6 }}>Danger zone</div>
         <div style={{ fontSize: 12.5, color: "#991B1B", lineHeight: 1.55, marginBottom: 14 }}>
-          Deleting {label} erases their catalog, designs, settings, logins and stored images. It cannot be
-          undone, and it still asks for the operator password even though you're signed in.
+          Deleting {label} erases their catalog, designs, settings and logins. Financial and signed records
+          are kept. It cannot be undone, and it still asks for the operator password even though you're signed in.
         </div>
         <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this builder…</button>
       </div>
@@ -2906,8 +2960,9 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
           onDeleted={async (id, r) => {
             setDelOpen(false);
             const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+            const report = admDeleteReport(r);
             await onReloadClients();
-            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}` });
+            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}${report ? ` ${report}` : ""}`, sticky: !!report });
             onDeleted();
           }} />
       )}

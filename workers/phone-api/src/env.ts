@@ -29,8 +29,9 @@ export interface Env {
   TRANSCRIBE?: string;
   /**
    * Call recording's kill switch (src/recording.ts). Exactly "on" lets a business that turned
-   * recording on have its calls announced and recorded. Anything else: no announcement, no
-   * recording, whatever the business chose. Recordings already made are still played and expired.
+   * recording on have its calls recorded (and announced, unless the owner turned that off).
+   * Anything else: no announcement, no recording, whatever the business chose. Recordings already
+   * made are still played and expired.
    */
   CALL_RECORDING?: string;
   /**
