@@ -201,7 +201,8 @@ function itemsFor(rect) {
 //               about 29 in): the count whose gaps come nearest 1.3 pickets wide
 //   classic     octagon 4 + diamond 1 per leaf (none where a window is), x 2 per leaf
 //   dutch       vent 9 per leaf (4 frame + 1 field + 4 slats at these sizes)
-//   window      windowCasing 4 + window 7 per leaf (sash 4, glass 1, a 2-pane grille: 2 bars)
+//   window      windowCasing 4 + window 7 per leaf (sash 4, glass 1, a 2-pane grille: 2 bars), and
+//               windowInterior 1 per leaf: the room behind the pane (2026-10-21)
 //   every door  header 1, threshold 1
 function expectedParts(d) {
   const n = leavesOf(d), look = lookOf(d), w = !!d.win;
@@ -209,7 +210,8 @@ function expectedParts(d) {
   if (look === "american") e.picket = (n === 2 ? 2 : 3) * n;
   if (look === "classic") { if (!w) { e.octagon = 4 * n; e.diamond = n; } e.x = 2 * n; }
   if (look === "dutch") e.vent = 9 * n;
-  if (w) { e.windowCasing = 4 * n; e.window = 7 * n; }
+  // ...and behind each pane the room seen through it (doorWindowIn, 2026-10-21): one box per leaf.
+  if (w) { e.windowCasing = 4 * n; e.window = 7 * n; e.windowInterior = n; }
   return e;
 }
 
@@ -599,6 +601,12 @@ async function runTransom3D(browser, rect) {
       (parts.window || 0) === 6 * n && (parts.windowCasing || 0) === 4 * n, JSON.stringify(parts));
     if (!n) continue;
     const glass = ms.filter((m) => m.part === "window" && m.transparent);
+    // Behind each pane the room it looks into (doorWindowIn, Ahsan 2026-10-21: "look inside, not the
+    // wall"): one 2.5 ft box per leaf, centred on its pane, starting behind the glass, going inward.
+    const rooms = ms.filter((m) => m.part === "windowInterior");
+    ok(`T ${d.key}: behind each pane a room to look into, 2.5 ft deep, behind the glass`, rooms.length === n && rooms.every((r) => r.box && near(r.box[2], 2.5, 1e-3)
+      && glass.some((g) => near(ctr(g, f.along), ctr(r, f.along), 0.01) && outOf(r, f, ctr(g, f.n)) < -0.05)),
+      rooms.map((r) => `${r.box && r.box[2]}@${glass.length ? outOf(r, f, ctr(glass[0], f.n)).toFixed(3) : "?"}`).join(" "));
     const fx = tfxOf(d.fx), hFt = fx.heightIn / 12;
     const bottom = Math.min(...ms.map((m) => m.min[1])), top = bottom + hFt;
     ok(`T ${d.key}: each pane sits in the top band of its leaf (under the top rail, above 60% of the door)`,
@@ -652,6 +660,35 @@ async function runTransom3D(browser, rect) {
     await page.evaluate(() => window.__ss3dEngine.render());
     await page.screenshot({ path: join(shots, `transom-${TPLAN[i].key}.png`), clip });
   }
+  // The rooms draw only for a camera OUTSIDE their own wall (so no window elsewhere shows a box behind
+  // a door), and hide in "look inside". West wall: 4 panes (Classic, slab, plank, Z); east: 4 (Yoder's
+  // two, the plain double's two).
+  const roomState = () => page.evaluate(() => {
+    const E = window.__ss3dEngine, out = { west: [0, 0], east: [0, 0] };
+    E.model.openingsGroup.children.forEach((g) => g.traverse((o) => {
+      if (!(o.userData && o.userData.ssDoorPart === "windowInterior")) return;
+      const k = g.userData.wall === "west" ? "west" : "east";
+      if (o.visible) out[k][0]++;
+      if (o.visible && o.geometry.drawRange.count > 0) out[k][1]++;
+    }));
+    return out;
+  });
+  const lookFrom = (x) => page.evaluate((x) => { const E = window.__ss3dEngine; E.camera.position.set(x, 6, 2); E.controls.target.set(0, 3, 0); E.camera.lookAt(0, 3, 0); E.camera.updateProjectionMatrix(); E.render(); }, x);
+  await lookFrom(-30);
+  let rs = await roomState();
+  ok("T from outside the west wall, the west rooms draw and the east ones do not", JSON.stringify(rs) === JSON.stringify({ west: [4, 4], east: [4, 0] }), JSON.stringify(rs));
+  await lookFrom(30);
+  rs = await roomState();
+  ok("T from outside the east wall, the east rooms draw and the west ones do not", JSON.stringify(rs) === JSON.stringify({ west: [4, 0], east: [4, 4] }), JSON.stringify(rs));
+  await page.evaluate(() => { const E = window.__ss3dEngine; E.interior = true; E.applyShellMode(E); });
+  await lookFrom(-30);
+  rs = await roomState();
+  ok("T \"look inside\" hides every room", JSON.stringify(rs) === JSON.stringify({ west: [0, 0], east: [0, 0] }), JSON.stringify(rs));
+  await page.screenshot({ path: join(shots, "transom-lookinside.png") });
+  await page.evaluate(() => { const E = window.__ss3dEngine; E.interior = false; E.applyShellMode(E); });
+  await lookFrom(-30);
+  rs = await roomState();
+  ok("T ...and they come back with it off", JSON.stringify(rs) === JSON.stringify({ west: [4, 4], east: [4, 0] }), JSON.stringify(rs));
 
   // The footer row on Yoder's door: None takes the transom out, the transom chip puts it back.
   const yi = TPLAN.findIndex((d) => d.key === "tYoder"), yid = items[yi].id;
