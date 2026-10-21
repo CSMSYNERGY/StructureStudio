@@ -694,7 +694,12 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
                       ? <>on for your account, but the lookup service isn't connected right now — estimates use your company and local rates until it is.</>
                       : <>on for your account. An estimate's rate can be verified against its delivery address before your customer signs.
                           {/* usage24h is null when the lookup ledger can't be counted: unknown, not zero. */}
-                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
+                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}
+                          {/* This UTC month (migration 319). Each figure is null when it can't be read: then it isn't shown. */}
+                          {typeof taxInfo.usageMonth === "number" && <> This month: {taxInfo.usageMonth} lookup{taxInfo.usageMonth === 1 ? "" : "s"}
+                            {typeof taxInfo.spendMonthCents === "number" && (taxInfo.spendMonthCents > 0
+                              ? <>, ${(taxInfo.spendMonthCents / 100).toFixed(2)} from your wallet (Billing → Transactions → Tax)</>
+                              : <>, nothing charged</>)}.</>}</>}
                 </div>
               </>);
             })()}
@@ -1325,7 +1330,7 @@ const FOUNDING_ANNUAL_ONLY = true;
 // INLINE STYLES ONLY, like every component here (there is no component stylesheet), so the phone
 // layout is chosen by measuring the card rather than by a media query: under WALLET_TX_NARROW_PX
 // each line becomes two rows, description over date on the left, amount over balance on the right.
-const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["funds", "Funds"], ["other", "Other"]];
+const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["tax", "Tax"], ["funds", "Funds"], ["other", "Other"]];
 const WALLET_TX_NARROW_PX = 560;
 // Narrower still (a 320 px phone with the settings rail beside it leaves a ~230 px card), two date
 // fields side by side clip their own dates, so they stack.

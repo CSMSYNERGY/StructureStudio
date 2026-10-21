@@ -90,6 +90,8 @@ type World = {
   walletThrows?: boolean;
   billingExempt?: boolean;
   sentToCustomer?: boolean;                     // ss_quote_sent_at set: confirmResend is needed
+  /** tax_lookups this month (migration 319): the count, the charged rows' cents, a failed spend read. */
+  month?: { count: number | null; charged: number[]; spendError?: boolean };
 };
 type Trace = { reads: string[]; writes: string[]; rpcs: string[]; fetched: string[]; errors: Record<string, unknown>[] };
 
@@ -119,6 +121,15 @@ function answer(world: World, table: string, ops: any[][]): { data: unknown; err
   if (table === "wallet_accounts") {
     if (world.walletError) return { data: null, error: DOWN };
     return { data: world.wallet === undefined ? null : world.wallet, error: null };
+  }
+  // The month's figures for tax_settings (taxUsage.ts monthTaxUsage): a head count from the 1st,
+  // and the charged rows' cents. The 24-hour count (gt) is left unanswered, as before.
+  if (table === "tax_lookups" && world.month && has("gte")) {
+    if (cols === "id") return { data: null, error: null, count: world.month.count } as any;
+    if (cols === "charge_cents") {
+      if (world.month.spendError) return { data: null, error: { code: "42703", message: "column charge_cents does not exist" } };
+      return { data: world.month.charged.map((c) => ({ charge_cents: c })), error: null };
+    }
   }
   void cols;
   return { data: has("maybeSingle") || has("single") ? null : [], error: null };
@@ -294,6 +305,20 @@ Deno.test("armed: a press that carries no price, or another one, is 409 price_ch
   }
   reachedClaim(await drive(PRICED, { price: ARMED, wallet }), "the stated price");
   reachedClaim(await drive({ ...PRESS, quotedPriceCents: 10 }, { wallet }), "disarmed: a stale 10c confirm is free now, never refused");
+});
+
+// ─── 6b. this month's lookups and spend, beside the 24-hour cap (migration 319) ─────────────────
+Deno.test("tax_settings: this month's lookups and what they took from the wallet; unknown is null, never 0", async () => {
+  const card = async (world: World) => {
+    const out = await drive({ action: "tax_settings" }, world);
+    assertEquals(out.status, 200, JSON.stringify(out.body));
+    assertEquals([out.body.ssMode, out.body.lookupEnabled], [true, true], "the rest of the card still loads");
+    return [out.body.usageMonth, out.body.spendMonthCents, typeof out.body.monthStart === "string" && out.body.monthStart.endsWith("-01T00:00:00.000Z")];
+  };
+  assertEquals(await card({ month: { count: 7, charged: [10, 10, 25] } }), [7, 45, true]);
+  assertEquals(await card({ month: { count: 3, charged: [] } }), [3, 0, true], "nothing charged (the live meters) is a real 0");
+  assertEquals(await card({ month: { count: 3, charged: [], spendError: true } }), [3, null, true], "before 319: the spend is unknown");
+  assertEquals(await card({}), [null, 0, true], "a count the ledger does not answer is unknown (null), and never fails the card");
 });
 
 // ─── 7. the price the confirm states ───────────────────────────────────────────────────────────
