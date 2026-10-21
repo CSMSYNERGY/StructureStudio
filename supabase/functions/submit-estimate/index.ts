@@ -2175,7 +2175,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // the window away with it. The name is display text only (the price is re-read from
       // fixture_items above), trimmed and capped so a forged body cannot write an essay on the quote.
       const doorName = w && w.inDoor ? (String(w.doorName || "Door").trim().slice(0, 80) || "Door") : null;
-      const place = w && w.dormer ? "in the dormer" : doorName ? `Window in door: ${doorName}` : (w && w.wall ? `${w.wall} wall` : null);
+      // A TRANSOM in the door (fixture_items.door_window_at, 2026-10-21) sends `doorWindowAt: "top"`
+      // beside `inDoor`: glass across the top of each leaf rather than in its upper panel. Same price
+      // rule (the catalog price, one line per leaf); only the words and the group differ. Anything
+      // but the exact "top" is the panel window it always was.
+      const doorTop = !!doorName && w.doorWindowAt === "top";
+      const place = w && w.dormer ? "in the dormer" : doorName ? `${doorTop ? "Transom in door" : "Window in door"}: ${doorName}` : (w && w.wall ? `${w.wall} wall` : null);
       const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
       // The dressing joins the group key for the same reason the colour does: two otherwise
       // identical windows, one with shutters and one without, are two different products to
@@ -2195,8 +2200,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // identical wall window's group it would be described as on that window's wall (and the other
       // way round), and two doors' windows would both be named after whichever door came first. It
       // KEEPS the win: row key, unlike the dormer: the designer's Details folds it into that very row
-      // (computeLayoutPricingRows' customWindows), so a rep's price on the row re-prices it too.
-      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : doorName ? `door:${doorName}` : ""}`
+      // (computeLayoutPricingRows' customWindows), so a rep's price on the row re-prices it too. A
+      // transom adds its position, so it is never described as a panel window in the same door.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : doorName ? `door:${doorName}${doorTop ? "|top" : ""}` : ""}`
         + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null), rowKey };
       if (g.rowKey !== rowKey) g.rowKey = null;

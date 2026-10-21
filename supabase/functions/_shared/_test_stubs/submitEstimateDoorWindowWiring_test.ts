@@ -19,6 +19,12 @@
 //      same ssDoorWindowCount answers both, so the designer and the estimate cannot disagree.
 //   4. ABSENT MEANS TODAY. Doors with no window, and designs from before the stamps, produce the
 //      estimate they always did.
+//   5. THE TRANSOM (fixture_items.door_window_at 'top', 2026-10-21; Yoder Barns). A 29 x 10 transom
+//      fits the leaf of a 72 in double and of a 36 in door where no panel window that wide would; it
+//      goes in the built looks, the board-and-batten looks and a slab with no photo, never a photo
+//      door or a slide-up; each leaf is one "Transom in door: <door>" line at the catalog price, in
+//      its own group, and the Details rows agree. A signed order resubmitted unchanged raises no
+//      change order, and adding a transom to one says exactly what was added.
 //
 // HOW. submitEstimatePartitionWiring_test's harness: Deno.serve is stubbed while
 // submit-estimate/index.ts is imported, the import map swaps supabase-js for supabase_stub.ts, every
@@ -32,6 +38,7 @@
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert";
 import { stubAuth, stubDb } from "./supabase_stub.ts";
 import { CMP, JSX, designer, detailsSubtotal, lift } from "./designerPricing.ts";
+import { changeOrderDescription } from "../changeOrderDiff.ts";
 
 const realServe = Deno.serve;
 let handler: ((req: Request) => Promise<Response>) | null = null;
@@ -60,10 +67,13 @@ Deno.test("the lifted door-window helpers and payload block are byte-identical i
 });
 const W = new Function(`${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps, ssItemPlacesKey, ssRemoveFromRow,
+  ssDoorWindowLookOk, ssDoorPhotoOf,
   payload: (items, C, frontWall) => ${R_CMP.pay}\n          }),
 };`)() as {
-  ssDoorWindowCount: (it: any, look: string) => number;
-  ssDoorWindowFit: (w: number, h: number, wi: any, hi: any) => any;
+  ssDoorWindowCount: (it: any, look: string, photo?: boolean) => number;
+  ssDoorWindowFit: (w: number, h: number, wi: any, hi: any, at?: string) => any;
+  ssDoorWindowLookOk: (look: string, at: string, photo: boolean, operation: string | null) => boolean;
+  ssDoorPhotoOf: (fixtures: any[], it: any) => boolean;
   ssDoorLeafFt: (wi: any, hi: any, dbl: boolean) => { w: number; h: number } | null;
   ssDoorWindowLines: (items: any[], fixtures: any[]) => any[];
   doorWindowStamps: (w: any) => Record<string, unknown>;
@@ -98,9 +108,18 @@ const FIXTURES = [
   { id: "fx-plank", category: "door", name: "Barn door", price: 450, width_in: 36, height_in: 80, door_style: "plank" },
   { id: "fx-lite", category: "window", name: "Door lite", price: 95, width_in: 18, height_in: 24, in_door: true },
   { id: "fx-big", category: "window", name: "Big lite", price: 150, width_in: 30, height_in: 40, in_door: true },
+  // The TRANSOM (door_window_at 'top', 2026-10-21): Yoder Barns' own row, 29 x 10 at $81, and their
+  // 72 in double; a plain slab with a photo (which cannot hold one); a door left on 'auto' with none.
+  { id: "fx-transom", category: "window", name: "Transom Windows", price: 81, width_in: 29, height_in: 10, in_door: true, door_window_at: "top" },
+  { id: "fx-yoder2", category: "door", name: "Cross buck Double Doors", price: 1200, width_in: 72, height_in: 72, door_style: "xbrace", op_double: true },
+  { id: "fx-slab", category: "door", name: "Plain door", price: 350, width_in: 36, height_in: 80 },
+  { id: "fx-photo", category: "door", name: "Photo door", price: 380, width_in: 36, height_in: 80, image_url: "https://stub.supabase.co/storage/v1/object/public/fixtures/door.jpg" },
 ].map((f) => ({ image_url: null, show_image_on_estimate: false, color_mode: "fixed", archived: false, taxable: true, ...f }));
-// The designer's catalog (get_fixtures' shape): ids, prices and the door looks it reads.
-const DESIGNER_FIXTURES = FIXTURES.map((f) => ({ id: f.id, category: f.category, price: f.price, ...(f.category === "door" ? { doorStyle: f.door_style } : {}), ...(f.in_door ? { inDoor: true } : {}) }));
+// The designer's catalog (get_fixtures' shape): ids, prices, the door looks it reads, a door's photo,
+// and the sparse inDoor / doorWindowAt.
+const DESIGNER_FIXTURES = FIXTURES.map((f: any) => ({ id: f.id, category: f.category, price: f.price,
+  ...(f.category === "door" && f.door_style ? { doorStyle: f.door_style } : {}), ...(f.image_url ? { imageUrl: f.image_url } : {}),
+  ...(f.in_door ? { inDoor: true } : {}), ...(f.door_window_at === "top" ? { doorWindowAt: "top" } : {}) }));
 
 type World = { inclusion?: boolean };
 type Trace = { designUpdates: any[]; ghl: { url: string; method: string; body: any }[] };
@@ -400,4 +419,117 @@ Deno.test("the window row's × reaches the door that carries the window, and kee
   // ...and the row it leaves is gone.
   const after = detailsSubtotal(D, SEL, [kept], [], C({}), PAINT);
   assertEquals(after.priceRows.filter((x: any) => x.key === "win:fx-lite|"), []);
+});
+
+// ─── 5. The transom (door_window_at 'top', 2026-10-21) ─────────────────────────────────────────
+const TOP = W.doorWindowStamps({ id: "fx-transom", name: "Transom Windows", widthIn: 29, heightIn: 10, price: 81, doorWindowAt: "top" });
+const TITEMS: any[] = [
+  door(20, fx("fx-yoder2"), "south", "double", TOP),       // Yoder's 72 in double, X-brace: one per leaf
+  door(21, fx("fx-classic"), "east", "right", TOP),        // a built look
+  door(22, fx("fx-slab"), "west", "left", TOP),            // a plain slab with no photo
+  door(23, fx("fx-photo"), "west", "right", TOP),          // a photo door: nothing
+  door(24, fx("fx-plank"), "north", "slideup", TOP),       // a slide-up: nothing
+  door(26, fx("fx-american2"), "east", "double", TOP),     // a 60 in double's 29 in leaf is too narrow: nothing
+  door(25, fx("fx-american2"), "north", "double", LITE),   // panel windows beside them, as before
+];
+
+Deno.test("transom stamps: a sixth field, 'top' for a transom and null otherwise", () => {
+  assertEquals(TOP.doorWindowAt, "top");
+  assertEquals(LITE.doorWindowAt, null);
+  assertEquals(Object.keys(NONE).sort(), ["doorWindowAt", "doorWindowHeightIn", "doorWindowId", "doorWindowName", "doorWindowPrice", "doorWindowWidthIn"]);
+  assert(Object.values(NONE).every((v) => v === null));
+  // Anything but the exact "top" is a panel window.
+  assertEquals(W.doorWindowStamps({ id: "x", name: "X", widthIn: 18, heightIn: 24, price: 1, doorWindowAt: "TOP" }).doorWindowAt, null);
+});
+
+Deno.test("ssDoorWindowFit 'top': Yoder's 29 x 10 fits a 72 in double's leaf and a 36 in door, under the top rail", () => {
+  const yoder = W.ssDoorLeafFt(72, 72, true)!, single = W.ssDoorLeafFt(36, 80, false)!, narrow = W.ssDoorLeafFt(60, 80, true)!;
+  const r = W.ssDoorWindowFit(yoder.w, yoder.h, 29, 10, "top");
+  assert(r, "fits the 35 in leaf");
+  assert(Math.abs((r.x0 + r.x1) / 2 - yoder.w / 2) < 1e-9, "centred across the leaf");
+  assert(Math.abs(r.y1 - (yoder.h - 0.29)) < 1e-9 && Math.abs(r.y1 - r.y0 - 10 / 12) < 1e-9, `its top under the 3.5 in top rail: ${JSON.stringify(r)}`);
+  assertEquals(W.ssDoorWindowFit(yoder.w, yoder.h, 29, 10), null, "the same window does NOT fit the upper panel (the 289 rule)");
+  assert(W.ssDoorWindowFit(single.w, single.h, 29, 10, "top"), "fits a 36 in door");
+  assertEquals(W.ssDoorWindowFit(narrow.w, narrow.h, 29, 10, "top"), null, "not a 60 in double's 29 in leaf: 1.5 in a side is the least");
+  // Height: at most 30% of the leaf, and the band (glass, casing, rail) ends above 60% of it.
+  assert(W.ssDoorWindowFit(yoder.w, yoder.h, 29, 19, "top"), "19 in tall still leaves the panel");
+  assertEquals(W.ssDoorWindowFit(yoder.w, yoder.h, 29, 20, "top"), null, "20 in would run the band below 60% of the leaf");
+  assertEquals(W.ssDoorWindowFit(yoder.w, yoder.h, 29, 24, "top"), null, "24 in is over 30% of the leaf");
+});
+
+Deno.test("ssDoorWindowLookOk: a transom goes in the built, board-and-batten and photo-less slab doors; a panel window in the built four", () => {
+  for (const l of ["american", "basic", "classic", "dutch", "plank", "zbrace", "xbrace", "auto"]) assert(W.ssDoorWindowLookOk(l, "top", false, "right"), l);
+  assertFalse(W.ssDoorWindowLookOk("auto", "top", true, "right"), "a photo door cannot be cut");
+  assert(W.ssDoorWindowLookOk("xbrace", "top", true, "right"), "a board-and-batten door's photo is not drawn, so it can");
+  for (const l of ["rollup", "gothic"]) assertFalse(W.ssDoorWindowLookOk(l, "top", false, "right"), l);
+  for (const l of ["american", "auto", "plank"]) assertFalse(W.ssDoorWindowLookOk(l, "top", false, "slideup"), `${l} slide-up`);
+  for (const l of ["american", "basic", "classic", "dutch"]) assert(W.ssDoorWindowLookOk(l, "panel", true, "double"), l);
+  for (const l of ["auto", "plank", "zbrace", "xbrace", "rollup"]) assertFalse(W.ssDoorWindowLookOk(l, "panel", false, "right"), l);
+});
+
+Deno.test("ssDoorWindowCount: one transom per leaf where the look and the leaf take it", () => {
+  const F = DESIGNER_FIXTURES;
+  const counts = TITEMS.map((i) => W.ssDoorWindowCount(i, (F.find((f: any) => f.id === i.fixtureItemId) as any).doorStyle || "auto", W.ssDoorPhotoOf(F, i)));
+  assertEquals(counts, [2, 1, 1, 0, 0, 0, 2]);
+  assert(W.ssDoorPhotoOf(F, TITEMS[3]) && !W.ssDoorPhotoOf(F, TITEMS[2]) && !W.ssDoorPhotoOf(F, { fixtureItemId: "gone" }));
+  // The 289 call without a photo argument still answers for every panel window.
+  assertEquals(W.ssDoorWindowCount(ITEMS[0], "classic"), 1);
+});
+
+Deno.test("the designer's payload: a transom's lines say doorWindowAt 'top'; a panel window's lines are unchanged", () => {
+  const lines = W.payload(TITEMS, C({}), "south");
+  assertEquals(lines.map((l: any) => [l.name, l.fixtureItemId, l.price, l.doorName, l.doorWindowAt ?? "-"]), [
+    ["Transom Windows", "fx-transom", 81, "Cross buck Double Doors", "top"],
+    ["Transom Windows", "fx-transom", 81, "Cross buck Double Doors", "top"],
+    ["Transom Windows", "fx-transom", 81, "Classic door", "top"],
+    ["Transom Windows", "fx-transom", 81, "Plain door", "top"],
+    ["Door lite", "fx-lite", 95, "American double", "-"],
+    ["Door lite", "fx-lite", 95, "American double", "-"],
+  ]);
+  assert(lines.filter((l: any) => l.name === "Door lite").every((l: any) => !("doorWindowAt" in l)), "sparse: a panel window's line has no new key");
+  assertEquals(W.payload(ITEMS, C({}), "south").filter((l: any) => "doorWindowAt" in l), [], "the 289 design's payload is exactly what it was");
+});
+
+Deno.test("the estimate: 'Transom in door: <door>' per door at the catalog price; panel windows still 'Window in door'", async () => {
+  const r = await submit(payloadFor(TITEMS, {}), {});
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(named(r.snap, "Transom Windows").map((l: any) => [l.kind, l.qty, l.amount, l.desc]), [
+    ["window", 2, 81, "2'5\"×10\" · Transom in door: Cross buck Double Doors"],
+    ["window", 1, 81, "2'5\"×10\" · Transom in door: Classic door"],
+    ["window", 1, 81, "2'5\"×10\" · Transom in door: Plain door"],
+  ]);
+  assertEquals(named(r.snap, "Door lite").map((l: any) => [l.qty, l.desc]), [[2, "1'6\"×2' · Window in door: American double"]]);
+  const client = detailsSubtotal(D, SEL, TITEMS, [], C({}), PAINT);
+  assertEquals(linesTotal(r.estimate.items), r2(client.subtotal), "PARITY: Details subtotal == the estimate's line total");
+  assertEquals(client.priceRows.filter((x: any) => x.key === "win:fx-transom|").map((x: any) => [x.qty, x.total]), [[4, 324]]);
+});
+
+Deno.test("the position joins the group key: the same window as a panel and as a transom in one door name is two lines", async () => {
+  const p: any = payloadFor([], {});
+  const base = { name: "Transom Windows", widthIn: 29, heightIn: 10, price: 81, wall: "front", inDoor: true, doorName: "Classic door", fixtureItemId: "fx-transom",
+    colorId: null, colorLabel: null, shutters: false, shutterColorId: null, shutterColorLabel: null, flowerBox: false, flowerBoxColorId: null, flowerBoxColorLabel: null };
+  p.windows = [{ ...base, doorWindowAt: "top" }, { ...base }, { ...base, doorWindowAt: "TOP" }];
+  const r = await submit(p, {});
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(named(r.snap, "Transom Windows").map((l: any) => [l.qty, l.desc]), [
+    [1, "2'5\"×10\" · Transom in door: Classic door"],
+    [2, "2'5\"×10\" · Window in door: Classic door"],
+  ]);
+});
+
+Deno.test("change orders: a signed order resubmitted unchanged raises none; adding transoms says exactly that", async () => {
+  const a = await submit(payloadFor(TITEMS, {}), {});
+  const b = await submit(payloadFor(TITEMS, {}), {});
+  assertEquals(a.status, 200, JSON.stringify(a.body));
+  assertEquals(changeOrderDescription(a.snap, b.snap), null, "a transom design resubmitted as it was");
+  // A door placed before the stamp (no doorWindowAt key) and the same door placed now (null) price alike.
+  const legacy = ITEMS.map((i) => { if (i.type !== "fixtureDoor") return i; const { doorWindowAt: _x, ...rest } = i; return rest; });
+  const old = await submit(payloadFor(legacy, {}), {});
+  const now = await submit(payloadFor(ITEMS, {}), {});
+  assertEquals(changeOrderDescription(old.snap, now.snap), null, "a 289 order resubmitted after the transom shipped");
+  const bare = TITEMS.map((i) => (i.type === "fixtureDoor" ? { ...i, ...NONE } : i));
+  const before = await submit(payloadFor(bare, {}), {});
+  const text = changeOrderDescription(before.snap, a.snap) || "";
+  assert(text.includes("Added: Transom Windows ×4 ($324.00)"), text);
+  assert(text.includes("Added: Door lite ×2 ($190.00)"), text);
 });

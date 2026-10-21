@@ -2693,14 +2693,22 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
   // silently, exactly like a single-swing door shows no Swing block.
   const colorable = !!(sel && (sel.colorMode === "paint" || sel.colorMode === "match"));
   const colorOpts = colorable ? colorList : [];
-  // The windows this door can take: only on the four built looks, never on a slide-up, and only the
-  // ones ssDoorWindowFit puts in ONE leaf of this size -- a double's leaf, once Double is chosen.
+  // The windows this door can take: the ones whose position this door's look allows
+  // (ssDoorWindowLookOk: a panel window on the four built looks, a transom on those, the
+  // board-and-batten looks and a slab with no photo; never on a slide-up), and only the ones
+  // ssDoorWindowFit puts in ONE leaf of this size -- a double's leaf, once Double is chosen.
   // The pick is re-checked against that list at every render rather than reset by an effect, so
   // switching to an operation the window no longer fits simply drops it.
-  const winLeaf = (sel && SS_TRIM_DOOR_LOOKS[sel.doorStyle] && operation !== "slideup")
-    ? ssDoorLeafFt(sel.widthIn, sel.heightIn, operation === "double") : null;
-  const winOpts = winLeaf ? (Array.isArray(doorWindows) ? doorWindows : []).filter((w) => w && ssDoorWindowFit(winLeaf.w, winLeaf.h, w.widthIn, w.heightIn)) : [];
+  const selLook = sel && typeof sel.doorStyle === "string" ? sel.doorStyle : "auto";
+  const winAt = (w) => (w && w.doorWindowAt === "top" ? "top" : "panel");
+  const winLeaf = sel ? ssDoorLeafFt(sel.widthIn, sel.heightIn, operation === "double") : null;
+  const winOpts = winLeaf ? (Array.isArray(doorWindows) ? doorWindows : []).filter((w) => w
+    && ssDoorWindowLookOk(selLook, winAt(w), !!sel.imageUrl, operation)
+    && ssDoorWindowFit(winLeaf.w, winLeaf.h, w.widthIn, w.heightIn, winAt(w))) : [];
   const pickedWin = (doorWindow && winOpts.find((w) => w.id === doorWindow.id)) || null;
+  // "Transom" when every window offered is one, so Yoder's door reads the way they sell it.
+  const winTops = winOpts.filter((w) => winAt(w) === "top").length;
+  const winHead = winTops === 0 ? "Window" : winTops === winOpts.length ? "Transom" : "Window or transom";
   const OP_LABEL = { right: "Right", left: "Left", double: "Double", slideup: "Slide up" };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
@@ -2780,11 +2788,11 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
         )}
         {winOpts.length > 0 && (
           <div data-ss-door-window-row="1" style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Window</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>{winHead}</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {chip("none", !pickedWin, "No window", () => setDoorWindow(null))}
               {winOpts.map((w) => chip(w.id, !!pickedWin && pickedWin.id === w.id,
-                `${w.name || "Window"} (${fmtFtIn(w.widthIn)} × ${fmtFtIn(w.heightIn)})${showPricing && Number(w.price) > 0 ? ` +${money(w.price)}${operation === "double" ? " each" : ""}` : ""}`,
+                `${w.name || "Window"} (${winTops > 0 && winTops < winOpts.length && winAt(w) === "top" ? "transom, " : ""}${fmtFtIn(w.widthIn)} × ${fmtFtIn(w.heightIn)})${showPricing && Number(w.price) > 0 ? ` +${money(w.price)}${operation === "double" ? " each" : ""}` : ""}`,
                 () => setDoorWindow(w)))}
             </div>
             {operation === "double" && pickedWin && (
@@ -3556,7 +3564,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId));
         // A window drawn in the door is a placed window (migration 289): the edge's placedKeys takes
         // every windows[] line's fixture id, the in-door ones included, and gives it no credit.
-        if (ssDoorWindowCount(it, ssDoorLookOf(C && C.fixtures, it)) > 0) placedKeys.add(String(it.doorWindowId));
+        if (ssDoorWindowCount(it, ssDoorLookOf(C && C.fixtures, it), ssDoorPhotoOf(C && C.fixtures, it)) > 0) placedKeys.add(String(it.doorWindowId));
         continue;
       }
       if (it.type === "window") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); else placedKeys.add("window"); continue; }
@@ -3951,10 +3959,23 @@ function ssSafeUrl(u) {
 // is charged only where it is drawn -- the dormer window's rule, and the reason these live in one
 // block instead of being restated at each site.
 const SS_TRIM_DOOR_LOOKS = { american: true, basic: true, classic: true, dutch: true };
+// A TRANSOM IN A DOOR (fixture_items.door_window_at, 2026-10-21; Yoder Barns asked for "transom
+// windows in doors"). A window row the builder set to go "as a transom at the top of the door" comes
+// from get_fixtures with `doorWindowAt: 'top'` (only then) and sits under the top rail of every leaf,
+// with a rail of the frame's board under it, instead of in the upper panel. It goes in more doors than
+// a panel window: the four built looks, the three board-and-batten looks and a plain slab ('auto' with
+// no photo), because each of those is drawn here and can be cut round the glass. Never a roll-up, a
+// slide-up, or a door shown by its photo: a photo cannot be cut.
+const SS_DOOR_TOP_LOOKS = { american: true, basic: true, classic: true, dutch: true, plank: true, zbrace: true, xbrace: true, auto: true };
 // The aluminium threshold the leaves of these doors stand on (they start this far above the bottom
 // of the opening, where a plank leaf starts 0.05 ft up), the window's own casing ring, and the gap
 // between that casing and the door's frame, all in feet.
 const SS_TRIM_DOOR_SILL_FT = 0.2, SS_DOOR_WIN_CASE_FT = 0.08, SS_DOOR_WIN_PAD_FT = 0.04;
+// A transom's sides are narrow, 1.5 in with its casing, not the 3.5 in stiles: Yoder's 29 in transom
+// has to fit the 35 in leaf of their 72 in double (and a 36 in door's). It is at most 30% of the leaf
+// tall, and the band it makes (glass, casing and the rail under it) ends above 60% of the leaf, clear
+// of both mid rails (42% on the built looks, 55% on board-and-batten), so the door keeps a panel.
+const SS_DOOR_TOP_SIDE_FT = 0.125, SS_DOOR_TOP_MAX_H = 0.3, SS_DOOR_TOP_FLOOR = 0.6;
 // The frame board: both stiles, the rails and the mid rail are all this wide. Bounded by the leaf as
 // well as by the real 3.5 in board, plankDoorLeaf's reason: a narrow leaf needs a panel left over.
 function ssTrimDoorBoardFt(w, h) {
@@ -3966,11 +3987,18 @@ function ssTrimDoorFields(w, h) {
   const F = ssTrimDoorBoardFt(w, h), mid = h * 0.42;
   return { F, mid, lower: { x0: F, x1: w - F, y0: F, y1: mid - F / 2 }, upper: { x0: F, x1: w - F, y0: mid + F / 2, y1: h - F } };
 }
-// Where a window winWIn x winHIn (inches) sits in the upper panel of a leaf w x h (feet): centred,
-// with its casing and a clearance all round, or null when the panel cannot hold it.
-function ssDoorWindowFit(w, h, winWIn, winHIn) {
+// Where a window winWIn x winHIn (inches) sits in a leaf w x h (feet), or null when the leaf cannot
+// hold it. `at` "panel" (or absent): in the upper panel, centred, with its casing and a clearance all
+// round. `at` "top": a transom, centred across the leaf with its top under the top rail.
+function ssDoorWindowFit(w, h, winWIn, winHIn, at) {
   const ww = Number(winWIn) / 12, wh = Number(winHIn) / 12;
   if (!(ww > 0) || !(wh > 0) || !(w >= 0.5) || !(h >= 1)) return null;
+  if (at === "top") {
+    const F = ssTrimDoorBoardFt(w, h), y1 = h - F, y0 = y1 - wh;
+    if (ww + 2 * SS_DOOR_TOP_SIDE_FT > w + 1e-9 || wh > h * SS_DOOR_TOP_MAX_H + 1e-9
+      || y0 - SS_DOOR_WIN_CASE_FT - F < h * SS_DOOR_TOP_FLOOR - 1e-9) return null;
+    return { x0: (w - ww) / 2, x1: (w + ww) / 2, y0, y1 };
+  }
   const u = ssTrimDoorFields(w, h).upper, pad = SS_DOOR_WIN_CASE_FT + SS_DOOR_WIN_PAD_FT;
   if (ww + 2 * pad > u.x1 - u.x0 + 1e-9 || wh + 2 * pad > u.y1 - u.y0 + 1e-9) return null;
   const cx = (u.x0 + u.x1) / 2, cy = (u.y0 + u.y1) / 2;
@@ -3991,36 +4019,64 @@ function ssDoorLookOf(fixtures, it) {
   const fx = (Array.isArray(fixtures) ? fixtures : []).find((f) => f && String(f.id) === String(it.fixtureItemId));
   return (fx && typeof fx.doorStyle === "string") ? fx.doorStyle : "auto";
 }
+// Whether a placed door's catalog row has a photo (get_fixtures' imageUrl), which is how the renderer
+// shows an 'auto' door, and a photo cannot hold a transom. A door not in the list has none, which is
+// also what the renderer reads for it (the plain slab).
+function ssDoorPhotoOf(fixtures, it) {
+  if (!it || it.fixtureItemId == null) return false;
+  const fx = (Array.isArray(fixtures) ? fixtures : []).find((f) => f && String(f.id) === String(it.fixtureItemId));
+  return !!(fx && fx.imageUrl);
+}
+// Where a placed door's window sits: "top" (a transom) only when it was stamped so; anything else,
+// a door placed before the stamp existed included, is the upper panel it always was.
+function ssDoorWindowAtOf(it) {
+  return it && it.doorWindowAt === "top" ? "top" : "panel";
+}
+// Whether a door of this look can carry a window in this position: a panel window only in the four
+// built looks, a transom in the SS_DOOR_TOP_LOOKS ones unless an 'auto' door shows its photo. Never on
+// a slide-up: that is not a hinged leaf.
+function ssDoorWindowLookOk(look, at, photo, operation) {
+  if (operation === "slideup") return false;
+  if (at !== "top") return !!SS_TRIM_DOOR_LOOKS[look];
+  return !!SS_DOOR_TOP_LOOKS[look] && !(look === "auto" && photo);
+}
 // How many windows a placed door carries: one per leaf, so two on a double, when a window was picked
-// for it, the door is one of the four built looks, it is hinged, and the window fits its leaf at the
-// door's catalog size; otherwise none. The renderer, the payload and the Details rows all call this.
-function ssDoorWindowCount(it, look) {
-  if (!it || it.type !== "fixtureDoor" || !it.doorWindowId || !SS_TRIM_DOOR_LOOKS[look] || it.operation === "slideup") return 0;
+// for it, the door's look can take it where it sits (ssDoorWindowLookOk), it is hinged, and the window
+// fits its leaf at the door's catalog size; otherwise none. The renderer, the payload and the Details
+// rows all call this. `photo` matters only to a transom (ssDoorPhotoOf).
+function ssDoorWindowCount(it, look, photo) {
+  if (!it || it.type !== "fixtureDoor" || !it.doorWindowId) return 0;
+  const at = ssDoorWindowAtOf(it);
+  if (!ssDoorWindowLookOk(look, at, photo, it.operation)) return 0;
   const dbl = it.operation === "double";
   const leaf = ssDoorLeafFt(it.widthIn, it.heightIn, dbl);
-  if (!leaf || !ssDoorWindowFit(leaf.w, leaf.h, it.doorWindowWidthIn, it.doorWindowHeightIn)) return 0;
+  if (!leaf || !ssDoorWindowFit(leaf.w, leaf.h, it.doorWindowWidthIn, it.doorWindowHeightIn, at)) return 0;
   return dbl ? 2 : 1;
 }
-// The five fields a placed door stamps for its window. ALL FIVE ON EVERY PLACEMENT PATH, null when
+// The six fields a placed door stamps for its window. ALL SIX ON EVERY PLACEMENT PATH, null when
 // there is none -- doorColorStamps' discipline -- so a swap can never carry the old door's window
 // onto the new one. Stamped, not looked up live, because the window's price is on the quote.
+// doorWindowAt is "top" for a transom and null for a panel window, so a panel window's door is
+// stamped exactly as before the transom apart from the one null.
 function doorWindowStamps(w) {
   return {
     doorWindowId: w ? w.id : null, doorWindowName: w ? (w.name || "Window") : null,
     doorWindowWidthIn: w ? (Number(w.widthIn) || null) : null, doorWindowHeightIn: w ? (Number(w.heightIn) || null) : null,
     doorWindowPrice: w ? (w.price != null ? w.price : null) : null,
+    doorWindowAt: w && w.doorWindowAt === "top" ? "top" : null,
   };
 }
 // The windows in placed doors as the window lines they price as: one per leaf, at the window's own
-// stamped price, each carrying the door it is in. NEVER folded into the door's line: an included
-// door nets its whole grouped price, which would give the window away with it.
+// stamped price, each carrying the door it is in (and "top" for a transom). NEVER folded into the
+// door's line: an included door nets its whole grouped price, which would give the window away with it.
 function ssDoorWindowLines(items, fixtures) {
   const out = [];
   (Array.isArray(items) ? items : []).forEach((it) => {
-    const n = ssDoorWindowCount(it, ssDoorLookOf(fixtures, it));
+    const n = ssDoorWindowCount(it, ssDoorLookOf(fixtures, it), ssDoorPhotoOf(fixtures, it));
     for (let k = 0; k < n; k++) {
       out.push({ type: "window", inDoor: true, door: it, fixtureItemId: it.doorWindowId, windowName: it.doorWindowName || "Window",
-        widthIn: it.doorWindowWidthIn, heightIn: it.doorWindowHeightIn, price: it.doorWindowPrice, colorId: null, colorLabel: null });
+        widthIn: it.doorWindowWidthIn, heightIn: it.doorWindowHeightIn, price: it.doorWindowPrice, colorId: null, colorLabel: null,
+        doorWindowAt: ssDoorWindowAtOf(it) });
     }
   });
   return out;
@@ -4035,7 +4091,7 @@ function ssItemPlacesKey(it, k, fixtures) {
   if (!it) return false;
   if (it.type === k || it.fixtureItemId === k) return true;
   return it.type === "fixtureDoor" && it.doorWindowId != null && String(it.doorWindowId) === String(k)
-    && ssDoorWindowCount(it, ssDoorLookOf(fixtures, it)) > 0;
+    && ssDoorWindowCount(it, ssDoorLookOf(fixtures, it), ssDoorPhotoOf(fixtures, it)) > 0;
 }
 // What taking one matched item off a Details row does to it: a door matched by a WINDOW row (the
 // in-door branch of priceRowMatcher) keeps its place and loses that window; anything else goes.
@@ -4661,7 +4717,7 @@ function priceRowMatcher(key, fixtures) {
     return (i) => (i.type === "window" && isCatalog(i) && gid(i, i.windowName || "Window") === gfid
       && String(i.colorId || "") === cId)
       || (i.type === "fixtureDoor" && cId === "" && i.doorWindowId != null && i.doorWindowPrice != null
-        && String(i.doorWindowId) === gfid && ssDoorWindowCount(i, ssDoorLookOf(fixtures, i)) > 0);
+        && String(i.doorWindowId) === gfid && ssDoorWindowCount(i, ssDoorLookOf(fixtures, i), ssDoorPhotoOf(fixtures, i)) > 0);
   }
   if (kind === "ramp") return (i) => i.type === "ramp" && isCatalog(i) && gid(i, i.rampName || "Ramp") === fid;
   return () => false;
@@ -11928,6 +11984,50 @@ function buildShed3DModel(THREE, p) {
     return b;
   };
 
+  // A WINDOW IN A DOOR LEAF: the two parts every door that can carry one shares (migration 289's
+  // panel window; the transom, fixture_items.door_window_at, 2026-10-21). `win` is trimDoorWindowOf's
+  // { rect, at, it }, or null. `put(mesh, part)` adds a mesh to the door's group and tags it
+  // userData.ssDoorPart (a falsy part leaves it untagged), which tests/harness/doorLooks.mjs counts.
+  //
+  // doorSlabCut lays the leaf's slab whole, or, with a window, in four pieces round it so the glass is
+  // a real opening the interior shows through (wallBox's world-feet UVs keep any grooves running
+  // straight past the cut). It returns the hole in wall feet, or null.
+  const doorSlabCut = (put, m, wf, a0, a1, y0, y1, win, part) => {
+    const r = win && win.rect ? win.rect : null;
+    if (!r) { put(wallBox(m, wf, a0, a1, y0, y1, 0, 0.16), part); return null; }
+    const hole = { x0: a0 + r.x0, x1: a0 + r.x1, y0: y0 + r.y0, y1: y0 + r.y1 };
+    put(wallBox(m, wf, a0, hole.x0, y0, y1, 0, 0.16), part);
+    put(wallBox(m, wf, hole.x1, a1, y0, y1, 0, 0.16), part);
+    put(wallBox(m, wf, hole.x0, hole.x1, y0, hole.y0, 0, 0.16), part);
+    put(wallBox(m, wf, hole.x0, hole.x1, hole.y1, y1, 0, 0.16), part);
+    return hole;
+  };
+  // doorWindowIn puts the window's own casing round the hole, in the window's colour, lying in the
+  // clearance the leaf leaves it with its face behind the frame's, and then the window itself through
+  // d3WindowFill's inset mode ("top" for a transom: vertical bars only, no double-hung rail).
+  const doorWindowIn = (put, og, wf, hole, win) => {
+    const c = SS_DOOR_WIN_CASE_FT, wm = mat(win.it.colorHex || "#3A3F45", { roughness: 0.6 });
+    put(wallBox(wm, wf, hole.x0 - c, hole.x0, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x1, hole.x1 + c, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), "windowCasing");
+    const n0 = og.children.length;
+    d3WindowFill(og, wf, { it: win.it, a0: hole.x0, a1: hole.x1, y0: hole.y0, y1: hole.y1 }, hole.x0, hole.x1, win.at === "top" ? "top" : true);
+    for (let k = n0; k < og.children.length; k++) og.children[k].userData.ssDoorPart = "window";
+  };
+  // A TRANSOM's frame, the same on every door that takes one: the TRANSOM RAIL, one board F tall under
+  // the window's casing and the full width of the leaf (the stiles stop under it, so nothing beside it
+  // is coplanar with it); over the rail a side piece each way, from the leaf's edge to the casing; and
+  // the top rail between them, from the casing to the top of the leaf. Returns the rail's bottom.
+  const doorTransomFrame = (put, frameMat, wf, hole, a0, a1, y1, F) => {
+    const c = SS_DOOR_WIN_CASE_FT, tr1 = hole.y0 - c, tr0 = tr1 - F;
+    put(wallBox(frameMat, wf, a0, a1, tr0, tr1, 0.13, 0.06), "transomRail");
+    put(wallBox(frameMat, wf, a0, hole.x0 - c, tr1, y1, 0.13, 0.06), "transomFrame");
+    put(wallBox(frameMat, wf, hole.x1 + c, a1, tr1, y1, 0.13, 0.06), "transomFrame");
+    put(wallBox(frameMat, wf, hole.x0 - c, hole.x1 + c, hole.y1 + c, y1, 0.13, 0.06), "transomFrame");
+    return tr0;
+  };
+
   // ONE LEAF of a board-and-batten door, built rather than photographed (186).
   //
   // Every builder in this catalog sells this door and until now the renderer could draw
@@ -11948,14 +12048,23 @@ function buildShed3DModel(THREE, p) {
   // lays one diagonal over them and 'xbrace' two. Parameterising the field rather than cloning
   // this function is the whole point — the stiles, rails, straps and latch below are the door,
   // and three more copies of them would be three more places to fix the next hinge bug.
-  const plankDoorLeaf = (og, wf, doorMat, frameMat, ironMat, a0, a1, y0, y1, hinge, latch, field) => {
+  //
+  // `win` (trimDoorWindowOf, a transom only: ssDoorWindowCount draws no panel window in these doors)
+  // cuts the slab round the glass at the top of the leaf. The boards, the stiles and the braces then
+  // stop under the transom rail (doorTransomFrame), and the top hinge moves down onto that rail rather
+  // than strap across the glass. Absent, which is every caller before the transom, nothing below moves.
+  // Only the transom's own parts are tagged.
+  const plankDoorLeaf = (og, wf, doorMat, frameMat, ironMat, a0, a1, y0, y1, hinge, latch, field, win) => {
     const w = a1 - a0, h = y1 - y0;
-    og.add(wallBox(doorMat, wf, a0, a1, y0, y1, 0, 0.16));
+    const put = (m, part) => { if (part) m.userData.ssDoorPart = part; og.add(m); return m; };
+    const hole = doorSlabCut(put, doorMat, wf, a0, a1, y0, y1, (w >= 0.5 && h >= 1) ? win : null, null);
     if (w < 0.5 || h < 1) return;                  // a sliver; the slab alone is honest
     // Stile/rail width. Bounded by the leaf as well as by the real 3.5 in board, because a
     // narrow leaf (half a 4 ft double) framed at a fixed width has no field left to board.
     const F = Math.min(0.3, w * 0.16, h * 0.09);
-    const f0 = a0 + F, f1 = a1 - F, fy0 = y0 + F, fy1 = y1 - F;
+    // Where the stiles and the boards stop: the leaf's top, or the transom rail's bottom.
+    const tr0 = hole ? hole.y0 - SS_DOOR_WIN_CASE_FT - F : y1;
+    const f0 = a0 + F, f1 = a1 - F, fy0 = y0 + F, fy1 = hole ? tr0 : y1 - F;
     const midY = y0 + h * 0.55, midH = Math.min(0.26, h * 0.06);
     if (f1 - f0 > 0.12 && fy1 - fy0 > 0.2) {
       // Vertical boards at ~6.5 in, but sized so the field divides EVENLY -- a part-width
@@ -11973,10 +12082,11 @@ function buildShed3DModel(THREE, p) {
     // Frame: two full-height stiles, then head/sill/mid rails spanning only BETWEEN them.
     // Running the rails the full width instead would put two coplanar faces at the same
     // depth in each corner, which z-fights -- the frame would flicker as the customer orbits.
-    og.add(wallBox(frameMat, wf, a0, a0 + F, y0, y1, 0.13, 0.06));
-    og.add(wallBox(frameMat, wf, a1 - F, a1, y0, y1, 0.13, 0.06));
+    og.add(wallBox(frameMat, wf, a0, a0 + F, y0, tr0, 0.13, 0.06));
+    og.add(wallBox(frameMat, wf, a1 - F, a1, y0, tr0, 0.13, 0.06));
     og.add(wallBox(frameMat, wf, f0, f1, y0, y0 + F, 0.13, 0.06));
-    og.add(wallBox(frameMat, wf, f0, f1, y1 - F, y1, 0.13, 0.06));
+    if (!hole) og.add(wallBox(frameMat, wf, f0, f1, y1 - F, y1, 0.13, 0.06));
+    else doorTransomFrame(put, frameMat, wf, hole, a0, a1, y1, F);
     og.add(wallBox(frameMat, wf, f0, f1, midY - midH / 2, midY + midH / 2, 0.13, 0.06));
     // The BRACE — the one thing that separates the three hinged styles, laid over the door
     // 'plank' already drew. It sits at 0.152, between the frame at 0.13 and the strap hinges at
@@ -12018,13 +12128,17 @@ function buildShed3DModel(THREE, p) {
     // in two steps because a taper cannot be a box. Three on a full-height door and two on a
     // short one, and the middle one sits ON the mid rail -- where a real strap is nailed,
     // because that is the one line of solid backing across the middle of the door.
+    // The transom's glass and casing, after the braces so they lie in the order the door is built.
+    if (hole) doorWindowIn(put, og, wf, hole, win);
     const he = hinge === "a0" ? a0 : a1, dir = hinge === "a0" ? 1 : -1;
     const sLen = Math.min(w * 0.5, 1.15);
     const iron = (from, to, cy, half, out, depth) => {
       const p0 = Math.min(he + dir * from, he + dir * to), p1 = Math.max(he + dir * from, he + dir * to);
       og.add(wallBox(ironMat, wf, p0, p1, cy - half, cy + half, out, depth));
     };
-    (h >= 5 ? [y0 + h * 0.13, midY, y1 - h * 0.13] : [y0 + h * 0.18, y1 - h * 0.18]).forEach((cy) => {
+    // Under a transom the top strap goes no higher than the middle of the transom rail.
+    const hTop = (k) => (hole ? Math.min(y1 - h * k, tr0 + F / 2) : y1 - h * k);
+    (h >= 5 ? [y0 + h * 0.13, midY, hTop(0.13)] : [y0 + h * 0.18, hTop(0.18)]).forEach((cy) => {
       iron(0, 0.11, cy, Math.min(0.17, h * 0.03), 0.165, 0.03);
       iron(0.11, 0.11 + sLen * 0.55, cy, 0.085, 0.165, 0.03);
       iron(0.11 + sLen * 0.55, 0.11 + sLen, cy, 0.05, 0.165, 0.03);
@@ -12065,36 +12179,34 @@ function buildShed3DModel(THREE, p) {
   //   classic   an octagon (four corner braces, each cutting ~22% of the panel's width and 25% of
   //             its height) round a solid diamond in the upper panel, and an X in the lower one;
   //   dutch     one small dark louvred vent centred in the lower panel.
-  // `win` ({ rect, it }, trimDoorWindowOf) puts a window in the upper panel IN PLACE OF that panel's
-  // decoration: the slab is cut round it, it gets its own casing in the window's colour, and
-  // d3WindowFill draws the sash, glass and grilles in its inset mode. Every mesh is tagged
-  // userData.ssDoorPart, which tests/harness/doorLooks.mjs counts.
+  // `win` ({ rect, at, it }, trimDoorWindowOf) puts a window in the leaf: the slab is cut round it
+  // (doorSlabCut), it gets its own casing in the window's colour, and d3WindowFill draws the sash,
+  // glass and grilles in its inset mode (doorWindowIn). A panel window ("panel") sits in the upper
+  // panel IN PLACE OF that panel's decoration. A TRANSOM ("top", door_window_at, 2026-10-21) sits under
+  // the top rail across the leaf: the stiles stop under a transom rail (doorTransomFrame), the upper
+  // panel is what is left between the mid rail and that rail, the Classic's octagon and diamond shrink
+  // into it, and the top hinge moves onto the transom rail. Every mesh is tagged userData.ssDoorPart,
+  // which tests/harness/doorLooks.mjs counts.
   const trimDoorLeaf = (og, wf, infillMat, frameMat, ironMat, a0, a1, y0, y1, hinge, latch, look, win) => {
     const w = a1 - a0, h = y1 - y0;
     const put = (m, part) => { m.userData.ssDoorPart = part; og.add(m); return m; };
     const fl = (w >= 0.5 && h >= 1) ? ssTrimDoorFields(w, h) : null;
-    const r = fl && win && win.rect ? win.rect : null;
-    const hole = r ? { x0: a0 + r.x0, x1: a0 + r.x1, y0: y0 + r.y0, y1: y0 + r.y1 } : null;
-    if (!hole) put(wallBox(infillMat, wf, a0, a1, y0, y1, 0, 0.16), "infill");
-    else {
-      // The slab in four pieces round the window, so the glass is a real opening the interior shows
-      // through. wallBox's world-feet UVs keep the grooves running straight past it.
-      put(wallBox(infillMat, wf, a0, hole.x0, y0, y1, 0, 0.16), "infill");
-      put(wallBox(infillMat, wf, hole.x1, a1, y0, y1, 0, 0.16), "infill");
-      put(wallBox(infillMat, wf, hole.x0, hole.x1, y0, hole.y0, 0, 0.16), "infill");
-      put(wallBox(infillMat, wf, hole.x0, hole.x1, hole.y1, y1, 0, 0.16), "infill");
-    }
+    const hole = doorSlabCut(put, infillMat, wf, a0, a1, y0, y1, fl ? win : null, "infill");
     if (!fl) return;                               // a sliver; the slab alone is honest
     const F = fl.F, f0 = a0 + F, f1 = a1 - F, midY = y0 + fl.mid;
+    const top = !!hole && win.at === "top";
+    // Where the stiles stop and the upper panel ends: the leaf's top rail, or the transom rail's bottom.
+    const tr0 = top ? hole.y0 - SS_DOOR_WIN_CASE_FT - F : y1;
     // Frame: two full-height stiles, then the rails BETWEEN them -- plankDoorLeaf's reason: rails run
     // the full width would put coplanar faces in each corner, and the frame would flicker.
-    put(wallBox(frameMat, wf, a0, f0, y0, y1, 0.13, 0.06), "frame");
-    put(wallBox(frameMat, wf, f1, a1, y0, y1, 0.13, 0.06), "frame");
+    put(wallBox(frameMat, wf, a0, f0, y0, tr0, 0.13, 0.06), "frame");
+    put(wallBox(frameMat, wf, f1, a1, y0, tr0, 0.13, 0.06), "frame");
     put(wallBox(frameMat, wf, f0, f1, y0, y0 + F, 0.13, 0.06), "frame");
-    put(wallBox(frameMat, wf, f0, f1, y1 - F, y1, 0.13, 0.06), "frame");
+    if (!top) put(wallBox(frameMat, wf, f0, f1, y1 - F, y1, 0.13, 0.06), "frame");
+    else doorTransomFrame(put, frameMat, wf, hole, a0, a1, y1, F);
     put(wallBox(frameMat, wf, f0, f1, midY - F / 2, midY + F / 2, 0.13, 0.06), "midRail");
     const lo = { x0: f0, x1: f1, y0: y0 + F, y1: midY - F / 2 };
-    const up = { x0: f0, x1: f1, y0: midY + F / 2, y1: y1 - F };
+    const up = { x0: f0, x1: f1, y0: midY + F / 2, y1: top ? tr0 : y1 - F };
     const fw = f1 - f0, lh = lo.y1 - lo.y0, uh = up.y1 - up.y0;
     // Braces and the diamond sit at 0.125 (face 0.15), a hair BEHIND the frame's face at 0.16: a brace
     // runs on under the stile or rail it meets, and the frame then covers its end instead of z-fighting
@@ -12128,14 +12240,17 @@ function buildShed3DModel(THREE, p) {
         put(wallBox(frameMat, wf, x, x + pk, lo.y0, lo.y1, 0.13, 0.06), "picket");
       }
     } else if (look === "classic") {
-      if (!hole && fw > 0.6 && uh > 0.6) {
+      // Under a transom the octagon and diamond stay, in the shorter upper panel; too short (0.6 ft)
+      // and they go, as they do beside a panel window.
+      if ((!hole || top) && fw > 0.6 && uh > 0.6) {
         const cw = fw * 0.22, ch = uh * 0.25;
         brace(up.x0, up.y1 - ch, up.x0 + cw, up.y1, "octagon");
         brace(up.x1 - cw, up.y1, up.x1, up.y1 - ch, "octagon");
         brace(up.x0, up.y0 + ch, up.x0 + cw, up.y0, "octagon");
         brace(up.x1 - cw, up.y0, up.x1, up.y0 + ch, "octagon");
-        // A SOLID diamond -- a square turned 45 degrees -- centred, its diagonal a third of the panel.
-        const s = (fw * 0.34) / Math.SQRT2, cx = (up.x0 + up.x1) / 2, cy = (up.y0 + up.y1) / 2;
+        // A SOLID diamond -- a square turned 45 degrees -- centred, its diagonal a third of the panel
+        // (and, under a transom, no more than 60% of the shorter panel's height).
+        const s = (top ? Math.min(fw * 0.34, uh * 0.6) : fw * 0.34) / Math.SQRT2, cx = (up.x0 + up.x1) / 2, cy = (up.y0 + up.y1) / 2;
         const dm = wallBox(frameMat, wf, cx - s / 2, cx + s / 2, cy - s / 2, cy + s / 2, 0.125, 0.05);
         dm.rotateZ(Math.PI / 4);
         put(dm, "diamond");
@@ -12159,18 +12274,9 @@ function buildShed3DModel(THREE, p) {
         put(wallBox(vm, wf, vx0 + vF, vx1 - vF, b1 - pitch * 0.55, b1, 0.115, 0.04), "vent");
       }
     }
-    if (hole) {
-      // The window's own casing, in the window's colour, then the window itself. The casing lies in
-      // the panel's clearance (SS_DOOR_WIN_PAD_FT), clear of the frame, with its face behind the frame's.
-      const c = SS_DOOR_WIN_CASE_FT, wm = mat(win.it.colorHex || "#3A3F45", { roughness: 0.6 });
-      put(wallBox(wm, wf, hole.x0 - c, hole.x0, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
-      put(wallBox(wm, wf, hole.x1, hole.x1 + c, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
-      put(wallBox(wm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), "windowCasing");
-      put(wallBox(wm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), "windowCasing");
-      const n0 = og.children.length;
-      d3WindowFill(og, wf, { it: win.it, a0: hole.x0, a1: hole.x1, y0: hole.y0, y1: hole.y1 }, hole.x0, hole.x1, true);
-      for (let k = n0; k < og.children.length; k++) og.children[k].userData.ssDoorPart = "window";
-    }
+    // The window's own casing, in the window's colour, then the window itself (doorWindowIn). A panel
+    // window's casing lies in the panel's clearance (SS_DOOR_WIN_PAD_FT), clear of the frame.
+    if (hole) doorWindowIn(put, og, wf, hole, win);
     // Black T-strap hinges ON THE RAILS, where these doors carry them: the top and bottom rails, and
     // the mid rail between them on a full-height door (two on a short one, as plankDoorLeaf hangs
     // them). The jamb leaf is the rail's own height, so the bottom one never reaches the threshold.
@@ -12180,7 +12286,9 @@ function buildShed3DModel(THREE, p) {
       const p0 = Math.min(he + dir * from, he + dir * to), p1 = Math.max(he + dir * from, he + dir * to);
       put(wallBox(ironMat, wf, p0, p1, cy - half, cy + half, 0.165, 0.03), part);
     };
-    (h >= 5 ? [y0 + F / 2, midY, y1 - F / 2] : [y0 + F / 2, y1 - F / 2]).forEach((cy) => {
+    // Under a transom the top row sits on the transom rail, never across the glass.
+    const hTop = top ? tr0 + F / 2 : y1 - F / 2;
+    (h >= 5 ? [y0 + F / 2, midY, hTop] : [y0 + F / 2, hTop]).forEach((cy) => {
       iron(0, 0.11, cy, F / 2, "hinge");
       iron(0.11, 0.11 + sLen * 0.55, cy, Math.min(0.085, F * 0.3), "hinge");
       iron(0.11 + sLen * 0.55, 0.11 + sLen, cy, Math.min(0.05, F * 0.18), "hinge");
@@ -12197,25 +12305,35 @@ function buildShed3DModel(THREE, p) {
       plate(0.08, lv, 0.045, 0.178, 0.024);
     }
   };
-  // The window a door's pick draws in a leaf lw x lh: centred in the upper panel by ssDoorWindowFit,
-  // the function the picker and the estimate measured it with. ssDoorWindowCount has already decided
-  // it IS drawn, from the door's catalog size; the leaf actually drawn can be shorter (openingSpan
-  // keeps a tall door under a low plate), and then the window shrinks to the panel rather than
-  // vanish from a door it is charged on.
+  // The window a door's pick draws in a leaf lw x lh, by ssDoorWindowFit, the function the picker and
+  // the estimate measured it with: centred in the upper panel, or for a transom ("top") across the top
+  // of the leaf. ssDoorWindowCount has already decided it IS drawn, from the door's catalog size; the
+  // leaf actually drawn can be shorter (openingSpan keeps a tall door under a low plate), and then the
+  // window shrinks to what the leaf holds rather than vanish from a door it is charged on. Every door
+  // that draws a window asks this: the built looks, and for a transom the board-and-batten and slab.
   const trimDoorWindowOf = (it, lw, lh) => {
-    let rect = ssDoorWindowFit(lw, lh, it.doorWindowWidthIn, it.doorWindowHeightIn);
+    const at = ssDoorWindowAtOf(it);
+    let rect = ssDoorWindowFit(lw, lh, it.doorWindowWidthIn, it.doorWindowHeightIn, at);
     if (!rect) {
       if (!(lw >= 0.5 && lh >= 1)) return null;
-      const u = ssTrimDoorFields(lw, lh).upper, pad = SS_DOOR_WIN_CASE_FT + SS_DOOR_WIN_PAD_FT;
-      const ww = Math.min(Number(it.doorWindowWidthIn) / 12, u.x1 - u.x0 - 2 * pad);
-      const wh = Math.min(Number(it.doorWindowHeightIn) / 12, u.y1 - u.y0 - 2 * pad);
-      if (!(ww > 0.2) || !(wh > 0.2)) return null;
-      const cx = (u.x0 + u.x1) / 2, cy = (u.y0 + u.y1) / 2;
-      rect = { x0: cx - ww / 2, x1: cx + ww / 2, y0: cy - wh / 2, y1: cy + wh / 2 };
+      if (at === "top") {
+        const F = ssTrimDoorBoardFt(lw, lh), y1 = lh - F;
+        const ww = Math.min(Number(it.doorWindowWidthIn) / 12, lw - 2 * SS_DOOR_TOP_SIDE_FT);
+        const wh = Math.min(Number(it.doorWindowHeightIn) / 12, lh * SS_DOOR_TOP_MAX_H, y1 - SS_DOOR_WIN_CASE_FT - F - lh * SS_DOOR_TOP_FLOOR);
+        if (!(ww > 0.2) || !(wh > 0.2)) return null;
+        rect = { x0: (lw - ww) / 2, x1: (lw + ww) / 2, y0: y1 - wh, y1 };
+      } else {
+        const u = ssTrimDoorFields(lw, lh).upper, pad = SS_DOOR_WIN_CASE_FT + SS_DOOR_WIN_PAD_FT;
+        const ww = Math.min(Number(it.doorWindowWidthIn) / 12, u.x1 - u.x0 - 2 * pad);
+        const wh = Math.min(Number(it.doorWindowHeightIn) / 12, u.y1 - u.y0 - 2 * pad);
+        if (!(ww > 0.2) || !(wh > 0.2)) return null;
+        const cx = (u.x0 + u.x1) / 2, cy = (u.y0 + u.y1) / 2;
+        rect = { x0: cx - ww / 2, x1: cx + ww / 2, y0: cy - wh / 2, y1: cy + wh / 2 };
+      }
     }
     // No colour stamp: like the dormer window, a window in a door has no colour picker yet, so it
     // draws in the sash colour every colourless catalog window takes.
-    return { rect, it: { type: "window", fixtureItemId: it.doorWindowId, colorHex: null } };
+    return { rect, at, it: { type: "window", fixtureItemId: it.doorWindowId, colorHex: null } };
   };
   // What goes round one of these doors and round no other (migration 289): the HEADER BOARD over the
   // opening -- a drip cap 0.4 of the frame's board F tall (on the real doors it is a third to a half of
@@ -12474,6 +12592,8 @@ function buildShed3DModel(THREE, p) {
   // `inset` is a window IN A DOOR (migration 289, trimDoorLeaf): no sill board, no sill nose, no
   // shutters and no flower box, because it sits in a door's panel inside the slim casing the door
   // draws for it. Every other caller passes nothing and gets exactly the window it always did.
+  // `inset` "top" is a TRANSOM in a door (door_window_at, 2026-10-21; doorWindowIn): the same, with
+  // its muntins vertical only.
   // `tw` (optional) is the wall's own thickness where it is not an outside wall's T: an interior wall
   // (Interior walls v2), whose stud and coverings make it thinner or thicker than the shell. Absent,
   // every outside window is drawn exactly as it always was.
@@ -12515,8 +12635,12 @@ function buildShed3DModel(THREE, p) {
         const a = o.a0 + (ww * ci) / cols;
         og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
       }
-      const midY = o.y0 + wh / 2;
-      og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+      // A transom in a door (inset "top") has the vertical bars only: a double-hung rail across a
+      // band 10 in tall reads as a second window stacked in it.
+      if (inset !== "top") {
+        const midY = o.y0 + wh / 2;
+        og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+      }
     }
     // ── SHUTTERS AND FLOWER BOX (Carolyn 2026-09-03) ───────────────────────────────
     // Independent of each other and of the sash colour, each painted from the builder's
@@ -12837,6 +12961,12 @@ function buildShed3DModel(THREE, p) {
         // parametric path spelled the same two numbers out four more times, which is exactly
         // how one of them gets missed.
         const y0d = o.y0 + 0.05, y1d = o.y1 - 0.05;
+        // A window only where ssDoorWindowCount draws one -- the SAME call the estimate payload and
+        // the Details rows make, so no window is charged that is not on the door. A panel window goes
+        // only in the four built looks; a transom also in the board-and-batten looks and the plain
+        // slab, never in a door shown by its photo (the catalog row's imageUrl, as ssDoorPhotoOf reads it).
+        const doorFx = o.it.fixtureItemId != null ? fxById.get(String(o.it.fixtureItemId)) : null;
+        const winOn = ssDoorWindowCount(o.it, dStyle, !!(doorFx && doorFx.imageUrl)) > 0;
         if (plank && SS_TRIM_DOOR_LOOKS[dStyle]) {
           // THE FOUR BUILT DOORS (migration 289); trimDoorLeaf says what they are. Their colour
           // fallbacks are the real product's and NOT the plank door's: the panels are the building's
@@ -12859,9 +12989,6 @@ function buildShed3DModel(THREE, p) {
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
           // The leaves stand on the threshold, every vertical measured from o.y0 (loft doors too).
           const ty0 = o.y0 + SS_TRIM_DOOR_SILL_FT;
-          // A window only where ssDoorWindowCount draws one -- the SAME call the estimate payload and
-          // the Details rows make, so no window is charged that is not on the door.
-          const winOn = ssDoorWindowCount(o.it, dStyle) > 0;
           // The HINGE POLARITY IS THE PLANK DOOR'S, to the letter, for the reason the note in the
           // plank branch below gives: a double hinges on its two outer jambs with the latch on the a1
           // leaf, and a single hinges at a1 only on an affirmative "right" -- fixtureDoorSVG's own test
@@ -12888,8 +13015,11 @@ function buildShed3DModel(THREE, p) {
           } else if (o.it.type === "doubleDoor" || o.it.operation === "double") {
             // Hinges on the two OUTER jambs and one latch where the leaves meet -- the pair
             // as it is actually hung, not the single-leaf treatment applied twice.
-            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a - 0.03, y0d, y1d, "a0", false, dStyle);
-            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a + 0.03, o.a1 - 0.05, y0d, y1d, "a1", true, dStyle);
+            // A transom (winOn) is cut into each leaf, measured on that leaf.
+            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a - 0.03, y0d, y1d, "a0", false, dStyle,
+              winOn ? trimDoorWindowOf(o.it, o.a - 0.03 - (o.a0 + 0.05), y1d - y0d) : null);
+            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a + 0.03, o.a1 - 0.05, y0d, y1d, "a1", true, dStyle,
+              winOn ? trimDoorWindowOf(o.it, o.a1 - 0.05 - (o.a + 0.03), y1d - y0d) : null);
           } else {
             // Hinge side follows the door's own operation, and "right" means the a1 end of
             // the wall run -- the SAME end the 2D plan swings its arc from (fixtureDoorSVG),
@@ -12906,15 +13036,26 @@ function buildShed3DModel(THREE, p) {
             // and the PDF drew its arc at a0. Hinges on one end of the shop drawing and the
             // other end of the customer's picture, with the latch swapped to match.
             plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d,
-              o.it.operation === "right" ? "a1" : "a0", true, dStyle);
+              o.it.operation === "right" ? "a1" : "a0", true, dStyle,
+              winOn ? trimDoorWindowOf(o.it, o.a1 - o.a0 - 0.1, y1d - y0d) : null);
           }
         } else {
           // The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
           // doors with no palette row) keeps the hard-coded natural brown as before.
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
+          // A TRANSOM (winOn here means one: no panel window is drawn in a slab) cuts every leaf round
+          // its glass (doorSlabCut, doorWindowIn), and only its own parts are tagged. Without one each
+          // leaf is the one box it always was.
+          const slabPut = (m, part) => { if (part) m.userData.ssDoorPart = part; og.add(m); return m; };
+          const slabLeaf = (la0, la1) => {
+            const sw = winOn ? trimDoorWindowOf(o.it, la1 - la0, y1d - y0d) : null;
+            const hole = doorSlabCut(slabPut, doorMat, wf, la0, la1, y0d, y1d, sw, null);
+            if (hole) doorWindowIn(slabPut, og, wf, hole, sw);
+            return hole;
+          };
           if (o.it.type === "doubleDoor" || o.it.operation === "double") {
-            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, y0d, y1d, 0, 0.16));
-            og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, y0d, y1d, 0, 0.16));
+            slabLeaf(o.a0 + 0.05, o.a - 0.03);
+            slabLeaf(o.a + 0.03, o.a1 - 0.05);
           } else {
             if (o.it.operation === "slideup" && !photoEntry) {
               // Roll-up read: reuse the lap texture as ~1 ft horizontal panel
@@ -12925,7 +13066,7 @@ function buildShed3DModel(THREE, p) {
               // for, and identical arithmetic for any door standing on it.
               if (seamTex) { seamTex.repeat.set(1, Math.max(2, Math.round(y1d - y0d))); doorMat.map = seamTex; }
             }
-            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, 0, 0.16));
+            const hole = slabLeaf(o.a0 + 0.05, o.a1 - 0.05);
             if (!photoEntry && o.it.operation !== "slideup") {
               // Raised panels + a handle on a plain hinged slab — the relief
               // shadows are what stop it reading as a painted rectangle.
@@ -12934,7 +13075,10 @@ function buildShed3DModel(THREE, p) {
               // number for a door standing on the floor and the wrong one for a loft door,
               // whose panels would have been laid out down the empty wall beneath it.
               const pa0 = o.a0 + 0.22, pa1 = o.a1 - 0.22, ph = y1d - o.y0;
-              og.add(wallBox(doorMat, wf, pa0, pa1, o.y0 + ph * 0.55, o.y0 + ph - 0.18, 0.1, 0.05));
+              // Under a transom the upper panel stops 0.18 ft below the window's casing, as it stops
+              // under the head without one, and it is left out where that leaves under 0.3 ft of it.
+              const upTop = hole ? Math.min(o.y0 + ph - 0.18, hole.y0 - SS_DOOR_WIN_CASE_FT - 0.18) : o.y0 + ph - 0.18;
+              if (!hole || upTop - (o.y0 + ph * 0.55) > 0.3) og.add(wallBox(doorMat, wf, pa0, pa1, o.y0 + ph * 0.55, upTop, 0.1, 0.05));
               og.add(wallBox(doorMat, wf, pa0, pa1, o.y0 + 0.22, o.y0 + ph * 0.45, 0.1, 0.05));
               // The handle was pinned at 3.0–3.14 ft, which is where a hand falls on a
               // full-height door and nowhere sensible on a 4 ft loft door — three-quarters of
@@ -17557,20 +17701,28 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   };
   // ── The window in the selected door (migration 289) ──
   // Changed or taken out in place, through the same recolorItems3 path the door colours use: it
-  // re-stamps the door (doorWindowStamps, all five fields) and rebuilds only that door's wall. Offered
-  // by the picker's own rule -- one of the four built looks, not a slide-up, and the windows ticked
-  // for doors that fit one leaf -- and a window already in the door that no longer fits stays listed,
-  // so it can be seen and removed.
+  // re-stamps the door (doorWindowStamps, all six fields) and rebuilds only that door's wall. Offered
+  // by the picker's own rule -- the windows ticked for doors whose position the door's look allows
+  // (ssDoorWindowLookOk; never a slide-up, and a transom never on a photo door) and that fit one
+  // leaf -- and a window already in the door that no longer fits stays listed, so it can be seen and
+  // removed. A door the catalog no longer lists (sel3dFx null) is offered none, as before.
   const sel3dLook = sel3dFx ? ssDoorLookOf([sel3dFx], sel3dItem) : "auto";
-  const sel3dLeaf = (SS_TRIM_DOOR_LOOKS[sel3dLook] && sel3dItem.operation !== "slideup")
+  const sel3dCan = (at) => !!sel3dFx && ssDoorWindowLookOk(sel3dLook, at, !!sel3dFx.imageUrl, sel3dItem.operation);
+  const sel3dLeaf = (sel3dCan("panel") || sel3dCan("top"))
     ? ssDoorLeafFt(sel3dItem.widthIn, sel3dItem.heightIn, sel3dItem.operation === "double") : null;
+  const doorWinAt = (w) => (w && w.doorWindowAt === "top" ? "top" : "panel");
   const doorWinOpts = sel3dLeaf
-    ? (placeableWindows || []).filter((w) => w && w.inDoor === true && ssDoorWindowFit(sel3dLeaf.w, sel3dLeaf.h, w.widthIn, w.heightIn)) : [];
+    ? (placeableWindows || []).filter((w) => w && w.inDoor === true && sel3dCan(doorWinAt(w))
+      && ssDoorWindowFit(sel3dLeaf.w, sel3dLeaf.h, w.widthIn, w.heightIn, doorWinAt(w))) : [];
   const doorWinCur = sel3dLeaf && sel3dItem.doorWindowId
-    ? { id: sel3dItem.doorWindowId, name: sel3dItem.doorWindowName || "Window", widthIn: sel3dItem.doorWindowWidthIn, heightIn: sel3dItem.doorWindowHeightIn, price: sel3dItem.doorWindowPrice }
+    ? { id: sel3dItem.doorWindowId, name: sel3dItem.doorWindowName || "Window", widthIn: sel3dItem.doorWindowWidthIn, heightIn: sel3dItem.doorWindowHeightIn, price: sel3dItem.doorWindowPrice,
+        doorWindowAt: sel3dItem.doorWindowAt === "top" ? "top" : null }
     : null;
   const doorWinShown = (doorWinCur && !doorWinOpts.some((w) => String(w.id) === String(doorWinCur.id))) ? doorWinOpts.concat([doorWinCur]) : doorWinOpts;
   const doorWinRowOn = !!sel3dLeaf && (doorWinOpts.length > 0 || !!doorWinCur);
+  // "Transom" when every window listed is one, as the door picker heads its row.
+  const doorWinTops = doorWinShown.filter((w) => doorWinAt(w) === "top").length;
+  const doorWinHead = doorWinTops === 0 ? "Window in door" : doorWinTops === doorWinShown.length ? "Transom" : "Window or transom";
   const pickDoorWindow = (w) => { if (sel3dItem) commitDoorColors([{ id: sel3dItem.id, patch: doorWindowStamps(w) }]); };
 
   useEffect(() => {
@@ -19585,7 +19737,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         {/* The window in the selected door (migration 289): None, or one of the windows that fit it. */}
         {doorWinRowOn && (
           <div data-ss-door-window-3d="1" style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-            <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Window in door</span>
+            <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>{doorWinHead}</span>
             {[{ id: null, name: "None" }].concat(doorWinShown).map((w) => {
               const on = w.id == null ? !sel3dItem.doorWindowId : String(sel3dItem.doorWindowId) === String(w.id);
               return (
@@ -31544,7 +31696,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // an included door nets its whole grouped price and would give the window away with it.
           // ssDoorWindowLines answers "is it drawn?" with the renderer's own ssDoorWindowCount, so a
           // window is charged only where it is on the door. `inDoor` and `doorName` put "Window in
-          // door: <door>" on the line and keep it off a wall window's group (submit-estimate).
+          // door: <door>" on the line and keep it off a wall window's group (submit-estimate);
+          // `doorWindowAt: "top"` makes it "Transom in door: <door>".
           ssDoorWindowLines(items, C.fixtures).map((w) => {
             const lbl = getDisplayLabel(w.door.wall, frontWall);
             return {
@@ -31555,6 +31708,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               wall: lbl ? lbl.toLowerCase() : (w.door.wall || null),
               inDoor: true,
               doorName: w.door.doorName || "Door",
+              // A TRANSOM says so, and only a transom: "Transom in door: <door>" on its line, and its
+              // own group. A panel window's line is exactly what it was.
+              ...(w.doorWindowAt === "top" ? { doorWindowAt: "top" } : {}),
               fixtureItemId: w.fixtureItemId,
               colorId: null,
               colorLabel: null,

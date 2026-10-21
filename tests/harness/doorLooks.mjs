@@ -10,7 +10,7 @@
 //
 //   P. the door PICKER: a built look offers a Window row with the in-door windows that fit one
 //      leaf (not a window too big for it, not a window that is not ticked for doors); the plank door
-//      offers none; the pick is stamped on the placed door (all five fields) and a double's leaf is
+//      offers none; the pick is stamped on the placed door (all six fields) and a double's leaf is
 //      measured, not the whole door
 // One saved design, opened in the 3D editor with __SS3D_DEBUG, then carries a single and a double
 // of each look, one board-and-batten door, and two doors with a window in them:
@@ -41,6 +41,15 @@
 //   E. the board-and-batten door is UNCHANGED: its mesh digest equals the one recorded on a clean
 //      origin/beta tree before this change (PLANK_DIGEST)
 //   F. no page errors; screenshots of every door straight on, for holding up against the real doors
+//   T. the TRANSOM (fixture_items.door_window_at 'top', 2026-10-21; Yoder Barns), on a catalog of its
+//      own so every block above keeps its own: the picker offers Yoder's 29 x 10 transom on their 72 in
+//      X-brace double (headed "Transom"), on a built look beside the panel lite ("Window or
+//      transom"), on a board-and-batten door and a plain slab, and never on a photo door or a leaf too
+//      narrow; the pick stamps doorWindowAt 'top'. In 3D, one transom per leaf across the top of every
+//      built, board-and-batten and slab door: glass in the top band, a transom rail under it with the
+//      stiles, boards and braces stopping below it, the Classic's octagon and diamond shrunk under it,
+//      the slab's upper panel moved down, no strap across the glass, vertical muntins only. The 3D
+//      footer row takes it out and puts it back, and Get Estimate sends doorWindowAt 'top' per leaf.
 //
 // SS_DOOR_BASELINE=1 prints only the board-and-batten door's digest and exits, which is how
 // PLANK_DIGEST was recorded (on the tree before the generator, where the new looks draw as 'auto').
@@ -315,7 +324,7 @@ async function runPicker(browser) {
   await page.getByRole("button", { name: "Place door" }).click();
   await settle(page, 700);
   let placed = ((await readItems(page)) || []).find((i) => !before.has(i.id));
-  ok("P the placed Classic carries the window's five stamps", !!placed && placed.doorWindowId === "w-door" && placed.doorWindowName === "Door lite"
+  ok("P the placed Classic carries the window's six stamps (a panel window: doorWindowAt null)", !!placed && placed.doorWindowId === "w-door" && placed.doorWindowName === "Door lite" && placed.doorWindowAt === null
     && placed.doorWindowWidthIn === 18 && placed.doorWindowHeightIn === 24 && placed.doorWindowPrice === 95, JSON.stringify(placed && { id: placed.doorWindowId, n: placed.doorWindowName, w: placed.doorWindowWidthIn, h: placed.doorWindowHeightIn, p: placed.doorWindowPrice }));
   // The Dutch double: each leaf is ~29 in wide, so the 18 in lite still fits it, priced each.
   await openPickerAt(0.75);
@@ -323,12 +332,12 @@ async function runPicker(browser) {
   await settle(page, 300);
   t = await winRowText();
   ok("P a Dutch double offers the lite for each leaf (+$95 each)", !!t && /Door lite/.test(t) && /\+\$95 each/.test(t) && !/Big lite/.test(t), t || "no row");
-  // No window picked: the placed door's five fields are all null (never absent).
+  // No window picked: the placed door's six fields are all null (never absent).
   before = new Set(((await readItems(page)) || []).map((i) => i.id));
   await page.getByRole("button", { name: "Place door" }).click();
   await settle(page, 700);
   placed = ((await readItems(page)) || []).find((i) => !before.has(i.id));
-  ok("P a door placed with No window stamps all five fields null", !!placed && ["doorWindowId", "doorWindowName", "doorWindowWidthIn", "doorWindowHeightIn", "doorWindowPrice"].every((k) => k in placed && placed[k] === null),
+  ok("P a door placed with No window stamps all six fields null", !!placed && ["doorWindowId", "doorWindowName", "doorWindowWidthIn", "doorWindowHeightIn", "doorWindowPrice", "doorWindowAt"].every((k) => k in placed && placed[k] === null),
     JSON.stringify(placed && Object.fromEntries(Object.entries(placed).filter(([k]) => k.startsWith("doorWindow")))));
   await page.screenshot({ path: join(shots, "picker-plan.png") });
   ok("P no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
@@ -460,6 +469,242 @@ async function runMoney(browser, rect) {
     ok("I no page errors (decline)", errors.length === 0, errors.slice(0, 3).join(" | "));
     await ctx.close();
   }
+}
+
+// ── T. The transom ────────────────────────────────────────────────────────────────────────────
+// Its own catalog: the 289 one plus Yoder's transom row and the doors it can and cannot go in. The
+// photo is a 1 x 1 PNG served on the stubbed storage host (routed in each page below).
+const PHOTO_URL = `https://${REF}.supabase.co/storage/v1/object/public/fixtures/harness-door.png`;
+const PNG_1x1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+const TFIX = [
+  ...FIX,
+  { ...base, id: "d-yoder2", category: "door", name: "yoder double", planLabel: "YD2", price: 1200, widthIn: 72, heightIn: 72, sortOrder: 20, opDouble: true, doorStyle: "xbrace" },
+  { ...base, id: "d-zbrace", category: "door", name: "zbrace single", planLabel: "ZB", price: 420, widthIn: 36, heightIn: 80, sortOrder: 21, opRight: true, opLeft: true, opDefault: "right", doorStyle: "zbrace" },
+  { ...base, id: "d-slab", category: "door", name: "plain slab", planLabel: "SLB", price: 350, widthIn: 36, heightIn: 80, sortOrder: 22, opRight: true, opLeft: true, opDefault: "right" },
+  { ...base, id: "d-slab2", category: "door", name: "plain double", planLabel: "SLB2", price: 650, widthIn: 72, heightIn: 80, sortOrder: 23, opDouble: true },
+  { ...base, id: "d-photo", category: "door", name: "photo door", planLabel: "PHO", price: 380, widthIn: 36, heightIn: 80, sortOrder: 24, opRight: true, opLeft: true, opDefault: "right", imageUrl: PHOTO_URL },
+  { ...win("w-top", "Transom Windows", 29, 10, 81, true), doorWindowAt: "top" },
+];
+const TFIXTURES = { ...FIXTURES, items: TFIX };
+const tfxOf = (id) => TFIX.find((f) => f.id === id);
+const TOPW = { doorWindowId: "w-top", doorWindowName: "Transom Windows", doorWindowWidthIn: 29, doorWindowHeightIn: 10, doorWindowPrice: 81, doorWindowAt: "top" };
+// kind: how it is drawn -- "trim" (trimDoorLeaf), "plank" (plankDoorLeaf), "slab" (the plain slab);
+// n: the transoms drawn (one per leaf), 0 where the door cannot take one.
+const TPLAN = [
+  { key: "tYoder", fx: "d-yoder2", wall: "east", at: 5, op: "double", kind: "plank", n: 2 },
+  { key: "tSlab2", fx: "d-slab2", wall: "east", at: 13, op: "double", kind: "slab", n: 2 },
+  { key: "tNarrow", fx: "d-american2", wall: "east", at: 21, op: "double", kind: "trim", n: 0 },
+  { key: "tPhoto", fx: "d-photo", wall: "east", at: 28, op: "right", kind: "slab", n: 0 },
+  { key: "tClassic", fx: "d-classic", wall: "west", at: 4, op: "right", kind: "trim", n: 1 },
+  { key: "tSlab", fx: "d-slab", wall: "west", at: 10, op: "left", kind: "slab", n: 1 },
+  { key: "tPlank", fx: "d-plank", wall: "west", at: 16, op: "right", kind: "plank", n: 1 },
+  { key: "tZ", fx: "d-zbrace", wall: "west", at: 22, op: "left", kind: "plank", n: 1 },
+];
+function tItemsFor(rect) {
+  return TPLAN.map((d, i) => {
+    const fx = tfxOf(d.fx);
+    return { id: 400 + i, type: "fixtureDoor", ...planPos(rect, d), wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name,
+      planLabel: fx.planLabel, price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, swing: "out", operation: d.op, ...NO_COLOR, sillMode: "fixed", ...TOPW };
+  });
+}
+const routePhoto = (page) => page.route(PHOTO_URL, (route) => route.fulfill({ status: 200, contentType: "image/png", headers: { "access-control-allow-origin": "*" }, body: PNG_1x1 }));
+
+// TP. The picker, on a fresh design with the transom catalog.
+async function runTransomPicker(browser, rect) {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await stubSupabase(page, { config: CONFIG, fixtures: TFIXTURES });
+  await routePhoto(page);
+  await openDesigner(page, CONFIG.clientId);
+  await page.waitForFunction(() => document.querySelector(".ssd-frame") !== null, null, { timeout: 40000 });
+  await pickStyle(page, "Door Test");
+  await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), L, { timeout: 20000 });
+  await settle(page, 500);
+  const openPickerAt = async (frac) => {
+    await (await revealTool(page, /^Door wall$/)).click();
+    await settle(page, 300);
+    const p = await svgPoint(page, rect.x + rect.w - 0.4 * (rect.w / W), rect.y + frac * rect.h);
+    await page.mouse.click(p.x, p.y);
+    await page.getByText("Choose a door").first().waitFor({ timeout: 5000 });
+    await settle(page, 300);
+  };
+  const rowOf = async (name) => {
+    await page.getByText(name, { exact: true }).first().click();
+    await settle(page, 300);
+    const row = page.locator("[data-ss-door-window-row]");
+    return (await row.count()) ? (await row.innerText()).replace(/\s+/g, " ") : null;
+  };
+  await openPickerAt(0.2);
+  let t = await rowOf("yoder double");
+  ok("TP Yoder's 72 in X-brace double offers the 29 x 10 transom, headed Transom, priced each", !!t && /^Transom /.test(t) && /Transom Windows \(2'5" × 10"\) \+\$81 each/.test(t) && !/Door lite/.test(t), t || "no row");
+  t = await rowOf("classic single");
+  ok("TP a Classic single offers the panel lite and the transom, headed Window or transom", !!t && /^Window or transom/.test(t) && /Door lite \(1'6" × 2'\)/.test(t) && /Transom Windows \(transom, 2'5" × 10"\)/.test(t), t || "no row");
+  t = await rowOf("Barn door");
+  ok("TP a board-and-batten door offers the transom only", !!t && /^Transom /.test(t) && /Transom Windows/.test(t) && !/Door lite/.test(t), t || "no row");
+  t = await rowOf("plain slab");
+  ok("TP a plain slab with no photo offers the transom", !!t && /Transom Windows/.test(t), t || "no row");
+  t = await rowOf("photo door");
+  ok("TP a photo door offers no window at all", t === null, t || "");
+  t = await rowOf("american double");
+  ok("TP a 60 in double's 29 in leaf takes the panel lite but not the 29 in transom", !!t && /Door lite/.test(t) && !/Transom Windows/.test(t) && /^Window /.test(t), t || "no row");
+  await rowOf("yoder double");
+  await page.getByText(/^Transom Windows/).first().click();
+  await settle(page, 200);
+  const before = new Set(((await readItems(page)) || []).map((i) => i.id));
+  await page.getByRole("button", { name: "Place door" }).click();
+  await settle(page, 700);
+  const placed = ((await readItems(page)) || []).find((i) => !before.has(i.id));
+  ok("TP the placed door carries the six stamps, doorWindowAt 'top'", !!placed && placed.doorWindowId === "w-top" && placed.doorWindowAt === "top" && placed.doorWindowWidthIn === 29
+    && placed.doorWindowHeightIn === 10 && placed.doorWindowPrice === 81 && placed.operation === "double",
+    JSON.stringify(placed && Object.fromEntries(Object.entries(placed).filter(([k]) => k.startsWith("doorWindow") || k === "operation"))));
+  await page.screenshot({ path: join(shots, "transom-picker.png") });
+  ok("TP no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
+// T. The 3D, the footer row and the estimate, on one saved design.
+async function runTransom3D(browser, rect) {
+  const items = tItemsFor(rect);
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  const CODE = "SS-HARNTRNSM";
+  const row = {
+    short_code: CODE, status: "draft", selections: { style: "doors", size: SIZE }, items,
+    contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
+    paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
+  };
+  const calls = await stubSupabase(page, { config: CONFIG, fixtures: TFIXTURES, rpc: { load_design: [row] } });
+  await page.route(`**/${REF}.supabase.co/storage/v1/**`, (route) => {
+    const hdr = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" };
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: hdr, body: "" });
+    return route.fulfill({ status: 200, contentType: "application/json", headers: hdr, body: JSON.stringify({ Key: "floor-plans/harness.pdf", Id: "1" }) });
+  });
+  await routePhoto(page);
+  await bypassGate(page, CONFIG.clientId);
+  await page.goto(`${BASE}/?client=${encodeURIComponent(CONFIG.clientId)}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+  let loaded = [];
+  for (let k = 0; k < 60 && loaded.length < items.length; k++) { await settle(page, 500); loaded = ((await readItems(page)) || []).filter((i) => i.type === "fixtureDoor"); }
+  ok("T the saved transom design opens with every door", loaded.length === items.length, `${loaded.length}/${items.length}`);
+  await openEditor(page);
+
+  const IRON = "#23272e";
+  for (let i = 0; i < TPLAN.length; i++) {
+    const d = TPLAN[i], ms = (await doorMeshes(page, items[i].id)) || [], f = frameOf(d.wall), parts = countParts(ms);
+    const lv = d.op === "double" ? 2 : 1, n = d.n;
+    ok(`T ${d.key}: ${n} transom(s) drawn (${n ? "one per leaf" : "none: " + (d.key === "tPhoto" ? "a photo door" : "the leaf is too narrow")})`,
+      (parts.window || 0) === 6 * n && (parts.windowCasing || 0) === 4 * n, JSON.stringify(parts));
+    if (!n) continue;
+    const glass = ms.filter((m) => m.part === "window" && m.transparent);
+    const fx = tfxOf(d.fx), hFt = fx.heightIn / 12;
+    const bottom = Math.min(...ms.map((m) => m.min[1])), top = bottom + hFt;
+    ok(`T ${d.key}: each pane sits in the top band of its leaf (under the top rail, above 60% of the door)`,
+      glass.length === n && glass.every((g) => g.max[1] < top - 0.15 && g.max[1] > top - 0.45 && g.min[1] > bottom + 0.6 * hFt),
+      glass.map((g) => `${(g.min[1] - bottom).toFixed(2)}..${(g.max[1] - bottom).toFixed(2)} of ${hFt.toFixed(2)}`).join(" "));
+    ok(`T ${d.key}: each pane is the transom's 29 in wide`, glass.every((g) => near(g.max[f.along] - g.min[f.along], 29 / 12 - 0.18, 0.02)),
+      glass.map((g) => (g.max[f.along] - g.min[f.along]).toFixed(3)).join(","));
+    // Vertical muntins only: the window's thin horizontal pieces are its sash's top and bottom, no rail between.
+    const flat = ms.filter((m) => m.part === "window" && !m.transparent && m.max[1] - m.min[1] < 0.1 && m.max[f.along] - m.min[f.along] > 1);
+    ok(`T ${d.key}: no double-hung rail across the transom (two flat sash pieces per pane)`, flat.length === 2 * n, String(flat.length));
+    // No strap hinge or latch crosses the glass.
+    const overGlass = ms.filter((m) => m.color === IRON && glass.some((g) => m.min[f.along] < g.max[f.along] - 1e-3 && m.max[f.along] > g.min[f.along] + 1e-3
+      && m.min[1] < g.max[1] - 1e-3 && m.max[1] > g.min[1] + 1e-3));
+    ok(`T ${d.key}: no hinge strap or latch crosses the glass`, overGlass.length === 0, overGlass.map((m) => `${m.min[1].toFixed(2)}..${m.max[1].toFixed(2)}`).join(","));
+    if (d.kind === "slab") {
+      ok(`T ${d.key}: a slab gets no transom rail (it has no frame)`, !parts.transomRail && !parts.transomFrame, JSON.stringify(parts));
+      if (d.op !== "double") {
+        const casingLo = Math.min(...ms.filter((m) => m.part === "windowCasing").map((m) => m.min[1]));
+        const panels = ms.filter((m) => !m.part && m.box && near(m.box[2], 0.05, 1e-3) && m.color !== "#6b7280");
+        ok(`T ${d.key}: the upper raised panel moved down under the transom`, panels.length === 2 && panels.every((p) => p.max[1] <= casingLo - 0.17),
+          panels.map((p) => p.max[1].toFixed(2)).join(",") + ` vs casing ${casingLo.toFixed(2)}`);
+      }
+      continue;
+    }
+    const rails = ms.filter((m) => m.part === "transomRail");
+    ok(`T ${d.key}: a transom rail under each pane and its frame cut to the glass (rail 1, side/top 3 per leaf)`, rails.length === n && (parts.transomFrame || 0) === 3 * n
+      && rails.every((r) => near(r.max[f.along] - r.min[f.along], (d.op === "double" ? fx.widthIn / 24 - 0.08 : fx.widthIn / 12 - 0.1), 0.01)), JSON.stringify(parts));
+    const railLo = Math.min(...rails.map((r) => r.min[1])), railHi = Math.max(...rails.map((r) => r.max[1]));
+    if (d.kind === "trim") {
+      ok(`T ${d.key}: the built look keeps its stiles and rails below the transom rail (frame 3 per leaf)`, parts.frame === 3 * n && ms.filter((m) => m.part === "frame").every((m) => m.max[1] <= railLo + 1e-3), JSON.stringify(parts));
+      const deco = ms.filter((m) => m.part === "octagon" || m.part === "diamond");
+      // The braces' square-cut ends tuck under the rail they meet, as they tuck under the top rail without a
+      // transom: none reaches past the transom rail toward the glass.
+      ok(`T ${d.key}: the Classic's octagon and diamond stay, shrunk under the transom rail`, parts.octagon === 4 * n && parts.diamond === n && deco.every((m) => m.max[1] <= railHi - 0.05),
+        deco.map((m) => m.max[1].toFixed(2)).join(",") + ` vs rail top ${railHi.toFixed(2)}`);
+    } else {
+      // Board-and-batten: everything of the field and the frame that is not the transom's own stops under its rail.
+      const field = ms.filter((m) => !m.part && m.color !== IRON && m.box && (near(m.box[2], 0.06, 1e-3) || near(m.box[2], 0.05, 1e-3)));
+      ok(`T ${d.key}: the boards, stiles and braces stop under the transom rail`, field.length > 4 && field.every((m) => m.max[1] <= railLo + 0.01),
+        `${field.length} pieces, highest ${Math.max(...field.map((m) => m.max[1])).toFixed(3)} vs rail ${railLo.toFixed(3)}`);
+      if (d.key === "tZ" || d.key === "tYoder") {
+        // A brace is a long thin box turned in the wall plane: its own height a board's, its bounds a diagonal's.
+        const braces = field.filter((m) => m.box[1] <= 0.25 && m.box[0] > 1 && m.max[1] - m.min[1] > 0.5);
+        ok(`T ${d.key}: its brace is there, under the rail`, braces.length >= 1 && braces.every((m) => m.max[1] <= railLo + 0.01), String(braces.length));
+      }
+    }
+  }
+  for (let i = 0; i < TPLAN.length; i++) {
+    const clip = await aimAt(page, items[i].id, TPLAN[i].wall);
+    await settle(page, 200);
+    await page.evaluate(() => window.__ss3dEngine.render());
+    await page.screenshot({ path: join(shots, `transom-${TPLAN[i].key}.png`), clip });
+  }
+
+  // The footer row on Yoder's door: None takes the transom out, the transom chip puts it back.
+  const yi = TPLAN.findIndex((d) => d.key === "tYoder"), yid = items[yi].id;
+  const clip = await aimAt(page, yid, "east");
+  await settle(page, 300);
+  // Off the centre: a double's two leaves meet there, and a click through the gap picks a door across the building.
+  await page.mouse.click(clip.x + clip.width * 0.42, clip.y + clip.height * 0.45);
+  await settle(page, 600);
+  const row3 = page.locator("[data-ss-door-window-3d]");
+  const rowText = (await row3.count()) ? (await row3.innerText()).replace(/\s+/g, " ") : "";
+  ok("T the 3D footer heads the row Transom and offers the transom for Yoder's door", /^Transom /i.test(rowText) && /Transom Windows/.test(rowText) && /None/.test(rowText) && !/Door lite/.test(rowText), rowText || "no row");
+  await page.screenshot({ path: join(shots, "transom-footer.png") });
+  if (await row3.count()) {
+    await row3.getByRole("button", { name: "None" }).click();
+    let ms = null;
+    for (let k = 0; k < 20; k++) { await settle(page, 250); ms = await doorMeshes(page, yid); if (ms && !ms.some((m) => m.part === "window")) break; }
+    let it = ((await readItems(page)) || []).find((x) => x.id === yid);
+    ok("T None takes the transom out of the door and off the design", !!ms && !ms.some((m) => m.part === "window") && !!it && it.doorWindowId === null && it.doorWindowAt === null, JSON.stringify(ms && countParts(ms)));
+    await row3.getByRole("button", { name: "Transom Windows" }).click();
+    for (let k = 0; k < 20; k++) { await settle(page, 250); ms = await doorMeshes(page, yid); if (ms && ms.some((m) => m.part === "window")) break; }
+    it = ((await readItems(page)) || []).find((x) => x.id === yid);
+    ok("T ...and the transom chip puts it back, stamped 'top'", !!ms && countParts(ms).window === 12 && !!it && it.doorWindowAt === "top", JSON.stringify(ms && countParts(ms)));
+  }
+
+  // The estimate: one windows[] line per drawn transom, doorWindowAt 'top'.
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "✕" && x.previousElementSibling && /^3D Preview/.test(x.previousElementSibling.textContent.trim()));
+    if (b) b.click();
+  });
+  await settle(page, 1500);
+  const before = calls.length;
+  const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit for Updated Estimate)$/ }).last();
+  let payload = null;
+  if (await submit.count()) {
+    await submit.click().catch(() => {});
+    for (let i = 0; i < 60 && !payload; i++) {
+      await settle(page, 250);
+      const hit = calls.slice(before).find((cl) => cl.path && cl.path.endsWith("/functions/v1/submit-estimate"));
+      if (hit) payload = hit.body;
+    }
+  }
+  ok("T Get Estimate reached submit-estimate", !!payload);
+  if (payload) {
+    const dw = (payload.windows || []).filter((w) => w.inDoor);
+    const by = (name) => dw.filter((w) => w.doorName === name).length;
+    ok("T one windows[] line per drawn transom (2 + 2 + 1 + 1 + 1 + 1), each doorWindowAt 'top' at the catalog price",
+      dw.length === 8 && dw.every((w) => w.doorWindowAt === "top" && w.fixtureItemId === "w-top" && w.price === 81 && w.name === "Transom Windows"),
+      JSON.stringify(dw.map((w) => [w.doorName, w.doorWindowAt, w.price])));
+    ok("T ...naming its door, and none for the photo door or the narrow leaf", by("yoder double") === 2 && by("plain double") === 2 && by("classic single") === 1
+      && by("plain slab") === 1 && by("Barn door") === 1 && by("zbrace single") === 1 && by("photo door") === 0 && by("american double") === 0);
+  }
+  ok("T no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
 }
 
 async function main() {
@@ -673,6 +918,8 @@ async function main() {
   ok("F no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
   await runMoney(browser, rect);
+  await runTransomPicker(browser, rect);
+  await runTransom3D(browser, rect);
   await browser.close();
   const fl = failed();
   console.log(fl.length ? `${fl.length} FAILED` : "ALL CHECKS PASSED");

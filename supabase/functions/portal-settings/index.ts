@@ -2664,7 +2664,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // in_door (289): a window's "Can be used inside a door" tick. The same applies: 289 is applied
       // BEFORE this function is deployed, or every portal's catalog read fails.
       // in_partition (313): "Allowed in interior walls". Same rule: 313 is applied first.
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // door_window_at (the transom in a door, 2026-10-21): where an in-door window sits. Same rule:
+      // its migration is applied first.
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -7060,6 +7062,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     } else if (has("inDoor")) {
       rec.in_door = row?.inDoor === true;
     }
+    // WHERE in the door (the transom, 2026-10-21): 'panel' is the upper panel (289, the default) and
+    // 'top' a transom across the top of each leaf. The column's check allows 'top' only on a window
+    // that can go in a door, and this says the same before the database does:
+    //   * not a window, or "not in a door" sent in this row: forced to 'panel';
+    //   * doorWindowAt "top" sent: 'top', and with no inDoor key beside it the window goes in doors
+    //     too (the catalog asks both in one select, so "as a transom" means "in a door");
+    //   * doorWindowAt sent as anything else: 'panel';
+    //   * neither key: the stored position stays (presence-guarded, like the tick above).
+    // Strictly `=== "top"`, so a typo or a value from a newer portal can only mean the upper panel.
+    if (category !== "window" || (has("inDoor") && rec.in_door !== true)) {
+      rec.door_window_at = "panel";
+    } else if (has("doorWindowAt")) {
+      rec.door_window_at = row?.doorWindowAt === "top" ? "top" : "panel";
+      if (rec.door_window_at === "top" && !has("inDoor")) rec.in_door = true;
+    }
     // Allowed in interior walls (313): doors and windows, presence-guarded the same way, so a sheet
     // without the column or an older portal leaves the builder's tick alone. The column defaults TRUE,
     // so only an explicit false takes an item out of the interior-wall pickers. A ramp or vent is never
@@ -7143,6 +7160,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     if (!("in_door" in rec)) rec.in_door = false;
+    if (!("door_window_at" in rec)) rec.door_window_at = "panel";
     if (!("in_partition" in rec)) rec.in_partition = true;
     if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;

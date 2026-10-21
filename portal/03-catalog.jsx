@@ -6067,6 +6067,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
     // Can go inside a door (289): windows only; absent reads as no, the column's default.
     in_door: d.in_door === true,
+    // Where in the door (the transom, 2026-10-21): "top" a transom, anything else the upper panel.
+    door_window_at: d.door_window_at === "top" ? "top" : "panel",
     // Allowed in interior walls (313): doors and windows; absent reads as YES, the column's default.
     in_partition: d.in_partition !== false,
     // null = offered on EVERY building style (the living default); an array = only those (272).
@@ -6130,7 +6132,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     // Can be used inside a door (289). WINDOW-ONLY on the wire, like the colour list: portal-settings
     // forces it off for every other category, so sending it for a door would be a value it throws away.
-    ...(isWindowCat ? { inDoor: r.in_door === true } : {}),
+    // Where in the door rides beside it, "top" only for a window that goes in doors at all.
+    ...(isWindowCat ? { inDoor: r.in_door === true, doorWindowAt: r.in_door === true && r.door_window_at === "top" ? "top" : "panel" } : {}),
     // Allowed in interior walls (313): doors and windows only. Ticked on the Interior walls tab; it
     // rides every line save so the tick survives a price edit made here.
     ...((isWindowCat || isDoorCat) ? { inPartition: r.in_partition !== false } : {}),
@@ -6435,7 +6438,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, door_window_at: "panel", in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -6502,8 +6505,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
       parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
-    // Can go inside a door (289): said on the row, only when ticked.
-    if (isWindowCat && r.in_door) parts.push("can go in a door");
+    // Can go inside a door (289): said on the row, only when ticked, and how (the transom, 2026-10-21).
+    if (isWindowCat && r.in_door) parts.push(r.door_window_at === "top" ? "transom in doors" : "can go in a door");
     // A raised DOOR says so on its row. It is the one field that separates a loft door from a
     // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
     // one they got wrong should not have to open each row to find it. Only when set, so an
@@ -6635,14 +6638,27 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {/* Can be used inside a door (migration 289; asked for on 2026-10-06: the window settings get
           "a can be used inside a door option"). The customer then sees it in the door picker for the four
           built door looks, but only where it fits the upper panel of one door leaf, and it is priced
-          as its own window line, once per leaf. Windows only. */}
+          as its own window line, once per leaf. Windows only.
+          The tick became a select on 2026-10-21 (Yoder Barns: "transom windows in doors"): No, in the
+          upper panel (in_door, door_window_at 'panel'), or as a transom across the top of each leaf
+          (door_window_at 'top'), which the designer also offers in the board-and-batten doors and a
+          plain door with no photo. One control because "as a transom" only means anything in a door. */}
       {isWindowCat && (
         <div style={{ marginBottom: 12 }}>
-          {dCbx("in_door", "Can be used inside a door", "Offer this window in the upper panel of the American, Basic, Classic and Dutch doors")}
+          <div style={fldLbl}>Use in doors</div>
+          <select data-ss-door-window-at="1" value={!edit.draft.in_door ? "no" : edit.draft.door_window_at === "top" ? "top" : "panel"}
+            onChange={(e) => setDraft(e.target.value === "no" ? { in_door: false, door_window_at: "panel" } : { in_door: true, door_window_at: e.target.value })}
+            style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
+            <option value="no">No</option>
+            <option value="panel">In the door's upper panel</option>
+            <option value="top">As a transom at the top of the door</option>
+          </select>
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {edit.draft.in_door
-              ? "Offered in the door picker for the American, Basic, Classic and Dutch doors it fits. Each one is charged as a window, one per door (two on a double door)."
-              : "Only on the walls. Tick to offer it inside the American, Basic, Classic and Dutch doors as well."}
+            {!edit.draft.in_door
+              ? "Only on the walls. Choose a door option to offer it inside doors as well."
+              : edit.draft.door_window_at === "top"
+                ? "Offered in the door picker as a transom across the top of the doors it fits: the American, Basic, Classic and Dutch doors, the board-and-batten doors, and plain doors without a photo. Each one is charged as a window, one per door (two on a double door)."
+                : "Offered in the door picker for the American, Basic, Classic and Dutch doors it fits. Each one is charged as a window, one per door (two on a double door)."}
           </div>
         </div>
       )}
