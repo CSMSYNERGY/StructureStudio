@@ -12022,11 +12022,17 @@ function buildShed3DModel(THREE, p) {
   // OUTSIDE this wall (onBeforeRender zeroes its draw range for any other camera, the quote's corner
   // views included, so a window elsewhere never shows a box behind this one), casts no shadow, and
   // hides in "look inside" (applyShellMode finds it by userData.ssGlassRoom). The caller adds it: a
-  // door's under its ssDoorPart, "windowInterior"; a wall window's as it is.
+  // door's under its ssDoorPart, "windowInterior"; a wall window's cut to fit inside the building by
+  // windowRoomFit (tests/harness/windowRooms.mjs).
+  // ONE material for every room in the build (a building can carry many windows), kept out of the
+  // scoped rebuilds' disposal with the walls' own (sharedMats). `depth` is SS_GLASS_ROOM_FT unless the
+  // caller had to make it shallower to keep it inside the building (windowRoomFit).
   const SS_GLASS_ROOM_FT = 2.5, SS_GLASS_ROOM_HEX = "#6B5A48";
-  const glassRoom = (wf, a0, a1, y0, y1, back) => {
-    const room = wallBox(mat(SS_GLASS_ROOM_HEX, { side: THREE.BackSide, roughness: 0.95 }), wf, a0, a1, y0, y1,
-      -(back + SS_GLASS_ROOM_FT / 2), SS_GLASS_ROOM_FT);
+  // Pushed back in depth (polygonOffset): a loft or a partition whose face lies exactly on one of the
+  // room's (both snap to the foot) is drawn, instead of the two flickering through each other.
+  const glassRoomMat = mat(SS_GLASS_ROOM_HEX, { side: THREE.BackSide, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4 });
+  const glassRoom = (wf, a0, a1, y0, y1, back, depth = SS_GLASS_ROOM_FT) => {
+    const room = wallBox(glassRoomMat, wf, a0, a1, y0, y1, -(back + depth / 2), depth);
     room.userData.noShadow = true;
     room.userData.ssGlassRoom = true;
     // A point on the pane and the wall's outward normal, in the model's frame (wallBox's): the camera
@@ -12742,6 +12748,39 @@ function buildShed3DModel(THREE, p) {
   // drag rebuilds ONLY the wall(s) an item left and landed on (rebuildWalls on
   // the returned model) — same code as the full build, so a partial rebuild's
   // output is identical to a full one by construction.
+  // WHERE A WALL WINDOW'S ROOM (glassRoom) FITS, so the box never shows anywhere but through its own
+  // glass. Along the wall: inside the inner faces of the walls at its two ends, which the wall's own
+  // frame already places (a corner, a porch set-back and a wing's notch all start or stop `len`).
+  // Inward: SS_GLASS_ROOM_FT at most, short of the opposite wall's inner face (a narrow building), clear
+  // of a wing's open ground (NOTCH), and where the roof comes DOWN going inward (a single-slope roof's
+  // high wall) only as deep as the roof stays 0.2 ft over the window, the roof read as a straight line
+  // from this wall's top to the opposite wall's. Every footprint wall is axis-aligned with U pointing
+  // +x or +z. Returns { a0, a1, depth } in the wall's frame, or null when what is left is under 0.3 ft
+  // across or 0.4 ft deep (the window then shows what it always did).
+  const WALL_OPP = { north: "south", south: "north", east: "west", west: "east" };
+  const windowRoomFit = (wf, wname, o) => {
+    const opp = WALLS[WALL_OPP[wname]];
+    if (!opp) return null;
+    const a0 = Math.max(o.a0, T / 2 + 0.02), a1 = Math.min(o.a1, wf.len - T / 2 - 0.02);
+    if (!(a1 - a0 >= 0.3)) return null;
+    // Centre line to centre line, along the inward normal (-N).
+    const span = Math.abs((opp.O[0] - wf.O[0]) * wf.N[0] + (opp.O[1] - wf.O[1]) * wf.N[1]);
+    let depth = Math.min(SS_GLASS_ROOM_FT, span - T - 0.05);
+    const shift = (wf.O[0] - opp.O[0]) * wf.U[0] + (wf.O[1] - opp.O[1]) * wf.U[1];
+    const top = topOver(wf, a0, a1), oppTop = topOver(opp, a0 + shift, a1 + shift);
+    if (top > oppTop + 1e-6) depth = Math.min(depth, ((top - o.y1 - 0.2) * span) / (top - oppTop) - T / 2);
+    // A wing's open ground: the room's plan rectangle (feet from the north-west corner), padded by half
+    // a wall, must not reach into a notch; step it back until it does not.
+    if (NOTCH) {
+      const rect = (d) => {
+        const xs = [0, 1].map((k) => wf.O[0] + wf.U[0] * (k ? a1 : a0) - wf.N[0] * (T / 2 + k * d));
+        const zs = [0, 1].map((k) => wf.O[1] + wf.U[1] * (k ? a1 : a0) - wf.N[1] * (T / 2 + k * d));
+        return [Math.min(...xs) + bldgW / 2 - T / 2, Math.min(...zs) + bldgH / 2 - T / 2, Math.max(...xs) + bldgW / 2 + T / 2, Math.max(...zs) + bldgH / 2 + T / 2];
+      };
+      while (depth >= 0.4 && d3InNotch(NOTCH, ...rect(depth))) depth -= 0.25;
+    }
+    return depth >= 0.4 ? { a0, a1, depth } : null;
+  };
   const buildOneWall = (wname, itemsNow) => {
     // A clerestory wall (wings) is built here too, with no items: it has no plan wall of its own.
     const wf = WALLS[wname] || CLERESTORY[wname];
@@ -12985,8 +13024,11 @@ function buildShed3DModel(THREE, p) {
           if (ob.a0 >= o.a1) limR = Math.min(limR, ob.a0);
         });
         d3WindowFill(og, wf, o, limL, limR);
-        // The room seen through it (glassRoom), from the wall's inner face, the size of the opening.
-        og.add(glassRoom(wf, o.a0, o.a1, o.y0, o.y1, T / 2));
+        // The room seen through it (glassRoom), from the wall's inner face, kept inside the building
+        // (windowRoomFit). Not behind a window whose photo covers the glass: the photo is the look.
+        const wfx = o.it.fixtureItemId != null ? fxById.get(String(o.it.fixtureItemId)) : null;
+        const rf = wfx && wfx.imageUrl ? null : windowRoomFit(wf, wname, o);
+        if (rf) og.add(glassRoom(wf, rf.a0, rf.a1, o.y0, o.y1, T / 2, rf.depth));
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
         // A board-and-batten door is BUILT, and its photo is deliberately NOT layered over
@@ -16950,7 +16992,7 @@ function buildShed3DModel(THREE, p) {
   // FRONT flip, which takes the full path because the GROUND LABELS re-home.
   // The roof does NOT re-home -- see d3RoofAxes -- so that rebuild produces an
   // identical roof and could one day be narrowed to the label group alone.
-  const sharedMats = new Set([wallMat, trimMat, battenMat]);
+  const sharedMats = new Set([wallMat, trimMat, battenMat, glassRoomMat]);
   // porch: the projecting porch's numbers as built (d3PorchGeom plus its depth and wall), or null.
   // Read by tests/harness/porchProbe.mjs. In the new frame it also carries d3PorchSpan's width and
   // whether it stands on a cap end or an eave wall, and `frame` names the roof's axes and each
