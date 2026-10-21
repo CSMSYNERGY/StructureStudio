@@ -1867,11 +1867,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Does page 2 of the quote show the building from all four corners (client_settings.
     // quote_corner_views, migration 276)? ITS OWN READ, AND TOLERANT, for the same reason as the
     // three above. A failed read answers null and the Settings card hides the switch; a tenant with
-    // no settings row reads off, which is the column's default.
+    // no settings row reads ON, which is the column's default since migration 322 (and what
+    // get_config says for that tenant), so the box and the quote PDF agree.
     const { data: cornerRow, error: cornerErr } = cornerRes;
     const quoteCornerViews: boolean | null = cornerErr
       ? null
-      : (cornerRow as { quote_corner_views?: boolean } | null)?.quote_corner_views === true;
+      : cornerRow
+      ? (cornerRow as { quote_corner_views?: boolean }).quote_corner_views === true
+      : true;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The

@@ -45,7 +45,9 @@ const OWNER_ACCESS = Object.fromEntries(["designer", "designs", "contacts", "inv
   "settings_structures", "settings_options", "settings_branding", "settings_crm", "settings_quickbooks",
   "settings_email", "settings_team", "settings_billing"].map((k) => [k, "edit"]));
 const LABEL = "Show the building from all four corners on page 2 of my estimates";
-const HINT = "Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view.";
+// Migration 322 (Ahsan 2026-10-21) made it on by default; the hint says so, and how to turn it off.
+const HINT = "Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view. "
+  + "It's on by default for every builder with 3D. Untick it to turn it off and go back to the single view.";
 const REFUSED = "The four-corner page setting has to be on or off.";
 const TERMS_LABEL = "estimate terms";
 
