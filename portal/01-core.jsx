@@ -1913,6 +1913,39 @@ function ssNavClick(fn) {
   };
 }
 
+// ── "Open design" is a REAL link too (2026-10-21) ────────────────────────────────────────
+// Carolyn 2026-10-20 opens things with the wheel ("I push the middle wheel so it opens up in a new
+// tab"). "Open design" was a button holding the design in memory, so a middle click did nothing,
+// and a new tab or a reload of /designer opened an EMPTY designer ("this link does not work", "there
+// is nothing in there"). Now the Open buttons in Orders and in the Contacts hub (the design list,
+// the contact list's Open latest, a record's Open in designer) are anchors to this address, and
+// their left click still runs the in-app open (ssNavClick). The shell reads ?open= on a cold load,
+// once the tenant and the access clamp have answered (Dashboard, beside openInDesigner), opens the
+// design, and takes ?open= back out of the address bar. ?view= rides along for an operator viewing
+// a builder, as on every other link; nothing else of the current query does.
+function ssDesignHref(code, version = null) {
+  const q = new URLSearchParams();
+  try {
+    const v = new URLSearchParams(window.location.search || "").get("view");
+    if (v) q.set("view", v);
+  } catch (_e) { /* no query */ }
+  q.set("open", String(code || ""));
+  if (version != null && version !== "") q.set("version", String(version));
+  return ssPageBase("designer", null) + "?" + q.toString();
+}
+// The ?open= a cold load arrived with, read once: { code, version } or null. A code is the
+// design's short code, so anything that is not one (a hand-typed address, a mangled paste) is
+// ignored rather than sent to the designer's loader.
+function ssDesignParam() {
+  try {
+    const q = new URLSearchParams(window.location.search || "");
+    const code = String(q.get("open") || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/.test(code)) return null;
+    const v = String(q.get("version") || "").trim();
+    return { code, version: /^\d{1,6}$/.test(v) ? Number(v) : null };
+  } catch (_e) { return null; }
+}
+
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
 //
 // TAB_AREA above answers "may this person open this page". This answers a question the

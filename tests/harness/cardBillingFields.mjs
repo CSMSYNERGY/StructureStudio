@@ -487,7 +487,8 @@ try {
     ok("P8: a new card puts Charge on \"Checking card fee…\", disabled",
       await until(async () => (await textOf(chargeBtn())).includes("Checking card fee") && await offOf(chargeBtn()), 3000));
     ok("P8: …until the answer for the card and the prefilled ZIP is in",
-      await until(async () => (await textOf(chargeBtn())) === "Charge $1,000.00" && !(await offOf(chargeBtn())), 5000));
+      // The card's last 4 ride on the label since 2026-10-21 ("Charge $1,000.00 to **** 0008").
+      await until(async () => /^Charge \$1,000\.00 to \*\*\*\* \d{4}$/.test(await textOf(chargeBtn())) && !(await offOf(chargeBtn())), 5000));
     const chargesP8 = callsOf("portal-payments", "charge").length;
     await pZip().fill("90210");
     ok("P8: a new ZIP puts it back on \"Checking card fee…\"",
@@ -496,7 +497,7 @@ try {
     await page.waitForTimeout(200);
     ok("P8: a tap meanwhile charges nothing", callsOf("portal-payments", "charge").length === chargesP8);
     ok("P8: the new ZIP's fee lands on the button",
-      await until(async () => (await textOf(chargeBtn())) === "Charge $1,030.00" && !(await offOf(chargeBtn())), 6000),
+      await until(async () => /^Charge \$1,030\.00 to \*\*\*\* \d{4}$/.test(await textOf(chargeBtn())) && !(await offOf(chargeBtn())), 6000),
       await textOf(chargeBtn()));
     ok("P8: the answer that decided was asked with that ZIP", lastOf("portal-payments", "surcharge_probe").postal === "90210",
       JSON.stringify(lastOf("portal-payments", "surcharge_probe")));
