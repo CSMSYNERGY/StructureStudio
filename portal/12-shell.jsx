@@ -1133,6 +1133,8 @@ function Dashboard({ session }) {
     try {
       const st = window.history.state;
       const keep = st && st.rec && st.rec.sub === (sub || null) ? { rec: st.rec } : {};
+      // The Designer entry's opened design (openInDesigner), so a rewrite here doesn't cost a reload it.
+      if (st && st.open && resolvedTab === "designer") keep.open = st.open;
       window.history.replaceState({ page: resolvedTab, sub, ...keep }, "", ssPagePath(resolvedTab, sub));
     } catch (_e) {}
     // `canProjects` is in this list because `gatesResolved` above READS it. Left out, a
@@ -1310,6 +1312,51 @@ function Dashboard({ session }) {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [isOperator, viewing, designerOpened]);
+
+  // /designer?open=<code> (ssDesignHref, 2026-10-21): an "Open design" link opened in a new tab,
+  // with the wheel, or reloaded. Read ONCE, from the address the page loaded with, and acted on only
+  // when the tenant it belongs to is the one on screen:
+  //   * the tenant has loaded (its access map comes with it, and openInDesigner's clamp reads it);
+  //   * with ?view=, the operator's view-as of THAT builder is up (is_operator answers late, and
+  //     before it does the page is the operator's own tenant), and a support operator's own answer
+  //     is in (it narrows the access map the clamp reads).
+  // Then ?open= (and ?version=) leave the address bar, so it can't ride along onto every later page
+  // (ssPagePath keeps the query), and the open goes through openInDesigner, refusal and all, without
+  // a second history entry.
+  //
+  // RELOAD: openInDesigner keeps a plain open in its history entry's STATE ({ open: { code,
+  // version } }), which the browser keeps across a reload of that entry. So a reload of /designer,
+  // after a link or after an in-app Open (Carolyn 2026-10-20: "there is nothing in there"), opens
+  // the same design again; a cold load of any other page, or a Designer reached from its nav item,
+  // has no such state and opens nothing. Hooks live up here, above Dashboard's early returns (React
+  // #310); openInDesigner is defined below them, so it is reached through openParamFnRef, which the
+  // render keeps current.
+  const openParamRef = useRef((() => {
+    try {
+      if (new URLSearchParams(window.location.search || "").has("open")) return ssDesignParam() || { code: null };
+      const st = window.history.state;
+      if (st && st.open && ssParsePath().page === "designer" && /^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/.test(String(st.open.code || ""))) {
+        return { code: String(st.open.code), version: Number.isInteger(st.open.version) ? st.open.version : null };
+      }
+    } catch (_e) { /* no history state */ }
+    return null;
+  })());
+  const openParamFnRef = useRef(null);
+  useEffect(() => {
+    const want = openParamRef.current;
+    if (!want || !tenant || tenant === "none") return;
+    const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
+    if (v && !(viewing && viewing.clientId === v && (isSupportOp !== null || supportCheckGaveUp))) return;
+    if (v && isSupportOp && !(viewedCtx && viewedCtx.clientId === v)) return;
+    openParamRef.current = null;
+    try {
+      const q = new URLSearchParams(window.location.search);
+      q.delete("open"); q.delete("version");
+      const rest = q.toString();
+      window.history.replaceState(window.history.state, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+    } catch (_e) { /* history unavailable: the address keeps ?open=, and the design still opens */ }
+    if (want.code && openParamFnRef.current) openParamFnRef.current(want.code, want.version);
+  }, [tenant, viewing, isSupportOp, supportCheckGaveUp, viewedCtx]);
 
   // Keep the transport override in lockstep with `viewing`. Assigned during RENDER, not in
   // an effect: React runs CHILD effects before PARENT effects on mount, so an effect here
@@ -2368,7 +2415,9 @@ function Dashboard({ session }) {
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
   // there would corrupt the very activity Contacts reports.
-  const openInDesigner = (code, version = null, extra = null) => {
+  // `replace`: the ?open= link (openParamRef above) is already ON /designer, so it opens there
+  // without pushing a second entry for the same page.
+  const openInDesigner = (code, version = null, extra = null, replace = false) => {
     // ⛔ REFUSE OUT LOUD WHEN THE CLAMP WOULD REFUSE THE TAB. TAB_AREA routes "designer"
     // through `designer`, an area neither shipped staff preset carries (crew_leader and
     // driver, _shared/access.ts) — yet every caller of this is ungated: Pipeline "Open",
@@ -2391,8 +2440,17 @@ function Dashboard({ session }) {
     // estimate" (load the unit's design as a FRESH estimate), or { unit: {...} } for
     // opening a master in update mode. Plain design opens pass nothing.
     setOpenDesign({ clientId: effClientId, code, version, ...(extra || {}), n: Date.now() });
-    navigate("designer");
+    navigate("designer", null, replace);
+    // A plain open is kept in the entry navigate() just wrote, so a reload of it opens this design
+    // again (openParamRef above). Not an inventory open (`extra`): replayed as a plain open it would
+    // load a lot building's master as an ordinary design.
+    if (code && !extra) {
+      try { window.history.replaceState({ ...(window.history.state || {}), open: { code: String(code), version: Number.isInteger(version) ? version : null } }, ""); } catch (_e) { /* history unavailable */ }
+    }
   };
+  // Render-time, so the ?open= effect above always calls the openInDesigner of the latest render
+  // (its clamp reads this render's access map and tenant).
+  openParamFnRef.current = (code, version) => openInDesigner(code, version, null, true);
 
   // "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
@@ -3482,7 +3540,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "orders" && (
               /* SHIPPED TO TENANTS 2026-09-01. Until then this was operators-only on their
-                 OWN portal and everyone else saw the locked example-data preview below.
+                 OWN portal and everyone else saw a locked example-data preview (removed
+                 2026-10-21; OrdersNotShown below says why Orders isn't there instead).
                  What had to be true first, named in advance by 154_area_access_rls.sql:84-95:
                  OrdersView read designs through RLS, and its viewers now include titles that
                  hold Orders and NOT Designs — a crew leader, a driver. Both of those reads
@@ -3492,8 +3551,8 @@ function Dashboard({ session }) {
                  designs_ensure_order mints a row for every accepted design and so it would
                  resolve to "every design ever sold".
                  !viewing survives: orders/payments RLS is scoped to current_client_id(), so
-                 an operator reading ANOTHER tenant's rows directly still gets nothing — the
-                 locked preview stays the honest answer there. */
+                 an operator reading ANOTHER tenant's rows directly still gets nothing, and
+                 OrdersNotShown says exactly that, with the way out of view-as. */
               (canAdmin || ssCanSeeTab("orders", myAccess) || isOperator) && !viewing
                 ? <OrdersView clientId={tenant.clientId}
                     schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
@@ -3520,7 +3579,9 @@ function Dashboard({ session }) {
                        to. `replace` is deliberately NOT used: the open IS the navigation. */
                     urlOpenId={sub && /^o-/.test(sub) ? sub.slice(2) : null}
                     onOpenChange={(id) => navigate("orders", id ? "o-" + id : null)} />
-                : <OrdersPreview />
+                /* No more "Coming soon" teaser with example orders (2026-10-21): the true
+                   reason, and the way out (OrdersNotShown). */
+                : <OrdersNotShown viewingName={viewing ? (viewing.companyName || viewing.clientId) : null} onExitView={viewing ? exitAccount : null} />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).
                 Kept MOUNTED across tab switches, like the designer — the original reason

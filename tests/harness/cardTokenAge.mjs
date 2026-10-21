@@ -32,16 +32,18 @@
 //     P3 keyed, a charge answered 503 with newCardNeeded (not a 402, so the flag alone decides
 //        it): the frame is loaded again, the server's sentence shows with "Key the card in
 //        again"; the new token is then charged
-//     P4 swipe, 60 s: charged, entry swipe
-//     P5 swipe, 101 s: no charge; "That card read has expired. Press Ready and swipe the card
-//        again." with Ready on offer; Ready and a new swipe are then charged
+//     P4 swipe, 60 s: charged, entry swipe (Swipe arms the reader itself: no Ready press since
+//        2026-10-21)
+//     P5 swipe, 101 s: no charge; "That card read has expired. Swipe, insert or tap the card
+//        again.", and a NEW reader frame loads by itself; a new swipe is then charged
 //     P6 Card, then Swipe, then Bank / ACH, then Card: Key it in again; then Swipe and Bank / ACH,
 //        and the bank charge, 300 s after its token, carries rail ach and NO entry
 //     P8 swipe refused by the frame: the modal shows CardPointe's own code and words after "didn't get a
-//        clean read" (the frame's 1001, then CardSecure's NNNN), with card-like runs cut and track-shaped
-//        words dropped, on screen and in the swipe_refused row (warn); 20 s of silence after the reader
-//        starts typing files swipe_no_answer; keys that reach the page are counted (swipe_missed_frame,
-//        keysOutsideFrame), never kept; nothing is charged
+//        clean read" (the frame's 1001, with the chip hint, then CardSecure's NNNN), with card-like runs
+//        cut and track-shaped words dropped, on screen and in the swipe_refused row (warn); 20 s of
+//        silence after the reader starts typing files swipe_no_answer; a reader burst that reaches the
+//        page is counted (swipe_missed_frame, keysOutsideFrame, armed), never kept, and arms the reader
+//        again; nothing is charged
 //     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
 //        frame is NOT loaded again and the server's sentence shows without "Key the card in
 //        again"; that same frame's next token is then charged
@@ -421,9 +423,15 @@ try {
     return modal;
   };
   const chargeBtn = (modal) => modal.getByRole("button", { name: /^(Charge \$|Checking card fee|Charging)/ });
-  const armedCharge = (modal) => until(async () => (await textOf(chargeBtn(modal))) === "Charge $1,000.00" && !(await offOf(chargeBtn(modal))), 5000);
+  // A card names its last 4 since 2026-10-21 ("Charge $1,000.00 to **** 0001"); a bank token doesn't.
+  const armedCharge = (modal) => until(async () => /^Charge \$1,000\.00( to \*\*\*\* \d{4})?$/.test(await textOf(chargeBtn(modal))) && !(await offOf(chargeBtn(modal))), 5000);
   const KEYED_EXPIRED = "The card details expired: the security code is only kept for 2 minutes. Key the card in again, then press Charge.";
-  const SWIPE_EXPIRED = "That card read has expired. Press Ready and swipe the card again.";
+  const SWIPE_EXPIRED = "That card read has expired. Swipe, insert or tap the card again.";
+  // The reader panel's state (data-ss-reader-state). This stub frame never takes the focus, so an
+  // armed reader settles on "click" ("Click here, then swipe…"); a real one would say "waiting".
+  const readerSt = () => page.evaluate(() => { const el = document.querySelector("[data-ss-reader-state]"); return el ? el.getAttribute("data-ss-reader-state") : null; });
+  const readerArmed = () => until(async () => ["click", "waiting"].includes(await readerSt()), 6000);
+  const noReadyButton = async (modal) => (await modal.getByRole("button", { name: /^Ready/ }).count()) === 0;
 
   // P1: keyed, 60 s.
   let modal = await openModal();
@@ -479,9 +487,10 @@ try {
     await until(() => callsOf("portal-payments", "charge").length > charges + 1, 6000) && lastOf("portal-payments", "charge").payToken === tok2 && tok2 !== tok,
     sent(lastOf("portal-payments", "charge"), tok2));
 
-  // P4: swipe, 60 s.
+  // P4: swipe, 60 s. Swipe arms the reader on its own; the token comes once that frame is up.
   modal = await openModal();
   await modal.getByRole("button", { name: "Swipe", exact: true }).click();
+  ok("P4: choosing Swipe arms the reader, with no Ready button", await readerArmed() && await noReadyButton(modal), String(await readerSt()));
   tok = await postToken(true);
   ok("P4: a swipe token arms Charge", !!tok && await armedCharge(modal));
   await ff(60_000);
@@ -495,24 +504,24 @@ try {
   // P5: swipe, 101 s.
   modal = await openModal();
   await modal.getByRole("button", { name: "Swipe", exact: true }).click();
+  await readerArmed();
   tok = await postToken(true);
   ok("P5: a swipe token arms Charge", !!tok && await armedCharge(modal));
   charges = callsOf("portal-payments", "charge").length;
+  before = loads.swipe;
   await ff(101_000);
   await tap(chargeBtn(modal));
-  ok("P5: 101 s on, the modal says the card read has expired and to press Ready",
+  ok("P5: 101 s on, the modal says the card read has expired, and to swipe, insert or tap again",
     await until(async () => (await textOf(modal)).includes(SWIPE_EXPIRED), 4000), await brief(modal));
   await page.waitForTimeout(500);
-  ok("P5: …nothing was charged, Charge is off, and Ready is on offer",
-    callsOf("portal-payments", "charge").length === charges && await offOf(chargeBtn(modal))
-    && (await modal.getByRole("button", { name: "Ready to swipe" }).count()) === 1);
+  ok("P5: …nothing was charged, and Charge is off",
+    callsOf("portal-payments", "charge").length === charges && await offOf(chargeBtn(modal)));
+  ok("P5: …and a NEW reader frame is up by itself, with no Ready button",
+    await until(async () => loads.swipe === before + 1, 4000) && await readerArmed() && await noReadyButton(modal),
+    `${loads.swipe - before} new frame(s), ${await readerSt()}`);
   await modal.screenshot({ path: join(shotsDir("cardTokenAge"), "P5-swipe-expired.png") }).catch(() => {});
-  before = loads.swipe;
-  await tap(modal.getByRole("button", { name: "Ready to swipe" }));
-  await until(async () => loads.swipe === before + 1, 4000);
-  await until(async () => (await textOf(modal)).includes("Ready — swipe the card now"), 4000);
   tok2 = await postToken(true);
-  ok("P5: Ready and a new swipe re-arm Charge", !!tok2 && await armedCharge(modal));
+  ok("P5: a new swipe re-arms Charge", !!tok2 && await armedCharge(modal));
   await tap(chargeBtn(modal));
   ok("P5: …and Charge sends the NEW swipe",
     await until(() => callsOf("portal-payments", "charge").length > charges, 6000)
@@ -574,24 +583,29 @@ try {
       await f.evaluate((m) => window.parent.postMessage(JSON.stringify(m), "*"), payload);
       return true;
     };
-    const MISS = "The reader didn't get a clean read. Press Ready and swipe again.";
+    const MISS = "The reader didn't get a clean read. Swipe, insert or tap the card again.";
+    const CHIP_HINT = "If the card has a chip, insert it chip-first.";
     const rowsSince = (n, code) => logRows.slice(n).filter((r) => r.p_code === code);
+    // Arming by hand (the reader box's own click target): a NEW frame, and a fresh run of the three
+    // re-arms the page makes by itself, which this many refusals in a row would otherwise use up.
     const ready = async () => {
-      await tap(modal.getByRole("button", { name: "Ready to swipe" }));
-      await until(async () => (await textOf(modal)).includes("Ready — swipe the card now"), 4000);
+      const before = loads.swipe;
+      await tap(modal.locator("[data-ss-reader-cover='1']"));
+      await until(async () => loads.swipe > before, 4000);
+      await readerArmed();
     };
     modal = await openModal();
     const swipeLoads = loads.swipe;
     await modal.getByRole("button", { name: "Swipe", exact: true }).click();
     await until(async () => loads.swipe > swipeLoads, 4000);
-    await until(async () => (await textOf(modal)).includes("Ready — swipe the card now"), 4000);
+    await readerArmed();
     charges = callsOf("portal-payments", "charge").length;
 
     // The frame's own verdict, in the shape its script posts it: validationError, errorCode 1001, entry manual.
     let n = logRows.length;
     await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
-    ok("P8: a validationError shows the frame's code and words after the clean-read sentence",
-      await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 1001, Invalid Account Number)"), 4000), await brief(modal));
+    ok("P8: a validationError shows the frame's code and words after the clean-read sentence, and the chip hint (1001)",
+      await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 1001, Invalid Account Number) " + CHIP_HINT), 4000), await brief(modal));
     const v = rowsSince(n, "swipe_refused")[0] || {};
     ok("P8: ...and files one swipe_refused row (warn, kind validation, code 1001, entry manual, the frame's host)",
       rowsSince(n, "swipe_refused").length === 1 && v.p_severity === "warn" && v.p_context && v.p_context.kind === "validation"
@@ -606,6 +620,7 @@ try {
     const shown = await until(async () => (await textOf(modal)).includes(MISS + " (CardPointe: code 0007, Unable to decrypt ref"), 4000);
     let txt = await textOf(modal);
     ok("P8: an errorCode shows the 4-digit code and the words", shown, await brief(modal));
+    ok("P8: ...and no chip hint: that is the 1001's alone", !txt.includes(CHIP_HINT));
     ok("P8: ...with every 4+ digit run (plain, spaced, dashed) and the hex run cut from the screen",
       ![SHORT, SPACED, DASHED, HEXISH, "1111"].some((x) => txt.includes(x)));
     const e = rowsSince(n, "swipe_refused")[0] || {};
@@ -633,15 +648,16 @@ try {
     await page.waitForTimeout(200);
     await ff(21_000);
     ok("P8: a read with no answer says it didn't go through",
-      await until(async () => (await textOf(modal)).includes("That swipe didn't go through."), 4000), await brief(modal));
+      await until(async () => (await textOf(modal)).includes("That card didn't go through. Try it again, or key the card in."), 4000), await brief(modal));
     const s = rowsSince(n, "swipe_no_answer")[0] || {};
     ok("P8: ...and files one swipe_no_answer row (warn, waited 20 s)",
       rowsSince(n, "swipe_no_answer").length === 1 && s.p_severity === "warn" && s.p_context && s.p_context.waitedMs === 20000,
       JSON.stringify(s.p_context || null));
 
     // A swipe whose START reaches the page (focus outside the card box) and whose rest the frame
-    // refuses: the page counts the keys it caught (never the keys), files swipe_missed_frame for the
-    // burst as soon as the attempt ends, and the frame's swipe_refused row carries the same count.
+    // refuses: the page recognises a reader-speed burst (4 keys under 15 ms apart), counts it (never
+    // the keys), files swipe_missed_frame once the keys stop, and the frame's swipe_refused row
+    // carries the same count.
     await ready();
     await modal.getByText("Take a payment").first().click();
     n = logRows.length;
@@ -654,47 +670,58 @@ try {
     const pm = rowsSince(n, "swipe_missed_frame")[0] || {};
     ok("P8: keys that reached the page are counted on the swipe_refused row (keysOutsideFrame 4)",
       !!pr.p_context && pr.p_context.keysOutsideFrame === 4, JSON.stringify(pr.p_context || null));
-    ok("P8: ...the frame's answer ends the burst: swipe_missed_frame (warn, keys 4) is filed at once, not by the 1.5 s timer",
-      filedFast && filedIn < 1400 && pm.p_severity === "warn" && pm.p_context && pm.p_context.keys === 4, `${filedIn} ms ` + JSON.stringify(pm.p_context || null));
+    ok("P8: ...swipe_missed_frame (warn, keys 4, armed) is filed as soon as the keys stop",
+      filedFast && filedIn < 1400 && pm.p_severity === "warn" && pm.p_context && pm.p_context.keys === 4 && pm.p_context.armed === true,
+      `${filedIn} ms ` + JSON.stringify(pm.p_context || null));
     ok("P8: ...neither row holds the keys",
       !JSON.stringify(pm).includes("02AB") && !JSON.stringify(pr).includes("02AB"));
-    ok("P8: ...with the timings: Ready to frame load, and frame load to the first key (ms)",
+    ok("P8: ...with the timings: arming to frame load, and frame load to the first key (ms)",
       !!pr.p_context && typeof pr.p_context.readyToLoadMs === "number" && pr.p_context.readyToLoadMs >= 0
       && typeof pr.p_context.loadToFirstKeyMs === "number" && typeof pm.p_context.loadToFirstKeyMs === "number"
       && pm.p_context.frameLoadedFirst === true, JSON.stringify(pm.p_context || null));
     await page.waitForTimeout(1800);
     ok("P8: ...and only one swipe_missed_frame row for that burst", rowsSince(n, "swipe_missed_frame").length === 1);
 
-    // A second swipe into the same frame, with no Ready: it starts from zero, not the first one's count.
+    // A second refusal from the frame, with no new burst: it starts from zero, not the first one's count.
     n = logRows.length;
+    await readerArmed();
     await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
     await until(async () => rowsSince(n, "swipe_refused").length > 0, 4000);
     const p2 = rowsSince(n, "swipe_refused")[0] || {};
-    ok("P8: a second refusal without Ready doesn't repeat the first one's count (keysOutsideFrame 0)",
+    ok("P8: a second refusal doesn't repeat the first one's count (keysOutsideFrame 0)",
       !!p2.p_context && p2.p_context.keysOutsideFrame === 0, JSON.stringify(p2.p_context || null));
 
-    // The whole swipe reaches the page and the frame never answers: the 1.5 s timer files it, and
+    // The whole swipe reaches the page and the frame never answers: the burst's quiet ends it, and
     // the Shift that comes with a capital letter is swallowed but not counted.
     await ready();
     await modal.getByText("Take a payment").first().click();
     n = logRows.length;
+    const loadsBurst = loads.swipe;
     await page.keyboard.type("02AB");
     await page.keyboard.down("Shift"); await page.keyboard.press("C"); await page.keyboard.up("Shift");
     await page.waitForTimeout(2000);
     const tm = rowsSince(n, "swipe_missed_frame");
-    ok("P8: with no frame answer, the timer files one swipe_missed_frame row: 5 characters, Shift not counted",
+    ok("P8: with no frame answer, one swipe_missed_frame row: 5 characters, Shift not counted",
       tm.length === 1 && tm[0].p_context && tm[0].p_context.keys === 5, JSON.stringify(tm.map((r) => r.p_context)));
-    ok("P8: ...the modal says the swipe didn't land, and Ready is on offer again",
-      (await textOf(modal)).includes("That swipe didn't land in the card box.") && (await modal.getByRole("button", { name: "Ready to swipe" }).count()) === 1,
+    ok("P8: ...the modal says the card went to the page, and the reader is armed again by itself (no Ready button)",
+      (await textOf(modal)).includes("The card went to the page, not the card reader.") && loads.swipe > loadsBurst && await readerArmed() && await noReadyButton(modal),
       await brief(modal));
 
-    // Ready starts the count again.
+    // An arming starts the count again.
     await ready();
     n = logRows.length;
     await postRaw({ validationError: "Invalid Account Number", errorCode: "1001", errorMessage: "Invalid Account Number", entry: "manual" });
     await until(async () => rowsSince(n, "swipe_refused").length > 0, 4000);
     const pz = rowsSince(n, "swipe_refused")[0] || {};
-    ok("P8: Ready starts the count again (keysOutsideFrame 0)", !!pz.p_context && pz.p_context.keysOutsideFrame === 0, JSON.stringify(pz.p_context || null));
+    ok("P8: an arming starts the count again (keysOutsideFrame 0)", !!pz.p_context && pz.p_context.keysOutsideFrame === 0, JSON.stringify(pz.p_context || null));
+
+    // Two typed keys at a person's pace on the page: no burst, nothing swallowed, no row.
+    await ready();
+    await modal.getByText("Take a payment").first().click();
+    n = logRows.length;
+    await page.keyboard.press("KeyQ"); await page.waitForTimeout(120); await page.keyboard.press("KeyW");
+    await page.waitForTimeout(800);
+    ok("P8: a person's two keys on the page are not a reader burst: no swipe_missed_frame row", rowsSince(n, "swipe_missed_frame").length === 0);
 
     await page.waitForTimeout(300);
     ok("P8: nothing was charged and Charge is off", callsOf("portal-payments", "charge").length === charges && await offOf(chargeBtn(modal)));

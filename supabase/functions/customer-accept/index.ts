@@ -5,7 +5,7 @@ import { checkSession } from "../_shared/customerSession.ts";
 import { acceptanceIdentityColumns, loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
-import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import { appendAcceptancePage, onBehalfOfFrom } from "../_shared/acceptancePdf.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -809,6 +809,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
             ip,
             consentText,
             docLabel: "Invoice",
+            onBehalfOf: onBehalfOfFrom(d?.contact, d?.short_code),
           });
           const storagePath = invPdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
           const up = await admin.storage.from("floor-plans")
@@ -1159,6 +1160,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
           acceptedAtIso,
           ip,
           consentText,
+          onBehalfOf: onBehalfOfFrom(design?.contact, design?.short_code),
         });
         const storagePath = quotePdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
         const up = await admin.storage.from("floor-plans")

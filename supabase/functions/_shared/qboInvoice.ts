@@ -29,6 +29,7 @@
 import { getQboConnection, qboFetch, QboApiError, QboBroken, QboNotConnected } from "./qboToken.ts";
 import { logEdgeError } from "./logError.ts";
 import { mapRowsForRealm } from "./qboRealm.ts";
+import { qboCustomerNames } from "./customerNaming.ts";
 
 /** QBO query-language string literal. Backslash is the ESCAPE character in that dialect, so it
  *  has to be doubled FIRST — escaping only the quote left a caller-supplied trailing backslash
@@ -156,8 +157,14 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     // ── Find or create the Customer (email first — a precise identity) ────────────
     const contact = design?.contact ?? {};
     const email = String(contact.email ?? "").trim();
-    const name = [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim()
+    const legacyName = [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim()
       || String(contact.name ?? "").trim() || email || `StructureStudio ${shortCode}`;
+    // A BUSINESS (designs.contact.company, 2026-10-21): DisplayName is the company, CompanyName the
+    // company, GivenName/FamilyName the person (customerNaming.ts, where Carolyn's display-name
+    // call is one line). Without a company, `names` is the legacy name and nothing else, so the
+    // lookups and the new customer's body are exactly what they always were.
+    const names = qboCustomerNames(contact, legacyName);
+    const name = names.displayName;
 
     let customerId: string | null = null;
     if (email) {
@@ -171,15 +178,31 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       customerId = r?.QueryResponse?.Customer?.[0]?.Id ?? null;
     }
     if (!customerId) {
-      const created = await qboFetch(admin, clientId, realmId, `/customer?minorversion=75`, {
-        method: "POST",
-        body: JSON.stringify({
-          DisplayName: name,
-          ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
-          ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: String(contact.phone) } } : {}),
-        }),
-      });
-      customerId = created?.Customer?.Id ?? null;
+      const create = async (displayName: string) => {
+        const created = await qboFetch(admin, clientId, realmId, `/customer?minorversion=75`, {
+          method: "POST",
+          body: JSON.stringify({
+            DisplayName: displayName,
+            ...names.extra,
+            ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
+            ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: String(contact.phone) } } : {}),
+          }),
+        });
+        return created?.Customer?.Id ?? null;
+      };
+      try {
+        customerId = await create(name);
+      } catch (e) {
+        // 6240 = Duplicate Name Exists: DisplayName is unique across customers, VENDORS, EMPLOYEES
+        // and inactive customers, none of which the lookup above can see. A company that is also a
+        // vendor (a church the builder buys from) or a deactivated customer lands here. Only a
+        // business has a second name to try, "Company (Person)", looked up first so a retried push
+        // reuses the customer the last one made. Anything else is the failure it always was.
+        if (!(e instanceof QboApiError && e.faultCode === "6240" && names.fallbackDisplayName)) throw e;
+        const r = await qboFetch(admin, clientId, realmId,
+          `/query?query=${encodeURIComponent(`select Id from Customer where DisplayName = '${q(names.fallbackDisplayName)}' maxresults 1`)}&minorversion=75`);
+        customerId = r?.QueryResponse?.Customer?.[0]?.Id ?? await create(names.fallbackDisplayName);
+      }
     }
     if (!customerId) { await fail("could not find or create the QuickBooks customer"); return; }
 

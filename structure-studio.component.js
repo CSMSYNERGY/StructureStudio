@@ -22192,6 +22192,9 @@ function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
       <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
         onChange={(e) => setName(e.target.value)}
         style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: SS_LEGACY_UI_FONT }} />
+      {/* customer-quotes' signingFor (designs.contact.company): they type their OWN name and sign
+          for the business, which the certificate prints as "On behalf of". */}
+      {q.signingFor ? <div style={{ marginTop: 6, fontSize: 13, color: "#64748B" }}>Signing for <strong style={{ color: "#0F172A" }}>{q.signingFor}</strong></div> : null}
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
         <span>{sentence}</span>
@@ -22309,6 +22312,9 @@ function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
       <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
         onChange={(e) => setName(e.target.value)}
         style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: SS_LEGACY_UI_FONT }} />
+      {/* customer-quotes' signingFor (designs.contact.company): they type their OWN name and sign
+          for the business, which the certificate prints as "On behalf of". */}
+      {q.signingFor ? <div style={{ marginTop: 6, fontSize: 13, color: "#64748B" }}>Signing for <strong style={{ color: "#0F172A" }}>{q.signingFor}</strong></div> : null}
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
         <span>{sentence}</span>
@@ -24688,7 +24694,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Public page only, and not on an ?id= reopen (that loads its own contact). Sign out and
   // "Not you? Start over" clear all three keys.
   const [contact, setContact] = useState(() => {
-    const blank = { name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" };
+    const blank = { name: "", company: "", phone: "", email: "", street: "", city: "", state: "", zip: "" };
     if (embedded) return blank;
     try {
       const params = new URLSearchParams(location.search);
@@ -25544,7 +25550,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const d = e.data;
         setSel((p) => { const n = { ...p }; Object.keys(d).forEach((k) => { if (k !== "type" && k in n) n[k] = d[k]; }); return n; });
         if (d.name || d.phone || d.email) {
-          setContact((p) => ({ ...p, name: d.name || p.name, phone: d.phone || p.phone, email: d.email || p.email, street: d.street || p.street, city: d.city || p.city, state: d.state || p.state, zip: d.zip || p.zip }));
+          setContact((p) => ({ ...p, name: d.name || p.name, company: d.company || p.company || "", phone: d.phone || p.phone, email: d.email || p.email, street: d.street || p.street, city: d.city || p.city, state: d.state || p.state, zip: d.zip || p.zip }));
           if (d.name && d.phone) setGatePassed(true);   // host pre-satisfied the lead gate
         }
       }
@@ -26119,7 +26125,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // contact: {} (portal-settings save_inventory), and a design saved before the address
     // fields existed has no street/city/state/zip, so a bare row left contact.name undefined:
     // Floorplan PDF -> Download PDF / PNG then threw on contact.name.trim() and saved nothing.
-    setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "", ...(data.contact || {}) });
+    setContact({ name: "", company: "", email: "", phone: "", street: "", city: "", state: "", zip: "", ...(data.contact || {}) });
     // Pre-set prevSizeRef to what sel.size is ABOUT to become, so the size effect doesn't
     // treat this load as a user size-change and wipe the items set below (same guard
     // openVersion uses). "" (not the old size) because sel is REBUILT below, not merged.
@@ -26195,7 +26201,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       setItems([]);
       setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-      setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+      setContact({ name: "", company: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
       setPaintColors({ body: "", trim: "" });
       setCustomOptions([]);
       setRoDimensions({});
@@ -26254,7 +26260,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ghlEstimateNumberRef.current = null;
         setHasExistingEstimate(false);
         setViewingVersion(null);
-        setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+        setContact({ name: "", company: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
         setInventoryMaster(null);
         // asNew is a NEW quote on that building: the lock comes from the armed ref, and
         // designUnit (which tracks a SAVED row's link) must not also be set yet.
@@ -28278,7 +28284,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ctx.strokeStyle = "#E2E8F0"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(TEXT_X, textTop); ctx.lineTo(TEXT_RIGHT, textTop); ctx.stroke();
 
-    const customerName = contact.name || "Customer";
+    // A business first, with the person as Attn (quote to a business entity, 2026-10-21); a name
+    // that only repeats the company adds nothing. Without a company, the name as always.
+    const coName = String(contact.company || "").trim();
+    const coPerson = String(contact.name || "").trim();
+    const customerName = coName
+      ? coName + (coPerson && coPerson.toLowerCase() !== coName.toLowerCase() ? ` — Attn: ${coPerson}` : "")
+      : (contact.name || "Customer");
     const customerAddr = [contact.street, contact.city, contact.state, contact.zip].filter(Boolean).join(", ");
 
     // Line 1: Name (left) | Size + Style (right)
@@ -31316,6 +31328,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           .map((k) => ({ key: k, label: (ITEMS[k] && ITEMS[k].label) || k })),
         contact: {
           name: contact.name,
+          // The business this quote is for (quote to a business entity, 2026-10-21): only when one
+          // was typed, so a quote without it sends exactly the body it always did.
+          ...(String(contact.company || "").trim() ? { company: String(contact.company).trim().slice(0, 200) } : {}),
           email: contact.email,
           // Strip display formatting (n8n/GHL store raw digits) — via ssPhone10, not a bare
           // digit strip: submit the same normalized 10 digits the validator counted (an
@@ -32101,7 +32116,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } catch (_e) {}
     setCustToken(null); setCustIdentity(null); setAccountView(null); setCodePending(null); setLoginSheet(null);
     setGatePassed(false); setGateOpen(false);
-    setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+    setContact({ name: "", company: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
     currentDesignIdRef.current = null;
     isDraftRef.current = false;
     draftStateRef.current = null;
@@ -38140,6 +38155,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               fields this builder asks for, so a missing field drops its column; the breakpoint rules live
               in SSD_CSS. Placeholders, types, formatting and the verified lock are unchanged. */}
           <div className="ssd-cf">
+          {/* QUOTE TO A BUSINESS ENTITY (Junior Barns, 2026-10-14: "Bear River Band communications all
+              say "Hi Bear" ... I am working with a guy named Thomas"). Optional. Name stays the PERSON,
+              this is the business; every email, document and CRM call reads them apart through
+              _shared/customerNaming.ts. Always on the rep's form in the portal; on the public page only
+              when the builder adds "company" to contactFields (off for everyone until Carolyn says). */}
+          {(embedded || C.contactFields.includes("company")) && (
+            <div className="ssd-cf-f">
+              <span className="ssd-cf-l">Company / organization</span>
+              <input type="text" value={contact.company || ""} maxLength={200} autoComplete="organization"
+                onChange={(e) => setContact((p) => ({ ...p, company: e.target.value }))}
+                placeholder="Optional: a business, church, farm or group" className="ssd-cf-in ssd-field" />
+            </div>
+          )}
           {(C.contactFields.includes("name") || C.contactFields.includes("email") || C.contactFields.includes("phone")) && (
             <div className="ssd-cf-a" style={{ "--ssd-cf-a": `repeat(${["name", "email", "phone"].filter((k) => C.contactFields.includes(k)).length}, minmax(0,1fr))`, "--ssd-cf-a-md": `repeat(${Math.min(2, ["name", "email", "phone"].filter((k) => C.contactFields.includes(k)).length)}, minmax(0,1fr))` }}>
             {C.contactFields.includes("name") && (
@@ -39221,7 +39249,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setAmendment(null); setAmendMsg(null);
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-                if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                if (!keepPerson) setContact({ name: "", company: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
                 setPaintColors({ body: "", trim: "" });
                 setCustomOptions([]);
                 setRoDimensions({});

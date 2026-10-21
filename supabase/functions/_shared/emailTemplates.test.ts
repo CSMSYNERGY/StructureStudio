@@ -1109,3 +1109,44 @@ Deno.test("photo design: Outlook gets a fixed 600px column, everything else may 
   assert(q.html.indexOf(open) >= 0 && q.html.indexOf(open) < q.html.indexOf(card), "the Outlook column opens before the card");
   assert(q.html.lastIndexOf(close) > q.html.indexOf("All rights reserved."), "and closes after it");
 });
+
+// ── Quote to a business entity (2026-10-21) ─────────────────────────────────────────────────
+// Junior Barns: "Bear River Band communications all say "Hi Bear" ... I am working with a guy
+// named Thomas". With a company on the design's contact, {first} is the PERSON and {company} the
+// business. Without one, nothing moves (the golden test pins the bytes).
+
+Deno.test("company: {first} greets the person and {company} names the business, classic and invoice", () => {
+  const who = { customerName: "Thomas Example", customerCompany: "Bear River Band" };
+  const q = estimateEmail({ ...acmeQuote(), ...who, templateCopy: { quote: { intro: "Hi {first} at {company}!", subject: "{company}: your estimate" } } });
+  assertIncludes(q.html, "Hi Thomas at Bear River Band!");
+  assertIncludes(q.text, "Hi Thomas at Bear River Band!");
+  assertEq(q.subject, "Bear River Band: your estimate");
+  const inv = invoiceEmail({ ...acmeInvoice(), ...who, templateCopy: { invoice: { intro: "Hi {first} ({company})" } } });
+  assertIncludes(inv.html + inv.text, "Hi Thomas (Bear River Band)");
+  assertNotIncludes(inv.html + inv.text, "{company}");
+});
+
+Deno.test("company: a name that only repeats the company is no person, so it is never 'Hi Bear'", () => {
+  for (const customerName of ["Bear River Band", "", "  bear river band "]) {
+    const q = photoQuote(photoCopy(), { customerName, customerCompany: "Bear River Band" });
+    assertNotIncludes(q.html + q.text, "Bear,", customerName);
+    assertNotIncludes(q.html + q.text, "Hi Bear", customerName);
+    assertIncludes(q.html, ">We&#39;re getting closer</h2>", `${customerName}: the heading closes up`);
+    // Her default message (no wording saved) greets "there".
+    const d = photoQuote({ layout: "photo" }, { customerName, customerCompany: "Bear River Band" });
+    assertIncludes(d.html + d.text, "Hi there,", customerName);
+  }
+});
+
+Deno.test("company: absent, empty or blank is no company, and {company} fills with nothing", () => {
+  for (const customerCompany of [undefined, null, "", "   "]) {
+    const q = estimateEmail({ ...acmeQuote(), customerName: "Bear River Band", customerCompany, templateCopy: { quote: { intro: "Hi {first}[{company}]" } } });
+    assertIncludes(q.html + q.text, "Hi Bear[]", String(customerCompany));
+  }
+});
+
+Deno.test("company: the wording screen's preview shows a sample company", () => {
+  assertEq(PREVIEW_SAMPLE.customerCompany, "Smith Family Farm");
+  const p = templatePreviewEmail({ kind: "quote", copy: { intro: "Hi {first} at {company}" }, businessName: "Acme Sheds" });
+  assertIncludes(p.html, "Hi Alex at Smith Family Farm");
+});

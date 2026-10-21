@@ -287,8 +287,11 @@ Deno.test("the SWIPE tokenizer is its own parameter set, so the reader's letters
     check(`swipe has ${p}=true`, q.get(p) === "true", swipe);
   }
   check("swipe keeps the 2 s quiet", q.get("inactivityto") === "2000", swipe);
-  check("swipe keeps the card css", q.get("css") === new URL(card).searchParams.get("css"));
-  check("swipe says what the box is for", q.get("cardlabel") === "Card reader" && q.get("placeholder") === "Swipe the card", swipe);
+  // The card css, plus white text in the reader's box (2026-10-21): what the reader types never
+  // shows. Exactly one rule added, at the end, so every other style is the card's.
+  check("swipe css = the card css + white text in the box", q.get("css") === new URL(card).searchParams.get("css") + "#ccnumfield{color:#FFFFFF}", String(q.get("css")));
+  check("the card frame's text stays dark", !String(new URL(card).searchParams.get("css")).includes("#FFFFFF"));
+  check("swipe says what the box is for", q.get("cardlabel") === "Card reader" && q.get("placeholder") === "Swipe, insert or tap the card", swipe);
   // Each of these loses or garbles a real swipe. Not one may come back, under any value.
   for (const p of ["cardnumbernumericonly", "formatinput", "useexpiry", "useexpiryfield", "usecvv", "invalidcreditcardevent", "invalidexpiryevent", "invalidcvvevent"]) {
     check(`swipe has NO ${p}`, !q.has(p) && !swipe.includes(`${p}=`), swipe);

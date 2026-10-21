@@ -994,8 +994,9 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                       {/* Opens IN THE PORTAL designer — never the public page, which now
                           silently captures leads and saves drafts; staff browsing a
                           customer's design there would corrupt that activity. */}
-                      <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
-                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
+                      {/* A real link (ssDesignHref): the wheel, a new tab and a reload open it too. */}
+                      <a href={ssDesignHref(r.short_code)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(r.short_code))} data-ss-open-design="1"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10, textDecoration: "none" }}>Open</a>
                       {/* Pop-up, not a new tab — Carolyn 2026-08-26. See PdfModal. */}
                       {ssSafeUrl(r.image_url) && (
                         <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
@@ -1065,8 +1066,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={S.td}></td>
                         <td style={S.td}></td>
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                          <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
-                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
+                          <a href={ssDesignHref(r.short_code, v.version)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(r.short_code, v.version))} data-ss-open-design="1"
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10, textDecoration: "none" }}>Open</a>
                           {ssSafeUrl(v.image_url) && (
                             <button type="button" onClick={() => setPdf({ url: v.image_url, title: `Floor plan v${v.version} — ${r.short_code}` })}
                               style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
@@ -1988,8 +1989,8 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {(g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
-                      {!g.browsing && !g.contactOnly && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
-                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
+                      {!g.browsing && !g.contactOnly && <a href={ssDesignHref(g.latestCode)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(g.latestCode))} data-ss-open-design="1"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>}
                       {/* The "Open record" button that stood here is gone: the customer NAME
                           is the link now, which is what Carolyn demonstrated. "Details" stays
                           as the quick inline peek that does not leave the list. */}
@@ -4563,7 +4564,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const insertQuickSend = (q, channel) => {
     if (!quick || !quick.list || !q) return;
     const email = channel === "email";
-    const fill = { contactName: data.contact && data.contact.name, myName: quick.myName };
+    // The PERSON's name (ssPersonName): a record whose name only repeats its company has no first
+    // name to fill, so {first_name} drops out instead of greeting "Hi Bear" for Bear River Band.
+    const fill = { contactName: ssPersonName(data.contact), myName: quick.myName };
     const next = ssInsertQuickSend(email ? mail.body : text, q, fill, channel);
     const say = email ? setMailMsg : setTextMsg;
     if (next === null) { say({ err: ssQuickSendTooLong(channel) }); return; }
@@ -4851,8 +4854,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                           reports on. openInDesigner also clamps on the designer area, so a Crew
                           Leader gets a refusal instead of a button that silently does nothing. */}
                       {d && onOpenDesign && (
-                        <button style={{ ...S.btn(), padding: "5px 10px", fontSize: 12, marginRight: "auto" }}
-                          onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
+                        <a href={ssDesignHref(d.short_code)} data-ss-open-design="1"
+                          style={{ ...S.btn("#EFEFEF", "#1E293B"), padding: "5px 10px", fontSize: 12, marginRight: "auto", display: "inline-block", textDecoration: "none" }}
+                          onClick={ssNavClick(() => onOpenDesign(d.short_code))}>Open in designer</a>
                       )}
                       {/* THIS pipeline's stages and nobody else's: "no list of every pipeline's
                           stages" (C37). Read only for someone who can't edit contacts. */}
@@ -5227,7 +5231,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           <div style={{ marginLeft: "auto" }}>
             {/* IN-PORTAL ONLY. Linking to the public ?id= page fires capture-lead and draft
                 saves, corrupting the very activity this page reports on. */}
-            <button style={S.btn(ACCENT, "#FFF")} onClick={() => onOpenDesign(recordId)}>Open in designer</button>
+            <a href={ssDesignHref(recordId)} data-ss-open-design="1" style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}
+              onClick={ssNavClick(() => onOpenDesign(recordId))}>Open in designer</a>
           </div>
         )}
       </div>
@@ -5497,7 +5502,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {quickSendsOn && (
                         <CrmQuickSendPicker channel="sms" quick={quick} onOpen={loadQuickSends}
                           onInsert={(q) => insertQuickSend(q, "sms")}
-                          fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                          fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                       )}
                       <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
                         {busy ? "Sending…" : "Send text"}
@@ -5590,7 +5595,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   {quickSendsOn && (
                     <CrmQuickSendPicker channel="email" quick={quick} onOpen={loadQuickSends}
                       onInsert={(q) => insertQuickSend(q, "email")}
-                      fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                      fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                   )}
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}

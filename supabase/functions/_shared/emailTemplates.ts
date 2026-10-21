@@ -23,7 +23,14 @@
 // so a value carrying a newline can never smuggle in an extra header.
 //
 // ⚠️ Importers, ALL of which must be redeployed together when this changes (_shared
-//    bundles PER function): portal-settings, submit-estimate, customer-accept.
+//    bundles PER function): portal-settings, submit-estimate, customer-accept, shop-checkout.
+//
+// THE CUSTOMER'S NAME AND COMPANY (2026-10-21, quote to a business entity). {first} is the
+// PERSON's first name through _shared/customerNaming.ts, and {company} is the business (both
+// from the design's contact). With no company on the contact {first} is exactly the first word
+// of the name it always was, so every email without one is unchanged (the golden test).
+
+import { companyOf, greetingFirst } from "./customerNaming.ts";
 
 export interface EmailContent {
   subject: string;
@@ -38,6 +45,9 @@ export interface EstimateEmailInput {
   templateCopy?: unknown;
   /** Used only by the {customer} and {first} tokens in tenant copy: the name on the design's contact. */
   customerName?: string;
+  /** The business on the design's contact (designs.contact.company), for the {company} token. With
+   *  one, {first} greets the person, never the company's first word. Absent = no company. */
+  customerCompany?: string | null;
   /** The building's photo: the builder's own style photo, and only when that style's "show on
    *  estimate" switch is on (callers use tenantStylePhotoUrl). Drawn above the detail rows when
    *  it is an https:// address and the builder hasn't switched the photo off in their wording.
@@ -119,6 +129,8 @@ export interface InvoiceEmailInput {
   templateCopy?: unknown;
   /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
   customerName?: string;
+  /** The business on the design's contact, for {company} (see EstimateEmailInput). */
+  customerCompany?: string | null;
 
   businessName: string;
   logoUrl?: string | null;
@@ -558,9 +570,12 @@ const PHOTO_BUTTON = "#2cab05";
 /** Her GHL email's body face. */
 const PHOTO_FONT = "Arial,Helvetica,sans-serif";
 
-/** The first word of the customer's name, for {first}. "" when there is none. */
-function firstName(customerName: unknown): string {
-  return oneLine(customerName).split(" ")[0] || "";
+/** The customer tokens every document email fills: {customer} (the name as typed), {first} (the
+ *  person's first name, through customerNaming.ts: "" when only a company is known) and {company}.
+ *  With no company these are the name and its first word, as they always were. */
+function customerTokens(name: unknown, company: unknown): { customer: string; first: string; company: string } {
+  const c = { name: oneLine(name), company: typeof company === "string" ? company : "" };
+  return { customer: oneLine(name), first: greetingFirst(c), company: companyOf(c) };
 }
 
 /** The business address on one line ("1645 Bethany Rd, Cottage Grove, TN 38224"), from the
@@ -886,7 +901,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // a Subject header — the one thing tenantCopy() already strips from the template. The
   // detail row and the plain-text line keep the raw value; a break there is only ugly.
   const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
-  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? ""), first: firstName(input.customerName) };
+  const tokens = { business: name, number: num, total: money, building: oneLine(building), ...customerTokens(input.customerName, input.customerCompany) };
   // The builder's button words, filled. Blank once filled (a lone {customer} with no name on the
   // design) falls back to ours rather than drawing an empty button.
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
@@ -1117,7 +1132,7 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   // has no value for: fillTokens leaves an UNKNOWN token verbatim on purpose, so omitting
   // {building} here would ship a literal "{building}" to a customer's inbox.
   const copy = tenantCopy(input.templateCopy, "invoice");
-  const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? ""), first: firstName(input.customerName) };
+  const tokens = { business: name, number: num, total: money, building: "", ...customerTokens(input.customerName, input.customerCompany) };
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
   const closing = copy.closing ? fillTokens(copy.closing, tokens).trim() : "";
   const cta = toSign
@@ -1310,6 +1325,8 @@ export function shopRequestEmail(input: ShopRequestEmailInput): EmailContent {
  *  preview is the builder's own: their name, logo, phone, website, terms and style photo. */
 export const PREVIEW_SAMPLE = {
   customerName: "Alex Smith",
+  /** So a {company} in the wording previews as a business, not as nothing. */
+  customerCompany: "Smith Family Farm",
   number: "1001",
   total: 12500,
   styleLabel: "Lofted Barn",
@@ -1347,6 +1364,7 @@ export function templatePreviewEmail(p: TemplatePreviewInput): EmailContent {
   const shared = {
     templateCopy,
     customerName: PREVIEW_SAMPLE.customerName,
+    customerCompany: PREVIEW_SAMPLE.customerCompany,
     businessName: p.businessName,
     logoUrl: p.logoUrl ?? null,
     phone: p.phone ?? null,

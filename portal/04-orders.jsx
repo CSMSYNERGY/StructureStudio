@@ -1227,96 +1227,30 @@ function ComingSoon({ icon, title, blurb, bullets, cta, available = false }) {
   );
 }
 
-// ─── Orders (preview) ───
-// Coming-soon preview of the paused Orders & payments feature (the full, wired build lives
-// on the wip/orders branch). Renders the finished LIST view with EXAMPLE data behind a
-// pointer-events/user-select lock, under a clear "coming soon / work in progress" banner —
-// so tenants can see what's coming but cannot interact with it. Intentionally self-contained
-// and inert: no data reads, no sb calls, no live wiring. When the real feature ships, this
-// whole component is replaced by the live OrdersView.
-function OrdersPreview() {
-  const pill = (bg, fg, label) => (
-    <span style={{ background: bg, color: fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{label}</span>
-  );
-  const tile = (label, value, note, accent) => (
-    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "13px 15px", borderLeft: `3px solid ${accent}` }}>
-      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 23, fontWeight: 800, marginTop: 5, letterSpacing: -0.5, fontVariantNumeric: "tabular-nums" }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{note}</div>
-    </div>
-  );
-  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
-  const td = { fontSize: 13, padding: "12px 10px", borderBottom: "1px solid #F1F5F9" };
-  const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
-  const chip = (label, on) => (
-    <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 20, padding: "6px 13px", border: `1px solid ${on ? "#3D3672" : "#E2E8F0"}`, background: on ? "#3D3672" : "#F1F5F9", color: on ? "#FFF" : "#475569" }}>{label}</span>
-  );
-  const muted = <span style={{ color: "#94A3B8" }}>—</span>;
-  const SAMPLE = [
-    { no: "1024", name: "Dale Hostetler", phone: "(330) 555-0148", bldg: "Lofted Barn 12×24", date: "Jul 20, 2026", total: "$9,575.00", paid: "$2,000.00", bal: "$7,575.00", balColor: "#1E293B", st: pill("#DBEAFE", "#1E40AF", "Partially paid") },
-    { no: "1023", name: "Marcus Webb", phone: "(614) 555-0192", bldg: "Garage 24×32", date: "Jul 18, 2026", total: "$18,400.00", paid: muted, bal: "$18,400.00", balColor: "#1E293B", st: pill("#FFE4E6", "#9F1239", "Awaiting payment") },
-    { no: "1022", name: "Owen Brant", phone: "(937) 555-0164", bldg: "Cabin 14×40", date: "Jul 15, 2026", total: <span style={{ color: "#3D3672", fontWeight: 700 }}>Set total</span>, paid: muted, bal: "—", balColor: "#94A3B8", st: pill("#FEF3C7", "#92400E", "Needs invoice") },
-    { no: "1021", name: "Rita Colson", phone: "(419) 555-0173", bldg: "Utility Shed 10×16", date: "Jul 12, 2026", total: "$4,300.00", paid: "$4,300.00", bal: "$0.00", balColor: "#94A3B8", st: pill("#DCFCE7", "#166534", "Paid in full") },
-    { no: "1020", name: "Gary Aldenmeyer", phone: "(740) 555-0100", bldg: "Lean-To 8×12", date: "Jul 8, 2026", total: "$2,100.00", paid: "$2,600.00", bal: "$500.00 credit", balColor: "#9A3412", st: pill("#FFEDD5", "#9A3412", "Overpaid") },
-  ];
-
+// ─── Orders, when it can't be shown ───
+// The "Coming soon / Work in progress" teaser that stood here (example orders behind a lock) went
+// on 2026-10-21. Orders shipped to builders on 2026-09-01, so the teaser only ever reached two
+// people, and told both of them something false: an operator viewing a builder (orders and payments
+// RLS is scoped to the signed-in tenant, so view-as can't read them) and a team member whose title
+// doesn't hold Orders. Carolyn asked on 2026-10-19: "Why does it say work in progress?" (a 10-20
+// error row's address carried ?view=structure-studio). Each now gets the true sentence and the way out.
+function OrdersNotShown({ viewingName = null, onExitView = null }) {
   return (
-    <div style={{ maxWidth: 1040 }}>
-      {/* Coming-soon / work-in-progress banner — the one thing that IS meant to read clearly. */}
-      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 12, padding: "20px 24px", color: "#FFF", marginBottom: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9, flexWrap: "wrap" }}>
-          <span style={{ background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Coming soon</span>
-          <span style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.32)", color: "#FFF", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Work in progress</span>
-        </div>
-        <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>Orders &amp; payments</div>
-        <p style={{ fontSize: 13.5, color: "#D6E4F0", lineHeight: 1.55, margin: "9px 0 0", maxWidth: 660 }}>
-          A preview of what's coming: every accepted estimate becomes a tracked order — from the sale, through the build, to delivery — with payments and balances in one place. The screen below shows <b style={{ color: "#FFF" }}>example data</b> and isn't switched on yet, so it can't be clicked or edited while we finish building it.
-        </p>
-      </div>
-
-      {/* Everything below is a locked, non-interactive preview. pointerEvents:none disables
-          every click/hover/field; userSelect:none stops text selection; aria-hidden keeps the
-          sample figures out of the accessibility tree (the banner above is the real message). */}
-      <div aria-hidden="true" style={{ pointerEvents: "none", userSelect: "none", cursor: "default", opacity: 0.96 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
-          {tile("Open balance", "$25,975.00", "across 2 open orders", "#F59E0B")}
-          {tile("Collected", "$12,300.00", "6 payments recorded", "#16A34A")}
-          {tile("Needs invoice", "1", "accepted, not billed yet", "#92400E")}
-          {tile("Awaiting payment", "1", "invoiced, nothing collected", "#9F1239")}
-        </div>
-
-        <div style={{ ...S.card }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
-            <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders (5)</div>
-            {chip("All", true)}{chip("Needs invoice")}{chip("Awaiting payment")}{chip("Partially paid")}{chip("Paid in full")}
-            <div style={{ marginLeft: "auto", minWidth: 220, flex: "0 1 280px", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#94A3B8", background: "#FFF" }}>Search orders — name, building, order #…</div>
-            <span style={{ border: "1px solid #E2E8F0", background: "#F1F5F9", color: "#334155", fontWeight: 700, fontSize: 12.5, borderRadius: 8, padding: "8px 12px" }}>↻ Refresh</span>
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>
-                <th style={th}>Order</th><th style={th}>Customer</th><th style={th}>Building</th><th style={th}>Ordered</th>
-                <th style={{ ...th, textAlign: "right" }}>Total</th><th style={{ ...th, textAlign: "right" }}>Paid</th>
-                <th style={{ ...th, textAlign: "right" }}>Balance</th><th style={th}>Status</th><th style={th}></th>
-              </tr></thead>
-              <tbody>
-                {SAMPLE.map((r) => (
-                  <tr key={r.no}>
-                    <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>#{r.no}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>{r.name}<div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{r.phone}</div></td>
-                    <td style={td}>{r.bldg}</td>
-                    <td style={{ ...td, whiteSpace: "nowrap" }}>{r.date}</td>
-                    <td style={numTd}>{r.total}</td>
-                    <td style={numTd}>{r.paid}</td>
-                    <td style={{ ...numTd, fontWeight: 800, color: r.balColor }}>{r.bal}</td>
-                    <td style={td}>{r.st}</td>
-                    <td style={{ ...td, whiteSpace: "nowrap" }}><span style={{ color: "#3D3672", fontWeight: 700, fontSize: 12 }}>Open →</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+    <div style={{ maxWidth: 560 }}>
+      <div style={{ ...S.card }} data-ss-orders-not-shown={viewingName ? "view-as" : "access"}>
+        <div style={{ ...S.h2, fontSize: 16 }}>Orders</div>
+        {viewingName ? (
+          <>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, margin: "0 0 14px" }}>
+              Orders isn't shown while viewing as <b>{viewingName}</b>. Their orders and payments can only be read from their own sign-in.
+            </p>
+            {onExitView && <button type="button" onClick={onExitView} style={S.btn(ACCENT, "#FFF")}>Exit view-as</button>}
+          </>
+        ) : (
+          <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, margin: 0 }}>
+            Orders isn't part of your access. Ask an owner to turn it on for you under Settings → Team.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -3468,11 +3402,12 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         {/* "View design" once the order is signed and this person cannot raise a change —
             the button still opens the real designer, but calling it "Open design" beside a
             locked order invites an edit that the save will refuse. */}
+        {/* A real link (ssDesignHref): the wheel, a new tab and a reload open THIS design. */}
         {o.short_code && onOpenDesign && (
-          <button type="button" onClick={() => onOpenDesign(o.short_code)}
-            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>
+          <a href={ssDesignHref(o.short_code)} onClick={ssNavClick(() => onOpenDesign(o.short_code))} data-ss-open-design="1"
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", display: "inline-block", textDecoration: "none" }}>
             {amendGate && amendGate.signed === true && attrsLocked ? "View design" : "Open design"}
-          </button>
+          </a>
         )}
         <button type="button"
           onClick={(e) => {
@@ -3665,20 +3600,46 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [tokenErr, setTokenErr] = useState("");
   const [surcharge, setSurcharge] = useState(null);
   const [armed, setArmed] = useState(false);
-  // Every "Ready" press REMOUNTS the reader's frame (armCount is its key), because the frame's own
+  // Every arming REMOUNTS the reader's frame (armCount is its key), because the frame's own
   // autofocus is the only thing that puts focus in its card box, and it runs once per load. The
-  // button says "swipe now" only once that load is done (frameReady): a swipe that arrives while
-  // the new frame is still loading is lost without a word.
+  // reader is said to be waiting only once that load is done (frameReady): a swipe that arrives
+  // while the new frame is still loading is lost without a word.
+  //
+  // NO "READY" BUTTON (Carolyn 2026-10-20: "why do I have to press Ready?"). Choosing Card > Charge
+  // it now > Swipe arms the reader by itself, and a refusal re-arms it 1.5 s later, at most
+  // READER_AUTO_REARMS times in a row; then "Reset reader". A click on the reader box arms it too.
   const [armCount, setArmCount] = useState(0);
   const [frameReady, setFrameReady] = useState(false);
+  const READER_AUTO_REARMS = 3;
+  // A read in flight: the reader's frame said "typing" and has not answered yet. The modal can't be
+  // closed meanwhile, or the rest of the read types into whatever is under it.
+  const [reading, setReading] = useState(false);
+  // Whether the reader's frame holds the page's focus (document.activeElement is the frame, in a
+  // focused window). Polled while the reader is up: the frame's own box can't be seen across
+  // origins, so this is the closest sign there is that the reader's keys will reach it.
+  const [readerFocus, setReaderFocus] = useState(false);
+  const [readerStuck, setReaderStuck] = useState(false);
+  const rearmTimerRef = useRef(null);
+  const rearmLeftRef = useRef(READER_AUTO_REARMS);
+  // Set once the current frame has been seen holding the focus: proof that this browser lets the
+  // frame take it without a click. Only then does the page re-arm by itself when focus wanders.
+  const focusOkRef = useRef(false);
+  // A reader burst that landed on the page while the reader is not what the modal shows (see the
+  // burst guard): the sentence for it, under the amount box.
+  const [readerHint, setReaderHint] = useState("");
+  // The amount box was filled by the PAGE (on open, from pay_options, on picking Charge it now),
+  // not by a person: the page may still replace it until someone types or picks a chip. What
+  // someone typed is never replaced (Carolyn 2026-10-20: "it flips over").
+  const amountAutoRef = useRef(true);
   const readTimerRef = useRef(null);   // the reader typed, no token yet: see the message listener
   const landTimerRef = useRef(null);   // the trap's "the burst is over" debounce
   // How many reader keys this attempt reached the PAGE instead of the card box (a count, never
   // the keys). 2026-10-20: two real swipes came back 1001 "manual" although the reader's output
   // ends like ID TECH's 02...03 swipe, which the frame accepts whole; a lost START would do that.
   const outsideKeysRef = useRef(0);
-  // When this attempt's Ready was pressed, its reader frame loaded, and the reader's first key
-  // arrived (page or frame), in ms: a swipe started before the frame has focus loses its start.
+  // When this attempt was armed (`ready`: the name the filed rows have always used), its reader
+  // frame loaded, and the reader's first key arrived (page or frame), in ms: a swipe started before
+  // the frame has focus loses its start.
   const swipeTimesRef = useRef({ ready: 0, load: 0, firstKey: 0 });
   const swipeTiming = () => {
     const s = swipeTimesRef.current;
@@ -3688,8 +3649,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     };
   };
   const noteFirstKey = () => { if (!swipeTimesRef.current.firstKey) swipeTimesRef.current.firstKey = Date.now(); };
-  // A new attempt starts counting from nothing: Ready, the Swipe chip, closing the modal, and each
-  // filed refusal (a second swipe into the same frame must not repeat the first one's numbers).
+  // A new attempt starts counting from nothing: an arming, the Swipe chip, closing the modal, and
+  // each filed refusal (a second swipe into the same frame must not repeat the first one's numbers).
   const resetSwipeCounts = (ready = 0) => { outsideKeysRef.current = 0; swipeTimesRef.current = { ready, load: 0, firstKey: 0 }; };
   const endSwipeAttempt = () => { outsideKeysRef.current = 0; swipeTimesRef.current.firstKey = 0; };
   const stopReadTimer = () => { if (readTimerRef.current) { clearTimeout(readTimerRef.current); readTimerRef.current = null; } };
@@ -3706,7 +3667,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // customer, and that can pass 2 minutes. So Charge checks the age first (100 s leaves the upload,
   // a cold start and the database writes inside the 2 minutes), and a charge the gateway saw
   // (newCardNeeded) asks for the card again. A swipe is held to the same limit: whether its track
-  // data lasts longer is not known, and one more Ready press costs little. Bank tokens are not
+  // data lasts longer is not known, and one more read costs little. Bank tokens are not
   // timed. scripts/preflight.mjs (checkCardTokenMaxAge) holds this equal to my-quotes.html's.
   const CARD_TOKEN_MAX_MS = 100000;
   // The bank rail's two boxes (see achTokenize). These two strings are the ONLY place the
@@ -3772,6 +3733,15 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     setBillName(p.name || ""); setBillStreet(p.street || ""); setBillZip(p.zip || ""); setBillErr("");
   }, [payOpts]);
 
+  // ONE amount for both modes (2026-10-21). It opens on the order's balance; once pay_options says
+  // what is due now (the deposit, or the balance), the box takes that figure, but only while the
+  // page filled it: a figure someone typed, or a chip they picked, is never replaced. Charge it now
+  // charges what is in the box, inside the balance; the server checks the same range.
+  useEffect(() => {
+    if (!payOpen || !payOpts || !payOpts.canCharge || !payOpts.askCents || !amountAutoRef.current) return;
+    setAmount((payOpts.askCents / 100).toFixed(2));
+  }, [payOpen, payOpts]);
+
   // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
   // security of this listener — without it any page that opens this one could post a forged
   // token. The origin comes from the SERVER (pay_options), so it can never be
@@ -3792,31 +3762,33 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // it only answers a 200. So "typing, then READ_WAIT_MS of silence" is the only sign there is.
       //   * Not while a token is held: after a token the frame says "typing" again on ANY key in
       //     its box (an Enter, a Shift), and the timer then threw a good card away.
-      //   * Only for the frame that said it: a switch to Bank / ACH, or a Ready that reloads the
+      //   * Only for the frame that said it: a switch to Bank / ACH, or an arming that reloads the
       //     frame, leaves this timer behind, and it must not touch what is on screen by then.
-      //   * Until it fires the page stays armed: "Press Ready" mid-read reloads the frame and
-      //     throws the read away.
+      //   * Until it fires the page stays armed, and `reading` holds the modal open and keeps every
+      //     re-arm away: one mid-read reloads the frame and throws the read away.
       if (m && m.cardTyping === true && entry === "swipe" && !payTokenRef.current) {
         noteFirstKey();
         stopReadTimer();
+        setReading(true);
         const f = frameRef.current;
         readTimerRef.current = setTimeout(() => {
           readTimerRef.current = null;
           if (frameRef.current !== f || payTokenRef.current) return;
-          setArmed(false);
-          setTokenErr("That swipe didn't go through. Press Ready and swipe again, or key the card in.");
+          setArmed(false); setReading(false);
+          setTokenErr("That card didn't go through. Try it again, or key the card in.");
           // Filed too (warn), beside swipe_refused below: silence is what a reader keyed for the
           // other system looks like, so support needs the two told apart. No card data.
           if (window.ssLogError) window.ssLogError("portal", "A swipe got no answer from the card reader frame", "swipe_no_answer",
             { waitedMs: READ_WAIT_MS, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
           endSwipeAttempt();
+          rearmSoon();
         }, READ_WAIT_MS);
       }
-      // Every answer below ends the swipe attempt, so each one disarms: "Press Ready" has to be
-      // a button that works, not one that stays grey for the rest of the minute.
+      // Every answer below ends the swipe attempt: it disarms, and a refusal re-arms by itself
+      // 1.5 s later (rearmSoon) so the next try needs no click.
       // A swipe's frame text is about typed numbers ("Invalid Account Number" for a half read),
       // so the reader gets its own sentence; the keyed form keeps the frame's own words.
-      const swipeMiss = "The reader didn't get a clean read. Press Ready and swipe again.";
+      const swipeMiss = "The reader didn't get a clean read. Swipe, insert or tap the card again.";
       // ...but that sentence alone hid WHY the frame refused (2026-10-19, the first real VP3350
       // swipe of a Fiserv test card: a complete read, refused, and nothing to tell a half read
       // from a reader keyed for the live system). So a swipe refusal also shows CardPointe's own
@@ -3827,6 +3799,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // How to read the code: 1001 "Invalid Account Number" is the FRAME's own verdict (it did not
       // recognise the reader's output as a swipe; nothing reached CardSecure, so it says nothing
       // about the reader's keys); a 4-digit code with other words is CardSecure's answer.
+      //
+      // 1001 GETS A HINT (2026-10-21). This reader (MSR-to-chip fallback on, per its manual's DFEF62)
+      // answers a swipe of any card whose stripe says "chip" with an "insert the card" code in front
+      // of the read, and the frame then sees no swipe at all: 1001. Inserting is the fix.
       const swipeRefused = (kind, rawCode, rawWords) => {
         const str = (v) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
         let said = str(rawWords);
@@ -3839,34 +3815,45 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         if (window.ssLogError) window.ssLogError("portal", "A swipe was refused by the card reader frame", "swipe_refused",
           { kind, errorCode: code || null, reason: said || null, entry: typeof m.entry === "string" ? m.entry.slice(0, 10) : null, frame, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
         endSwipeAttempt();
-        return shown ? swipeMiss + " (CardPointe: " + shown + ")" : swipeMiss;
+        const hint = code === "1001" ? " If the card has a chip, insert it chip-first." : "";
+        return (shown ? swipeMiss + " (CardPointe: " + shown + ")" : swipeMiss) + hint;
       };
-      if (m && m.validationError) { stopReadTimer(); setPayToken(null); setTokenErr(entry === "swipe" ? swipeRefused("validation", m.errorCode, m.validationError) : m.validationError); setArmed(false); return; }
+      if (m && m.validationError) {
+        stopReadTimer(); setPayToken(null); setArmed(false);
+        if (entry === "swipe") { setReading(false); setTokenErr(swipeRefused("validation", m.errorCode, m.validationError)); rearmSoon(); }
+        else setTokenErr(m.validationError);
+        return;
+      }
       // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
       // indistinguishable from a strange token and the button would arm on nothing.
       if (m && m.errorCode && String(m.errorCode) !== "0") {
         stopReadTimer();
-        setPayToken(null);
-        setTokenErr(entry === "swipe" ? swipeRefused("error", m.errorCode, m.errorMessage) : (m.errorMessage || "That card wasn't accepted — check the number."));
-        setArmed(false);
+        setPayToken(null); setArmed(false);
+        if (entry === "swipe") { setReading(false); setTokenErr(swipeRefused("error", m.errorCode, m.errorMessage)); rearmSoon(); }
+        else setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
         return;
       }
       const tok = m && (m.token || m.message);
       if (!tok) return;
       stopReadTimer();
+      setReading(false);
       // swipeonly does nothing next to tokenizewheninactive, so a card number TYPED into the
       // reader's frame is tokenized too, as entry "manual". Charged as a swipe it would go out
       // with no ecomind and no billing address. enhancedresponse reports the entry on every token.
+      // A chip read (ID TECH's DFEE25/DFEE26 output) is classed "swipe" by the frame, so it passes.
       if (entry === "swipe" && m.entry !== "swipe") {
         setPayToken(null); setArmed(false);
-        setTokenErr("That was typed, not swiped. Press Ready and swipe the card.");
+        setTokenErr("That was typed, not read by the card reader. Swipe, insert or tap the card.");
+        rearmSoon();
         return;
       }
       payTokenAtRef.current = Date.now();
+      // A card in hand ends the run of refusals: the next one gets its three re-arms again.
+      rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
       setTokenErr(""); setPayExpiry(m.expiry || null); setPayToken(String(tok)); setArmed(false);
     };
     window.addEventListener("message", onMsg, false);
-    return () => { window.removeEventListener("message", onMsg, false); stopReadTimer(); };
+    return () => { window.removeEventListener("message", onMsg, false); stopReadTimer(); setReading(false); };
   }, [payOpen, collect, payOpts, entry, method]);
 
   // The bank rail has no iframe to post a token back: once BOTH boxes are valid, the numbers
@@ -3954,103 +3941,250 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   }, [payToken, method, probeZip]);
   const feeReady = !feeKey || !!(surcharge && surcharge.key === feeKey);
 
-  // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
-  // whatever element has focus, fast, ending in Enter. This modal's amount box carries
-  // autoFocus, so an un-trapped swipe would type track data into it. While armed, every
-  // keystroke that reaches this document is one that did NOT reach the iframe — swallow it
-  // and say so. Never echo, never buffer, never log those characters: they are card data.
+  // Card > Charge it now > Swipe, on an account that can take the card: the reader is what the
+  // modal shows. The listeners and timers below read these through refs, so a key or a timer that
+  // fires between renders sees the page as it is now.
+  const swipeLive = payOpen && collect === "charge" && method === "card" && entry === "swipe"
+    && !!(payOpts && payOpts.canCharge && payOpts.tokenizer);
+  const swipeLiveRef = useRef(false);
+  swipeLiveRef.current = swipeLive;
+  const armedRef = useRef(false);
+  armedRef.current = armed;
+  const frameReadyRef = useRef(false);
+  frameReadyRef.current = frameReady;
+  // Set while the burst guard puts a box's old value back, so the amount box does not count that as
+  // someone typing (amountAutoRef).
+  const restoringRef = useRef(false);
+  const isTextBox = (el) => !!el && (el.tagName === "TEXTAREA"
+    || (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|date|range|color|file)$/i.test(el.type || "")));
+
+  // ⚠️ THE READER-BURST GUARD (2026-10-21). It replaces the focus trap that swallowed EVERY key on
+  // the page while armed, which, with the reader now armed whenever it shows, would have made the
+  // amount box untypeable. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
+  // whatever has focus, a character every ~1.2 ms, ending in two Enters. While the reader's frame
+  // holds the focus, none of that reaches this document. A burst that DOES reach it missed the
+  // frame: it would type into the amount box (autoFocus), or press a button with its Enter.
+  // A person can't press READER_BURST_KEYS keys inside READER_BURST_WINDOW_MS (that is 80 keys a
+  // second; a held key repeats at 30 at most), so that is the test; anything slower passes
+  // untouched. On a burst the rest of it is swallowed, the box it began in gets its value from
+  // before the burst back, the count (never the keys) is filed, and the reader is armed again.
+  // Never echo, never buffer, never log those characters: they are card data.
+  //   * Timed by the event's own timeStamp, when it arrived, not when it was handled: the first
+  //     characters of a burst re-render the modal, and the keys queued behind that render are
+  //     handled in a clump that says nothing about how fast they came.
+  //   * A WINDOW, not "every gap under N ms": Windows stamps input on a coarse clock, and a key
+  //     pressed on a 15.6 ms tick boundary would break a per-gap rule in the middle of a swipe.
+  //   * Once recognised, the burst is followed BACK through keys under READER_KEY_GAP_MS apart to
+  //     its first key, so the box gets back the value it had before ANY of it landed. Generous on
+  //     purpose: the first characters of a burst each re-render the modal, and a slow machine spaces
+  //     them out (a visible Chrome window did, 2026-10-21). Nobody types an amount and swipes a card
+  //     inside 0.15 s, so a person's own typing is never part of it.
   //
-  // ⚠️ NOTHING HERE FOCUSES THE FRAME (2026-10-13). It used to call iframe.focus(), and refocus
-  // it on every focusin. On CardPointe's real iframe that puts the frame's activeElement on its
-  // BODY, not the card box, so a swipe vanished with no token, no error and no swallowed key; a
-  // click on any modal button while armed did the same through the focusin refocus. The frame
-  // now focuses its own box (autofocus, on the reload every Ready press makes), and a click
-  // elsewhere leaves focus HERE, where this trap catches the swipe and says so.
+  // ⚠️ NOTHING HERE FOCUSES THE FRAME (2026-10-13). iframe.focus() puts the frame's activeElement on
+  // its BODY, not the card box, so a swipe vanished with no token, no error and no key on the page.
+  // The frame focuses its own box (autofocus, on the reload every arming makes).
+  const READER_BURST_KEYS = 4;
+  const READER_BURST_WINDOW_MS = 50;
+  const READER_KEY_GAP_MS = 150;
   useEffect(() => {
-    if (!armed) return;
-    // One row per burst (warn): how many keys missed the box. The count only, never the keys. Filed
-    // when the burst ends: 1.5 s after its last key, or sooner if the attempt ends first (the frame
-    // refusing the rest of the swipe disarms, and that cleanup must not lose the row).
-    // `burst` is this arming's own count: a Ready pressed mid-burst zeroes outsideKeysRef before
-    // this cleanup runs, and the row must still say how many keys that burst lost.
-    // Its own first-key time too: a refusal filed meanwhile zeroes the shared one. Filed once:
-    // a key that slips in between the timer and the re-render must not file a second row.
-    let burst = 0, burstFirstAt = 0;
-    const fileMissed = () => {
-      if (!burst) return;
-      const keys = burst; burst = 0;
+    if (!payOpen) return;
+    // A real reader is a USB keyboard: each capital hex letter comes with its own Shift keydown.
+    // Those are neither timed nor counted (only swallowed inside a burst), so the count is
+    // characters. The names are compared, never kept.
+    const MODIFIERS = ["Shift", "Control", "Alt", "Meta", "CapsLock"];
+    // `recent`: the last few keys, each with its time, the box it went to and that box's value
+    // BEFORE it (a value, compared and put back, never read for its content or kept past a burst).
+    let recent = [], inBurst = false, burst = 0, burstFirstAt = 0, armedAtBurst = false;
+    const restore = (s) => {
+      // The native setter plus an input event, so React's onChange sees the old value come back.
+      try {
+        const proto = s.el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(s.el, s.value);
+        restoringRef.current = true;
+        s.el.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch (_e) { /* the box is gone */ } finally { restoringRef.current = false; }
+    };
+    // One row per burst (warn): how many keys missed the reader's box, and whether it was armed.
+    const endBurst = () => {
+      landTimerRef.current = null;
+      const keys = burst, firstAt = burstFirstAt;
+      inBurst = false; burst = 0; burstFirstAt = 0; recent = [];
       const { ready, load } = swipeTimesRef.current;
       if (window.ssLogError) window.ssLogError("portal", "Reader keys reached the page, not the card box", "swipe_missed_frame",
-        { keys, readyToLoadMs: ready && load ? load - ready : null,
-          loadToFirstKeyMs: load && burstFirstAt ? burstFirstAt - load : null,
-          frameLoadedFirst: !!load && load <= burstFirstAt, orderId: o.id }, "warn");
-    };
-    // A real reader is a USB keyboard: each capital hex letter comes with its own Shift keydown.
-    // Those are swallowed like any key but not counted, so the count is characters. The names are
-    // compared, never kept.
-    const MODIFIERS = ["Shift", "Control", "Alt", "Meta", "CapsLock"];
-    const swallow = (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      if (!MODIFIERS.includes(ev.key)) {
-        outsideKeysRef.current += 1; burst += 1; noteFirstKey();
-        if (!burstFirstAt) burstFirstAt = Date.now();
+        { keys, armed: armedAtBurst, readyToLoadMs: ready && load ? load - ready : null,
+          loadToFirstKeyMs: load && firstAt ? firstAt - load : null,
+          frameLoadedFirst: !!load && load <= firstAt, orderId: o.id }, "warn");
+      if (swipeLiveRef.current && payTokenRef.current) {
+        // A card is already read: it stays the one Charge takes. Dropping it for a read that missed
+        // the reader would leave nothing to charge and no way to tell why.
+        setTokenErr("Another card went to the page, not the card reader. To read a different card, choose Use another card.");
+      } else if (swipeLiveRef.current) {
+        setTokenErr("The card went to the page, not the card reader. Swipe, insert or tap it again.");
+        armReader({ keepErr: true });
+      } else {
+        setReaderHint("That looked like the card reader. To take the card, choose Card, then Charge it now, then Swipe.");
       }
-      setTokenErr("That swipe didn't land in the card box. Press Ready, then swipe again.");
-      // Stay armed while the reader is still typing, so the rest of its burst is swallowed too,
-      // then disarm 1.5 s after the LAST key so Ready works again at once instead of in a minute.
+    };
+    const onKey = (ev) => {
+      if (MODIFIERS.includes(ev.key)) {
+        if (inBurst) { ev.preventDefault(); ev.stopPropagation(); }
+        return;
+      }
+      if (!inBurst) {
+        const t = ev.timeStamp > 0 ? ev.timeStamp : performance.now();
+        recent.push({ t, el: isTextBox(ev.target) ? ev.target : null, value: isTextBox(ev.target) ? ev.target.value : null });
+        if (recent.length > 24) recent.shift();
+        const last = recent.length - 1;
+        if (recent.length < READER_BURST_KEYS || t - recent[last - READER_BURST_KEYS + 1].t > READER_BURST_WINDOW_MS) return;
+        // A burst. Back to its first key; every key before this one is already on the page, so the
+        // box that first key went to gets its value from before it back.
+        let first = last - READER_BURST_KEYS + 1;
+        while (first > 0 && recent[first].t - recent[first - 1].t <= READER_KEY_GAP_MS) first -= 1;
+        inBurst = true; burstFirstAt = Date.now(); armedAtBurst = armedRef.current;
+        burst = last - first; outsideKeysRef.current += last - first;
+        noteFirstKey();
+        if (recent[first].el) restore({ el: recent[first].el, value: recent[first].value });
+        recent = [];
+      }
+      ev.preventDefault(); ev.stopPropagation();
+      burst += 1; outsideKeysRef.current += 1;
+      // The burst is over once the keys stop; the reader types its whole blob without a pause.
       if (landTimerRef.current) clearTimeout(landTimerRef.current);
-      landTimerRef.current = setTimeout(() => { landTimerRef.current = null; setArmed(false); fileMissed(); }, 1500);
+      landTimerRef.current = setTimeout(endBurst, 400);
     };
-    document.addEventListener("keydown", swallow, true);
-    // An indefinitely armed page is one where the next thing anyone types disappears. A read
-    // still in flight keeps it armed: the read timer disarms when it gives up.
-    const t = setTimeout(() => { if (!readTimerRef.current) setArmed(false); }, 60000);
+    document.addEventListener("keydown", onKey, true);
     return () => {
-      document.removeEventListener("keydown", swallow, true);
-      clearTimeout(t);
-      if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; fileMissed(); }
+      document.removeEventListener("keydown", onKey, true);
+      if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; }
     };
-    // armCount: a re-arm while armed (a click on the reader's frame) starts the minute again.
-  }, [armed, armCount]);
+  }, [payOpen]);
 
-  // "Ready": a NEW reader frame (armCount is its key), whose autofocus puts the focus in its box,
-  // and nothing left of the last read. The Ready button and a click on the reader's frame both
-  // come here.
-  const armReader = () => {
+  // An arming: a NEW reader frame (armCount is its key), whose autofocus puts the focus in its box,
+  // and nothing left of the last read. `keepErr` keeps the sentence about the last try on screen.
+  // `remount: false` arms the frame that is loading right now (just mounted, never loaded, so its
+  // autofocus is still to come) instead of throwing it away for another.
+  const armReader = ({ keepErr = false, remount = true } = {}) => {
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
     stopReadTimer();
     resetSwipeCounts(Date.now());
-    setArmCount((n) => n + 1); setFrameReady(false);
-    setPayToken(null); setPayExpiry(null); setTokenErr("");
+    focusOkRef.current = false;
+    if (remount) { setArmCount((n) => n + 1); setFrameReady(false); }
+    setReading(false);
+    setPayToken(null); setPayExpiry(null);
+    if (!keepErr) setTokenErr("");
     setArmed(true);
   };
+  // After a refusal: the reader again in 1.5 s, with no click, at most READER_AUTO_REARMS times in
+  // a row. Then "Reset reader": three refusals in a row is the card or the reader, and re-arming for
+  // ever would only hide that.
+  const rearmSoon = () => {
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
+    if (rearmLeftRef.current <= 0) { setReaderStuck(true); return; }
+    rearmLeftRef.current -= 1;
+    rearmTimerRef.current = setTimeout(() => {
+      rearmTimerRef.current = null;
+      if (swipeLiveRef.current && !payTokenRef.current) armReader({ keepErr: true });
+    }, 1500);
+  };
+  // A person asked for the reader (Reset reader, a click on its box): a fresh run of re-arms.
+  const armReaderByHand = () => {
+    rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
+    armReader();
+  };
 
-  const askCents = payOpts && payOpts.canCharge ? payOpts.askCents : 0;
+  // Choosing Swipe arms the reader: no Ready press (Carolyn 2026-10-20). So does coming back to it
+  // (Already collected, then Charge it now again), since a hidden frame has lost the focus and gets
+  // a new one. A frame that has not loaded yet (the Swipe chip just mounted it) is armed as it is.
+  useEffect(() => {
+    if (!swipeLive) return;
+    rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
+    if (!payTokenRef.current) armReader({ remount: frameReadyRef.current });
+    return () => { if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; } };
+  }, [swipeLive]);
+
+  // Where the focus is, while the reader shows. The frame's box can't be seen across origins, but the
+  // frame ELEMENT is document.activeElement whenever the focus is anywhere inside it.
+  //   * Focus that leaves the reader for a button or the bare page (a chip, the backdrop) is brought
+  //     back with a fresh frame after 0.6 s. Never while someone is in a text box (they are typing),
+  //     during a read, with a card in hand, or with a re-arm already on its way.
+  //   * Only where this browser has let the CURRENT frame take the focus by itself (focusOkRef).
+  //     Chrome may refuse a cross-origin frame the focus without a click; then the reader box says
+  //     "Click here", and that click is the one the browser wants. Without this check a frame that
+  //     never gets the focus would be reloaded every second, for ever.
+  useEffect(() => {
+    if (!swipeLive) { setReaderFocus(false); return; }
+    let lostAt = 0;
+    const tick = () => {
+      const f = frameRef.current;
+      const on = !!f && document.hasFocus() && document.activeElement === f;
+      setReaderFocus(on);
+      if (on) { focusOkRef.current = true; lostAt = 0; return; }
+      const idle = armedRef.current && frameReadyRef.current && !payTokenRef.current && !readTimerRef.current && !rearmTimerRef.current;
+      if (!idle || !focusOkRef.current || !document.hasFocus() || isTextBox(document.activeElement)) { lostAt = 0; return; }
+      if (!lostAt) lostAt = Date.now();
+      else if (Date.now() - lostAt >= 600) { lostAt = 0; armReader({ keepErr: true }); }
+    };
+    tick();
+    const t = setInterval(tick, 250);
+    return () => clearInterval(t);
+  }, [swipeLive]);
+
+  // What Charge takes: the amount box, held to the server's range (pay_options' minCents, the
+  // balance, maxCents). portal-payments checks the same range again and charges this figure.
+  const typedCents = centsFrom(amount);
+  const canChargeHere = !!(payOpts && payOpts.canCharge);
+  const owedNow = canChargeHere ? Number(payOpts.balanceCents) || 0 : 0;
+  const chargeMost = canChargeHere ? Math.min(owedNow, Number(payOpts.maxCents) || owedNow) : 0;
+  const chargeLeast = canChargeHere ? Number(payOpts.minCents) || 100 : 0;
+  const amountProblem = !canChargeHere ? ""
+    : !Number.isFinite(typedCents) ? "Enter the amount to charge."
+    : typedCents < chargeLeast ? `The smallest payment is ${money(chargeLeast)}.`
+    : typedCents > chargeMost
+      ? (chargeMost === owedNow ? `That's more than the ${money(owedNow)} still owed.` : `A single payment can be at most ${money(chargeMost)}.`)
+    : "";
+  const chargeCents = canChargeHere && !amountProblem ? typedCents : 0;
   const feeCents = surcharge && surcharge.applies && surcharge.percent
-    ? Math.round(askCents * (surcharge.percent / 100)) : 0;
+    ? Math.round(chargeCents * (surcharge.percent / 100)) : 0;
+  // CardSecure tokens keep the card number's last 4 digits, so the card can be named before it is
+  // charged (Carolyn 2026-10-20: "**** **** **** 1234"). A card only; a bank token is not one.
+  const cardLast4 = method === "card" && payToken ? ((/(\d{4})$/.exec(String(payToken)) || [])[1] || "") : "";
+  // The box was typed in (or a chip picked): never refilled by the page after this.
+  const typeAmount = (v) => { if (!restoringRef.current) amountAutoRef.current = false; setAmount(v); setReaderHint(""); };
+  const pickAmount = (cents) => { amountAutoRef.current = false; setAmount((cents / 100).toFixed(2)); setReaderHint(""); };
+  // Charge it now with an empty box: the figure due now (the deposit, or the balance). Never over
+  // what is already there.
+  const fillAmountForCharge = () => {
+    if (String(amount).trim() || !canChargeHere || !payOpts.askCents) return;
+    amountAutoRef.current = true; setAmount((payOpts.askCents / 100).toFixed(2));
+  };
 
   const closePay = () => {
     setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
     setTokenErr(""); setSurcharge(null); setArmed(false); setFrameReady(false); stopReadTimer(); setEntry("keyed"); clearAch();
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
+    setReading(false); setReaderStuck(false); setReaderHint(""); amountAutoRef.current = true;
     resetSwipeCounts();
     setBillName(""); setBillStreet(""); setBillZip(""); setBillErr("");
   };
 
   // The card is spent, so the next Charge must carry a NEW one: a new, empty keyed frame (cardGen),
-  // or for a swipe the word to press Ready, which makes a new reader frame. `why` is the sentence.
+  // or for a swipe a new reader frame, armed. `why` is the sentence.
   const askForCardAgain = (why) => {
     setPayToken(null); setPayExpiry(null);
     if (entry !== "swipe") setCardGen((n) => n + 1);
     setTokenErr(why);
+    if (entry === "swipe") armReader({ keepErr: true });
   };
 
   const chargeCard = async () => {
     if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
-    if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    // The button is off while the amount is out of range; this says why if it is pressed anyway.
+    if (!chargeCents) { setMsg({ err: amountProblem || "There's nothing to charge on this order." }); return; }
     // Too old to still hold its CVV (CARD_TOKEN_MAX_MS): nothing is sent. Before the billing
     // check, which is not worth answering for a card that has to be entered again anyway.
     if (method === "card" && Date.now() - payTokenAtRef.current > CARD_TOKEN_MAX_MS) {
       askForCardAgain(entry === "swipe"
-        ? "That card read has expired. Press Ready and swipe the card again."
+        ? "That card read has expired. Swipe, insert or tap the card again."
         : "The card details expired: the security code is only kept for 2 minutes. Key the card in again, then press Charge.");
       return;
     }
@@ -4073,9 +4207,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         // A keyed card only: a swipe carries its own name, and a bank payment's holder is named
         // by the server from the estimate.
         ...(keyedCard ? { name: billName.trim(), address: billStreet.trim(), postal: billZip.trim() } : {}),
-        // The echo that keeps three numbers provably identical: what is on screen, what the
-        // token was minted against, and what is charged.
-        confirmChargeCents: askCents,
+        // The amount in the box (2026-10-21), and the echo that keeps two numbers provably
+        // identical: what is on screen and what is charged. A server older than amountCents would
+        // charge its own ask and refuse any other confirm, so it can't charge a figure nobody saw.
+        amountCents: chargeCents,
+        confirmChargeCents: chargeCents,
       },
     });
     setBusy(false);
@@ -4088,10 +4224,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       // so on its own the operator was left looking at a Charge button gone grey, no reason.
       setMsg({ err: m });
       if (method === "card" && seen) {
-        askForCardAgain(`${m} ${entry === "swipe" ? "Press Ready and swipe the card again." : "Key the card in again, then press Charge."}`);
+        askForCardAgain(`${m} ${entry === "swipe" ? "Swipe, insert or tap the card again." : "Key the card in again, then press Charge."}`);
         return;
       }
       setPayToken(null); setTokenErr(m);
+      // The token is dropped, so the reader has to read the card again: get it ready for that.
+      if (method === "card" && entry === "swipe") armReader({ keepErr: true });
     };
     if (error) {
       // A non-2xx from an edge function surfaces as a generic message; the real sentence —
@@ -4345,8 +4483,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 )}
                 {/* IN-PORTAL designer, never the public ?id= page (capture-lead/draft saves). */}
                 {o.short_code && onOpenDesign && (
-                  <button type="button" onClick={() => onOpenDesign(o.short_code)}
-                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+                  <a href={ssDesignHref(o.short_code)} onClick={ssNavClick(() => onOpenDesign(o.short_code))} data-ss-open-design="1"
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", display: "inline-block", textDecoration: "none" }}>Open design</a>
                 )}
               </div>
             </div>
@@ -4486,7 +4624,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             {o.total_cents != null && ordersOn && (
               <button type="button" disabled={!moneyReady}
                 title={moneyReady ? undefined : "Reading this order's payments…"}
-                onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
+                onClick={() => { amountAutoRef.current = true; setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
                 style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13, opacity: moneyReady ? 1 : 0.55, cursor: moneyReady ? "pointer" : "not-allowed" }}>Record a payment</button>
             )}
           </div>
@@ -4660,7 +4798,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       {pdfView && <PdfModal url={pdfView.url} title={pdfView.title} onClose={() => setPdfView(null)} />}
 
       {payOpen && ordersOn && (
-        <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
+        <div onClick={(e) => { if (reading) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
 {/* Scrolls inside itself (2026-10-12): with the card form plus the billing name, street and
               ZIP (2026-10-09) the box is taller than a laptop screen, and the centred, fixed backdrop
@@ -4668,29 +4806,43 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflowX: "hidden", overflowY: "auto", maxHeight: "calc(100vh - 40px)" }}>
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ fontSize: 15.5, fontWeight: 800 }}>{collect === "charge" ? "Take a payment" : "Record a payment"}</div>
-              <button type="button" onClick={closePay} disabled={armed}
-                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: armed ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: armed ? 0.4 : 1 }}>×</button>
+              <button type="button" onClick={closePay} disabled={reading}
+                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: reading ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: reading ? 0.4 : 1 }}>×</button>
             </div>
             <div style={{ padding: "17px 18px" }}>
               <span style={S.lbl}>Amount</span>
-              {collect === "charge" ? (
-                // The amount is the SERVER's, not the operator's: the deposit-vs-balance
-                // rule lives in portal-payments and the figure here is echoed back to it.
-                <div style={{ ...S.input, fontSize: 20, fontWeight: 800, background: "#F8FAFC", color: "#0F172A" }}>
-                  {money(askCents)}
-                  {payOpts && payOpts.askKind === "deposit" && (
-                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0E7490", marginLeft: 8 }}>deposit</span>
-                  )}
-                </div>
-              ) : (
-                <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
+              {/* ONE box for both modes, typeable at any time (Carolyn 2026-10-20). Charge it now
+                  takes what is in it, from $1 up to the balance; the server holds the same range
+                  and charges exactly this figure. The page fills it (the balance, then the deposit
+                  pay_options names) only until someone types or picks a chip. */}
+              <input data-ss-amount="1" style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount}
+                onChange={(e) => typeAmount(e.target.value)} placeholder="0.00" inputMode="decimal" autoComplete="off" autoFocus
+                // Leaving the box with the reader showing and no card read: the reader gets the
+                // focus back (a fresh frame), so the next swipe reaches it. Not when the whole window
+                // lost the focus (another app): the browser hands it back to this box on return.
+                onBlur={(e) => { if (swipeLive && !payToken && !reading && document.hasFocus() && !isTextBox(e.relatedTarget)) armReader({ keepErr: true }); }} />
+              {(() => {
+                // The chips use the server's figures where it gave them (the balance it will hold the
+                // charge to), and the order's own balance otherwise.
+                const full = canChargeHere ? owedNow : bal;
+                if (!(full > 0)) return null;
+                const chip = (label, cents, key) => (
+                  <button key={key} type="button" onClick={() => pickAmount(cents)}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>{label}</button>
+                );
+                return (
+                  <div style={{ display: "flex", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
+                    {canChargeHere && payOpts.askKind === "deposit" && payOpts.askCents > 0 && payOpts.askCents < full
+                      && chip(`Deposit ${money(payOpts.askCents)}`, payOpts.askCents, "dep")}
+                    {chip("Full balance", full, "full")}
+                    {chip("Half", Math.round(full / 2), "half")}
+                  </div>
+                );
+              })()}
+              {collect === "charge" && amountProblem && (
+                <div data-ss-amount-problem="1" style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{amountProblem}</div>
               )}
-              {collect === "recorded" && bal > 0 && (
-                <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
-                  <button type="button" onClick={() => setAmount((bal / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Full balance</button>
-                  <button type="button" onClick={() => setAmount((Math.round(bal / 2) / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Half</button>
-                </div>
-              )}
+              {readerHint && <div style={{ fontSize: 11.5, color: "#92400E", marginTop: 7 }}>{readerHint}</div>}
               <div style={{ marginTop: 13 }}><span style={S.lbl}>Method</span>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {PAY_METHODS.map(([id, label]) => (
@@ -4703,8 +4855,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       // entered and Charge is pressed, and Already collected is one click away.
                       // Not where the server has already said this account can't charge: there
                       // is no toggle back from "charge" (see the effect beside pay_options).
-                      setCollect((id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge) ? "charge" : "recorded");
-                      setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch();
+                      const toCharge = (id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge);
+                      setCollect(toCharge ? "charge" : "recorded");
+                      // Charge it now keeps the amount in the box; only an EMPTY box gets the figure
+                      // due now. It used to swap any typed amount for the server's ask.
+                      if (toCharge) fillAmountForCharge();
+                      setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); setReaderHint("");
                       // Swipe is a card's choice: leaving Card drops it, so Card again starts on
                       // Key it in, and nothing else can carry a stale "swipe" (see chargeCard).
                       if (id !== "card") setEntry("keyed");
@@ -4723,7 +4879,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
-                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); }}
+                      <button key={id} type="button" onClick={() => { setCollect(id); if (id === "charge") fillAmountForCharge(); setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); }}
                         style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                     ))}
                   </div>
@@ -4746,7 +4902,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
                         // The one already chosen does nothing: it reloads no frame, so dropping the
                         // arm (or the card) there left the reader typing into this button, unheard.
-                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); resetSwipeCounts(); }}
+                        // Swipe arms itself once chosen (the effect beside armReader).
+                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); setReading(false); setFrameReady(false); stopReadTimer(); resetSwipeCounts(); }}
                           style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                       ))}
                     </div>
@@ -4760,9 +4917,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {method !== "ach" && payOpts && payOpts.tokenizer && (
                     <div style={{ position: "relative" }}>
                     <iframe
-                      // A new key per Ready press is a NEW frame: an empty box (a failed read
-                      // left its characters in the old one, and the next swipe was appended),
-                      // and the frame's autofocus runs again. See armCount. The keyed frame's
+                      // A new key per arming is a NEW frame: an empty box (a failed read left
+                      // its characters in the old one, and the next swipe was appended), and the
+                      // frame's autofocus runs again. See armCount. The keyed frame's
                       // cardGen does the same once its card is spent (see CARD_TOKEN_MAX_MS): the
                       // new frame is empty, so the next token has to carry a freshly typed CVV.
                       key={entry === "swipe" ? "swipe-" + armCount : "card-" + cardGen}
@@ -4779,13 +4936,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     />
                     {/* ⚠️ The reader's frame takes no click of its own. A click anywhere in it but
                         ON its box leaves the frame's focus on its BODY, where a swipe vanishes:
-                        no token, no message, and no key reaches the trap (2026-10-13). So a click
-                        there is "Ready" instead: a new frame, whose autofocus puts the focus in
-                        the box. Ignored while that frame is still loading. */}
+                        no token, no message, and no key reaches the page (2026-10-13). So a click
+                        there arms the reader instead: a new frame, whose autofocus puts the focus
+                        in the box. Ignored while that frame is still loading, during a read, and
+                        with a card in hand (the panel's "Use another card" drops one on purpose).
+                        Transparent: the frame stays in view, and its text is white (cpTokenizerUrl's
+                        swipe css), so what the reader types never shows. */}
                     {entry === "swipe" && (
                       <div aria-hidden="true" data-ss-reader-cover="1"
-                        onClick={() => { if (busy || (armed && !frameReady)) return; armReader(); }}
-                        style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, cursor: "pointer", background: "transparent" }} />
+                        onClick={() => { if (busy || reading || payToken || (armed && !frameReady)) return; armReaderByHand(); }}
+                        style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, cursor: payToken ? "default" : "pointer", background: "transparent" }} />
                     )}
                     </div>
                   )}
@@ -4840,28 +5000,64 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       {achChecking && !payToken && <div style={{ fontSize: 11.5, color: "#475569", marginTop: 7 }}>Checking the bank details…</div>}
                     </div>
                   )}
-                  {method === "card" && entry === "swipe" && (
-                    <div style={{ marginTop: 8 }}>
-                      {/* ⚠️ The reader is a USB KEYBOARD. Arming is what stops a swipe from
-                          typing card data into the amount box, and nothing is armed while
-                          the modal is merely open. Each press reloads the reader's frame (a new
-                          key) and drops whatever the last read left: a stale first card must
-                          not stay chargeable while the second swipe is in flight. */}
-                      <button type="button" disabled={armed} onClick={armReader}
-                        style={{ ...S.btn(armed ? "#DCFCE7" : "#F1F5F9", armed ? "#166534" : "#334155"), border: "1px solid #E2E8F0", fontSize: 12, width: "100%" }}>
-                        {armed ? (frameReady ? "Ready — swipe the card now" : "Getting the card box ready…") : payToken ? "Card read ✓ — swipe again" : "Ready to swipe"}
+                  {method === "card" && entry === "swipe" && (() => {
+                    // THE READER, IN WORDS, where the "Ready to swipe" button was (Carolyn 2026-10-20:
+                    // no Ready press, never the reader's raw output, "**** **** **** 1234" once read).
+                    // The frame above shows nothing a person can read: its text is white.
+                    const st = payToken ? "card" : reading ? "reading" : readerStuck ? "stuck"
+                      : !armed ? "between" : !frameReady ? "loading" : readerFocus ? "waiting" : "click";
+                    const box = { marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 8, padding: "11px 12px", fontSize: 12.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 9, lineHeight: 1.4 };
+                    const spinner = (
+                      // SMIL, not a CSS keyframe: the portal has no stylesheet (see SkelBar).
+                      <svg viewBox="0 0 24 24" width="16" height="16" style={{ flexShrink: 0 }} aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" fill="none" stroke="#CBD5E1" strokeWidth="3" />
+                        <path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke={ACCENT} strokeWidth="3" strokeLinecap="round">
+                          <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" />
+                        </path>
+                      </svg>
+                    );
+                    const link = { background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" };
+                    if (st === "card") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#ECFDF5", borderColor: "#A7F3D0", color: "#065F46", justifyContent: "space-between" }}>
+                        <span>
+                          <span style={{ fontSize: 16, letterSpacing: 1.5, fontFamily: "ui-monospace,Consolas,monospace" }}>{cardLast4 ? "**** **** **** " + cardLast4 : "Card read"}</span>
+                          <span style={{ marginLeft: 8 }}>✓</span>
+                        </span>
+                        <button type="button" style={link} disabled={busy} onClick={armReaderByHand}>Use another card</button>
+                      </div>
+                    );
+                    if (st === "reading") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#F5F3FF", borderColor: "#DDD6FE", color: ACCENT }}>{spinner}Reading card…</div>
+                    );
+                    if (st === "stuck") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#FFFBEB", borderColor: "#FDE68A", color: "#92400E", flexWrap: "wrap" }}>
+                        <span style={{ flex: "1 1 200px" }}>The reader didn't take the card {READER_AUTO_REARMS + 1} times in a row. Check the card, or choose Key it in.</span>
+                        <button type="button" onClick={armReaderByHand} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", fontSize: 12, padding: "6px 12px" }}>Reset reader</button>
+                      </div>
+                    );
+                    if (st === "between" || st === "loading") return (
+                      <div data-ss-reader-state={st} style={{ ...box, color: "#475569" }}>{spinner}Getting the card reader ready…</div>
+                    );
+                    if (st === "click") return (
+                      // The frame doesn't have the focus (a click elsewhere, or a browser that won't
+                      // hand a frame the focus by itself): this click arms it, and counts as the
+                      // click the browser wants.
+                      <button type="button" data-ss-reader-state={st} onClick={armReaderByHand}
+                        style={{ ...box, width: "100%", background: "#FFF7ED", borderColor: "#FED7AA", color: "#9A3412", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                        Click here, then swipe, insert or tap the card
                       </button>
-                      {armed && (
-                        <div style={{ fontSize: 11, color: "#166534", marginTop: 6 }}>
-                          Don't type anything until it reads. This clears itself after a minute.
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {tokenErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
-                  {payToken && !tokenErr && (
+                    );
+                    return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#F0FDF4", borderColor: "#BBF7D0", color: "#166534" }}>
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#16A34A" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M3 10h18" /></svg>
+                        Waiting for card — swipe, insert or tap
+                      </div>
+                    );
+                  })()}
+                  {tokenErr && <div data-ss-token-err="1" style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
+                  {payToken && !tokenErr && !(method === "card" && entry === "swipe") && (
                     <div style={{ fontSize: 11.5, color: "#047857", marginTop: 7, fontWeight: 700 }}>
-                      {method === "ach" ? "Bank details captured ✓" : "Card captured ✓"}
+                      {method === "ach" ? "Bank details captured ✓" : `Card captured ✓${cardLast4 ? ` (**** ${cardLast4})` : ""}`}
                     </div>
                   )}
                   {/* Fiserv adds the surcharge itself and reports it back, so this is a
@@ -4870,7 +5066,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {surcharge && surcharge.applies === true && feeCents > 0 && (
                     <div style={{ marginTop: 10, fontSize: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", color: "#92400E" }}>
                       A {surcharge.percent}% card fee applies to this card — the customer will be charged{" "}
-                      <strong>{money(askCents + feeCents)}</strong>. {money(askCents)} goes to the balance.
+                      <strong>{money(chargeCents + feeCents)}</strong>. {money(chargeCents)} goes to the balance.
                     </div>
                   )}
                   {surcharge && surcharge.applies === false && (
@@ -4894,13 +5090,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
                 {collect === "charge" ? (
-                  <button onClick={chargeCard} disabled={busy || !payToken || !feeReady} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken || !feeReady ? 0.55 : 1 }}>
-                    {busy ? "Charging…" : !feeReady ? "Checking card fee…" : `Charge ${money(askCents + feeCents)}`}
+                  <button data-ss-charge="1" onClick={chargeCard} disabled={busy || !payToken || !feeReady || !chargeCents} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken || !feeReady || !chargeCents ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : !feeReady ? "Checking card fee…" : `Charge ${money(chargeCents + feeCents)}${cardLast4 ? ` to **** ${cardLast4}` : ""}`}
                   </button>
                 ) : (
                   <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
                 )}
-                <button onClick={closePay} disabled={armed} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: armed ? 0.5 : 1 }}>Cancel</button>
+                <button onClick={closePay} disabled={reading} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: reading ? 0.5 : 1 }}>Cancel</button>
               </div>
             </div>
           </div>

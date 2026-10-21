@@ -1498,6 +1498,42 @@ async function ssPhoneStartCall(raw, ids, badNumber) {
   return { kind: "error", text: ssPhoneRefusal(out.reply) };
 }
 
+// ── CUSTOMER NAMING (quote to a business entity, 2026-10-21) ────────────────────────────────
+// A COPY of companyOf / personName / greetingFirst / displayName / billTo in
+// supabase/functions/_shared/customerNaming.ts, which explains the model: a contact's `name` is
+// the PERSON and its `company` the business, and nothing is ever guessed from the shape of a name
+// ("Bear River Band" with no company is still read as a name). Change both copies together:
+// supabase/functions/_shared/_test_stubs/customerNamingParity_test.ts runs this block (between the
+// two markers) against the shared module. SS_NAMING_GREET_COMPANY is NAMING.greetCompanyWhenNoPerson.
+// ⟦customer-naming:start⟧
+const SS_NAMING_GREET_COMPANY = false;
+function ssNamingLine(v) {
+  return String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+}
+function ssCompanyOf(c) {
+  const v = c && typeof c === "object" ? c.company : undefined;
+  return typeof v === "string" ? ssNamingLine(v) : "";
+}
+function ssPersonName(c) {
+  const name = ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+  const company = ssCompanyOf(c);
+  if (company && name.toLowerCase() === company.toLowerCase()) return "";
+  return name;
+}
+function ssGreetingFirst(c) {
+  const first = ssPersonName(c).split(" ")[0] || "";
+  if (!first && SS_NAMING_GREET_COMPANY) return ssCompanyOf(c);
+  return first;
+}
+function ssDisplayName(c) {
+  return ssCompanyOf(c) || ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+}
+function ssBillTo(c) {
+  const company = ssCompanyOf(c);
+  return { company, attn: company ? ssPersonName(c) : ssNamingLine(c && typeof c === "object" ? c.name : undefined) };
+}
+// ⟦customer-naming:end⟧
+
 // ── QUICK SENDS: saved messages, in the record's Email and SMS boxes ─────────────────────
 // Carolyn 2026-09-30: "I think I want to call it quick sends, okay, for them to do quick sends on
 // text and email, both of them, okay, so that they can easily just click and choose the list of
@@ -1911,6 +1947,39 @@ function ssNavClick(fn) {
     e.preventDefault();
     fn();
   };
+}
+
+// ── "Open design" is a REAL link too (2026-10-21) ────────────────────────────────────────
+// Carolyn 2026-10-20 opens things with the wheel ("I push the middle wheel so it opens up in a new
+// tab"). "Open design" was a button holding the design in memory, so a middle click did nothing,
+// and a new tab or a reload of /designer opened an EMPTY designer ("this link does not work", "there
+// is nothing in there"). Now the Open buttons in Orders and in the Contacts hub (the design list,
+// the contact list's Open latest, a record's Open in designer) are anchors to this address, and
+// their left click still runs the in-app open (ssNavClick). The shell reads ?open= on a cold load,
+// once the tenant and the access clamp have answered (Dashboard, beside openInDesigner), opens the
+// design, and takes ?open= back out of the address bar. ?view= rides along for an operator viewing
+// a builder, as on every other link; nothing else of the current query does.
+function ssDesignHref(code, version = null) {
+  const q = new URLSearchParams();
+  try {
+    const v = new URLSearchParams(window.location.search || "").get("view");
+    if (v) q.set("view", v);
+  } catch (_e) { /* no query */ }
+  q.set("open", String(code || ""));
+  if (version != null && version !== "") q.set("version", String(version));
+  return ssPageBase("designer", null) + "?" + q.toString();
+}
+// The ?open= a cold load arrived with, read once: { code, version } or null. A code is the
+// design's short code, so anything that is not one (a hand-typed address, a mangled paste) is
+// ignored rather than sent to the designer's loader.
+function ssDesignParam() {
+  try {
+    const q = new URLSearchParams(window.location.search || "");
+    const code = String(q.get("open") || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/.test(code)) return null;
+    const v = String(q.get("version") || "").trim();
+    return { code, version: /^\d{1,6}$/.test(v) ? Number(v) : null };
+  } catch (_e) { return null; }
 }
 
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────

@@ -86,7 +86,8 @@ import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { pdfCustomerFrom } from "../_shared/estimatePdf.ts";
 import { pdfLogoSources } from "../_shared/pdfLogo.ts";
 import { parseQuoteValidDays, QUOTE_VALID_DAYS_MAX, QUOTE_VALID_DAYS_MIN, readQuoteValidDays } from "../_shared/quoteValidity.ts";
-import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import { appendAcceptancePage, onBehalfOfFrom } from "../_shared/acceptancePdf.ts";
+import { companyOf, greetingFirst } from "../_shared/customerNaming.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { FLOOR_PLANS, OBJECT_PATH, LEGACY_ROOT_ERA_END, crmInvoiceExists, floorPlanKey, isOwnFloorPlanKey, invoiceExists, removeDesignObjects } from "../_shared/designStorageKeys.ts";
 import {
@@ -1114,6 +1115,7 @@ async function regenerateQuotePdf(
           acceptedAtIso: String(acc.accepted_at ?? ""),
           ip: acc.ip == null ? null : String(acc.ip),
           consentText: String(acc.consent_text ?? ""),
+          onBehalfOf: onBehalfOfFrom(who?.contact, shortCode),
         });
       } catch (e) {
         console.warn("acceptance page re-append failed:", (e as Error).message);
@@ -1155,8 +1157,12 @@ const INVENTORY_PHOTO_MAX = 12;
 // gain one without breaking the designer's form and its validation), so this is the same
 // split submit-estimate already uses to title a GHL estimate. Snapshotted at the sale so the
 // label never has to join back to a customer's design row to render.
+// A quote to a BUSINESS (designs.contact.company, 2026-10-21): the person's first name when
+// there is one, else the company ("SOLD — Bear River Band"). Without a company, as always.
 // deno-lint-ignore no-explicit-any
 function firstNameOf(contact: any): string | null {
+  const company = companyOf(contact);
+  if (company) return greetingFirst(contact) || company.slice(0, 80);
   const full = String(contact?.name ?? "").trim();
   if (!full) return null;
   return full.split(/\s+/)[0] || null;
@@ -13923,6 +13929,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // 2026-10-04 a re-send passed neither, so it said different words from the first send.
       templateCopy: cs.email_template_copy,
       customerName: String(d?.contact?.name ?? "").trim(),
+      customerCompany: companyOf(d?.contact),
       pictureUrl: styleEmailPhoto(styleRow),
       businessName: cs.business_name || clientId,
       logoUrl: cs.business_logo_url || null,
@@ -15288,6 +15295,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           ip: acc.ip == null ? null : String(acc.ip),
           consentText: String(acc.consent_text ?? ""),
           docLabel: "Invoice",
+          onBehalfOf: onBehalfOfFrom(d.contact, shortCode),
         });
       }
 
@@ -15324,6 +15332,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // invoice sender passed either, so saved invoice wording never reached a customer.
         templateCopy: csRes.data?.email_template_copy,
         customerName: String((d.contact as { name?: unknown } | null)?.name ?? "").trim(),
+        customerCompany: companyOf(d.contact),
         businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
         logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
         invoiceNumber: String(inv.invoice_number),
@@ -16422,6 +16431,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               ...invoiceEmail({
                 templateCopy: cs2?.email_template_copy,
                 customerName: String((c2?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+                customerCompany: companyOf(c2?.contact),
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
@@ -16953,6 +16963,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             ...invoiceEmail({
               templateCopy: cur0?.email_template_copy,
               customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+              customerCompany: companyOf(c?.contact),
               businessName: String(cur0?.business_name ?? "").trim() || clientId,
               logoUrl: cur0?.business_logo_url,
               phone: cur0?.business_phone,
@@ -17262,6 +17273,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ...invoiceEmail({
           templateCopy: cur.email_template_copy,
           customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+          customerCompany: companyOf(c?.contact),
           businessName: String(cur.business_name ?? "").trim() || clientId,
           logoUrl: cur.business_logo_url,
           phone: cur.business_phone,

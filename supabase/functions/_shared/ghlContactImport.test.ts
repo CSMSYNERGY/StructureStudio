@@ -133,8 +133,21 @@ Deno.test("a contact: the name falls back to GoHighLevel's other name fields, in
   assertEquals(parseGhlContact({ firstName: "deShawn", lastName: "mcKay" })?.row.name, "deShawn mcKay", "a name as written is never recased");
   assertEquals(parseGhlContact({ name: "acme sheds llc" })?.row.name, "acme sheds llc", "only the lowercased fields are capitalised");
   assertEquals([capitaliseLowercaseName(null), capitaliseLowercaseName("ÉMILE zola"), capitaliseLowercaseName("élise")], [null, "ÉMILE zola", "Élise"]);
-  assertEquals(parseGhlContact({ companyName: "Acme Sheds" })?.row.name, "Acme Sheds");
   assertEquals(parseGhlContact({ firstName: "   " })?.row.name, null);
+});
+
+// Quote to a business entity (2026-10-21): the company is its own field and is never the name, so a
+// business is never greeted by its first word ("Hi Bear" for Bear River Band). Migration 318 stores it.
+Deno.test("a contact: the company is its own field, never the name", () => {
+  const only = parseGhlContact({ companyName: "Bear River Band", phone: "(555) 010-0142" })?.row;
+  assertEquals([only?.name, only?.company], [null, "Bear River Band"]);
+  const both = parseGhlContact({ firstName: "Thomas", lastName: "Example", companyName: "  Bear River Band " })?.row;
+  assertEquals([both?.name, both?.company], ["Thomas Example", "Bear River Band"]);
+  assertEquals(parseGhlContact({ contactName: "Kim Contact", companyName: "Acme Sheds" })?.row.company, "Acme Sheds");
+  // No company: no key at all, so the row is exactly the one 282 always took.
+  assertEquals(Object.keys(parseGhlContact({ firstName: "Pat", companyName: "   " })?.row ?? {}).includes("company"), false);
+  assertEquals(Object.keys(parseGhlContact({ firstName: "Pat", companyName: 7 })?.row ?? {}).includes("company"), false);
+  assertEquals(parseGhlContact({ companyName: "C".repeat(300) })?.row.company?.length, 200);
 });
 
 Deno.test("a contact: what is dropped rather than stored", () => {

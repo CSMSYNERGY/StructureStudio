@@ -813,8 +813,11 @@ export async function cpSurchargeProbe(
  *   autofocus              the ONLY way the card box gets focus from inside the frame (itoke's
  *                          onLoad calls input.focus()). Focusing the iframe ELEMENT from the page
  *                          leaves the frame's activeElement on BODY, where the reader's keys
- *                          vanish without a message. The portal reloads the frame on every
- *                          "Ready" press so this runs each time.
+ *                          vanish without a message. The portal reloads the frame every time it
+ *                          arms the reader (no "Ready" press since 2026-10-21) so this runs each time.
+ *   css + #ccnumfield{color:#FFFFFF}
+ *                          the card css with the box's text white (2026-10-21), so the reader's
+ *                          raw output never shows on screen.
  *   invalidinputevent      a half or garbled read says "Invalid Account Number" instead of nothing
  *   sendcardtypingevent    {cardTyping:true} on the reader's first character, so the page can say
  *                          so when no token follows (a refused read posts nothing else)
@@ -858,16 +861,15 @@ export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach" | "swi
   // So labels stay INLINE (the <br> already breaks the line) and width is set per FIELD,
   // never on the `input` element generally. Only Fiserv's allow-listed properties apply;
   // anything else is dropped silently.
-  const css = encodeURIComponent(
-    `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
-      `label{font-family:${FONT};font-size:13px;font-weight:600;color:#475569}` +
-      `input{box-sizing:border-box;font-size:16px;padding:10px 12px;border:1px solid #CBD5E1;` +
-      `border-radius:8px;color:#0F172A;font-family:${FONT};margin-top:5px;margin-bottom:12px}` +
-      `#ccnumfield{width:100%}` +
-      `#ccexpiryfieldmonth{width:78px;margin-right:6px}#ccexpiryfieldyear{width:96px;margin-left:6px}` +
-      `#cccvvfield{width:110px}` +
-      `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`,
-  );
+  const cssText = `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
+    `label{font-family:${FONT};font-size:13px;font-weight:600;color:#475569}` +
+    `input{box-sizing:border-box;font-size:16px;padding:10px 12px;border:1px solid #CBD5E1;` +
+    `border-radius:8px;color:#0F172A;font-family:${FONT};margin-top:5px;margin-bottom:12px}` +
+    `#ccnumfield{width:100%}` +
+    `#ccexpiryfieldmonth{width:78px;margin-right:6px}#ccexpiryfieldyear{width:96px;margin-left:6px}` +
+    `#cccvvfield{width:110px}` +
+    `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`;
+  const css = encodeURIComponent(cssText);
   const common = [
     "enhancedresponse=true",
     "unique=true",
@@ -887,13 +889,19 @@ export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach" | "swi
     ? [
       // See the docblock: no cardnumbernumericonly, formatinput, useexpiry, useexpiryfield,
       // usecvv or invalidcreditcard/expiry/cvv events. Each one loses or garbles a real swipe.
-      ...common,
+      //
+      // WHITE TEXT IN THE READER'S BOX (Carolyn 2026-10-20: the reader's raw output typed itself
+      // across the screen). The box is white, so what the reader types can't be seen; `color` is
+      // on Fiserv's css allow-list (the input rule above uses it), and the caret, which follows
+      // the text colour, goes with it. The placeholder keeps the browser's own grey. The portal
+      // says what is happening beside the frame instead ("Reading card…", then the last 4).
+      ...common.map((p) => p.startsWith("css=") ? `css=${encodeURIComponent(cssText + "#ccnumfield{color:#FFFFFF}")}` : p),
       "swipeonly=true",
       "autofocus=true",
       "invalidinputevent=true",
       "sendcardtypingevent=true",
       "cardlabel=" + encodeURIComponent("Card reader"),
-      "placeholder=" + encodeURIComponent("Swipe the card"),
+      "placeholder=" + encodeURIComponent("Swipe, insert or tap the card"),
     ]
     : [
       ...common,
