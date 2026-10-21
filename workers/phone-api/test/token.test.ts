@@ -268,6 +268,17 @@ describe("POST /token", () => {
     expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
   });
 
+  it("recorded with the announcement off (2026-10-21) still says recorded, and its calls are still transcribed", async () => {
+    const quiet = { on: true, notice: false, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const s = await setup(callerCtx({ recording: quiet }));
+    const json = (await call(makeEnv({ CALL_RECORDING: "on", CALL_TRANSCRIBE: "on", TRANSCRIBE: "on" }), await req(s.auth))).json;
+    expect(json.recording).toEqual({ on: true });
+    expect(json.transcripts).toEqual({ calls: true, voicemail: true });
+    // The rail still wins.
+    expect((await call(makeEnv({ CALL_TRANSCRIBE: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+  });
+
   // App Store guideline 5.1.2(i): the apps tell the person which outside AI services make the
   // transcripts and summaries before showing any, and need to know whether this business has them.
   it("says whether this business's calls are transcribed (recorded, the owner's transcripts switch, CALL_TRANSCRIBE) and its voicemails (TRANSCRIBE)", async () => {
