@@ -1,20 +1,26 @@
 // Every tenant table and bucket has a decided fate (2026-10-21, board item "delete_client leaves 7
 // per-tenant tables behind, including crm_contacts").
 //
-// WHY THIS EXISTS. No table has a foreign key to client_configs, so a builder's rows go only if
-// delete_client names their table, and nothing noticed when a new table was not named: on 10-21, 62
-// of the 105 tables with client_id were neither wiped nor reported. _shared/tenantTables.ts now
-// gives every one of them a fate, and this test reads every migration to keep it that way:
+// WHY THIS EXISTS. No table has a foreign key to client_configs. Until 10-21 a builder's rows went
+// only if delete_client named their table, and 62 of the 105 tables with client_id were neither
+// wiped nor reported. Since migration 321, tenant_purge() deletes from EVERY table with a client_id
+// column except the ones _shared/tenantTables.ts retains: deny by default. So an unclassified table
+// is no longer left behind, it is purged, and a table that should have been kept (a new ledger, a
+// new signed record) would be destroyed silently. This test reads every migration to stop that:
 //
 //   1. A migration that creates a table with client_id (create table, create table ... as, like,
 //      alter table ... add column, a rename), or a new storage bucket, fails the push until the table
 //      or bucket is classified in tenantTables.ts.
 //   2. A registry entry that no migration creates any more (dropped or renamed) fails too, unless it
-//      is marked outsideMigrations (made by hand).
-//   3. A `cascade` entry whose foreign key is not ON DELETE CASCADE on NOT NULL columns, read from
-//      the migrations, fails: a nullable or SET NULL key leaves rows behind that the entry says go.
-//   4. delete_client's own wipe calls must be exactly the registry's `now` wipes, and its retained
-//      and left-behind counts and its bucket sweep must come from the registry, not a literal list.
+//      is marked outsideMigrations (older than the migrations, or made by hand).
+//   3. A `cascade` entry whose foreign key is not ON DELETE CASCADE on NOT NULL columns fails.
+//   4. A RETAINED table with a CASCADE, NO ACTION or RESTRICT reference to a purged table fails: the
+//      purge would delete the kept rows, or refuse every delete of that builder.
+//   5. An exported table with a column that looks like a secret (token, hash, password, otp) that is
+//      not in its exportDrop fails, and so does an exportDrop naming a column that is not there.
+//   6. delete_client must purge through tenant_purge with RETAINED_TABLES, export EXPORT_TABLES
+//      first, delete no table itself but billing_customers (the gateway step's hook), and take its
+//      reports and its bucket sweep from the registry, not a literal list.
 //
 // The parser is small and deliberately conservative: comments are dropped, string contents masked,
 // dollar quotes treated as transparent (so DDL inside a DO block counts). It runs over the real
@@ -22,7 +28,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  CHECKED_BUCKETS, COUNTED_AFTER_DELETE, RETAINED_TABLES, SWEPT_BUCKETS, TENANT_BUCKETS, TENANT_TABLES, WIPED_BY_DELETE,
+  CHECKED_BUCKETS, COUNTED_AFTER_DELETE, EXPORT_TABLES, EXPORTED_BUCKETS, RETAINED_TABLES, SWEPT_BUCKETS, TENANT_BUCKETS, TENANT_TABLES,
 } from "../tenantTables.ts";
 
 // ─── The migration reader ──────────────────────────────────────────────────────────────────────
@@ -252,6 +258,27 @@ export function coverageProblems(schema: Schema): string[] {
       problems.push(`${name}: marked cascade from ${e.parent}, but the migrations give ${seen.length ? seen.join("; ") : "no foreign key to it"}.`);
     }
   }
+  // A kept row must not hang off a purged one: CASCADE would delete it, NO ACTION / RESTRICT would
+  // make tenant_purge refuse every delete of a builder who has one. SET NULL only blanks a pointer.
+  for (const name of RETAINED_TABLES) {
+    const t = schema.tables.get(name);
+    if (!t) continue;
+    for (const k of t.fks) {
+      const parent = TENANT_TABLES[k.parent];
+      if (!parent || parent.fate === "retain" || k.onDelete === "set null" || k.onDelete === "set default") continue;
+      problems.push(`${name} is retained but references ${k.parent} (${k.cols.join(", ")}) on delete ${k.onDelete}, and ${k.parent} is purged: retain ${k.parent} too, or change the key.`);
+    }
+  }
+  const SECRET = /(^|_)(token|hash|secret|password|otp)(_|$)/;
+  for (const { table, drop } of EXPORT_TABLES) {
+    const t = schema.tables.get(table);
+    if (!t) continue;
+    if (!t.cols.has("id")) problems.push(`${table} is exported but has no id column: the export pages by id (tenantExport.ts rowsOf).`);
+    for (const c of drop) if (!t.cols.has(c)) problems.push(`${table}: exportDrop names ${c}, which the migrations do not have (renamed? the secret would now be exported).`);
+    for (const c of t.cols.keys()) {
+      if (SECRET.test(c) && !drop.includes(c)) problems.push(`${table}.${c} looks like a secret and would go into the delete-time export: add it to exportDrop, or rename it.`);
+    }
+  }
   for (const [id, file] of schema.buckets) {
     if (!TENANT_BUCKETS[id]) problems.push(`storage bucket ${id} (${file}) has no fate in _shared/tenantTables.ts.`);
   }
@@ -279,10 +306,11 @@ Deno.test("the reader sees what the live database had on 10-21", () => {
   // Pinned so a reader that silently stops seeing tables cannot pass the test above by seeing
   // nothing. Live: 105 tables with client_id. 7 of them no migration creates (designs,
   // client_configs, client_settings, orders and payments are older than the migrations, plus two
-  // hand-made backups); 020's hand-applied backup is in the migrations but not live. 105 - 7 + 1.
+  // hand-made backups); 020's hand-applied backup is in the migrations but not live; 321 adds
+  // deleted_clients. 105 - 7 + 1 + 1.
   const tenant = [...REAL.tables].filter(([, t]) => hasClientId(t)).map(([n]) => n);
-  assert(tenant.length >= 99, `only ${tenant.length} tenant tables found in the migrations`);
-  for (const t of ["crm_contacts", "style_cladding", "tenant_setup_items", "billing_consents", "building_sizes", "client_configs_styleitem_backup"]) {
+  assert(tenant.length >= 100, `only ${tenant.length} tenant tables found in the migrations`);
+  for (const t of ["crm_contacts", "style_cladding", "tenant_setup_items", "billing_consents", "building_sizes", "client_configs_styleitem_backup", "deleted_clients"]) {
     assert(tenant.includes(t), `${t} was not found`);
   }
   assert(!REAL.tables.has("building_sizes_new"), "011's rename was not followed");
@@ -339,26 +367,62 @@ Deno.test("PLANTED: a dropped table, a nullable cascade and a SET NULL cascade a
   assert(problems.includes("customer_design_links: marked cascade from designs, but the migrations give (short_code) on delete set null"), problems);
 });
 
+Deno.test("PLANTED: a kept table hanging off a purged one, and a secret in the export, both fail", () => {
+  const planted = readMigrations([
+    ...MIGRATIONS,
+    {
+      name: "999_planted.sql",
+      sql: [
+        "alter table public.invoice_sends add column zz_contact_id uuid references public.crm_contacts (id) on delete cascade;",
+        "alter table public.billing_consents add column zz_location_id uuid references public.builder_locations (id) on delete set null;",
+        "alter table public.crm_contacts add column api_token text;",
+        "alter table public.customer_sessions rename column token_hash to session_token_hash;",
+      ].join("\n"),
+    },
+  ]);
+  const problems = coverageProblems(planted).join("\n");
+  assert(problems.includes("invoice_sends is retained but references crm_contacts (zz_contact_id) on delete cascade"), problems);
+  assert(!problems.includes("billing_consents is retained"), `a SET NULL reference only blanks a pointer:\n${problems}`);
+  assert(problems.includes("crm_contacts.api_token looks like a secret"), problems);
+  assert(problems.includes("customer_sessions: exportDrop names token_hash, which the migrations do not have"), problems);
+  assert(problems.includes("customer_sessions.session_token_hash looks like a secret"), problems);
+});
+
 // ─── The registry's own shape ──────────────────────────────────────────────────────────────────
 
-Deno.test("registry: the lists delete_client reads add up, and every fate is complete", () => {
+Deno.test("registry: Ahsan's 10-21 retention answers, and lists that add up", () => {
   const all = Object.keys(TENANT_TABLES);
-  assertEquals(new Set([...WIPED_BY_DELETE, ...RETAINED_TABLES, ...COUNTED_AFTER_DELETE]).size, all.length, "a table is in two lists, or none");
-  assertEquals(WIPED_BY_DELETE.length + RETAINED_TABLES.length + COUNTED_AFTER_DELETE.length, all.length);
+  assertEquals(new Set([...RETAINED_TABLES, ...COUNTED_AFTER_DELETE]).size, all.length, "a table is in both lists, or neither");
+  assertEquals(RETAINED_TABLES.length + COUNTED_AFTER_DELETE.length, all.length);
   for (const [n, t] of Object.entries(TENANT_TABLES)) {
+    assert(["wipe", "cascade", "retain"].includes(t.fate), `${n}: unknown fate ${t.fate}`);
     assert(t.why.trim().length > 0, `${n} has no reason`);
-    if (t.now) assertEquals(t.fate, "wipe", `${n}: only a wipe can be "now"`);
     if (t.parent) assertEquals(t.fate, "cascade", `${n}: only a cascade has a parent`);
-    if (t.proposed) assertEquals(t.fate, "pending", `${n}: only a pending table has a proposal`);
+    if (t.export) assert(t.fate !== "retain", `${n}: a kept table is not exported (it is not deleted)`);
   }
-  for (const t of ["orders", "payments", "invoice_sends", "billing_consents", "wallet_transactions", "usage_charges", "design_acceptances"]) {
-    assert(RETAINED_TABLES.includes(t), `${t} is a financial or signed record and must be retained`);
+  // Money and signed records: kept forever. SMS consent and opt-outs: kept as proof. The tombstone.
+  for (
+    const t of [
+      "orders", "payments", "payment_attempts", "invoice_sends", "change_orders", "order_unlocks", "design_acceptances",
+      "billing_charge_attempts", "billing_consents", "wallet_transactions", "usage_charges", "sms_consent_log", "sms_opt_outs", "deleted_clients",
+    ]
+  ) assert(RETAINED_TABLES.includes(t), `${t} must be retained`);
+  // Customer data: exported, then deleted.
+  for (
+    const t of [
+      "crm_contacts", "crm_notes", "crm_activities", "crm_deals", "sms_messages", "phone_calls", "phone_voicemails",
+      "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions",
+    ]
+  ) {
+    assert(EXPORT_TABLES.some((e) => e.table === t), `${t} is customer data: it is exported before the purge`);
+    assert(COUNTED_AFTER_DELETE.includes(t), `${t} is deleted after the export`);
   }
-  for (const t of ["crm_contacts", "sms_messages", "phone_calls", "email_sends", "customer_sessions"]) {
-    assertEquals(TENANT_TABLES[t].fate, "pending", `${t} waits on Carolyn's retention decision`);
-  }
+  assertEquals(EXPORT_TABLES.find((e) => e.table === "customer_sessions")?.drop, ["token_hash"], "a login token hash never leaves");
+  assertEquals(EXPORTED_BUCKETS, ["customer-uploads"]);
+  assert(EXPORTED_BUCKETS.every((b) => SWEPT_BUCKETS.includes(b)), "an exported bucket is not swept");
+  assert(!SWEPT_BUCKETS.includes("signatures"), "the signature images are kept");
   assert(SWEPT_BUCKETS.every((b) => CHECKED_BUCKETS.includes(b)), "a swept bucket is not checked afterwards");
-  assert(!CHECKED_BUCKETS.includes("pm-attachments") && !CHECKED_BUCKETS.includes("setup-screens"), "a global bucket is checked per builder");
+  for (const g of ["pm-attachments", "setup-screens", "tenant-exports"]) assert(!CHECKED_BUCKETS.includes(g), `${g} is checked per builder`);
 });
 
 // ─── delete_client reads the registry ──────────────────────────────────────────────────────────
@@ -372,28 +436,38 @@ const DEL = (() => {
   return CODE.slice(i, j);
 })();
 
-Deno.test("source: delete_client wipes exactly the registry's `now` tables", () => {
-  const deleted = new Set([
-    ...[...DEL.matchAll(/\bwipe\("([^"]+)"\)/g)].map((m) => m[1]),
-    ...[...DEL.matchAll(/\.from\("([^"]+)"\)\.delete\(/g)].map((m) => m[1]),
-  ]);
-  assert(/await forgetTwilioAccount\(sb, clientId, twPlan\.row\)/.test(DEL), "the Twilio account row is no longer removed");
-  deleted.add("twilio_accounts");
-  const extra = [...deleted].filter((t) => !WIPED_BY_DELETE.includes(t));
-  const missing = WIPED_BY_DELETE.filter((t) => !deleted.has(t));
-  assertEquals(extra, [], `delete_client deletes tables tenantTables.ts does not mark now: ${extra.join(", ")}`);
-  assertEquals(missing, [], `tenantTables.ts marks tables now that delete_client does not delete: ${missing.join(", ")}`);
+Deno.test("source: delete_client purges through tenant_purge with the registry's keep list, and deletes no table itself", () => {
+  assert(/^import \{[^}]*\} from "\.\.\/_shared\/tenantTables\.ts";$/m.test(SRC), "admin-catalog does not import tenantTables.ts");
+  const calls = [...DEL.matchAll(/sb\.rpc\("tenant_purge", \{ p_client_id: clientId, p_keep: (\w+), p_actor: actor, p_dry_run: (true|false) \}\)/g)];
+  assertEquals(calls.map((m) => [m[1], m[2]]), [["RETAINED_TABLES", "true"], ["RETAINED_TABLES", "false"]], "a dry run, then the purge, both keeping RETAINED_TABLES");
+  assertEquals([...DEL.matchAll(/\.from\("([^"]+)"\)\.delete\(/g)].map((m) => m[1]), [], "delete_client deletes a table itself again");
+  assertEquals([...DEL.matchAll(/\bwipe\("([^"]+)"\)/g)].map((m) => m[1]), ["billing_customers"], "only the gateway step's hook deletes directly");
+  assert(/await forgetTwilioAccount\(sb, clientId, twPlan\.row\)/.test(DEL), "the Twilio account row is no longer removed (with its Vault secrets) before the purge");
 });
 
-Deno.test("source: retained, leftBehind and the bucket sweep come from the registry", () => {
-  assert(/^import \{[^}]*\} from "\.\.\/_shared\/tenantTables\.ts";$/m.test(SRC), "admin-catalog does not import tenantTables.ts");
+Deno.test("source: the export, the reports and the storage sweep come from the registry", () => {
   assert(!/for \(\s*const \w+ of \[\s*"/.test(DEL), "delete_client loops over a literal list again: take it from tenantTables.ts");
-  assert(/countTenantRows\(RETAINED_TABLES\)/.test(DEL), "retained is not counted over RETAINED_TABLES");
+  assert(/buildTenantExport\(sb, clientId, \{ tables: EXPORT_TABLES, buckets: EXPORTED_BUCKETS \}\)/.test(DEL), "the export does not use EXPORT_TABLES and EXPORTED_BUCKETS");
+  assert(/countTenantRows\(RETAINED_TABLES\.filter/.test(DEL), "retained is not counted over RETAINED_TABLES");
   assert(/countTenantRows\(COUNTED_AFTER_DELETE\)/.test(DEL), "leftBehind is not counted over COUNTED_AFTER_DELETE");
-  assert(/for \(const bucket of SWEPT_BUCKETS\)/.test(DEL), "the storage sweep does not use SWEPT_BUCKETS");
+  assert(/for \(const bucket of SWEPT_BUCKETS\) \{\s*if \(notExported\.has\(bucket\)\) continue;/.test(DEL), "the sweep does not use SWEPT_BUCKETS, or sweeps files the export could not take");
+  assert(/await sweepPrefix\(sb, bucket, clientId\)/.test(DEL), "the sweep is not recursive (storageTree.ts sweepPrefix)");
   assert(/CHECKED_BUCKETS\.map\(async \(bucket\)/.test(DEL), "what is left in storage is not checked over CHECKED_BUCKETS");
-  // Counted after the last table wipe and before the logins go, as the 10-05 report was.
-  const after = DEL.indexOf("countTenantRows(COUNTED_AFTER_DELETE)");
-  assert(after > DEL.lastIndexOf('await wipe("qbo_item_map")') && after > DEL.indexOf('from("phone_number_requests").delete('), "leftBehind is counted before a wipe");
-  assert(after < DEL.indexOf('await wipe("client_users")'), "leftBehind is counted after the logins are gone");
+  const purgeAt = DEL.indexOf("p_dry_run: false");
+  for (const read of ['from("client_users").select("user_id").eq("client_id", clientId)', 'from("client_settings")', 'from("sms_numbers").select("phone_number")']) {
+    const i = DEL.indexOf(read);
+    assert(i > 0 && i < purgeAt, `${read} must be read BEFORE the purge takes the rows`);
+  }
+  for (const after of ["countTenantRows(COUNTED_AFTER_DELETE)", "await sweepPrefix(", "await rsDeleteDomain(", "await qboEndpoints()"]) {
+    assert(DEL.indexOf(after) > purgeAt, `${after} must come after the purge committed`);
+  }
+});
+
+Deno.test("source: create_client refuses a deleted builder's id", () => {
+  const i = CODE.indexOf('case "create_client": {');
+  const create = CODE.slice(i, CODE.indexOf("\n      case ", i + 10));
+  assert(/sb\.from\("deleted_clients"\)\.select\("deleted_at"\)\.eq\("client_id", clientId\)\.maybeSingle\(\)/.test(create), "create_client does not read the tombstone");
+  assert(/RETAINED_TABLES\.filter/.test(create), "create_client does not look for kept rows under the id");
+  const refuse = create.indexOf("can't be used again");
+  assert(refuse > 0 && refuse < create.indexOf('.from("client_configs").insert('), "the refusal is not ahead of the tenant row's insert");
 });

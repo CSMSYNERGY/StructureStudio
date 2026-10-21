@@ -36,13 +36,13 @@ Deno.test("an open subscription or a saved card, no gateway: 503 and nothing del
 
 Deno.test("nothing at the gateway, no gateway needed: the builder is still deleted", async () => {
   for (const subs of [[], [{ id: "4200000002", status: "cancelled" }]]) {
-    const r = await deleteClient(HANDLER, { subs, vault: null, rows: { wallet_accounts: 1 } });
+    const r = await deleteClient(HANDLER, { subs, vault: null, purge: { purged: { wallet_accounts: 1, client_configs: 1 } } });
     assertEquals(r.status, 200, r.raw);
     assertEquals(r.gatewayCalls, []);
-    assertEquals(r.wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"]);
-    assert(r.wipes.includes("client_configs"));
+    assertEquals(r.wipes, ["tenant_purge"], "the purge takes the tenant, the wallet with it");
+    assertEquals([r.body.deleted.wallet_accounts, r.body.deleted.client_configs], [1, 1]);
     assertEquals(r.body.gateway, { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 });
-    assertEquals(r.audits.map((a) => a.target_client_id), [TENANT]);
+    assertEquals(r.audits.map((a) => a.target_client_id), [TENANT, TENANT], "the gateway's audit row, then the purge's");
   }
 });
 

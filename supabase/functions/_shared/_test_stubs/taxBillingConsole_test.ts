@@ -253,7 +253,7 @@ Deno.test("tax_charge_retry: a meter repriced since the attempt is not replayed 
   assertEquals(db.credits.length, 0, "never a price the builder did not see when they pressed Verify");
 });
 
-Deno.test("delete_client closes the builder's tax charges still waiting on a retry, before the wallet is wiped", async () => {
+Deno.test("delete_client closes the builder's tax charges still waiting on a retry, before the purge takes the wallet", async () => {
   const r = await deleteClient(HANDLER, { subs: [], vault: null, taxOpenCharges: 2 });
   assertEquals(r.status, 200, r.raw);
   assertEquals(r.body.taxChargesClosed, 2, "reported, as a count");
@@ -261,8 +261,9 @@ Deno.test("delete_client closes the builder's tax charges still waiting on a ret
   assertEquals(close.length, 1);
   assertEquals(close[0].payload, { charge_state: "error", charge_cents: null, wallet_tx_id: null, charged_at: null }, "an error with no price: never replayed");
   assertEquals(close[0].filters, [["eq", "client_id", "acme-sheds"], ["in", "charge_state", ["pending", "error"]]]);
+  // Since migration 321 the wallet goes with everything else in tenant_purge's one transaction.
   const at = r.log.indexOf("db update tax_lookups");
-  assert(at > 0 && at < r.log.indexOf("db delete wallet_accounts"), `the close runs before the wallet goes: ${r.log.join(" | ")}`);
+  assert(at > 0 && at < r.log.indexOf("db rpc tenant_purge"), `the close runs before the purge takes the wallet: ${r.log.join(" | ")}`);
   // Nothing to close is not a report line; and a database without 319 does not stop the delete.
   const none = await deleteClient(HANDLER, { subs: [], vault: null });
   assertEquals([none.status, "taxChargesClosed" in none.body], [200, false], none.raw);

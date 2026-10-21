@@ -64,8 +64,9 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
     // How many days a quote stays good for (migration 269). A STRING like every other field; "30"
     // is the column's default and what every quote printed before the setting existed.
     quoteValidDays: "30",
-    // Page 2 of the quote from all four corners (migration 276). Off is the column's default.
-    quoteCornerViews: false,
+    // Page 2 of the quote from all four corners (migration 276). On is the column's default since
+    // migration 322; the box shows only once status has said what is stored.
+    quoteCornerViews: true,
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
@@ -1056,7 +1057,8 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
         )}
         {/* Carolyn 2026-08-20: a 3D page on the estimate, "optional for them", that "gets 4 sides. So
             4 quadrants"; 2026-09-08: "we want to see 4 images... one from each corner". Only where
-            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. */}
+            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. On by
+            default since migration 322 (Ahsan 2026-10-21); a builder can still untick it. */}
         {view3d && cornerReady && (
           <div style={{ marginTop: 12 }}>
             <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
@@ -1065,6 +1067,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
             </label>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
               Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
+              {" "}It's on by default for every builder with 3D. Untick it to turn it off and go back to the single view.
             </div>
           </div>
         )}

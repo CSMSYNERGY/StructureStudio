@@ -30,7 +30,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import { deleteClient, firstWipe, loadAdminCatalog, SECURITY_KEY, TENANT } from "./deleteClientHarness.ts";
-import { COUNTED_AFTER_DELETE, RETAINED_TABLES } from "../tenantTables.ts";
+import { COUNTED_AFTER_DELETE, RETAINED_TABLES, TENANT_TABLES } from "../tenantTables.ts";
 
 const HANDLER = await loadAdminCatalog(true);
 
@@ -45,28 +45,30 @@ const declined = (text: string) => `response=3&responsetext=${encodeURIComponent
 
 // ─── Behaviour ─────────────────────────────────────────────────────────────────────────────────
 
-Deno.test("a builder with nothing at the gateway: zero gateway calls, wallet wiped, ledgers reported", async () => {
+Deno.test("a builder with nothing at the gateway: zero gateway calls, one purge, ledgers reported", async () => {
   for (const subs of [[], [{ id: "4200000009", status: "cancelled" }]]) {
     const r = await deleteClient(HANDLER, {
       subs,
       vault: null,
-      rows: { wallet_accounts: 1, tax_code_assignments: 2, client_feature_grants: 1 },
+      purge: { purged: { wallet_accounts: 1, tax_code_assignments: 2, client_feature_grants: 1, client_configs: 1 }, passes: 2 },
+      // The harness's counts are static, so these also show what a purge that LEFT rows looks like.
       retained: { wallet_transactions: 2, usage_charges: 5, orders: 1, crm_contacts: 8, customer_sessions: 3 },
     });
     assertEquals(r.status, 200, r.raw);
     assertEquals(r.gatewayCalls, [], "nothing to do at the gateway, so it is never called");
-    assertEquals(r.wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"],
-      "tax codes first, then the wallet balance and the comped features");
+    assertEquals(r.purges.map((p) => p.p_dry_run), [true, false], "a dry run, then the purge");
+    for (const p of r.purges) assertEquals(p.p_keep, RETAINED_TABLES, "the keep list is the registry's");
+    assertEquals(r.wipes, ["tenant_purge"], "the purge deletes; delete_client deletes no table itself");
     assertEquals(r.body.deleted.wallet_accounts, 1);
     assertEquals(r.body.deleted.client_feature_grants, 1);
+    assertEquals(r.body.deleted.client_configs, 1);
     assertEquals(r.body.retained, { orders: 1, wallet_transactions: 2, usage_charges: 5 }, "money that moved is kept and reported");
-    assertEquals(r.body.leftBehind, { crm_contacts: 8, customer_sessions: 3 }, "what else outlives the tenant is reported too");
+    assertEquals(r.body.leftBehind, { crm_contacts: 8, customer_sessions: 3 }, "anything that survived the purge is reported");
     assertEquals(r.body.gateway, { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 });
-    assertEquals(r.audits.length, 1, "one dedicated audit row");
-    assertEquals(r.audits[0].action, "delete_client");
-    assertEquals(r.audits[0].target_client_id, TENANT);
+    assertEquals(r.audits.length, 2, "the gateway's audit row, then the purge's");
+    assertEquals(r.audits.map((a) => [a.action, a.target_client_id]), [["delete_client", TENANT], ["delete_client", TENANT]]);
     assert(/^via=password gateway none subscriptions_cancelled=0 of 0 vault_deleted=false already_gone=0$/.test(r.audits[0].note), r.audits[0].note);
-    assert(r.wipes.includes("client_configs"), "the tenant itself is still deleted");
+    assert(/^via=password purge passes=2 rows=5 kept=8 export=none tax_charges_closed=0$/.test(r.audits[1].note), r.audits[1].note);
   }
 });
 
@@ -169,33 +171,36 @@ Deno.test("a vault the gateway no longer holds counts as removed, and the delete
   });
   assertEquals(r.status, 200, r.raw);
   assertEquals(r.body.gateway, { subscriptionsCancelled: 0, vaultDeleted: true, alreadyGone: 1 });
-  assert(r.wipes.includes("billing_customers") && r.wipes.includes("client_configs"));
+  assertEquals(r.wipes, ["billing_customers", "tenant_purge"]);
 });
 
-Deno.test("the vault row goes the moment the card does, so a delete that fails later leaves no dead card on file", async () => {
-  const world = { subs: [{ id: "4200000001", status: "active" }], vault: VAULT as string | null, failWipe: "designs" };
+Deno.test("the vault row goes the moment the card does, so a purge that is refused leaves no dead card on file", async () => {
+  const world: Parameters<typeof deleteClient>[1] = {
+    subs: [{ id: "4200000001", status: "active" }], vault: VAULT,
+    purge: { error: 'update or delete on table "crm_contacts" violates foreign key constraint' },
+  };
   const first = await deleteClient(HANDLER, world);
-  assertEquals(first.status, 400, first.raw);
-  assert(/^designs: /.test(first.body.error), first.raw);
+  assertEquals(first.status, 500, first.raw);
+  assert(/^The database refused the delete \(.*\), so none of this builder's data was deleted\. The payment gateway step had already run \(1 paid plan cancelled, the saved card removed\)\. Delete again to finish\.$/.test(first.body.error), first.raw);
   assertEquals(first.gatewayCalls.length, 2, "the plan and the card are gone at the gateway");
   const cardCall = first.log.lastIndexOf(`gw delete_customer ${VAULT}`);
   assertEquals(first.log[cardCall + 1], "db delete billing_customers", `the vault row did not go straight after the card:\n${first.log.join("\n")}`);
-  assert(first.wipes.indexOf("billing_customers") < first.wipes.indexOf("tax_code_assignments"), "the vault row went after a wipe");
+  assertEquals(first.wipes, ["billing_customers"], "only the vault row went; the refused purge took nothing");
   assertEquals(world.vault, null, "no vault id is left for Billing to show as a card on file");
   assertEquals(world.subs.map((s) => s.status), ["cancelled"]);
   assert(!first.raw.includes(VAULT));
 
   // The operator retries: nothing is left to send to the gateway, and the delete completes.
-  const retry = await deleteClient(HANDLER, { ...world, failWipe: undefined });
+  const retry = await deleteClient(HANDLER, { ...world, purge: {} });
   assertEquals(retry.status, 200, retry.raw);
   assertEquals(retry.gatewayCalls, [], "a retry must never ask the gateway to delete the card again");
   assertEquals(retry.body.gateway, { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 });
 });
 
-Deno.test("billing_customers is counted once, whichever of its two wipes removed it", async () => {
-  const r = await deleteClient(HANDLER, { subs: [], vault: VAULT });
+Deno.test("billing_customers is counted once: the gateway hook's delete, then the purge as the backstop", async () => {
+  const r = await deleteClient(HANDLER, { subs: [], vault: VAULT, purge: { purged: {} } });
   assertEquals(r.status, 200, r.raw);
-  assertEquals(r.wipes.filter((t) => t === "billing_customers").length, 2, "the hook, then the backstop");
+  assertEquals(r.wipes, ["billing_customers", "tenant_purge"], "the hook, then the backstop");
   assertEquals(r.body.deleted.billing_customers, 1);
 });
 
@@ -226,8 +231,10 @@ const at = (needle: string) => {
   return i;
 };
 
-Deno.test("source: read, refuse-if-unconfigured, clean up, and only then wipe", () => {
-  const firstWipeAt = at("await wipe(");
+const PURGE_CALL = 'sb.rpc("tenant_purge", { p_client_id: clientId, p_keep: RETAINED_TABLES, p_actor: actor, p_dry_run: false })';
+
+Deno.test("source: read, refuse-if-unconfigured, clean up, and only then purge", () => {
+  const firstWipeAt = at(PURGE_CALL);
   const reads = at('sb.from("billing_subscriptions").select("id, status").eq("client_id", clientId)');
   assert(DEL.includes('sb.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle()'), "the vault read is not scoped to this tenant");
   const unconfigured = at("if (!nmiConfigured) {");
@@ -241,32 +248,36 @@ Deno.test("source: read, refuse-if-unconfigured, clean up, and only then wipe", 
   assert(at("onVaultDeleted:") > cleanup, "onVaultDeleted is not handed to cleanupTenantGateway");
   assert(/if \(!nmiConfigured\) \{\s*return json\(\{ error: "Can't reach the payment gateway; nothing was deleted\." \}, 503\);/.test(DEL),
     "the unconfigured refusal changed");
-  // Every refusal returns from inside the gateway step, before the first wipe.
+  // Every refusal returns before the purge, except the purge's own: a refused purge deleted nothing.
   const refusals = [...DEL.matchAll(/return json\(\{\s*error:/g)].map((m) => m.index!);
-  assert(refusals.length >= 2 && refusals.every((i) => i < firstWipeAt), "a refusal sits below a wipe");
+  const late = refusals.filter((i) => i > firstWipeAt);
+  assert(refusals.length >= 4, "the refusals moved");
+  assertEquals(late.length, 1, "a refusal sits below the purge, after something was deleted");
+  assert(/^;\s*if \(purge\.error\) \{\s*$/.test(DEL.slice(firstWipeAt + PURGE_CALL.length, late[0])), "the one refusal after the purge call is not its own failure");
 });
 
-Deno.test("source: wipe order, the wallet, and the retained ledgers", () => {
-  const wipes = [...DEL.matchAll(/await wipe\("([^"]+)"\)/g)].map((m) => m[1]);
-  assertEquals(wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"]);
-  // Since 2026-10-21 both reports come from _shared/tenantTables.ts, and tenantTableCoverage_test holds
-  // delete_client to it. What matters here: the ledgers are reported and never wiped, and the
-  // customer data is reported, not wiped (design_acceptances moved to retained: it is signed).
-  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents", "design_acceptances"]) {
-    assert(RETAINED_TABLES.includes(t), `${t} is missing from the retained list`);
-    assert(!wipes.includes(t), `${t} is a ledger and must not be wiped`);
+Deno.test("source: the dry run and the export come before anything irreversible; the purge keeps the ledgers", () => {
+  // Since 2026-10-21 tenant_purge (migration 321) deletes, in one transaction, everything but
+  // RETAINED_TABLES. Customer data is exported first, and a database without 321 refuses at the dry
+  // run, before the gateway or Twilio are touched.
+  const dry = at('sb.rpc("tenant_purge", { p_client_id: clientId, p_keep: RETAINED_TABLES, p_actor: actor, p_dry_run: true })');
+  const exportAt = at("await buildTenantExport(sb, clientId, { tables: EXPORT_TABLES, buckets: EXPORTED_BUCKETS })");
+  const gatewayAt = at("await cleanupTenantGateway({");
+  const twilioClose = at("await closePlannedSub(");
+  const purgeAt = at(PURGE_CALL);
+  assert(at("await twilioClosePlan(") < dry && dry < exportAt && exportAt < gatewayAt && gatewayAt < twilioClose && twilioClose < purgeAt,
+    "the order is: Twilio plan (read only), dry run, export, gateway, Twilio close, purge");
+  assertEquals([...DEL.matchAll(/await wipe\("([^"]+)"\)/g)].length, 0, "delete_client deletes a table itself again");
+  assertEquals([...DEL.matchAll(/\.from\("([^"]+)"\)\.delete\(/g)].map((m) => m[1]), [], "delete_client deletes a table itself again");
+  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents", "design_acceptances", "sms_consent_log"]) {
+    assert(RETAINED_TABLES.includes(t), `${t} is missing from the keep list`);
   }
-  for (
-    const t of [
-      "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls", "phone_voicemails",
-      "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions", "customer_email_otps",
-    ]
-  ) {
-    assert(COUNTED_AFTER_DELETE.includes(t), `${t} is missing from the leftBehind report`);
-    assert(!wipes.includes(t), `${t} is wiped now: mark it wiped in tenantTables.ts too`);
+  for (const t of ["crm_contacts", "sms_messages", "phone_calls", "email_sends", "customer_sessions", "customer_email_otps", "tenant_setup_items"]) {
+    assert(COUNTED_AFTER_DELETE.includes(t) && TENANT_TABLES[t].fate !== "retain", `${t} is purged`);
   }
-  assert(/const retained = await countTenantRows\(RETAINED_TABLES\);/.test(DEL), "retained is not counted");
+  assert(/const retained = await countTenantRows\(RETAINED_TABLES\.filter\(\(t\) => t !== "deleted_clients"\)\);/.test(DEL), "retained is not counted");
   assert(/const leftBehind = await countTenantRows\(COUNTED_AFTER_DELETE\);/.test(DEL), "leftBehind is not counted");
+  assert(at("countTenantRows(COUNTED_AFTER_DELETE)") > purgeAt, "leftBehind is counted before the purge");
   assert(/\.\.\.\(Object\.keys\(leftBehind\)\.length \? \{ leftBehind \} : \{\}\)/.test(DEL), "leftBehind is not in the response");
 });
 

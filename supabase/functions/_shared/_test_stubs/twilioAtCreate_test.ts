@@ -772,6 +772,7 @@ Deno.test("source: delete_client checks the provisioning lock before it plans an
   const del = SRC.slice(SRC.indexOf('case "delete_client": {'));
   const lock = del.indexOf('sb.from("twilio_accounts").select("provision_lock_until")');
   const plan = del.indexOf("await twilioClosePlan(sb, clientId, { get: twGet })");
-  const firstWipe = del.indexOf("await wipe(");
+  // Since migration 321 nothing is deleted before the gateway hook and the one tenant_purge call.
+  const firstWipe = Math.min(...[del.indexOf("wipe(\"billing_customers\")"), del.indexOf("p_dry_run: false")].filter((i) => i >= 0));
   assert(lock > 0 && plan > lock && firstWipe > plan, "the lock read sits before the plan, and both before any wipe");
 });
