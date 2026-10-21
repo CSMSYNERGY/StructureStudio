@@ -530,11 +530,43 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const decision = paymentAmountDecision(money);
     if (!decision.ok) return json({ error: amountRefusalText(decision.reason), reason: decision.reason }, 409);
 
-    if (Number(payload?.confirmChargeCents) !== decision.askCents) {
-      return json({
-        error: `The amount due is now $${(decision.askCents / 100).toFixed(2)}. Check it and try again.`,
-        askCents: decision.askCents,
-      }, 400);
+    // THE AMOUNT IS THE BUILDER'S TO CHOOSE, INSIDE THE BALANCE (Carolyn 2026-10-20: "$5,000 of the
+    // balance"). Until then a builder charge was pinned to the server's ask (the deposit, or the
+    // whole balance), so the modal swapped any typed figure for it. `amountCents` is OPTIONAL and
+    // defaults to the ask: production's portal and my-quotes send none, and they must charge exactly
+    // what they charged before. Every refusal above still stands (paid, refund owed, a bank payment
+    // clearing, a change waiting), so a free amount opens nothing the ask did not.
+    let amountCents = decision.askCents;
+    const typed = payload?.amountCents;
+    if (typed !== undefined && typed !== null) {
+      const n = typeof typed === "number" ? typed : NaN;
+      if (!Number.isInteger(n)) return json({ error: "Enter the amount in dollars and cents, e.g. 5000.00." }, 400);
+      const most = Math.min(decision.balanceCents, MAX_PAYMENT_CENTS);
+      if (n < MIN_PAYMENT_CENTS) {
+        return json({ error: `The smallest payment is $${(MIN_PAYMENT_CENTS / 100).toFixed(2)}.`, minCents: MIN_PAYMENT_CENTS }, 400);
+      }
+      if (n > most) {
+        return json({
+          error: most === decision.balanceCents
+            ? `That's more than the $${(most / 100).toFixed(2)} still owed on this order.`
+            : `A single payment can be at most $${(most / 100).toFixed(2)}.`,
+          maxCents: most,
+        }, 400);
+      }
+      amountCents = n;
+    }
+
+    // A typed amount is echoed back as the same number, never a string that happens to parse to it:
+    // the page that typed it sends both. The ask keeps its old, looser comparison for the pages
+    // already out there.
+    const asked = typed === undefined || typed === null;
+    if (asked ? Number(payload?.confirmChargeCents) !== amountCents : payload?.confirmChargeCents !== amountCents) {
+      return json(asked
+        ? {
+          error: `The amount due is now $${(decision.askCents / 100).toFixed(2)}. Check it and try again.`,
+          askCents: decision.askCents,
+        }
+        : { error: "The amount to charge changed. Check it and try again." }, 400);
     }
 
     const rail: "card" | "ach" = payload?.rail === "ach" ? "ach" : "card";
@@ -551,7 +583,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // labelled "Swipe". A bank payment is never a swipe, whatever the page sends.
     const swiped = rail === "card" && payload?.entry === "swipe";
 
-    await audit(`charge_${rail}`, null, `order=${orderId} cents=${decision.askCents}`).catch(() => {});
+    await audit(`charge_${rail}`, null, `order=${orderId} cents=${amountCents}`).catch(() => {});
 
     // The audit above is deliberately ahead of this refusal: a throttled attempt is still
     // an attempt, and the trail has to show it was made as well as refused.
@@ -583,7 +615,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       merchant: currentMerchant,
       orderId,
       shortCode: money.shortCode,
-      amountCents: decision.askCents,
+      amountCents,
       rail,
       account: token,
       expiry: typeof payload?.expiry === "string" ? payload.expiry.trim().slice(0, 8) : undefined,
