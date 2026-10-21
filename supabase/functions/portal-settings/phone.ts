@@ -154,12 +154,14 @@ export function parseRoute(
 // The settings card's form → the client_settings columns, or the first thing wrong with it.
 // The columns' CHECKs are mirrored here so a bad value is refused in words the owner can act on.
 // Decided for Ahsan on 2026-10-04, and by Carolyn on 2026-10-06 (migration 287): recording ON by
-// default, and only the owner turns it off; the announcement on and LOCKED ON while calls are
-// recorded (this refuses turning it off; the column stays for a later decision); transcripts on
-// per business, but they run only once the Worker's CALL_TRANSCRIBE rail is on (off: Carolyn left
-// them a separate decision); recordings kept 365 days unless the owner picks another of the five
-// lengths. The standard wording is the phone-api Worker's (src/recording.ts STANDARD_NOTICE*),
-// repeated here only to show the owner; tests/phone/callRecordingUi_test.ts pins the copies equal.
+// default, and only the owner turns it off; transcripts on per business, but they run only once
+// the Worker's CALL_TRANSCRIBE rail is on (off: Carolyn left them a separate decision); recordings
+// kept 365 days unless the owner picks another of the five lengths. The announcement was locked on
+// until 2026-10-21 (Carolyn's 10-20 ask, Ahsan's decision): now the owner can turn it off, default
+// on. The phone-api Worker records a call either way (recording.ts armedFor) and only the <Say>
+// and the whisper follow it. The standard wording is the Worker's (src/recording.ts
+// STANDARD_NOTICE*), repeated here only to show the owner; tests/phone/callRecordingUi_test.ts
+// pins the copies equal.
 
 /** client_settings_phone_recording_retention_chk. */
 export const RECORDING_RETENTION_DAYS = [30, 90, 180, 365, 730] as const;
@@ -177,7 +179,8 @@ export function standardNotice(transcribe: boolean): string {
 
 export type RecordingRow = {
   phone_record_calls: boolean;
-  phone_recording_notice: true;
+  /** Absent: the stored value is kept (see parseRecording). */
+  phone_recording_notice?: boolean;
   phone_recording_notice_text: string | null;
   phone_transcribe_calls: boolean;
   phone_recording_retention_days: number;
@@ -186,7 +189,10 @@ export type RecordingRow = {
 /**
  * { on, noticeText?, transcribe?, retentionDays?, notice? } → the columns to write.
  *   on            required, true or false
- *   notice        absent or true. false is refused: the announcement is locked on
+ *   notice        true or false: whether callers hear the announcement. ABSENT (or null) keeps
+ *                 the stored value and writes nothing: the shipped apps (iOS build 9, Android
+ *                 vc7, extension 0.1.4) save this action from their transcripts switch without
+ *                 it, and must never turn an owner's "off" back on
  *   noticeText    blank, or either standard sentence, means the standard wording (stored NULL,
  *                 so it follows the transcripts switch); otherwise 10-300 characters once spaces
  *                 are tidied, one line, and it has to say the call is recorded and not deny it
@@ -197,8 +203,8 @@ export type RecordingRow = {
  */
 export function parseRecording(p: Record<string, unknown>): { ok: true; row: RecordingRow } | { ok: false; error: string } {
   if (typeof p.on !== "boolean") return { ok: false, error: "Say whether calls should be recorded." };
-  if (p.notice === false) {
-    return { ok: false, error: "The announcement can't be turned off: callers are always told a call is recorded." };
+  if (p.notice !== undefined && p.notice !== null && typeof p.notice !== "boolean") {
+    return { ok: false, error: "Say whether callers should hear the announcement." };
   }
   if (p.transcribe !== undefined && p.transcribe !== null && typeof p.transcribe !== "boolean") {
     return { ok: false, error: "Say whether recorded calls should be transcribed." };
@@ -232,7 +238,7 @@ export function parseRecording(p: Record<string, unknown>): { ok: true; row: Rec
     ok: true,
     row: {
       phone_record_calls: p.on,
-      phone_recording_notice: true,
+      ...(typeof p.notice === "boolean" ? { phone_recording_notice: p.notice } : {}),
       phone_recording_notice_text: text,
       phone_transcribe_calls: transcribe,
       phone_recording_retention_days: days,
@@ -268,7 +274,8 @@ export function transcribeServerOn(env: (k: string) => string | undefined): bool
  * calls are recorded only while the owner's `on` AND it are true; with the owner's on and the
  * server's off, the card says recording hasn't started yet. `transcribeOnServer` is
  * transcribeServerOn: the standard sentence says "and transcribed" only while the business's
- * transcripts are on AND it is, which is exactly when the Worker says it (noticeText).
+ * transcripts are on AND it is, which is exactly when the Worker says it (noticeText). `notice`
+ * reads true unless the column is false (its default is true), as the Worker's RPCs read it.
  */
 export function recordingView(row: Record<string, unknown> | null | undefined, serverOn = false, transcribeOnServer = false) {
   const r = row ?? {};
@@ -279,7 +286,7 @@ export function recordingView(row: Record<string, unknown> | null | undefined, s
     on: r.phone_record_calls === true,
     serverOn: serverOn === true,
     transcribeServerOn: transcribeOnServer === true,
-    notice: true,
+    notice: r.phone_recording_notice !== false,
     noticeText: text,
     standardText: standardNotice(transcribe && transcribeOnServer === true),
     transcribe,

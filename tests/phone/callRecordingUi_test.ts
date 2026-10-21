@@ -228,11 +228,12 @@ Deno.test("the timeline offers Play and Show transcript on the voicemail player'
 
 // ── Settings › Phone: the Call recording card ───────────────────────────────────────────────
 const REC_BLOCK = slice(SMS, "const PHONE_REC_STANDARD = ", "function PhoneSettingsView(", "the Call recording helpers");
-const card = new Function(`${REC_BLOCK}; return { PHONE_REC_STANDARD, PHONE_REC_STANDARD_TRANSCRIBED, PHONE_REC_KEEP_WORDS, phoneRecFormFrom, phoneRecNoticeProblem };`)() as {
+const card = new Function(`${REC_BLOCK}; return { PHONE_REC_STANDARD, PHONE_REC_STANDARD_TRANSCRIBED, PHONE_REC_KEEP_WORDS, PHONE_REC_UNANNOUNCED_WARNING, phoneRecFormFrom, phoneRecNoticeProblem };`)() as {
   PHONE_REC_STANDARD: string;
   PHONE_REC_STANDARD_TRANSCRIBED: string;
   PHONE_REC_KEEP_WORDS: Record<string, string>;
-  phoneRecFormFrom: (r: unknown) => { on: boolean; noticeText: string; transcribe: boolean; retentionDays: number };
+  PHONE_REC_UNANNOUNCED_WARNING: string;
+  phoneRecFormFrom: (r: unknown) => { on: boolean; notice: boolean; noticeText: string; transcribe: boolean; retentionDays: number };
   phoneRecNoticeProblem: (t: unknown) => string | null;
 };
 
@@ -279,19 +280,51 @@ Deno.test("the card's two wording patterns are _shared/recordingNotice.ts's, wor
   }
 });
 
-Deno.test("the form starts from the server's view: off, standard wording, transcripts on, a year", () => {
-  assertEquals(card.phoneRecFormFrom({ on: false, noticeText: null, transcribe: true, retentionDays: 365 }), { on: false, noticeText: "", transcribe: true, retentionDays: 365 });
-  assertEquals(card.phoneRecFormFrom({ on: true, noticeText: "We record calls.", transcribe: false, retentionDays: 90 }), { on: true, noticeText: "We record calls.", transcribe: false, retentionDays: 90 });
-  assertEquals(card.phoneRecFormFrom(null), { on: false, noticeText: "", transcribe: true, retentionDays: 365 });
+Deno.test("the form starts from the server's view: off, announced, standard wording, transcripts on, a year", () => {
+  assertEquals(card.phoneRecFormFrom({ on: false, notice: true, noticeText: null, transcribe: true, retentionDays: 365 }), { on: false, notice: true, noticeText: "", transcribe: true, retentionDays: 365 });
+  assertEquals(card.phoneRecFormFrom({ on: true, notice: false, noticeText: "We record calls.", transcribe: false, retentionDays: 90 }), { on: true, notice: false, noticeText: "We record calls.", transcribe: false, retentionDays: 90 });
+  assertEquals(card.phoneRecFormFrom(null), { on: false, notice: true, noticeText: "", transcribe: true, retentionDays: 365 });
+  // A server from before 2026-10-21 sends no `notice` (or always true): announced.
+  assertEquals(card.phoneRecFormFrom({ on: true }).notice, true);
 });
 
-Deno.test("the card saves through phone_recording_save on its own, owner-only, with the announcement locked on", () => {
+Deno.test("the card saves through phone_recording_save on its own, owner-only, and the announcement is the owner's switch (2026-10-21)", () => {
   const view = slice(SMS, "const rec = data.recording || null;", "// Someone with their OWN calls only", "the Call recording card");
   assert(view.includes('phoneAction("phone_recording_save"'), "its own action");
   assert(!/phoneAction\("phone_settings_save"/.test(view), "never the routing form's save");
   assert(view.includes("const recEdit = !!data.canChangeRecording && canEdit && !!recForm;"), "the server's owner rule decides who may change it");
-  assert(/check\(true, true, \(\) => \{\}, "Announce it to callers"/.test(view), "the announcement is shown on and can't be unticked");
-  assert(!/notice:\s*false/.test(view), "the card never asks to turn the announcement off");
+  assert(!/check\(true, true, \(\) => \{\}, "Announce it to callers"/.test(view), "the announcement is no longer a locked, greyed tick");
+  assert(view.includes('check(recForm.notice, !recEdit, (e) => setRecNotice(e.target.checked), "Announce it to callers"'),
+    "a real box, the owner's alone, through setRecNotice");
+  assert(/notice: recForm\.notice,/.test(view), "the save always sends the box, so the server writes it");
+  assert(view.includes("|| recForm.notice !== (rec.notice !== false)"), "changing only the announcement lets Save run");
+  // Unticking asks first, with the warning; ticking it back on doesn't ask.
+  const setter = slice(view, "const setRecNotice = (on) => {", "};", "setRecNotice");
+  assert(/if \(!on && !window\.confirm\(`Turn off the announcement\? Calls will still be recorded, but callers won't be told\.\\n\\n\$\{PHONE_REC_UNANNOUNCED_WARNING\}`\)\) return;/.test(setter),
+    "the untick confirm carries the warning");
+  // While it's off the card shows the warning instead of the short legal note.
+  assert(/\{recForm\.notice \? \(\s*<div data-ss-phone-recording-legal /.test(view), "the short note only while it's on");
+  assert(/data-ss-phone-recording-legal="unannounced"[^>]*>[\s\S]{0,200}\{PHONE_REC_UNANNOUNCED_WARNING\}/.test(view), "the warning while it's off");
+});
+
+Deno.test("the warning names the all-party-consent states, the area-code trap, AI transcripts, and the owner's responsibility", () => {
+  const w = card.PHONE_REC_UNANNOUNCED_WARNING;
+  for (const state of ["California", "Florida", "Illinois", "Maryland", "Massachusetts", "Montana", "New Hampshire", "Pennsylvania", "Washington"]) {
+    assert(w.includes(state), `the warning no longer names ${state}`);
+  }
+  assert(/area code doesn't tell you where someone is/.test(w));
+  assert(/transcribed by AI services/.test(w));
+  assert(/You're responsible for following the law, so check with your lawyer\./.test(w));
+});
+
+Deno.test("the save's words and the 'Record calls?' question follow the announcement", () => {
+  const view = slice(SMS, "const rec = data.recording || null;", "// Someone with their OWN calls only", "the Call recording card");
+  assert(view.includes('const how = recForm.notice ? "announced and then recorded" : "recorded without an announcement";'));
+  assert(view.includes("Saved. Calls are recorded from the next call on, without an announcement."));
+  assert(view.includes("Saved. Calls will be recorded, without an announcement, once call recording starts on this account."));
+  const own = slice(SMS, "// Someone with their OWN calls only", "{installCard}", "the own-level view");
+  assert(/data\.recording\.notice === false\s*\n?\s*\? <>Calls on your business number are recorded\. Your owner has turned the announcement off/.test(own),
+    "the own-level line says when callers aren't told");
 });
 
 Deno.test("the card says calls are recorded only while the owner's switch AND the server's are on", () => {

@@ -50,14 +50,20 @@ type DbErr = { code?: string; message?: string };
  * of the Worker's two rails (phone.ts recordingServerOn / transcribeServerOn). The Worker's own
  * rule (routes/token.ts transcriptsFor): a call is recorded when the owner's switch AND the
  * CALL_RECORDING rail are on, and transcribed when it is recorded, the owner left transcripts on
- * (the column's default is on) AND the CALL_TRANSCRIBE rail is on.
+ * (the column's default is on) AND the CALL_TRANSCRIBE rail is on. `callAnnounced` (2026-10-21):
+ * callers hear the announcement unless the owner turned it off (the column's default is on); it
+ * says nothing about whether calls are recorded.
  */
 export function businessFacts(
-  row: { phone_record_calls?: unknown; phone_transcribe_calls?: unknown } | null | undefined,
+  row: { phone_record_calls?: unknown; phone_transcribe_calls?: unknown; phone_recording_notice?: unknown } | null | undefined,
   rails: { recording: boolean; transcribe: boolean },
-): { callRecording: boolean; businessTranscribes: boolean } {
+): { callRecording: boolean; businessTranscribes: boolean; callAnnounced: boolean } {
   const callRecording = row?.phone_record_calls === true && rails.recording === true;
-  return { callRecording, businessTranscribes: callRecording && row?.phone_transcribe_calls !== false && rails.transcribe === true };
+  return {
+    callRecording,
+    businessTranscribes: callRecording && row?.phone_transcribe_calls !== false && rails.transcribe === true,
+    callAnnounced: row?.phone_recording_notice !== false,
+  };
 }
 
 /**
@@ -72,7 +78,7 @@ export async function readAiTranscripts(
   rails: { recording: boolean; transcribe: boolean },
   own = true,
 ): Promise<
-  | { consent: AiConsent | null; callRecording: boolean; businessTranscribes: boolean }
+  | { consent: AiConsent | null; callRecording: boolean; businessTranscribes: boolean; callAnnounced: boolean }
   | { notReady: true }
   | { dbError: DbErr }
 > {
@@ -81,7 +87,7 @@ export async function readAiTranscripts(
     own
       ? db.from("phone_user_settings").select(AI_CONSENT_COLUMNS).eq("user_id", who.userId).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
-    db.from("client_settings").select("phone_record_calls, phone_transcribe_calls").eq("client_id", who.clientId).maybeSingle(),
+    db.from("client_settings").select("phone_record_calls, phone_transcribe_calls, phone_recording_notice").eq("client_id", who.clientId).maybeSingle(),
   ]);
   if (mine.error) return aiNotReady(mine.error) ? { notReady: true } : { dbError: mine.error };
   // A database before 263 has no recording columns: nothing is recorded there, so nothing is sent.

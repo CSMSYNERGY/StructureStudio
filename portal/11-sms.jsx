@@ -1590,10 +1590,20 @@ const PHONE_REC_STANDARD = "This call may be recorded.";
 const PHONE_REC_STANDARD_TRANSCRIBED = "This call may be recorded and transcribed.";
 // How long recordings are kept: client_settings_phone_recording_retention_chk's five lengths.
 const PHONE_REC_KEEP_WORDS = { 30: "30 days", 90: "90 days", 180: "6 months", 365: "1 year", 730: "2 years" };
+// The announcement is the owner's to turn off (2026-10-21, Carolyn's 10-20 ask; Ahsan: on by
+// default, a confirm and this warning when it's turned off). Calls are still recorded and
+// transcribed without it (the phone-api Worker's armedFor). Shown in the confirm and on the card
+// while it's off.
+const PHONE_REC_UNANNOUNCED_WARNING = "Recording a call without telling everyone on it is against the law in some states, "
+  + "including California, Florida, Illinois, Maryland, Massachusetts, Montana, New Hampshire, Pennsylvania and Washington. "
+  + "Those laws can apply when only your customer is in one of them, and an area code doesn't tell you where someone is. "
+  + "Recorded calls can also be transcribed by AI services. You're responsible for following the law, so check with your lawyer.";
 
 function phoneRecFormFrom(r) {
   return {
     on: !!(r && r.on),
+    // Announced unless the server says it's off (a server before 2026-10-21 always announced).
+    notice: !(r && r.notice === false),
     noticeText: (r && r.noticeText) || "",
     transcribe: !(r && r.transcribe === false),
     retentionDays: (r && r.retentionDays) || 365,
@@ -2560,9 +2570,10 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // ── Call recording (migration 263) ─────────────────────────────────────────────────────
   // Shown to everyone on the team screen; only the business OWNER can change it (the server's
   // phone_recording_save rule, reported as canChangeRecording), because recording customers is
-  // the business's own legal decision. The announcement is locked on. It saves on its own, with
-  // its own button, so the routing form's Save never touches it. `recording` is null on a
-  // database before 263: the card says so and offers nothing.
+  // the business's own legal decision. So is the announcement (2026-10-21): on by default, and
+  // turning it off asks first with PHONE_REC_UNANNOUNCED_WARNING, which stays on the card while it
+  // is off. It saves on its own, with its own button, so the routing form's Save never touches
+  // it. `recording` is null on a database before 263: the card says so and offers nothing.
   // Calls are recorded only while the owner's `on` AND the server's switch (`serverOn`, the
   // phone-api Worker's CALL_RECORDING rail as portal-settings sees it) are both true. With the
   // owner's on and the server's off, the card says recording hasn't started yet: never that calls
@@ -2579,29 +2590,40 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const recEdit = !!data.canChangeRecording && canEdit && !!recForm;
   const recProblem = recForm ? phoneRecNoticeProblem(recForm.noticeText) : null;
   const recDirty = !!(rec && recForm) && (recForm.on !== rec.on || recForm.transcribe !== rec.transcribe
+    || recForm.notice !== (rec.notice !== false)
     || Number(recForm.retentionDays) !== Number(rec.retentionDays)
     || recForm.noticeText.replace(/\s+/g, " ").trim() !== String(rec.noticeText || ""));
+  // Unticking the announcement asks first, with the warning; ticking it back on doesn't.
+  const setRecNotice = (on) => {
+    if (!on && !window.confirm(`Turn off the announcement? Calls will still be recorded, but callers won't be told.\n\n${PHONE_REC_UNANNOUNCED_WARNING}`)) return;
+    setRecForm((f) => ({ ...f, notice: on }));
+  };
   const saveRecording = async () => {
     const keep = Number(recForm.retentionDays);
     const keepWords = PHONE_REC_KEEP_WORDS[keep] || `${keep} days`;
     const recWho = `The people who can see a call can play its recording${recForm.transcribe && rec.transcribeServerOn ? " and read its transcript and summary" : ""}.`;
+    const how = recForm.notice ? "announced and then recorded" : "recorded without an announcement";
     if (recForm.on && (!rec.on || !rec.updatedAt) && !window.confirm(rec.serverOn
-      ? `Record calls? From your next call on, every call to and from your business number is announced and then recorded. ${recWho}`
-      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is announced and then recorded. ${recWho}`)) return;
+      ? `Record calls? From your next call on, every call to and from your business number is ${how}. ${recWho}`
+      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is ${how}. ${recWho}`)) return;
     if (keep < Number(rec.retentionDays) && !window.confirm(`Keep recordings for ${keepWords}? Recordings older than that, and their transcripts, are deleted at the next daily clean-up. Their summaries stay with the calls.`)) return;
     setBusy(true); setRecNote(null);
     try {
       const d = await phoneAction("phone_recording_save", {
         on: recForm.on,
+        notice: recForm.notice,
         noticeText: recForm.noticeText,
         transcribe: recForm.transcribe,
         retentionDays: keep,
       });
       setData((x) => ({ ...x, recording: d.recording }));
       setRecForm(phoneRecFormFrom(d.recording));
+      const told = !(d.recording && d.recording.notice === false);
       setRecNote({ ok: !(d.recording && d.recording.on) ? "Saved. Calls aren't recorded."
-        : d.recording.serverOn ? "Saved. Calls are announced and recorded from the next call on."
-        : "Saved. Calls will be announced and recorded once call recording starts on this account." });
+        : d.recording.serverOn
+          ? (told ? "Saved. Calls are announced and recorded from the next call on." : "Saved. Calls are recorded from the next call on, without an announcement.")
+          : (told ? "Saved. Calls will be announced and recorded once call recording starts on this account."
+            : "Saved. Calls will be recorded, without an announcement, once call recording starts on this account.") });
     } catch (e) { setRecNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -2641,16 +2663,17 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           </p>
         )}
         <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-          When it&rsquo;s on, calls to and from your business number are recorded from the moment someone answers. Callers
-          hear the announcement below before the call rings your team, and on calls your team places, the customer hears it
-          when they pick up. Recording pauses while a customer is on hold, except while the call is being passed to a
+          When it&rsquo;s on, calls to and from your business number are recorded from the moment someone answers. While the
+          announcement is on, callers hear it before the call rings your team, and on calls your team places, the customer
+          hears it when they pick up. Recording pauses while a customer is on hold, except while the call is being passed to a
           teammate. Recordings play on the contact&rsquo;s page here and in My Synergy Phone,
           for the people who can see that call.
         </p>
         <div style={{ display: "grid", gap: 10 }}>
           {check(recForm.on, !recEdit, (e) => setRecForm((f) => ({ ...f, on: e.target.checked })), "Record calls", null, "on")}
-          {check(true, true, () => {}, "Announce it to callers",
-            "Always on: callers are told before anything is recorded.", "notice")}
+          {check(recForm.notice, !recEdit, (e) => setRecNotice(e.target.checked), "Announce it to callers",
+            recForm.notice ? "Callers are told before anything is recorded. On by default."
+              : "Off: calls are still recorded, but callers aren't told.", "notice")}
           <label style={{ display: "block" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>What callers hear (optional)</div>
             <input value={recForm.noticeText} disabled={!recEdit} maxLength={300} placeholder={standard}
@@ -2658,6 +2681,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               style={S.input} data-ss-phone-recording-notice />
             <div style={{ fontSize: 11.5, color: recProblem ? "#B91C1C" : "#64748B", marginTop: 4, lineHeight: 1.45 }}>
               {recProblem || <>Leave it empty for the standard sentence: &ldquo;{standard}&rdquo; Your own wording has to say the call is recorded (10 to 300 characters).</>}
+              {!recProblem && !recForm.notice && (
+                <span data-ss-phone-recording-notice-unused style={{ display: "block" }}>Callers don&rsquo;t hear it while the announcement is off.</span>
+              )}
             </div>
           </label>
           {check(recForm.transcribe, !recEdit, (e) => setRecForm((f) => ({ ...f, transcribe: e.target.checked })),
@@ -2682,10 +2708,16 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
             <span style={{ fontSize: 12, color: "#64748B" }}>The recording and its transcript are deleted after that. The summary stays with the call.</span>
           </label>
         </div>
-        <div data-ss-phone-recording-legal style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
-          Some states require everyone on a call to agree before it&rsquo;s recorded. The announcement tells every caller, but the
-          rules are yours to follow: check them with your lawyer for the states you and your customers are in.
-        </div>
+        {recForm.notice ? (
+          <div data-ss-phone-recording-legal style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
+            Some states require everyone on a call to agree before it&rsquo;s recorded. The announcement tells every caller, but the
+            rules are yours to follow: check them with your lawyer for the states you and your customers are in.
+          </div>
+        ) : (
+          <div data-ss-phone-recording-legal="unannounced" role="alert" style={{ fontSize: 12, color: "#991B1B", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
+            <span style={{ fontWeight: 800 }}>Callers aren&rsquo;t told calls are recorded. </span>{PHONE_REC_UNANNOUNCED_WARNING}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
           {recEdit && (
             <button type="button" disabled={busy || !recDirty || !!recProblem} onClick={saveRecording} data-ss-phone-recording-save
@@ -2713,8 +2745,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
 
   // Someone with their OWN calls only: whether it is on, which number customers see, and where
   // to get the apps. The setup is the team's business (the server did not send it), but whether
-  // their calls are recorded is theirs to know (recording {on, serverOn}: said only when both are
-  // true, which is when calls really are recorded).
+  // their calls are recorded is theirs to know (recording {on, serverOn, notice}: said only when
+  // both switches are true, which is when calls really are recorded; and whether callers hear the
+  // announcement, which only a server from 2026-10-21 on sends as false).
   if (data.scope !== "team" || !form) {
     return (
       <div data-ss-phone-settings="own">
@@ -2724,8 +2757,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           Your owner chooses who answers the business number. Calls you place and take show on the Calls page.
           {data.recording && data.recording.on && data.recording.serverOn && (
             <span data-ss-phone-recording="own" style={{ display: "block", marginTop: 6 }}>
-              Calls on your business number are recorded. Callers hear an announcement first, and recordings play on the
-              contact&rsquo;s page and in My Synergy Phone.
+              {data.recording.notice === false
+                ? <>Calls on your business number are recorded. Your owner has turned the announcement off, so callers
+                  aren&rsquo;t told. Recordings play on the contact&rsquo;s page and in My Synergy Phone.</>
+                : <>Calls on your business number are recorded. Callers hear an announcement first, and recordings play on the
+                  contact&rsquo;s page and in My Synergy Phone.</>}
             </span>
           )}
         </div>

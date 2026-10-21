@@ -126,7 +126,7 @@ type CardHelpers = {
   SS_AI_NOTICE_VERSION: number;
   SS_AI_PRIVACY_URL: string;
   SS_AI_WORDS: Record<string, string>;
-  ssAiStatusLines: (d: { callRecording?: boolean; businessTranscribes?: boolean }) => string[];
+  ssAiStatusLines: (d: { callRecording?: boolean; businessTranscribes?: boolean; callAnnounced?: boolean }) => string[];
   ssAiChoiceText: (a: string | null) => string;
   ssAiNoticeSections: (businessTranscribes: boolean) => Section[];
 };
@@ -239,24 +239,24 @@ Deno.test("the read: the session's own row only, and the business's facts", asyn
     client_settings: { data: { phone_record_calls: true, phone_transcribe_calls: true } },
   });
   const out = await readAiTranscripts(db, { userId: USER, clientId: CLIENT }, RAILS_ON);
-  assertEquals(out, { consent: { choice: "allowed", version: 1, at: "2026-10-14T12:00:00Z" }, callRecording: true, businessTranscribes: true });
+  assertEquals(out, { consent: { choice: "allowed", version: 1, at: "2026-10-14T12:00:00Z" }, callRecording: true, businessTranscribes: true, callAnnounced: true });
   const mine = calls.filter((c) => c.table === "phone_user_settings");
   assertEquals(mine.map((c) => [c.op, c.args]), [["select", [AI_CONSENT_COLUMNS]], ["eq", ["user_id", USER]], ["maybeSingle", []]]);
   const biz = calls.filter((c) => c.table === "client_settings");
-  assertEquals(biz.map((c) => [c.op, c.args]), [["select", ["phone_record_calls, phone_transcribe_calls"]], ["eq", ["client_id", CLIENT]], ["maybeSingle", []]]);
+  assertEquals(biz.map((c) => [c.op, c.args]), [["select", ["phone_record_calls, phone_transcribe_calls, phone_recording_notice"]], ["eq", ["client_id", CLIENT]], ["maybeSingle", []]]);
   assert(!calls.some((c) => ["upsert", "update", "insert", "delete"].includes(c.op)), "a read wrote something");
 });
 
 Deno.test("the read in view-as never reads the person's row (it would be the operator's)", async () => {
   const { db, calls } = stubDb({ client_settings: { data: { phone_record_calls: true } } });
   const out = await readAiTranscripts(db, { userId: USER, clientId: CLIENT }, RAILS_ON, false);
-  assertEquals(out, { consent: null, callRecording: true, businessTranscribes: true });
+  assertEquals(out, { consent: null, callRecording: true, businessTranscribes: true, callAnnounced: true });
   assert(!calls.some((c) => c.table === "phone_user_settings"), "view-as read the operator's own row");
 });
 
 Deno.test("never answered reads as null; a database before 307 says so; a real fault is a fault", async () => {
   const none = await readAiTranscripts(stubDb({ phone_user_settings: { data: null }, client_settings: { data: null } }).db, { userId: USER, clientId: CLIENT }, RAILS_ON);
-  assertEquals(none, { consent: { choice: null, version: null, at: null }, callRecording: false, businessTranscribes: false });
+  assertEquals(none, { consent: { choice: null, version: null, at: null }, callRecording: false, businessTranscribes: false, callAnnounced: true });
   for (const code of ["42703", "42P01", "PGRST204", "PGRST205"]) {
     const nr = await readAiTranscripts(stubDb({ phone_user_settings: { error: { code, message: "column does not exist" } } }).db, { userId: USER, clientId: CLIENT }, RAILS_ON);
     assertEquals(nr, { notReady: true }, code);
@@ -284,8 +284,13 @@ Deno.test("the business's facts follow the Worker's transcriptsFor: switch AND r
     [null, RAILS_ON, false, false],
   ];
   for (const [row, rails, rec, tr] of cases) {
-    assertEquals(businessFacts(row, rails), { callRecording: rec, businessTranscribes: tr }, JSON.stringify([row, rails]));
+    assertEquals(businessFacts(row, rails), { callRecording: rec, businessTranscribes: tr, callAnnounced: true }, JSON.stringify([row, rails]));
   }
+  // The announcement (2026-10-21): on unless the owner turned it off; it says nothing about recording.
+  assertEquals(businessFacts({ phone_record_calls: true, phone_recording_notice: false }, RAILS_ON),
+    { callRecording: true, businessTranscribes: true, callAnnounced: false }, "recorded and transcribed, unannounced");
+  assertEquals(businessFacts({ phone_record_calls: true, phone_recording_notice: null }, RAILS_ON).callAnnounced, true);
+  assertEquals(businessFacts({ phone_record_calls: false, phone_recording_notice: false }, RAILS_ON).callAnnounced, false);
 });
 
 Deno.test("the save: an upsert of the session's own row, the Worker's write, read back", async () => {
@@ -371,6 +376,12 @@ Deno.test("the card's lines: recording, transcripts only with everyone's yes, vo
   assertEquals(on[2], "Voicemails are turned into text by Twilio.");
   const off = P.ssAiStatusLines({ callRecording: false, businessTranscribes: false });
   assert(/aren't recorded right now/.test(off[0]) && /aren't transcribed or summarized right now/.test(off[1]));
+  // The announcement line follows the owner's switch (2026-10-21); a server that doesn't send it means announced.
+  assert(/Callers hear an announcement first\./.test(on[0]));
+  const quiet = P.ssAiStatusLines({ callRecording: true, businessTranscribes: true, callAnnounced: false });
+  assert(/The business owner has turned the announcement off, so callers aren't told\./.test(quiet[0]) && !/hear an announcement/.test(quiet[0]));
+  assert(/records them without telling callers/.test(P.ssAiStatusLines({ callRecording: false, callAnnounced: false })[0]));
+  assertEquals(P.ssAiStatusLines({ callRecording: true, businessTranscribes: true, callAnnounced: true })[0], on[0]);
   assert(/You allowed it/.test(P.ssAiChoiceText("allowed")));
   assert(/You said no/.test(P.ssAiChoiceText("declined")));
   assert(/You haven't chosen yet/.test(P.ssAiChoiceText(null)));
