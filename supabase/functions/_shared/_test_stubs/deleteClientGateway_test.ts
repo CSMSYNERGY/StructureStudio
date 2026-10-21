@@ -30,6 +30,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import { deleteClient, firstWipe, loadAdminCatalog, SECURITY_KEY, TENANT } from "./deleteClientHarness.ts";
+import { COUNTED_AFTER_DELETE, RETAINED_TABLES } from "../tenantTables.ts";
 
 const HANDLER = await loadAdminCatalog(true);
 
@@ -248,21 +249,24 @@ Deno.test("source: read, refuse-if-unconfigured, clean up, and only then wipe", 
 Deno.test("source: wipe order, the wallet, and the retained ledgers", () => {
   const wipes = [...DEL.matchAll(/await wipe\("([^"]+)"\)/g)].map((m) => m[1]);
   assertEquals(wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"]);
-  const retained = /for \(const t of \[([^\]]+)\]\)/.exec(DEL)?.[1] ?? "";
-  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents"]) {
-    assert(retained.includes(`"${t}"`), `${t} is missing from the retained list`);
+  // Since 2026-10-21 both reports come from _shared/tenantTables.ts, and tenantTableCoverage_test holds
+  // delete_client to it. What matters here: the ledgers are reported and never wiped, and the
+  // customer data is reported, not wiped (design_acceptances moved to retained: it is signed).
+  for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents", "design_acceptances"]) {
+    assert(RETAINED_TABLES.includes(t), `${t} is missing from the retained list`);
     assert(!wipes.includes(t), `${t} is a ledger and must not be wiped`);
   }
-  const leftBehind = /const leftBehind[\s\S]*?const t of \[([^\]]+)\]/.exec(DEL)?.[1] ?? "";
   for (
     const t of [
       "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls", "phone_voicemails",
-      "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions", "customer_email_otps", "design_acceptances",
+      "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions", "customer_email_otps",
     ]
   ) {
-    assert(leftBehind.includes(`"${t}"`), `${t} is missing from the leftBehind report`);
-    assert(!wipes.includes(t), `${t} is wiped now: drop it from leftBehind too`);
+    assert(COUNTED_AFTER_DELETE.includes(t), `${t} is missing from the leftBehind report`);
+    assert(!wipes.includes(t), `${t} is wiped now: mark it wiped in tenantTables.ts too`);
   }
+  assert(/const retained = await countTenantRows\(RETAINED_TABLES\);/.test(DEL), "retained is not counted");
+  assert(/const leftBehind = await countTenantRows\(COUNTED_AFTER_DELETE\);/.test(DEL), "leftBehind is not counted");
   assert(/\.\.\.\(Object\.keys\(leftBehind\)\.length \? \{ leftBehind \} : \{\}\)/.test(DEL), "leftBehind is not in the response");
 });
 
