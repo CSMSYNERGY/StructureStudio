@@ -2775,6 +2775,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
           // Workstream 2: whether the builder's own Twilio sub-account was closed first.
           ...(twilioClosed ? { twilio: { closed: true } } : {}),
+          // Sales tax charges that were waiting on a retry and now never will be (count only).
+          ...(taxChargesClosed ? { taxChargesClosed } : {}),
           ...(exportView ? { export: exportView } : {}),
           ...(Object.keys(retained).length ? { retained } : {}),
           ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
