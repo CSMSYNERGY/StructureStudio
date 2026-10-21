@@ -16,6 +16,9 @@ import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 // before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
 import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
 import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscriptions } from "../_shared/tenantGatewayCleanup.ts";
+// delete_client's reports (what was kept, what was left behind) and its bucket sweep come from the
+// tenant data registry (2026-10-21); _test_stubs/tenantTableCoverage_test holds its wipes to it.
+import { CHECKED_BUCKETS, COUNTED_AFTER_DELETE, RETAINED_TABLES, SWEPT_BUCKETS, TENANT_BUCKETS } from "../_shared/tenantTables.ts";
 // Workstream 2, phase 9: the operator console's card for a builder's own Twilio sub-account (get,
 // create, suspend, close), and delete_client closing that sub-account first.
 import {
@@ -2484,6 +2487,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         await wipe("building_sizes");
         await wipe("building_styles");
         await wipe("client_layout_items");
+        // What client_settings connects to OUTSIDE the database, read before the row goes, so the
+        // response can say what is still connected out there: nothing removes the Resend domains or
+        // revokes QuickBooks yet (Track G part 2), so for now that is a step for a person. A failed
+        // read only loses the reminder, and says so.
+        const connections = await sb.from("client_settings")
+          .select("resend_domain_id, resend_inbound_domain_id, qbo_realm_id, qbo_connected_at")
+          .eq("client_id", clientId).maybeSingle();
         await wipe("client_settings");
         // 2026-08-01: the same orphan-cascade hole as design_versions/captured_leads above, on the
         // tables added since. Verified against information_schema rather than by memory — no FK
@@ -2523,43 +2533,43 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           if (error && !relationMissing(error)) throw new Error(`phone_number_requests: ${error.message}`);
           if (!error) deleted.phone_number_requests = count ?? 0;
         }
-        try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
+        let appErrorsKept = false;
+        try { await wipe("app_errors"); } catch (_) { appErrorsKept = true; /* error logs are best-effort */ }
 
-        // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.
-        // orders (payments cascades from it), invoice_sends and billing_charge_attempts are
-        // records of money that actually moved. Destroying them is a data-retention decision with
-        // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
-        // unmentioned is how this class of miss happened in the first place. The counts go back in
-        // the response so the operator can see exactly what outlived the tenant and escalate if a
-        // deletion request requires them gone too. wallet_transactions (every top-up, debit and
-        // refund) and usage_charges (each metered call, text and 3D generation) joined the list on
-        // 2026-10-05: they are the same kind of record, and were neither wiped nor reported.
-        // billing_consents (migration 317) joined it on 2026-10-20: each row is what the builder
-        // agreed to before a stored card was charged, the evidence a card-network dispute asks
-        // for, so it is kept and counted like the charges it backs.
-        const retained: Record<string, number> = {};
-        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges", "billing_consents"]) {
-          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
-          if (count) retained[t] = count;
-        }
-        // LEFT BEHIND, and NOT a decision: the tenant's CRM, phone, text, email and customer-login
-        // rows, which name THEIR customers (names, phone numbers, message bodies, voicemails). All
-        // keyed by client_id with no FK to anything wiped here, so none cascade, and on 2026-10-05
-        // a deleted tenant's crm_contacts and customer_sessions were still in the database. Whether
-        // they are wiped, kept or exported first is a retention call for Ahsan and Carolyn, not
-        // part of the 10-05 change, so they are counted here exactly like `retained`: the dialog
-        // says "all of its data", and what outlives it has to be visible rather than assumed.
-        const leftBehind: Record<string, number> = {};
-        for (
-          const t of [
-            "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls",
-            "phone_voicemails", "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions",
-            "customer_email_otps", "design_acceptances",
-          ]
-        ) {
-          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
-          if (count) leftBehind[t] = count;
-        }
+        // What outlived the tenant, counted per table from the tenant data registry
+        // (_shared/tenantTables.ts, 2026-10-21) rather than a list kept here: on 10-21 the lists here
+        // named 20 tables and 62 more were neither wiped nor reported.
+        //
+        // RETAINED, deliberately: the financial and signed records (orders, payments, invoices,
+        // signed estimates, card consents, the wallet ledger and metered usage). Destroying them is a
+        // data-retention decision with accounting consequences, not a bug fix, so it is NOT made
+        // here, but each one is counted so the operator sees exactly what outlived the tenant.
+        //
+        // LEFT BEHIND, and NOT a decision: every other tenant table this delete does not wipe itself,
+        // counted AFTER the wipes, so a cascade that did not happen shows up instead of being assumed.
+        // That is the CRM, phone, text, email and customer-login rows, which name the builder's
+        // customers and wait on a retention decision from Carolyn, and the setup tables a later
+        // change will wipe in one transaction (Track G part 2).
+        //
+        // A few counts at a time. A table this database does not have yet is skipped (a migration not
+        // applied); any other failed count is named in `notCounted`, so a report that could not look
+        // is never read as "nothing there".
+        const notCounted: string[] = [];
+        const countTenantRows = async (list: readonly string[]) => {
+          const counts: (number | null)[] = [];
+          for (let i = 0; i < list.length; i += 8) {
+            counts.push(...await Promise.all(list.slice(i, i + 8).map(async (t) => {
+              const { count, error } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+              if (error) { if (!relationMissing(error)) notCounted.push(t); return null; }
+              return count;
+            })));
+          }
+          const found: Record<string, number> = {};
+          list.forEach((t, i) => { if (counts[i]) found[t] = counts[i]!; });
+          return found;
+        };
+        const retained = await countTenantRows(RETAINED_TABLES);
+        const leftBehind = await countTenantRows(COUNTED_AFTER_DELETE);
 
         // Capture the logins mapped to this client, unmap them, then delete any
         // that aren't also attached to another client.
@@ -2568,9 +2578,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const userIds = [...new Set((cu.data ?? []).map((r: any) => r.user_id).filter(Boolean))];
         await wipe("client_users");
         let deletedUsers = 0;
+        // A login that should have gone and did not (a failed read or delete) is reported, not dropped.
+        let loginsKept = 0;
         for (const uid of userIds) {
           const still = await sb.from("client_users").select("user_id").eq("user_id", uid).maybeSingle();
-          if (!still.error && !still.data) { const d = await sb.auth.admin.deleteUser(uid); if (!d.error) deletedUsers++; }
+          if (still.error) { loginsKept++; continue; }
+          if (still.data) continue; // another builder still uses this login
+          const d = await sb.auth.admin.deleteUser(uid);
+          if (d.error) loginsKept++; else deletedUsers++;
         }
         deleted["auth_logins"] = deletedUsers;
 
@@ -2584,8 +2599,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Paginated: list() caps at 1000 per call, and the old single call meant a tenant with
         // more than 1000 objects silently left the overflow behind — junior-barns alone already has
         // 93 floor plans, and nothing warned that the sweep was partial.
+        // The buckets come from the registry (SWEPT_BUCKETS, the same four as before 10-21). A sweep
+        // that stops is still best-effort, but it is now reported instead of swallowed.
         let files = 0;
-        for (const bucket of ["floor-plans", "branding", "fixtures", "feedback-attachments"]) {
+        const storageFailed: string[] = [];
+        for (const bucket of SWEPT_BUCKETS) {
           try {
             // Always re-list from offset 0: each round DELETES what it listed, so the next page
             // shifts down into the same window. The bound is a round counter, not an offset —
@@ -2593,29 +2611,59 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             for (let round = 0; round < 20; round++) {
               const { data: list, error: lsErr } = await sb.storage.from(bucket)
                 .list(clientId, { limit: 1000 });
-              if (lsErr) break;
+              if (lsErr) { storageFailed.push(bucket); break; }
               const batch = list ?? [];
               if (batch.length === 0) break;
               const paths = batch.map((o: any) => `${clientId}/${o.name}`);
               const rm = await sb.storage.from(bucket).remove(paths);
-              if (rm.error) break;                    // stop rather than spin on the same page
+              if (rm.error) { storageFailed.push(bucket); break; } // stop rather than spin on the same page
               files += rm.data?.length ?? paths.length;
               if (batch.length < 1000) break;         // that was the last page
             }
-          } catch (_) { /* storage cleanup is best-effort */ }
+          } catch (_) { storageFailed.push(bucket); /* storage cleanup is best-effort */ }
         }
         deleted["storage_files"] = files;
+        // Then every per-builder bucket is looked at: anything still under <clientId>/ (a bucket the
+        // sweep does not cover, files deeper than its one level, a sweep that stopped) is reported,
+        // as retained (signatures) or left behind. One object is enough to know.
+        const filesRetained: string[] = [];
+        const filesLeft: string[] = [];
+        await Promise.all(CHECKED_BUCKETS.map(async (bucket) => {
+          try {
+            const { data, error } = await sb.storage.from(bucket).list(clientId, { limit: 1 });
+            if (error) { if (!storageFailed.includes(bucket)) storageFailed.push(bucket); return; }
+            if ((data ?? []).length) (TENANT_BUCKETS[bucket].fate === "retain" ? filesRetained : filesLeft).push(bucket);
+          } catch (_) { if (!storageFailed.includes(bucket)) storageFailed.push(bucket); }
+        }));
+        const byOrder = (a: string, b: string) => CHECKED_BUCKETS.indexOf(a) - CHECKED_BUCKETS.indexOf(b);
 
         const cc = await sb.from("client_configs").delete({ count: "exact" }).eq("client_id", clientId);
         if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
         deleted["client_configs"] = cc.count ?? 0;
 
-        // `retained` is empty for a normal tenant and only appears when financial rows outlived
-        // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
-        // its data", so anything that survives has to be visible rather than assumed.
+        // Outside the database. `byHand`: what this delete does not do yet and a person must
+        // (remove the Resend domains, disconnect QuickBooks at Intuit, release numbers held on our
+        // parent Twilio account; a closed sub-account released its own). `failed`: a step out there
+        // that ran and did not finish. Names only, never an id or a token.
+        const conn = connections.error ? null : connections.data;
+        const byHand = [
+          ...(connections.error ? ["connections_unknown"] : []),
+          ...(conn?.resend_domain_id ? ["resend_domain"] : []),
+          ...(conn?.resend_inbound_domain_id ? ["resend_inbound_domain"] : []),
+          ...(conn?.qbo_realm_id && conn?.qbo_connected_at ? ["quickbooks"] : []),
+          ...(!twilioClosed && leftBehind.sms_numbers ? ["twilio_numbers"] : []),
+        ];
+        const failed = [
+          ...storageFailed.sort(byOrder).map((b) => `storage:${b}`),
+          ...(loginsKept ? [`logins:${loginsKept}`] : []),
+          ...(appErrorsKept ? ["app_errors"] : []),
+        ];
+
+        // Each report is present only when it has something in it, so a clean delete is just
+        // `deleted` and `gateway`. Surfacing the rest is the point: anything that outlives the tenant
+        // has to be visible rather than assumed.
         // `gateway` is counts only (see the gateway step): what was cancelled and removed at the
-        // payment gateway, so the operator's confirmation can say so. `leftBehind` works like
-        // `retained`: present only when the tenant had rows there.
+        // payment gateway, so the operator's confirmation can say so.
         return json({
           ok: true, clientId, deleted,
           gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
@@ -2623,6 +2671,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           ...(twilioClosed ? { twilio: { closed: true } } : {}),
           ...(Object.keys(retained).length ? { retained } : {}),
           ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
+          ...(filesRetained.length || filesLeft.length
+            ? { files: { ...(filesRetained.length ? { retained: filesRetained.sort(byOrder) } : {}), ...(filesLeft.length ? { leftBehind: filesLeft.sort(byOrder) } : {}) } }
+            : {}),
+          ...(byHand.length || failed.length
+            ? { cleanup: { ...(byHand.length ? { byHand } : {}), ...(failed.length ? { failed } : {}) } }
+            : {}),
+          ...(notCounted.length ? { notCounted } : {}),
         });
       }
 

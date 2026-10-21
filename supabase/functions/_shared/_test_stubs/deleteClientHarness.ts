@@ -68,6 +68,15 @@ export interface World {
   retained?: Record<string, number>;
   /** A table whose wipe fails (a statement timeout, say), to drive a delete that stops part-way. */
   failWipe?: string;
+  /** Tables whose head count fails with something other than "no such table". */
+  countErrors?: string[];
+  /** The client_settings row the delete reads for what is connected outside the database. */
+  settings?: Record<string, unknown> | null;
+  /** Objects under <tenant>/ per bucket. A bucket in `folders` holds only sub-folders, which the
+   *  one-level sweep lists but cannot remove; one in `failList` refuses to list. */
+  storage?: Record<string, number>;
+  folders?: string[];
+  failList?: string[];
   /** The gateway's answer to one call: a body string, an HTTP status, or a throw (no answer). */
   gateway?: (params: Record<string, string>) => string | number;
   /** Workstream 2, phase 9: the tenant's twilio_accounts row and what Twilio holds for it. Absent:
@@ -140,11 +149,14 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       // reads
       if (call.opts?.head) {
         if (table === "billing_customers") return { error: null, count: world.sharedVault ?? 0 };
+        if (world.countErrors?.includes(table)) return { error: { message: "" }, count: null };
         return { error: null, count: world.retained?.[table] ?? 0 };
       }
       switch (table) {
         case "client_configs":
           return { data: eqv("client_id") === TENANT ? { client_id: TENANT } : null, error: null };
+        case "client_settings":
+          return { data: eqv("client_id") === TENANT ? (world.settings ?? null) : null, error: null };
         case "billing_subscriptions":
           return { data: eqv("client_id") === TENANT ? world.subs : [], error: null };
         case "billing_customers":
@@ -226,8 +238,18 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
     return Promise.reject(new Error(`deleteClientHarness: unexpected rpc ${fn}`));
   };
   stubStorage.from = (bucket: string) => ({
-    list: () => { run.log.push(`storage list ${bucket}`); return Promise.resolve({ data: [], error: null }); },
-    remove: () => Promise.resolve({ data: [], error: null }),
+    list: (prefix: string, o?: { limit?: number }) => {
+      run.log.push(`storage list ${bucket}`);
+      if (world.failList?.includes(bucket)) return Promise.resolve({ data: null, error: { message: "list failed" } });
+      const n = prefix === TENANT ? Math.min(world.storage?.[bucket] ?? 0, o?.limit ?? 100) : 0;
+      return Promise.resolve({ data: Array.from({ length: n }, (_, i) => ({ name: `f${i}` })), error: null });
+    },
+    remove: (paths: string[]) => {
+      // A folder cannot be removed by its name: storage answers with nothing removed.
+      if (world.folders?.includes(bucket)) return Promise.resolve({ data: [], error: null });
+      if (world.storage?.[bucket]) world.storage[bucket] -= paths.length;
+      return Promise.resolve({ data: paths.map((name) => ({ name })), error: null });
+    },
   });
   try {
     const res = await handler(new Request("http://localhost/functions/v1/admin-catalog", {
