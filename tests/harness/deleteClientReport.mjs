@@ -1,14 +1,15 @@
 // What the two operator consoles say after "Delete builder" (2026-10-21, board item "delete_client
-// leaves 7 per-tenant tables behind, including crm_contacts"), driven for real on the COMPILED
-// pages against admin-catalog answers stubbed at the network layer (no login, nothing is deleted,
-// nothing leaves the machine; the twilioAccountCard.mjs shape):
-//   A  portal /console/account: the dialog describes the real scope (no "nine tables"; says some data
-//      stays); a delete that left data behind flashes what was kept, what was left behind, the steps
-//      by hand, the failed steps and the tables it could not check, and the message stays until
-//      Dismiss;
-//   B  portal: a clean delete flashes no report and clears itself as before;
-//   C  /admin.html (the break-glass console): the same report after its own delete, sticky too, and
-//      its dialog no longer says "all of its data";
+// leaves 7 per-tenant tables behind, including crm_contacts"; since migration 321 the delete exports
+// the builder's customer data, then purges everything but the kept records), driven for real on the
+// COMPILED pages against admin-catalog answers stubbed at the network layer (no login, nothing is
+// deleted, nothing leaves the machine; the twilioAccountCard.mjs shape):
+//   A  portal /console/account: the dialog describes the real scope (all data, customer data exported
+//      first, kept records, the id blocked; no "nine tables"); the flash sums up what was deleted,
+//      offers the export as a link, and names what was kept, done, still to do by hand (with the
+//      numbers), failed and not checked; it stays until Dismiss;
+//   B  portal: a delete with nothing to report flashes one line, no link, and clears itself;
+//   C  /admin.html (the break-glass console): the same report and link after its own delete, sticky
+//      too, and its dialog describes the same scope;
 //   every scenario: no uncaught page error.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -34,15 +35,19 @@ const SESSION = {
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 
-// The shape delete_client answers with since 10-21 (admin-catalog, from _shared/tenantTables.ts).
+const EXPORT_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co/storage/v1/object/sign/tenant-exports/harness-builder/x.zip?token=t";
+// The shape delete_client answers with since migration 321 (admin-catalog, from _shared/tenantTables.ts).
 const MESSY = {
   ok: true, clientId: CLIENT,
-  deleted: { designs: 3, client_configs: 1 },
+  deleted: { designs: 3, crm_contacts: 8, client_configs: 1, auth_logins: 2, storage_files: 5 },
   gateway: { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 },
+  export: { url: EXPORT_URL, expiresAt: "2026-10-28T03:30:00.000Z", rows: 12, files: 1, tables: 3, bytes: 4096 },
   retained: { orders: 2, design_acceptances: 1 },
-  leftBehind: { crm_contacts: 8, tenant_setup_items: 25 },
-  files: { retained: ["signatures"], leftBehind: ["inventory-photos"] },
-  cleanup: { byHand: ["resend_domain", "quickbooks"], failed: ["storage:branding", "logins:1"] },
+  files: { retained: ["signatures"] },
+  cleanup: {
+    done: ["resend_domain", "quickbooks"], byHand: ["twilio_numbers", "twilio_a2p"], failed: ["storage:branding"],
+    numbers: ["+15550100001", "+15550100002"], a2p: { brandSid: "BN-test", campaignSid: null },
+  },
   notCounted: ["sms_messages"],
 };
 const CLEAN = { ok: true, clientId: CLIENT, deleted: { designs: 1, client_configs: 1 }, gateway: { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 } };
@@ -135,20 +140,27 @@ try {
   // ── A ──
   const A = await portalDelete(MESSY);
   ok("A: the dialog no longer counts tables", !/nine tables/.test(A.dialogText), A.dialogText);
-  ok("A: the dialog says some data stays, and what kind", /Some data stays/.test(A.dialogText) && /financial and signed records are kept on purpose/.test(A.dialogText)
-    && /CRM\s+contacts, messages, calls and customer logins wait on a retention decision/.test(A.dialogText), A.dialogText);
+  ok("A: the dialog says all data goes, customer data is exported first, kept records stay, the id is blocked",
+    /erases all of harness-builder's data/.test(A.dialogText) && /customer data is exported\s+first/.test(A.dialogText)
+      && /Money, signed and consent records are kept for good/.test(A.dialogText) && /can never be used again/.test(A.dialogText), A.dialogText);
   const del = A.calls.find((c) => c.action === "delete_client");
   ok("A: the delete was asked for with the typed id and the password", !!del && del.clientId === CLIENT && del.confirmClientId === CLIENT && del.adminPassword === PASSWORD, JSON.stringify(del));
-  ok("A: kept on purpose, with counts and the signatures files",
-    A.flash.includes("Kept on purpose (financial and signed records): 3 rows in 2 tables (orders 2, design_acceptances 1), plus files in signatures."), A.flash);
-  ok("A: left behind, with counts and the files",
-    A.flash.includes("Left behind (CRM, messages and customer logins wait on a retention decision; the rest is not removed yet): 33 rows in 2 tables (crm_contacts 8, tenant_setup_items 25), plus files in inventory-photos."), A.flash);
-  ok("A: the steps by hand, in words", A.flash.includes("Still to do by hand: remove their sending domain at Resend; disconnect QuickBooks at Intuit."), A.flash);
-  ok("A: the failed steps, in words", A.flash.includes("Did not finish: the file cleanup in branding; deleting 1 login."), A.flash);
+  ok("A: what was deleted, summed up", A.flash.startsWith("Deleted “harness-builder” (12 rows from 3 tables, 2 logins, 5 files)."), A.flash);
+  ok("A: the export, said", A.flash.includes("Their customer data (CRM, texts, emails, calls, customer logins) was exported first: 12 rows and 1 file. The download link works for 7 days."), A.flash);
+  const link = A.page.locator("[data-adm-export-link]");
+  ok("A: and offered as a link to the signed file", (await link.count()) === 1 && (await link.getAttribute("href")) === EXPORT_URL
+    && (await link.innerText()).trim() === "Download the customer-data export" && (await link.getAttribute("target")) === "_blank");
+  ok("A: kept for good, with counts and the signatures files",
+    A.flash.includes("Kept for good (money, signed and consent records): 3 rows in 2 tables (orders 2, design_acceptances 1), plus files in signatures."), A.flash);
+  ok("A: what was done outside the database", A.flash.includes("Also removed their sending domain at Resend; disconnected QuickBooks at Intuit."), A.flash);
+  ok("A: the steps by hand, with the numbers to release",
+    A.flash.includes("Still to do by hand: release their numbers on our Twilio account (+15550100001, +15550100002); close their texting registration (A2P brand and campaign) on our Twilio account."), A.flash);
+  ok("A: the failed steps", A.flash.includes("Did not finish, do by hand: the file cleanup in branding."), A.flash);
   ok("A: what could not be checked", A.flash.includes("Could not check sms_messages."), A.flash);
+  ok("A: nothing claims a retention decision is still pending", !/retention decision/.test(A.flash), A.flash);
   if (process.env.SS_SHOT_DIR) await A.page.screenshot({ path: join(process.env.SS_SHOT_DIR, "delete-report-portal.png") });
   await A.page.waitForTimeout(7000);
-  ok("A: the report is still there after the six-second auto-clear", (await flashText(A.page)).includes("Left behind"));
+  ok("A: the report and link are still there after the six-second auto-clear", (await flashText(A.page)).includes("Kept for good") && (await link.count()) === 1);
   await A.page.getByRole("button", { name: "Dismiss" }).click();
   await A.page.waitForTimeout(300);
   ok("A: Dismiss clears it", (await flashText(A.page)) === "");
@@ -157,8 +169,8 @@ try {
 
   // ── B ──
   const B = await portalDelete(CLEAN);
-  ok("B: a clean delete says only what was deleted", /^Deleted “harness-builder” \(1 designs, 1 client_configs\)\.$/.test(B.flash.trim()), B.flash);
-  ok("B: no Dismiss button", (await B.page.getByRole("button", { name: "Dismiss" }).count()) === 0);
+  ok("B: a delete with nothing to report says only what was deleted", /^Deleted “harness-builder” \(2 rows from 2 tables\)\.$/.test(B.flash.trim()), B.flash);
+  ok("B: no link, no Dismiss button", (await B.page.locator("[data-adm-export-link]").count()) === 0 && (await B.page.getByRole("button", { name: "Dismiss" }).count()) === 0);
   await B.page.waitForTimeout(6800);
   ok("B: and it clears itself as before", (await flashText(B.page)) === "");
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
@@ -173,17 +185,21 @@ try {
   await C.page.locator("select").first().selectOption(CLIENT);
   await C.page.getByRole("button", { name: "Delete builder" }).click();
   const cText = await C.page.evaluate(() => document.body.innerText);
-  ok("C: the console's dialog no longer promises all of its data", !/and all of its data/.test(cText) && /Some data stays:/.test(cText), cText.slice(0, 400));
+  ok("C: the console's dialog describes the same scope", /deletes harness-builder and all of its data/.test(cText) && /exported first/.test(cText)
+    && /can never be used again/.test(cText) && !/Some data stays/.test(cText), cText.slice(0, 600));
   await C.page.locator(`input[placeholder='Type "${CLIENT}" to confirm']`).fill(CLIENT);
   await C.page.locator(`input[placeholder='Type "${CLIENT}" to confirm']`).press("Enter");
   await C.page.waitForFunction(() => [...document.querySelectorAll("div")].some((d) => /^Builder "/.test(d.innerText || "")), null, { timeout: 15000 });
   const cFlash = await flashText(C.page);
-  ok("C: the console shows the same report", cFlash.includes("Kept on purpose (financial and signed records): 3 rows in 2 tables")
-    && cFlash.includes("Still to do by hand: remove their sending domain at Resend; disconnect QuickBooks at Intuit.")
-    && cFlash.includes("Did not finish: the file cleanup in branding; deleting 1 login.") && cFlash.includes("Could not check sms_messages."), cFlash);
+  ok("C: the console shows the same report", cFlash.startsWith('Builder "harness-builder" deleted (12 rows from 3 tables, 2 logins, 5 files).')
+    && cFlash.includes("was exported first: 12 rows and 1 file.") && cFlash.includes("Kept for good (money, signed and consent records): 3 rows in 2 tables")
+    && cFlash.includes("Still to do by hand: release their numbers on our Twilio account (+15550100001, +15550100002)")
+    && cFlash.includes("Did not finish, do by hand: the file cleanup in branding.") && cFlash.includes("Could not check sms_messages."), cFlash);
+  const cLink = C.page.locator("[data-adm-export-link]");
+  ok("C: with the export link", (await cLink.count()) === 1 && (await cLink.getAttribute("href")) === EXPORT_URL);
   if (process.env.SS_SHOT_DIR) await C.page.screenshot({ path: join(process.env.SS_SHOT_DIR, "delete-report-console.png") });
   await C.page.waitForTimeout(3200);
-  ok("C: and keeps it past its 2.5-second auto-clear", (await flashText(C.page)).includes("Left behind"));
+  ok("C: and keeps it past its 2.5-second auto-clear", (await flashText(C.page)).includes("Kept for good"));
   ok("C: no uncaught page errors", C.pageErrors.length === 0, C.pageErrors.join(" | "));
   await C.ctx.close();
 } finally {

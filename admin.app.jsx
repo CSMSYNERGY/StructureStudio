@@ -221,22 +221,44 @@ function downloadFile(name, text) {
 
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
 
-// What outlived a deleted builder, as sentences for the confirmation (2026-10-21): records kept on
-// purpose, rows and files left behind, steps outside the database still to do by hand, and any that
-// failed. The twin of admDeleteReport in portal/07-admin.jsx; the server sends names and counts only.
+// What delete_client did and what outlived the builder, as sentences for the confirmation
+// (2026-10-21, migration 321): how much was deleted, the customer-data export, records kept for good,
+// anything left behind (nothing should be), and steps outside the database done, to do by hand, or
+// failed. The twin of admDeleteReport in portal/07-admin.jsx; the server sends names and counts only,
+// plus the export's signed link.
+const DONE = {
+  resend_domain: "removed their sending domain at Resend",
+  resend_inbound_domain: "removed their reply domain at Resend",
+  quickbooks: "disconnected QuickBooks at Intuit",
+};
 const BY_HAND = {
   resend_domain: "remove their sending domain at Resend",
   resend_inbound_domain: "remove their reply domain at Resend",
   quickbooks: "disconnect QuickBooks at Intuit",
-  twilio_numbers: "release their numbers on our Twilio account",
+  twilio_a2p: "close their texting registration (A2P brand and campaign) on our Twilio account",
   connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
 };
 function failedStep(f) {
   const [kind, what] = String(f).split(":");
   if (kind === "storage") return `the file cleanup in ${what}`;
   if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
-  if (kind === "app_errors") return "clearing the error log";
+  if (kind === "resend_domain" || kind === "resend_inbound_domain") return BY_HAND[kind];
+  if (kind === "quickbooks") return BY_HAND.quickbooks;
   return f;
+}
+// "1,234 rows from 41 tables, 2 logins and 57 files": the purge reports every table it touched.
+function deletedSummary(d) {
+  if (!d) return "";
+  let rows = 0, tables = 0;
+  for (const [k, v] of Object.entries(d)) {
+    if (k === "auth_logins" || k === "storage_files" || !v) continue;
+    rows += v; tables++;
+  }
+  const bits = [];
+  if (tables) bits.push(`${rows.toLocaleString()} row${rows === 1 ? "" : "s"} from ${tables} table${tables === 1 ? "" : "s"}`);
+  if (d.auth_logins) bits.push(`${d.auth_logins} login${d.auth_logins === 1 ? "" : "s"}`);
+  if (d.storage_files) bits.push(`${d.storage_files} file${d.storage_files === 1 ? "" : "s"}`);
+  return bits.join(", ");
 }
 function deleteReport(r) {
   if (!r) return "";
@@ -249,12 +271,21 @@ function deleteReport(r) {
   const files = r.files || {};
   const c = r.cleanup || {};
   const out = [];
+  if (r.export) {
+    out.push(`Their customer data (CRM, texts, emails, calls, customer logins) was exported first: ${r.export.rows} row${r.export.rows === 1 ? "" : "s"}`
+      + `${r.export.files ? ` and ${r.export.files} file${r.export.files === 1 ? "" : "s"}` : ""}. The download link works for 7 days.`);
+  }
   const kept = withFiles(rows(r.retained), files.retained);
-  if (kept) out.push(`Kept on purpose (financial and signed records): ${kept}.`);
-  const left = withFiles(rows(r.leftBehind), files.leftBehind);
-  if (left) out.push(`Left behind (CRM, messages and customer logins wait on a retention decision; the rest is not removed yet): ${left}.`);
-  if ((c.byHand || []).length) out.push(`Still to do by hand: ${c.byHand.map((k) => BY_HAND[k] || k).join("; ")}.`);
-  if ((c.failed || []).length) out.push(`Did not finish: ${c.failed.map(failedStep).join("; ")}.`);
+  if (kept) out.push(`Kept for good (money, signed and consent records): ${kept}.`);
+  if ((files.notExported || []).length) out.push(`Too large to export, so kept: files in ${files.notExported.join(", ")}.`);
+  const left = withFiles(rows(r.leftBehind), (files.leftBehind || []).filter((b) => !(files.notExported || []).includes(b)));
+  if (left) out.push(`Still there after the delete (tell CSM Synergy): ${left}.`);
+  if ((c.done || []).length) out.push(`Also ${c.done.map((k) => DONE[k] || k).join("; ")}.`);
+  const byHand = (c.byHand || []).map((k) => (k === "twilio_numbers"
+    ? `release their number${(c.numbers || []).length === 1 ? "" : "s"} on our Twilio account (${(c.numbers || []).join(", ")})`
+    : BY_HAND[k] || k));
+  if (byHand.length) out.push(`Still to do by hand: ${byHand.join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish, do by hand: ${c.failed.map(failedStep).join("; ")}.`);
   if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
   return out.join(" ");
 }
@@ -601,17 +632,17 @@ function AdminApp() {
     }
     setBusy(false);
   };
-  // Operator hard-delete: server wipes the tenant (catalog, designs, settings, logins, some
-  // storage) and reports what it kept or left behind. Guarded by typing the builder id.
+  // Operator hard-delete: the server exports the builder's customer data, then purges everything
+  // but the kept records in one transaction (migration 321), and reports it all. Guarded by typing
+  // the builder id.
   const deleteClient = async () => {
     const id = sel;
     if (!id || delConfirm.trim() !== id) return;
     setBusy(true); setMsg(null);
     try {
       const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
-      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       selRef.current = ""; setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
-      const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+      const parts = deletedSummary(r && r.deleted);
       // What happened at the payment gateway (counts only; the server never sends an id).
       const g = (r && r.gateway) || {};
       const gw = [
@@ -620,7 +651,17 @@ function AdminApp() {
         g.vaultKept ? "saved card kept, because another builder uses it" : "",
       ].filter(Boolean).join(", ");
       const report = deleteReport(r);
-      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}${report ? ` ${report}` : ""}`, sticky: !!report });
+      const exportUrl = r && r.export && r.export.url;
+      // Shown BEFORE the list refresh: a failed refresh must not swallow the export's link, the only
+      // copy of their customers' data.
+      flash({
+        ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}${report ? ` ${report}` : ""}`,
+        sticky: !!(report || exportUrl),
+        link: exportUrl ? { href: exportUrl, label: "Download the customer-data export" } : null,
+      });
+      try {
+        const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
+      } catch (_) { /* the list catches up on the next load */ }
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -791,6 +832,12 @@ function AdminApp() {
         {msg && msg.ok && (
           <div style={S.ok}>
             {msg.ok}
+            {msg.link && (
+              <a href={msg.link.href} target="_blank" rel="noopener noreferrer" data-adm-export-link=""
+                style={{ marginLeft: 10, color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>
+                {msg.link.label}
+              </a>
+            )}
             {msg.sticky && (
               <button type="button" onClick={() => setMsg(null)}
                 style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
@@ -1178,13 +1225,12 @@ function AdminApp() {
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
-                  This permanently deletes <b>{sel}</b>: designs/leads, building styles &amp; sizes, pricing &amp; inclusions,
-                  layout items, settings (incl. GHL credentials), error logs, owner/team logins, and uploaded floor-plan,
-                  branding and door-photo files. Any paid plans are cancelled at the payment gateway and their saved card is
-                  removed, so they are never charged again. <b>Some data stays:</b> financial and signed records are kept on
-                  purpose, CRM contacts, messages, calls and customer logins wait on a retention decision, and some setup data
-                  and files are not removed yet. The result lists what stayed. <b>This cannot be undone.</b> (GoHighLevel
-                  contacts/estimates live in GHL and are not affected.)
+                  This permanently deletes <b>{sel}</b> and <b>all of its data</b>: designs/leads, catalog and pricing,
+                  settings (incl. GHL credentials), owner/team logins, uploaded files, and their customers' contacts, texts,
+                  emails and calls. That customer data is <b>exported first</b>, with a download link in the result. Money,
+                  signed and consent records are kept for good, and the id can never be used again. Any paid plans are
+                  cancelled at the payment gateway and their saved card is removed, so they are never charged again.
+                  <b> This cannot be undone.</b> (GoHighLevel contacts/estimates live in GHL and are not affected.)
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}

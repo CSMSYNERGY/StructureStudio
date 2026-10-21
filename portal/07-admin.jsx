@@ -719,23 +719,44 @@ function admGatewayNote(g) {
   return bits.length ? ` Payment gateway: ${bits.join(", ")}.` : "";
 }
 
-// What outlived the builder, as sentences for the same confirmation (2026-10-21): the financial and
-// signed records kept on purpose, the rows and files left behind, steps outside the database a
-// person still has to do, and any that failed. The server derives it from _shared/tenantTables.ts
-// and sends names and counts only. "" when nothing outlived the builder. admin.app.jsx has a twin.
+// What delete_client did and what outlived the builder, as sentences for the same confirmation
+// (2026-10-21, migration 321): how much was deleted, the customer-data export, the records kept on
+// purpose, anything left behind (nothing should be), steps outside the database that were done, that
+// a person still has to do, and that failed. The server derives it from _shared/tenantTables.ts and
+// sends names and counts only, plus the export's signed link. admin.app.jsx has a twin.
+const ADM_DONE = {
+  resend_domain: "removed their sending domain at Resend",
+  resend_inbound_domain: "removed their reply domain at Resend",
+  quickbooks: "disconnected QuickBooks at Intuit",
+};
 const ADM_BY_HAND = {
   resend_domain: "remove their sending domain at Resend",
   resend_inbound_domain: "remove their reply domain at Resend",
   quickbooks: "disconnect QuickBooks at Intuit",
-  twilio_numbers: "release their numbers on our Twilio account",
+  twilio_a2p: "close their texting registration (A2P brand and campaign) on our Twilio account",
   connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
 };
 function admFailedStep(f) {
   const [kind, what] = String(f).split(":");
   if (kind === "storage") return `the file cleanup in ${what}`;
   if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
-  if (kind === "app_errors") return "clearing the error log";
+  if (kind === "resend_domain" || kind === "resend_inbound_domain") return ADM_BY_HAND[kind];
+  if (kind === "quickbooks") return ADM_BY_HAND.quickbooks;
   return f;
+}
+// "1,234 rows from 41 tables, 2 logins and 57 files": the purge reports every table it touched.
+function admDeletedSummary(d) {
+  if (!d) return "";
+  let rows = 0, tables = 0;
+  for (const [k, v] of Object.entries(d)) {
+    if (k === "auth_logins" || k === "storage_files" || !v) continue;
+    rows += v; tables++;
+  }
+  const bits = [];
+  if (tables) bits.push(`${rows.toLocaleString()} row${rows === 1 ? "" : "s"} from ${tables} table${tables === 1 ? "" : "s"}`);
+  if (d.auth_logins) bits.push(`${d.auth_logins} login${d.auth_logins === 1 ? "" : "s"}`);
+  if (d.storage_files) bits.push(`${d.storage_files} file${d.storage_files === 1 ? "" : "s"}`);
+  return bits.join(", ");
 }
 function admDeleteReport(r) {
   if (!r) return "";
@@ -748,12 +769,21 @@ function admDeleteReport(r) {
   const files = r.files || {};
   const c = r.cleanup || {};
   const out = [];
+  if (r.export) {
+    out.push(`Their customer data (CRM, texts, emails, calls, customer logins) was exported first: ${r.export.rows} row${r.export.rows === 1 ? "" : "s"}`
+      + `${r.export.files ? ` and ${r.export.files} file${r.export.files === 1 ? "" : "s"}` : ""}. The download link works for 7 days.`);
+  }
   const kept = withFiles(rows(r.retained), files.retained);
-  if (kept) out.push(`Kept on purpose (financial and signed records): ${kept}.`);
-  const left = withFiles(rows(r.leftBehind), files.leftBehind);
-  if (left) out.push(`Left behind (CRM, messages and customer logins wait on a retention decision; the rest is not removed yet): ${left}.`);
-  if ((c.byHand || []).length) out.push(`Still to do by hand: ${c.byHand.map((k) => ADM_BY_HAND[k] || k).join("; ")}.`);
-  if ((c.failed || []).length) out.push(`Did not finish: ${c.failed.map(admFailedStep).join("; ")}.`);
+  if (kept) out.push(`Kept for good (money, signed and consent records): ${kept}.`);
+  if ((files.notExported || []).length) out.push(`Too large to export, so kept: files in ${files.notExported.join(", ")}.`);
+  const left = withFiles(rows(r.leftBehind), (files.leftBehind || []).filter((b) => !(files.notExported || []).includes(b)));
+  if (left) out.push(`Still there after the delete (tell CSM Synergy): ${left}.`);
+  if ((c.done || []).length) out.push(`Also ${c.done.map((k) => ADM_DONE[k] || k).join("; ")}.`);
+  const byHand = (c.byHand || []).map((k) => (k === "twilio_numbers"
+    ? `release their number${(c.numbers || []).length === 1 ? "" : "s"} on our Twilio account (${(c.numbers || []).join(", ")})`
+    : ADM_BY_HAND[k] || k));
+  if (byHand.length) out.push(`Still to do by hand: ${byHand.join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish, do by hand: ${c.failed.map(admFailedStep).join("; ")}.`);
   if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
   return out.join(" ");
 }
@@ -794,12 +824,11 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
         Delete {client.company_name || id} permanently?
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
-        This erases <strong>{id}</strong>'s catalog and pricing, designs and estimates, settings, and every
-        login attached to it, plus its floor plans, logos and door photos. Their designer link stops working
-        immediately. Any paid plans are cancelled at the payment gateway and their saved card is removed, so
-        they are never charged again. Some data stays: financial and signed records are kept on purpose, CRM
-        contacts, messages, calls and customer logins wait on a retention decision, and some setup data and
-        files are not removed yet. When it finishes you'll see what stayed.
+        This erases all of <strong>{id}</strong>'s data: catalog, pricing, designs and estimates, settings,
+        logins, files, and their customers' contacts, texts, emails and calls. That customer data is exported
+        first, and you get a download link. Money, signed and consent records are kept for good, and the id
+        can never be used again. Their designer link stops working immediately. Any paid plans are cancelled
+        at the payment gateway and their saved card is removed, so they are never charged again.
         <strong> This cannot be undone.</strong> To stop offering the account without destroying its data, set a paused billing
         posture instead.
       </div>
@@ -2121,6 +2150,12 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       {msg && msg.ok && (
         <div style={S.okMsg}>
           {msg.ok}
+          {msg.link && (
+            <a href={msg.link.href} target="_blank" rel="noopener noreferrer" data-adm-export-link=""
+              style={{ marginLeft: 10, color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>
+              {msg.link.label}
+            </a>
+          )}
           {msg.sticky && (
             <button type="button" onClick={() => setMsg(null)}
               style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
@@ -3090,8 +3125,9 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       <div style={{ ...S.card, background: "#FEE2E2", border: "1px solid #DC2626" }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#991B1B", letterSpacing: 0.3, marginBottom: 6 }}>Danger zone</div>
         <div style={{ fontSize: 12.5, color: "#991B1B", lineHeight: 1.55, marginBottom: 14 }}>
-          Deleting {label} erases their catalog, designs, settings and logins. Financial and signed records
-          are kept. It cannot be undone, and it still asks for the operator password even though you're signed in.
+          Deleting {label} erases all of their data; their customers' records are exported first, and money,
+          signed and consent records are kept. It cannot be undone, and it still asks for the operator password
+          even though you're signed in.
         </div>
         <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this builder…</button>
       </div>
@@ -3100,10 +3136,17 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         <AdmDeleteDialog client={clientRow || { client_id: clientId }} onClose={() => setDelOpen(false)}
           onDeleted={async (id, r) => {
             setDelOpen(false);
-            const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+            const parts = admDeletedSummary(r && r.deleted);
             const report = admDeleteReport(r);
+            const exportUrl = r && r.export && r.export.url;
             await onReloadClients();
-            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}${report ? ` ${report}` : ""}`, sticky: !!report });
+            // Sticky while there is anything to read, and always with an export: the link is the only
+            // copy of their customers' data.
+            onFlash({
+              ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}${report ? ` ${report}` : ""}`,
+              sticky: !!(report || exportUrl),
+              link: exportUrl ? { href: exportUrl, label: "Download the customer-data export" } : null,
+            });
             onDeleted();
           }} />
       )}

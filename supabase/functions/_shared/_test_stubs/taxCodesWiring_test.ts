@@ -16,8 +16,8 @@
 //      both payloads), or the insert-if-missing losing ignoreDuplicates (updated_by rewritten on
 //      every unchanged row);
 //   6. the three gates leaving settings_crm:view/view/edit;
-//   7. delete_client forgetting tax_code_assignments (a reused slug inherits the deleted company's
-//      heading codes), or wiping it after other tables — deployed ahead of 246, that half-deletes;
+//   7. delete_client keeping tax_code_assignments (a reused slug inherits the deleted company's
+//      heading codes); since 321 tenant_purge takes it with everything not on the keep list;
 //   8. a builder-side tax code action reaching Avalara;
 //   9. avalara_tax_codes_status (the Admin console's catalog row) growing an Avalara call or a
 //      read of anything but the catalog, while it sits on READ_ONLY_ACTIONS;
@@ -202,12 +202,15 @@ Deno.test("admin-catalog avalara_tax_codes_status: read-only, reads the catalog 
   }
 });
 
-Deno.test("admin-catalog delete_client wipes tax_code_assignments, before anything else", () => {
+Deno.test("admin-catalog delete_client purges tax_code_assignments with everything else", async () => {
+  // Since 2026-10-21 (migration 321) delete_client calls tenant_purge, which deletes from every table
+  // with a client_id column except the kept ones, in ONE transaction: a half-deleted tenant cannot
+  // happen, so the "wipe it first" ordering this test used to pin is gone. What still matters: the
+  // assignments are not on the keep list, or a reused slug's Tax tab shows the deleted company's codes.
+  const { RETAINED_TABLES, TENANT_TABLES } = await import("../tenantTables.ts");
+  assert(TENANT_TABLES.tax_code_assignments && !RETAINED_TABLES.includes("tax_code_assignments"),
+    "tax_code_assignments is kept on delete — a reused slug inherits the heading codes");
   const del = block(CATALOG, 'case "delete_client": {', "\n      default:", "delete_client");
-  const wipes = [...del.matchAll(/await wipe\("([^"]+)"\)/g)].map((m) => m[1]);
-  assert(wipes.includes("tax_code_assignments"), "delete_client no longer wipes tax_code_assignments — a reused slug inherits the heading codes");
-  assert(wipes[0] === "tax_code_assignments",
-    `tax_code_assignments is wiped after ${wipes[0]} — deployed ahead of 246, the delete would fail half-way`);
-  assert(/const \{ error, count \} = await sb\.from\(table\)\.delete\(\{ count: "exact" \}\)\.eq\("client_id", clientId\);/.test(del),
-    "wipe is no longer scoped to the deleted tenant");
+  assert(/sb\.rpc\("tenant_purge", \{ p_client_id: clientId, p_keep: RETAINED_TABLES, p_actor: actor, p_dry_run: false \}\)/.test(del),
+    "delete_client no longer purges through tenant_purge with RETAINED_TABLES");
 });

@@ -72,11 +72,27 @@ export interface World {
   countErrors?: string[];
   /** The client_settings row the delete reads for what is connected outside the database. */
   settings?: Record<string, unknown> | null;
-  /** Objects under <tenant>/ per bucket. A bucket in `folders` holds only sub-folders, which the
-   *  one-level sweep lists but cannot remove; one in `failList` refuses to list. */
-  storage?: Record<string, number>;
-  folders?: string[];
+  /** Files under <tenant>/ per bucket, as paths below it ("a.png", "unit-1/b.png"). A bucket in
+   *  `failList` refuses to list. The delete-time export is written to tenant-exports. */
+  files?: Record<string, string[]>;
+  /** Every file's size in bytes (10 by default). */
+  fileSize?: number;
   failList?: string[];
+  /** Migration 321: what tenant_purge answers. Absent: a dry run finds nothing and the purge
+   *  reports `purged` = {} in one pass. `missing` = the function is not there (PGRST202). */
+  purge?: { purged?: Record<string, number>; passes?: number; error?: string; dryError?: string; missing?: boolean };
+  /** Rows the export reads, by table (each needs an `id`). */
+  exportRows?: Record<string, Record<string, unknown>[]>;
+  /** The export's upload to tenant-exports fails with this message. */
+  uploadError?: string;
+  /** Other builders' client_settings rows naming the same Resend domain id. */
+  sharedDomain?: number;
+  /** Numbers and A2P registration a builder NOT on a closed sub-account still holds. */
+  parentNumbers?: string[];
+  a2p?: { brand_sid: string | null; campaign_sid: string | null } | null;
+  /** HTTP status Resend answers a domain delete with, and Intuit a revoke with (200 by default). */
+  resendStatus?: number;
+  qboRevokeStatus?: number;
   /** The gateway's answer to one call: a body string, an HTTP status, or a throw (no answer). */
   gateway?: (params: Record<string, string>) => string | number;
   /** Workstream 2, phase 9: the tenant's twilio_accounts row and what Twilio holds for it. Absent:
@@ -112,10 +128,22 @@ export interface Run {
   faultRows: any[];
   /** Twilio requests, in order: "<METHOD> <path>" (also in `log` as "tw ..."). */
   twilioCalls: string[];
+  /** tenant_purge calls, in order, with their arguments. */
+  purges: any[];
+  /** Objects written to storage: the export. */
+  uploads: { bucket: string; path: string; bytes: Uint8Array; opts: any }[];
+  /** Paths removed, by bucket. */
+  removed: Record<string, string[]>;
+  /** Resend and Intuit calls: "<METHOD> <url path>". */
+  outsideCalls: string[];
 }
 
 export async function deleteClient(handler: (req: Request) => Promise<Response>, world: World): Promise<Run> {
-  const run: Run = { status: 0, body: null, raw: "", log: [], gatewayCalls: [], wipes: [], audits: [], updates: [], faultRows: [], twilioCalls: [] };
+  const run: Run = {
+    status: 0, body: null, raw: "", log: [], gatewayCalls: [], wipes: [], audits: [], updates: [], faultRows: [], twilioCalls: [],
+    purges: [], uploads: [], removed: {}, outsideCalls: [],
+  };
+  const files: Record<string, string[]> = Object.fromEntries(Object.entries(world.files ?? {}).map(([b, p]) => [b, [...p]]));
 
   const from = (table: string) => {
     const call: any = { table, op: "select", filters: [] as [string, string, unknown][], opts: undefined, payload: undefined };
@@ -155,10 +183,19 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       // reads
       if (call.opts?.head) {
         if (table === "billing_customers") return { error: null, count: world.sharedVault ?? 0 };
+        if (table === "client_settings" && call.filters.some((f: any) => f[0] === "or")) return { error: null, count: world.sharedDomain ?? 0 };
         if (world.countErrors?.includes(table)) return { error: { message: "" }, count: null };
         return { error: null, count: world.retained?.[table] ?? 0 };
       }
+      // The export's paged reads.
+      if (call.range && eqv("client_id") === TENANT) {
+        return { data: (world.exportRows?.[table] ?? []).slice(call.range[0], call.range[1] + 1), error: null };
+      }
       switch (table) {
+        case "sms_numbers":
+          return { data: (world.parentNumbers ?? []).map((n) => ({ phone_number: n })), error: null };
+        case "sms_registrations":
+          return { data: world.a2p ?? null, error: null };
         case "client_configs":
           return { data: eqv("client_id") === TENANT ? { client_id: TENANT } : null, error: null };
         case "client_settings":
@@ -185,6 +222,10 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       lt: (c: string, v: unknown) => { call.filters.push(["lt", c, v]); return b; },
       in: (c: string, v: unknown) => { call.filters.push(["in", c, v]); return b; },
       is: (c: string, v: unknown) => { call.filters.push(["is", c, v]); return b; },
+      or: (expr: string) => { call.filters.push(["or", expr, null]); return b; },
+      order: (_c: string) => b,
+      limit: (_n: number) => b,
+      range: (a: number, z: number) => { call.range = [a, z]; return b; },
       maybeSingle: () => Promise.resolve(answer()),
       single: () => Promise.resolve(answer()),
       then: (res: any, rej: any) => Promise.resolve(answer()).then(res, rej),
@@ -210,6 +251,22 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       const status = world.twilio.closeStatus ?? 200;
       return Promise.resolve(new Response(JSON.stringify(status === 200 ? { status: "closed" } : { code: 20005 }), { status }));
     }
+    if (url.startsWith("https://api.resend.com/")) {
+      const line = `${init?.method ?? "GET"} ${new URL(url).pathname}`;
+      run.outsideCalls.push(line);
+      run.log.push(`out ${line}`);
+      const status = world.resendStatus ?? 200;
+      return Promise.resolve(new Response(status === 200 ? "{}" : JSON.stringify({ name: "not_found", message: "nope" }), { status }));
+    }
+    if (/intuit\.com\//.test(url)) {
+      const u = new URL(url);
+      // The discovery document is never served here, so qboDiscovery.ts falls back to its defaults.
+      if (/openid_configuration|\.well-known/.test(u.pathname)) return Promise.resolve(new Response("", { status: 503 }));
+      const line = `${init?.method ?? "GET"} ${u.hostname}${u.pathname}`;
+      run.outsideCalls.push(line);
+      run.log.push(`out ${line}`);
+      return Promise.resolve(new Response("", { status: world.qboRevokeStatus ?? 200 }));
+    }
     if (url !== `${GATEWAY_URL}/api/transact.php`) {
       return Promise.reject(new Error(`deleteClientHarness: unexpected fetch to ${url}`));
     }
@@ -230,6 +287,8 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
   const env: Record<string, string> = { SUPABASE_URL: "http://supabase.test", SUPABASE_SERVICE_ROLE_KEY: "service-role-test", ADMIN_PASSWORD };
   // The parent's SID and auth token: closing a sub-account is done with them (Workstream 2).
   if (world.twilio) Object.assign(env, { TWILIO_ACCOUNT_SID: "AC" + "0".repeat(32), TWILIO_AUTH_TOKEN: "parent-auth-token-test" });
+  // Resend and QuickBooks keys, read at call time, so they can be set per run.
+  Object.assign(env, { RESEND_API_KEY: "re_test_not_a_real_key", QBO_CLIENT_ID: "qbo-client-test", QBO_CLIENT_SECRET: "qbo-secret-test" });
   const prior = Object.fromEntries(Object.keys(env).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
   stubDb.from = from;
@@ -242,21 +301,62 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
       world.twilio = world.twilio ? { ...world.twilio, row: null } : world.twilio;
       return Promise.resolve({ data: !r ? "none" : r.kind === "parent" ? "parent_pin" : r.account_sid ? "closed_sub" : "never_created", error: null });
     }
+    // 321's tenant_purge: a dry run first, then the purge (logged as a wipe, so "nothing was deleted"
+    // assertions see it).
+    if (fn === "tenant_purge" && args?.p_client_id === TENANT) {
+      run.purges.push(args);
+      const p = world.purge ?? {};
+      if (p.missing) return Promise.resolve({ data: null, error: { code: "PGRST202", message: "Could not find the function public.tenant_purge" } });
+      if (args.p_dry_run) {
+        run.log[run.log.length - 1] = "db rpc tenant_purge (dry run)";
+        if (p.dryError) return Promise.resolve({ data: null, error: { code: "57014", message: p.dryError } });
+        return Promise.resolve({ data: { dryRun: true, clientId: TENANT, purge: p.purged ?? {}, kept: {}, tombstoned: false }, error: null });
+      }
+      if (p.error) return Promise.resolve({ data: null, error: { code: "23503", message: p.error } });
+      run.wipes.push("tenant_purge");
+      return Promise.resolve({ data: { dryRun: false, clientId: TENANT, purged: p.purged ?? {}, kept: {}, passes: p.passes ?? 1 }, error: null });
+    }
     return Promise.reject(new Error(`deleteClientHarness: unexpected rpc ${fn}`));
   };
+  // Storage as a tree of full paths per bucket ("<tenant>/a.png"). list() answers one level, the
+  // way storage does: files with an id and a size, sub-folders with no id.
+  const tree = (bucket: string) => (files[bucket] ??= []);
+  for (const [b, paths] of Object.entries(files)) files[b] = paths.map((p) => `${TENANT}/${p}`);
   stubStorage.from = (bucket: string) => ({
-    list: (prefix: string, o?: { limit?: number }) => {
+    list: (dir: string, o?: { limit?: number; offset?: number }) => {
       run.log.push(`storage list ${bucket}`);
       if (world.failList?.includes(bucket)) return Promise.resolve({ data: null, error: { message: "list failed" } });
-      const n = prefix === TENANT ? Math.min(world.storage?.[bucket] ?? 0, o?.limit ?? 100) : 0;
-      return Promise.resolve({ data: Array.from({ length: n }, (_, i) => ({ name: `f${i}` })), error: null });
+      const pre = dir ? `${dir}/` : "";
+      const entries = new Map<string, any>();
+      for (const p of tree(bucket)) {
+        if (!p.startsWith(pre)) continue;
+        const rest = p.slice(pre.length);
+        const slash = rest.indexOf("/");
+        if (slash < 0) entries.set(rest, { name: rest, id: `obj-${rest}`, metadata: { size: world.fileSize ?? 10 }, created_at: "2026-10-21T00:00:00Z" });
+        else entries.set(rest.slice(0, slash), { name: rest.slice(0, slash), id: null, metadata: null });
+      }
+      const all = [...entries.values()].sort((a, z) => a.name.localeCompare(z.name));
+      const off = o?.offset ?? 0;
+      return Promise.resolve({ data: all.slice(off, off + (o?.limit ?? 100)), error: null });
     },
     remove: (paths: string[]) => {
-      // A folder cannot be removed by its name: storage answers with nothing removed.
-      if (world.folders?.includes(bucket)) return Promise.resolve({ data: [], error: null });
-      if (world.storage?.[bucket]) world.storage[bucket] -= paths.length;
-      return Promise.resolve({ data: paths.map((name) => ({ name })), error: null });
+      run.log.push(`storage remove ${bucket}`);
+      const gone = paths.filter((p) => tree(bucket).includes(p));
+      files[bucket] = tree(bucket).filter((p) => !paths.includes(p));
+      (run.removed[bucket] ??= []).push(...gone);
+      return Promise.resolve({ data: gone.map((name) => ({ name })), error: null });
     },
+    download: (path: string) =>
+      Promise.resolve(tree(bucket).includes(path) ? { data: new Blob([`bytes of ${path}`]), error: null } : { data: null, error: { message: "not found" } }),
+    upload: (path: string, bytes: Uint8Array, opts: any) => {
+      run.log.push(`storage upload ${bucket}`);
+      if (world.uploadError) return Promise.resolve({ data: null, error: { message: world.uploadError } });
+      run.uploads.push({ bucket, path, bytes, opts });
+      tree(bucket).push(path);
+      return Promise.resolve({ data: { path }, error: null });
+    },
+    createSignedUrl: (path: string, secs: number, _o?: any) =>
+      Promise.resolve({ data: { signedUrl: `https://storage.test/sign/${bucket}/${path}?token=t&secs=${secs}` }, error: null }),
   });
   try {
     const res = await handler(new Request("http://localhost/functions/v1/admin-catalog", {
@@ -280,8 +380,9 @@ export async function deleteClient(handler: (req: Request) => Promise<Response>,
   return run;
 }
 
-/** Index of the first table wipe in the log, or Infinity when nothing was wiped. */
+/** Index of the first table wipe in the log (a delete, or tenant_purge's real run), or Infinity
+ *  when nothing was wiped. */
 export const firstWipe = (run: Run) => {
-  const i = run.log.findIndex((l) => l.startsWith("db delete ") && l !== "db delete admin_auth_attempts");
+  const i = run.log.findIndex((l) => (l.startsWith("db delete ") && l !== "db delete admin_auth_attempts") || l === "db rpc tenant_purge");
   return i < 0 ? Infinity : i;
 };
