@@ -1748,7 +1748,7 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     return json({
       ok: true, available: true, viewAs: !!operator, noticeVersion: AI_NOTICE_VERSION,
       answer, version: read.consent?.version ?? null, at: answer ? read.consent?.at ?? null : null,
-      callRecording: read.callRecording, businessTranscribes: read.businessTranscribes,
+      callRecording: read.callRecording, businessTranscribes: read.businessTranscribes, callAnnounced: read.callAnnounced,
       canChangeRecording: role === "owner" && canEdit("phone"),
       phoneAccess: canRead("phone"),
     });
@@ -11179,7 +11179,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // rather than that calls are recorded while nothing records. CALL_TRANSCRIBE is mirrored the
     // same way (transcribeServerOn), so the card promises transcripts only while they are made.
     const recRes = await admin.from("client_settings")
-      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
+      .select("phone_record_calls, phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
       .eq("client_id", clientId).maybeSingle();
     if (recRes.error && !phoneNotReady(recRes.error)) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_recording_read_failed", severity: "error",
@@ -11201,7 +11201,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           e164: mine.phone_number, label: mine.label ?? null,
           mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(userId ?? "").toLowerCase(),
         } : null,
-        recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null,
+        // Whether their calls are recorded, and whether callers are told (2026-10-21: the owner's
+        // announcement switch), so their line says so truthfully.
+        recording: recording ? { on: recording.on, serverOn: recording.serverOn, notice: recording.notice } : null,
       });
     }
 
@@ -11448,10 +11450,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // ── Call recording (migration 263) ─────────────────────────────────────────────────────
   // The business OWNER only (role 'owner', on top of the gate's phone:'edit'): recording
   // customers' calls is the business's own legal decision (decided 2026-10-04). An admin and an
-  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid,
-  // and refuses turning the announcement off. Who changed it and when are stamped on the row,
-  // for any later question about consent. Nothing records until the phone-api Worker's
-  // CALL_RECORDING rail is on too.
+  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid.
+  // The announcement (2026-10-21) is the owner's too: `notice` true/false is written, and a save
+  // without it (the shipped apps' transcripts switch) keeps the stored value. Who changed it and
+  // when are stamped on the row, for any later question about consent. Nothing records until
+  // the phone-api Worker's CALL_RECORDING rail is on too.
   if (action === "phone_recording_save") {
     if (role !== "owner") return json({ error: "Only the business owner can change call recording." }, 403);
     const parsed = parseRecording((payload ?? {}) as Record<string, unknown>);
@@ -11459,7 +11462,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data, error } = await admin.from("client_settings")
       .update({ ...parsed.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: userId })
       .eq("client_id", clientId)
-      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
+      .select("phone_record_calls, phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
     if (error) {
       return phoneNotReady(error) ? phoneUnavailable("Call recording isn't set up on this server yet.") : dbFail(req, clientId, "save call recording", error);
     }
@@ -11467,7 +11470,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
     }
     audit(parsed.row.phone_record_calls ? "phone_recording_on" : "phone_recording_off", 1,
-      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"}`).catch(() => {});
+      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"} announce=${parsed.row.phone_recording_notice === undefined ? "kept" : parsed.row.phone_recording_notice ? "on" : "off"}`).catch(() => {});
     return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k))) });
   }
 

@@ -417,3 +417,91 @@ Deno.test("source: provision and close are on can_bill, get is a read, suspend n
   const close = SRC.slice(SRC.indexOf('case "twilio_account_close": {'), SRC.indexOf('case "delete_client": {'));
   assert(close.includes('if (closing && reqStr(p.confirmClientId, "confirmClientId") !== clientId) {'));
 });
+
+// ── The builder's own login text service (2026-10-21, migration 323) ─────────────────────────
+// Create makes it inside the sub with the SUB's key, named after the builder; the card's "Sync
+// login text name" (twilio_verify_sync, one builder or all) renames it and is otherwise a no-op.
+// The parent's credentials only ever READ the parent's own service.
+const PARENT_VA = "VA" + "9".repeat(32);
+function withVerify(tw: Twilio) {
+  const services: Row[] = [];
+  const calls: { method: string; path: string; auth: string; form: URLSearchParams }[] = [];
+  const base = tw.fetch;
+  tw.fetch = (input: Request | URL | string, init?: RequestInit): Promise<Response> => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.host !== "verify.twilio.com") return base(input, init);
+    const method = init?.method ?? "GET";
+    const auth = new Headers(init?.headers).get("authorization") ?? "";
+    const form = new URLSearchParams(String(init?.body ?? ""));
+    calls.push({ method, path: url.pathname + url.search, auth, form });
+    const j = (v: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(v), { status }));
+    const subKey = `Basic ${btoa(`${tw.key?.sid}:${tw.key?.secret}`)}`;
+    if (url.pathname === `/v2/Services/${PARENT_VA}`) {
+      return auth === `Basic ${btoa(`${BASE_ENV.TWILIO_API_KEY}:${BASE_ENV.TWILIO_API_SECRET}`)}`
+        ? j({ sid: PARENT_VA, friendly_name: "Structure Studio", code_length: 6, lookup_enabled: false, do_not_share_warning_enabled: false })
+        : j({ code: 20404 }, 404);
+    }
+    if (auth !== subKey) return j({ code: 20404 }, 404);
+    if (url.pathname === "/v2/Services" && method === "GET") return j({ services });
+    if (url.pathname === "/v2/Services" && method === "POST") {
+      const svc = { sid: "VA" + "8".repeat(31) + String(services.length + 1), friendly_name: form.get("FriendlyName"), code_length: Number(form.get("CodeLength")), lookup_enabled: form.get("LookupEnabled") === "true", do_not_share_warning_enabled: form.get("DoNotShareWarningEnabled") === "true", date_created: "2026-10-21T12:00:00Z" };
+      services.push(svc);
+      return j(svc, 201);
+    }
+    const svc = services.find((s) => url.pathname === `/v2/Services/${s.sid}`);
+    if (svc && method === "POST") { if (form.has("FriendlyName")) svc.friendly_name = form.get("FriendlyName"); return j(svc); }
+    return Promise.reject(new Error(`unexpected verify fetch ${method} ${url.href}`));
+  };
+  return { services, calls };
+}
+
+Deno.test("login text service: Create makes it in the sub with the sub's key; Sync (all) is a no-op; a rename is one POST", async () => {
+  const db = new Db(), tw = new Twilio();
+  db.settings.set(TENANT, { client_id: TENANT, business_name: "Acme Barns & Sheds" });
+  const v = withVerify(tw);
+  const env = { TWILIO_VERIFY_SERVICE_SID: PARENT_VA, TWILIO_SUBACCOUNTS: "manual" };
+
+  const r = await act(db, tw, { action: "twilio_account_provision", confirmClientId: TENANT }, env);
+  assertEquals(r.status, 200, r.raw);
+  const sid = v.services[0]?.sid;
+  assertEquals(r.body.verifyService, { ok: true, outcome: "created", sid: `VA…${String(sid).slice(-4)}`, name: "Acme Barns Sheds" });
+  const create = v.calls.find((c) => c.method === "POST" && c.path === "/v2/Services")!;
+  assertEquals(create.auth, `Basic ${btoa(`${tw.key!.sid}:${tw.key!.secret}`)}`, "made with the sub's own key");
+  assertEquals([create.form.get("FriendlyName"), create.form.get("CodeLength")], ["Acme Barns Sheds", "6"]);
+  assertEquals([db.accounts.get(TENANT)!.verify_service_sid, db.accounts.get(TENANT)!.verify_service_name], [sid, "Acme Barns Sheds"]);
+  assert(!r.raw.includes(sid), "the response carries a masked SID only");
+  assert(db.audits.some((a) => a.action === "twilio_verify_sync" && a.note.includes("created") && !a.note.includes(sid)), JSON.stringify(db.audits));
+  const parentAuth = `Basic ${btoa(`${BASE_ENV.TWILIO_API_KEY}:${BASE_ENV.TWILIO_API_SECRET}`)}`;
+  assertEquals(v.calls.filter((c) => c.auth === parentAuth).map((c) => c.method), ["GET"], "the parent's key only reads the parent's service");
+
+  const before = v.calls.length;
+  const all = await act(db, tw, { action: "twilio_verify_sync", all: true }, env);
+  assertEquals(all.status, 200, all.raw);
+  assertEquals(all.body.results.map((x: Row) => [x.clientId, x.ok, x.outcome]), [[TENANT, true, "unchanged"]]);
+  assertEquals(v.calls.slice(before).filter((c) => c.method !== "GET").length, 0, "nothing written at Twilio");
+
+  db.settings.get(TENANT)!.business_name = "Acme Structures";
+  const one = await act(db, tw, { action: "twilio_verify_sync" }, env);
+  assertEquals(one.status, 200, one.raw);
+  assertEquals([one.body.verifyService.outcome, one.body.verifyService.name], ["renamed", "Acme Structures"]);
+  const renames = v.calls.filter((c) => c.method === "POST" && c.path === `/v2/Services/${sid}`);
+  assertEquals(renames.map((c) => [...c.form.entries()]), [[["FriendlyName", "Acme Structures"]]]);
+  assertEquals(v.services.length, 1, "never a second service");
+
+  const got = await act(db, tw, { action: "twilio_account_get" }, env);
+  assertEquals(got.body.account.verifyService, { sid: `VA…${String(sid).slice(-4)}`, name: "Acme Structures" });
+});
+
+Deno.test("login text service: a builder on the parent, or the switch off, is refused by Sync with a sentence; Twilio is not asked", async () => {
+  const db = new Db(), tw = new Twilio();
+  const v = withVerify(tw);
+  db.accounts.set(TENANT, { client_id: TENANT, kind: "parent", status: "active" });
+  const pinned = await act(db, tw, { action: "twilio_verify_sync" }, { TWILIO_VERIFY_SERVICE_SID: PARENT_VA, TWILIO_SUBACCOUNTS: "on" });
+  assertEquals([pinned.status, pinned.body.reason], [409, "not_sub"]);
+  assert(/main Twilio account/.test(pinned.body.error), pinned.raw);
+  const off = await act(db, tw, { action: "twilio_verify_sync" }, { TWILIO_VERIFY_SERVICE_SID: PARENT_VA });
+  assertEquals([off.status, off.body.reason], [409, "switch_off"]);
+  assertEquals(v.calls.length, 0);
+  const reads = /const READ_ONLY_ACTIONS = new Set\(\[([\s\S]*?)\]\);/.exec(SRC)?.[1] ?? "";
+  assert(!reads.includes('"twilio_verify_sync"'), "Sync writes, so it needs can_write");
+});

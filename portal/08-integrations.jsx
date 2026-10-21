@@ -3356,12 +3356,21 @@ const SS_AI_WORDS = {
   noPhone: "You don't make or take calls with My Synergy Phone on this account right now, so none of your calls are sent either way. Your answer is kept for if you do.",
 };
 
-/** What happens to this business's calls now, in plain lines (phone-core settingsStatusLines, for the web). */
+/**
+ * What happens to this business's calls now, in plain lines (phone-core settingsStatusLines, for the web).
+ * `callAnnounced` false (2026-10-21) is the owner's announcement switch turned off; a server that
+ * doesn't send it reads as announced, as every business was before.
+ */
 function ssAiStatusLines(d) {
   const lines = [];
+  const announced = !(d && d.callAnnounced === false);
   lines.push(d && d.callRecording
-    ? "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. Callers hear an announcement first."
-    : "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them, and callers hear an announcement first.");
+    ? (announced
+      ? "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. Callers hear an announcement first."
+      : "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. The business owner has turned the announcement off, so callers aren't told.")
+    : (announced
+      ? "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them, and callers hear an announcement first."
+      : "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them without telling callers, because the owner has turned the announcement off."));
   lines.push(d && d.businessTranscribes
     ? "Recorded calls are transcribed by Cloudflare Workers AI and summarized by Anthropic's Claude, but only when everyone from your team on the call allowed it."
     : "Recorded calls aren't transcribed or summarized right now. When your business has call transcripts on, Cloudflare Workers AI transcribes them and Anthropic's Claude summarizes them, only when everyone from your team on the call allowed it.");

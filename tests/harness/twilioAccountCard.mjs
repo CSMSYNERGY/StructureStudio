@@ -20,6 +20,10 @@
 //      quietly, no error, no buttons;
 //   G  phase 6: each number's caller-ID statuses (SHAKEN/STIR, Voice Integrity, CNAM) and the CNAM
 //      name, as chips; before migration 297 (no `cnam`), no CNAM chip;
+//   H  migration 323: an active sub's "Login text name" row reads the text their customers get
+//      ("Your <name> verification code is…") with the masked service SID; "Sync login text name"
+//      sends twilio_verify_sync and the row takes the answer's new name; a sub with no service yet
+//      says texts use our name; an older admin-catalog (no verifyService) shows neither row nor button;
 //   every scenario: no uncaught page error.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -112,6 +116,10 @@ async function run(label, S) {
       if (body.action === "twilio_account_close") {
         account = { ...account, status: "closed" };
         return json(route, { ok: true, status: "closed", account });
+      }
+      if (body.action === "twilio_verify_sync") {
+        account = { ...account, verifyService: { sid: "VA…7777", name: "Harness Barns" } };
+        return json(route, { ok: true, verifyService: { ok: true, outcome: "renamed", sid: "VA…7777", name: "Harness Barns" }, account });
       }
       if (body.action === "twilio_account_suspend") {
         account = { ...account, status: "suspended" };
@@ -238,6 +246,29 @@ try {
   ok("G: no uncaught page errors", G.pageErrors.length === 0, G.pageErrors.join(" | "));
   if (process.env.SS_SHOT_DIR) await G.card.screenshot({ path: join(process.env.SS_SHOT_DIR, "twilio-card-caller-id.png") });
   await G.ctx.close();
+
+  // ── H ──
+  const H1 = await run("H1", { account: { ...ACTIVE, switchMode: "on", switchOn: true, verifyService: { sid: "VA…7777", name: "Harness Sheds" } } });
+  t = await H1.text();
+  ok("H: the row reads the customer's text, with the masked service SID", /Login text name/.test(t) && /Your Harness Sheds verification code is/.test(t) && /VA…7777/.test(t), t.slice(0, 900));
+  await H1.button("Sync login text name").click();
+  await H1.page.waitForFunction(() => document.querySelector("[data-adm-login-text]")?.innerText.includes("Harness Barns"), null, { timeout: 10000 }).catch(() => {});
+  t = await H1.text();
+  ok("H: Sync sends twilio_verify_sync for this builder", H1.calls.some((c) => c.action === "twilio_verify_sync" && c.clientId === CLIENT), JSON.stringify(H1.calls.map((c) => c.action)));
+  ok("H: the row takes the new name from the answer", /Your Harness Barns verification code is/.test(t), t.slice(0, 900));
+  ok("H: no uncaught page errors", H1.pageErrors.length === 0, H1.pageErrors.join(" | "));
+  if (process.env.SS_SHOT_DIR) await H1.card.screenshot({ path: join(process.env.SS_SHOT_DIR, "twilio-card-login-text.png") });
+  await H1.ctx.close();
+  const H2 = await run("H2", { account: { ...ACTIVE, verifyService: { sid: null, name: null } } });
+  t = await H2.text();
+  ok("H: a sub with no service yet says texts use our name, and offers Sync", /Our name \(Structure Studio\) until their own is made/.test(t)
+    && await H2.button("Sync login text name").count() === 1, t.slice(0, 900));
+  await H2.ctx.close();
+  const H3 = await run("H3", { account: ACTIVE });
+  t = await H3.text();
+  ok("H: an older admin-catalog (no verifyService) shows no row and no Sync button", !/Login text name/.test(t)
+    && await H3.button("Sync login text name").count() === 0, t.slice(0, 900));
+  await H3.ctx.close();
 
   // ── F ──
   const F1 = await run("F1", { account: NONE, unknownAction: true });

@@ -191,6 +191,8 @@ async function scenario(browser, opts) {
     // switches (portal-settings' copies of the Worker's CALL_RECORDING and CALL_TRANSCRIBE rails;
     // transcripts ship off).
     recordingRow = {}, canChangeRecording = true, recordingServerOn = true, transcribeServerOn = false,
+    // ...and what an own-level caller is told ({on, serverOn, notice}; null = nothing, as before).
+    ownRecording = null,
     // Your calls (R): the signed-in person's own settings the stub Worker answers GET and POST
     // /settings/me with (null = the stub answers those paths as it always has), the team screen's
     // list, and the browser's time zone.
@@ -235,9 +237,14 @@ async function scenario(browser, opts) {
 
   const page = await ctx.newPage();
   page.on("pageerror", (e) => pageErrors.push(`${opts.name}: ${e.message}`));
-  // Every confirm is accepted, and its words kept (P20/P21: which saves ask "Record calls?").
+  // Every confirm is accepted, and its words kept (P20/P21: which saves ask "Record calls?"),
+  // unless a scenario sets dismiss.next (P22: cancelling "Turn off the announcement?").
   const dialogs = [];
-  page.on("dialog", (d) => { dialogs.push(d.message()); d.accept(); });
+  const dismiss = { next: false };
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    if (dismiss.next) { dismiss.next = false; d.dismiss(); } else d.accept();
+  });
   const calls = [];
   const state = {
     phoneStatus, route: null,
@@ -419,7 +426,7 @@ async function scenario(browser, opts) {
         // An 'own' caller gets their own slice (portal-settings' ownPhoneOnly branch).
         if (access.phone !== "view" && access.phone !== "edit") {
           return json(route, { ok: true, available: true, scope: "own", phoneStatus: state.phoneStatus, level: "own", canEdit: false,
-            number: state.number ? { e164: state.number.e164 } : null, recording: null });
+            number: state.number ? { e164: state.number.e164 } : null, recording: ownRecording });
         }
         return json(route, { ok: true, available: true, scope: "team", phoneStatus: state.phoneStatus, level: "edit", canEdit: true,
           number: state.number, canBuyNumber: rolloutOpen, numbersForSale: true, voiceSetup: true,
@@ -428,13 +435,17 @@ async function scenario(browser, opts) {
           recording: state.recording, canChangeRecording: !!state.recording && canChangeRecording,
           route: state.route, team, suggestedMembers: state.route ? null : [USER.id] });
       // P. Call recording: the owner only (the server's rule; the stub refuses the same way), and
-      // the REAL parseRecording decides what is valid.
+      // the REAL parseRecording decides what is valid. A save without `notice` keeps the stored
+      // announcement, as the real update does (the column is simply not in the write).
       case "phone_recording_save": {
         if (!canChangeRecording) return json(route, { error: "Only the business owner can change call recording." }, 403);
         if (!state.recording) return json(route, { error: "Call recording isn't set up on this server yet." }, 503);
         const r = parseRecording(body);
         if (!r.ok) return json(route, { error: r.error }, 400);
-        state.recording = recordingView({ ...r.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id }, recordingServerOn, transcribeServerOn);
+        state.recording = recordingView({
+          phone_recording_notice: state.recording.notice, ...r.row,
+          phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id,
+        }, recordingServerOn, transcribeServerOn);
         return json(route, { ok: true, recording: state.recording });
       }
       // Plan phase 6, caller ID. STUBS: nothing reaches Twilio. The server refuses non-operators;
@@ -516,7 +527,7 @@ async function scenario(browser, opts) {
     await page.waitForTimeout(1200);
   };
   const sent = () => page.evaluate(() => (window.__sssSent || []).map((s) => ({ id: s.id, ...s.msg })));
-  return { ctx, page, calls, go, sent, vm, state, dialogs };
+  return { ctx, page, calls, go, sent, vm, state, dialogs, dismiss };
 }
 
 // R. The phone-api Worker's POST /settings/me for the person's own hours (routes/me.ts
@@ -861,7 +872,7 @@ try {
       const words = s.page.locator("[data-ss-phone-recording-notice]");
       ok("P1 its Save waits for a change", (await save.count()) === 1 && await save.isDisabled());
       const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
-      ok("P2 the announcement is ticked and can't be unticked", (await notice.isChecked()) && (await notice.isDisabled()));
+      ok("P2 the announcement is ticked by default, and the owner can untick it", (await notice.isChecked()) && (await notice.isEnabled()));
       ok("P3 the wording box shows the standard sentence, without \"and transcribed\" while transcripts haven't started",
         (await words.getAttribute("placeholder")) === "This call may be recorded."
           && /Leave it empty for the standard sentence: \u201cThis call may be recorded\.\u201d/.test(await card.innerText().catch(() => "")));
@@ -884,8 +895,8 @@ try {
       await tap(save);
       await s.page.waitForSelector('[data-ss-phone-recording="on"]', { timeout: 8000 }).catch(() => {});
       const sent = s.calls.filter((c) => c.action === "phone_recording_save").pop();
-      ok("P8 Save sent phone_recording_save with on, the wording, transcripts and the keep length, and never notice:false",
-        !!sent && sent.on === true && sent.noticeText === mine && sent.transcribe === true && sent.retentionDays === 90 && !("notice" in sent),
+      ok("P8 Save sent phone_recording_save with on, the announcement still on, the wording, transcripts and the keep length",
+        !!sent && sent.on === true && sent.notice === true && sent.noticeText === mine && sent.transcribe === true && sent.retentionDays === 90,
         JSON.stringify(sent));
       const after = await card.innerText().catch(() => "");
       ok("P9 the real validator took it, and the card says calls are recorded",
@@ -1003,6 +1014,69 @@ try {
         && !/Calls are recorded/.test(after)
         && /Saved\. Calls will be announced and recorded once call recording starts on this account\./.test(after), after.slice(0, 200));
     await card.screenshot({ path: join(shots, "P-recording-not-started.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
+    // 2026-10-21 (Carolyn's 10-20 ask, Ahsan's decision): the owner can turn the announcement
+    // off. Unticking asks first with the all-party-consent warning; Cancel keeps it on; once off,
+    // the warning replaces the short legal note and the save sends notice:false; calls stay
+    // recorded. Ticking it back on asks nothing. STUBBED: no real business is changed.
+    const s = await scenario(browser, { name: "P-unannounced", recordingRow: {
+      phone_record_calls: true, phone_recording_updated_at: "2026-10-04T12:00:00Z", phone_recording_updated_by: USER.id,
+    } });
+    await s.go("/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
+    const save = s.page.locator("[data-ss-phone-recording-save]");
+    s.dismiss.next = true;
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    ok("P22 unticking the announcement asks first, with the warning, and Cancel keeps it on",
+      s.dialogs.length === 1 && /^Turn off the announcement\? Calls will still be recorded, but callers won't be told\./.test(s.dialogs[0])
+        && /California, Florida, Illinois, Maryland, Massachusetts, Montana, New Hampshire, Pennsylvania and Washington/.test(s.dialogs[0])
+        && /check with your lawyer/.test(s.dialogs[0]) && (await notice.isChecked()) && (await save.isDisabled()), JSON.stringify(s.dialogs));
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    const warn = s.page.locator('[data-ss-phone-recording-legal="unannounced"]');
+    ok("P23 OK unticks it: the warning replaces the short legal note, the wording box says it isn't heard, and Save is ready",
+      s.dialogs.length === 2 && !(await notice.isChecked()) && (await warn.count()) === 1
+        && /Callers aren’t told calls are recorded\./.test(await warn.innerText().catch(() => ""))
+        && (await s.page.locator('[data-ss-phone-recording-legal]:not([data-ss-phone-recording-legal="unannounced"])').count()) === 0
+        && (await s.page.locator("[data-ss-phone-recording-notice-unused]").count()) === 1 && (await save.isEnabled()));
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-unannounced.png") }).catch(() => {});
+    await tap(save);
+    await s.page.waitForFunction(() => /Saved\./.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const off = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    const after = await card.innerText().catch(() => "");
+    ok("P24 Save sends notice:false; calls are still recorded, and the card says it's without an announcement",
+      !!off && off.notice === false && off.on === true && s.state.recording.notice === false && !(await notice.isChecked())
+        && (await s.page.locator('[data-ss-phone-recording-status="on"]').innerText().catch(() => "")) === "Calls are recorded"
+        && /Saved\. Calls are recorded from the next call on, without an announcement\./.test(after)
+        && (await warn.count()) === 1 && s.dialogs.length === 2, JSON.stringify({ off, after: after.slice(0, 240), dialogs: s.dialogs }));
+    await card.screenshot({ path: join(shots, "P-recording-unannounced-saved.png") }).catch(() => {});
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    await tap(save);
+    await s.page.waitForFunction(() => /announced and recorded/.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const back = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    ok("P25 ticking it back on asks nothing, saves notice:true, and the short legal note returns",
+      s.dialogs.length === 2 && !!back && back.notice === true && s.state.recording.notice === true && (await notice.isChecked())
+        && (await warn.count()) === 0 && (await s.page.locator("[data-ss-phone-recording-legal]").count()) === 1
+        && /Saved\. Calls are announced and recorded from the next call on\./.test(await card.innerText().catch(() => "")), JSON.stringify(back));
+    await s.ctx.close();
+  }
+  for (const [label, notice, want] of [
+    ["P26", false, /Calls on your business number are recorded\. Your owner has turned the announcement off, so callers\s+aren’t told\./],
+    ["P27", true, /Calls on your business number are recorded\. Callers hear an announcement first/],
+  ]) {
+    // Someone with their own calls only is told whether callers hear the announcement.
+    const s = await scenario(browser, { name: `${label}-own`, role: "user", access: PRESETS.sales_rep, ownRecording: { on: true, serverOn: true, notice } });
+    await s.go("/settings/phone");
+    await s.page.waitForSelector('[data-ss-phone-recording="own"]', { timeout: 15000 }).catch(() => {});
+    const line = await s.page.locator('[data-ss-phone-recording="own"]').innerText().catch(() => "");
+    ok(`${label} the own-level line with the announcement ${notice ? "on" : "off"}`, want.test(line), line);
     await s.ctx.close();
   }
 
