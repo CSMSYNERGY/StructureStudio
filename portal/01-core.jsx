@@ -1498,6 +1498,42 @@ async function ssPhoneStartCall(raw, ids, badNumber) {
   return { kind: "error", text: ssPhoneRefusal(out.reply) };
 }
 
+// ── CUSTOMER NAMING (quote to a business entity, 2026-10-21) ────────────────────────────────
+// A COPY of companyOf / personName / greetingFirst / displayName / billTo in
+// supabase/functions/_shared/customerNaming.ts, which explains the model: a contact's `name` is
+// the PERSON and its `company` the business, and nothing is ever guessed from the shape of a name
+// ("Bear River Band" with no company is still read as a name). Change both copies together:
+// supabase/functions/_shared/_test_stubs/customerNamingParity_test.ts runs this block (between the
+// two markers) against the shared module. SS_NAMING_GREET_COMPANY is NAMING.greetCompanyWhenNoPerson.
+// ⟦customer-naming:start⟧
+const SS_NAMING_GREET_COMPANY = false;
+function ssNamingLine(v) {
+  return String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+}
+function ssCompanyOf(c) {
+  const v = c && typeof c === "object" ? c.company : undefined;
+  return typeof v === "string" ? ssNamingLine(v) : "";
+}
+function ssPersonName(c) {
+  const name = ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+  const company = ssCompanyOf(c);
+  if (company && name.toLowerCase() === company.toLowerCase()) return "";
+  return name;
+}
+function ssGreetingFirst(c) {
+  const first = ssPersonName(c).split(" ")[0] || "";
+  if (!first && SS_NAMING_GREET_COMPANY) return ssCompanyOf(c);
+  return first;
+}
+function ssDisplayName(c) {
+  return ssCompanyOf(c) || ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+}
+function ssBillTo(c) {
+  const company = ssCompanyOf(c);
+  return { company, attn: company ? ssPersonName(c) : ssNamingLine(c && typeof c === "object" ? c.name : undefined) };
+}
+// ⟦customer-naming:end⟧
+
 // ── QUICK SENDS: saved messages, in the record's Email and SMS boxes ─────────────────────
 // Carolyn 2026-09-30: "I think I want to call it quick sends, okay, for them to do quick sends on
 // text and email, both of them, okay, so that they can easily just click and choose the list of
