@@ -52,6 +52,9 @@ function harness(env: Record<string, string | undefined>, ensure?: (opts: Ensure
     log: (row) => { if (logFails) return Promise.reject(new Error("log failed")); logs.push(row); return Promise.resolve(); },
     ensure: ensure ? (_a, _c, opts) => { calls.push(opts); return ensure(opts); } : undefined,
     keepAlive: (p) => { kept.push(p); },
+    // The login text service (migration 323): by default this deployment has no Verify service, so
+    // the step does nothing; the two tests after "created" drive it.
+    syncVerify: () => Promise.resolve({ ok: false, reason: "not_configured", status: 503, code: "parent_verify_missing" }),
     ...over,
   });
   return {
@@ -86,6 +89,39 @@ Deno.test("at create: a finished run is \"created\", run with the console's opti
   }]);
   assert(!JSON.stringify(h.audits).includes(SUB), "never the full SID");
   assertEquals(h.logs, []);
+});
+
+Deno.test("at create: once the sub is made, the builder's login text service is made too; one audit row, masked", async () => {
+  const h = harness(ON, () => Promise.resolve({ ok: true, kind: "sub", accountSid: SUB, ran: true, pushSkipped: [] }));
+  const synced: string[] = [];
+  const r = await provisionAtCreate(h.admin, NEW, h.deps({
+    syncVerify: (_a, id) => { synced.push(id); return Promise.resolve({ ok: true, outcome: "created", sid: "VA" + "7".repeat(32), name: "Acme Sheds" }); },
+  }));
+  assertEquals(r, { outcome: "created" }, "the create's answer is unchanged");
+  assertEquals(synced, [NEW]);
+  assertEquals(h.audits.map((a) => [a.action, a.note]), [
+    ["twilio_account_provision", "via=password at=create_client provisioned sid=AC…5555"],
+    ["twilio_verify_sync", "via=password at=create_client created sid=VA…7777 name=Acme Sheds"],
+  ]);
+  assertEquals(h.logs, []);
+});
+
+Deno.test("at create: a login text service Twilio refused is one warn row (codes only); none for a parent pin; never fatal", async () => {
+  const h = harness(ON, () => Promise.resolve({ ok: true, kind: "sub", accountSid: SUB, ran: true, pushSkipped: [] }));
+  const r = await provisionAtCreate(h.admin, NEW, h.deps({
+    syncVerify: () => Promise.resolve({ ok: false, reason: "twilio_failed", status: 502, code: "create_60248" }),
+  }));
+  assertEquals(r, { outcome: "created" });
+  assertEquals(h.logs.map((l) => [l.code, l.severity, l.context.code]), [["twilio_verify_sync_failed", "warn", "create_60248"]]);
+
+  const pin = harness(ON, () => Promise.resolve({ ok: true, kind: "parent", reason: "pinned" }));
+  let asked = 0;
+  await provisionAtCreate(pin.admin, NEW, pin.deps({ syncVerify: () => { asked++; return Promise.reject(new Error("must not run")); } }));
+  assertEquals(asked, 0, "a builder on the parent keeps the parent's service");
+
+  const threw = harness(ON, () => Promise.resolve({ ok: true, kind: "sub", accountSid: SUB, ran: true, pushSkipped: [] }));
+  assertEquals(await provisionAtCreate(threw.admin, NEW, threw.deps({ syncVerify: () => Promise.reject(new Error("boom")) })), { outcome: "created" });
+  assertEquals(threw.logs.map((l) => l.context.code), ["threw"]);
 });
 
 Deno.test("at create: a builder who stays on the parent (pin, internal, parent holdings) is \"skipped\" with the reason; nothing filed", async () => {
