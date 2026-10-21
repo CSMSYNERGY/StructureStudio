@@ -12014,38 +12014,28 @@ function buildShed3DModel(THREE, p) {
     put(wallBox(m, wf, hole.x0, hole.x1, hole.y1, y1, 0, 0.16), part);
     return hole;
   };
-  // doorWindowIn puts the window's own casing round the hole, in the window's colour, lying in the
-  // clearance the leaf leaves it with its face behind the frame's, and then the window itself through
-  // d3WindowFill's inset mode ("top" for a transom: vertical bars only, no double-hung rail).
-  //
-  // THEN THE INSIDE, SEEN THROUGH THE GLASS (Ahsan, 2026-10-21, on the first transoms: "the windows
-  // should be able to look inside not the wall"). Every wall's inside face wears the outside siding
-  // in full daylight, so through a door's pane the far wall read as siding standing right behind the
-  // glass. Behind each pane now sits a shallow ROOM: an inside-out box (BackSide, so only its inner
-  // faces draw) from the leaf's back face SS_DOOR_ROOM_FT into the building, in an unfinished-wood
-  // tone. Through the glass it reads as the inside, its floor and a side wall receding as the
-  // customer orbits. It draws only while the camera is OUTSIDE this wall (onBeforeRender zeroes its
-  // draw range for any other camera, the quote's corner views included, so a window elsewhere never
-  // shows a box behind the door), casts no shadow, and hides in "look inside" (applyShellMode, which
-  // finds it by its ssDoorPart, "windowInterior").
-  const SS_DOOR_ROOM_FT = 2.5, SS_DOOR_ROOM_HEX = "#6B5A48";
-  const doorWindowIn = (put, og, wf, hole, win) => {
-    const c = SS_DOOR_WIN_CASE_FT, wm = mat(win.it.colorHex || "#3A3F45", { roughness: 0.6 });
-    put(wallBox(wm, wf, hole.x0 - c, hole.x0, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
-    put(wallBox(wm, wf, hole.x1, hole.x1 + c, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
-    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), "windowCasing");
-    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), "windowCasing");
-    const n0 = og.children.length;
-    d3WindowFill(og, wf, { it: win.it, a0: hole.x0, a1: hole.x1, y0: hole.y0, y1: hole.y1 }, hole.x0, hole.x1, win.at === "top" ? "top" : true);
-    for (let k = n0; k < og.children.length; k++) og.children[k].userData.ssDoorPart = "window";
-    // The room starts at the leaf's back face (every leaf's slab is 0.16 deep, centred on the wall).
-    const room = wallBox(mat(SS_DOOR_ROOM_HEX, { side: THREE.BackSide, roughness: 0.95 }), wf, hole.x0, hole.x1, hole.y0, hole.y1,
-      -(0.08 + SS_DOOR_ROOM_FT / 2), SS_DOOR_ROOM_FT);
+  // THE INSIDE, SEEN THROUGH THE GLASS (Ahsan, 2026-10-21, on the first transoms: "the windows should
+  // be able to look inside not the wall"; then, of normal wall windows, "give normal wall windows the
+  // same look-inside room behind the glass"). Every wall's inside face wears the outside siding in full
+  // daylight, so through any pane the far wall read as siding standing right behind the glass. Behind
+  // each pane now sits a shallow ROOM: an inside-out box (BackSide, so only its inner faces draw)
+  // SS_GLASS_ROOM_FT deep from `back` behind the wall's centre plane (a door leaf's back face, or an
+  // outside wall's inner face), in an unfinished-wood tone. Through the glass it reads as the inside,
+  // its floor and a side wall receding as the customer orbits. It draws only while the camera is
+  // OUTSIDE this wall (onBeforeRender zeroes its draw range for any other camera, the quote's corner
+  // views included, so a window elsewhere never shows a box behind this one), casts no shadow, and
+  // hides in "look inside" (applyShellMode finds it by userData.ssGlassRoom). The caller adds it: a
+  // door's under its ssDoorPart, "windowInterior"; a wall window's as it is.
+  const SS_GLASS_ROOM_FT = 2.5, SS_GLASS_ROOM_HEX = "#6B5A48";
+  const glassRoom = (wf, a0, a1, y0, y1, back) => {
+    const room = wallBox(mat(SS_GLASS_ROOM_HEX, { side: THREE.BackSide, roughness: 0.95 }), wf, a0, a1, y0, y1,
+      -(back + SS_GLASS_ROOM_FT / 2), SS_GLASS_ROOM_FT);
     room.userData.noShadow = true;
+    room.userData.ssGlassRoom = true;
     // A point on the pane and the wall's outward normal, in the model's frame (wallBox's): the camera
     // is outside when it is on the normal's side of the pane, worked out per render in world space.
-    const ac = (hole.x0 + hole.x1) / 2;
-    const p0 = new THREE.Vector3(wf.O[0] + wf.U[0] * ac, (hole.y0 + hole.y1) / 2, wf.O[1] + wf.U[1] * ac);
+    const ac = (a0 + a1) / 2;
+    const p0 = new THREE.Vector3(wf.O[0] + wf.U[0] * ac, (y0 + y1) / 2, wf.O[1] + wf.U[1] * ac);
     const n0w = new THREE.Vector3(wf.N[0], 0, wf.N[1]);
     const pW = new THREE.Vector3(), nW = new THREE.Vector3(), cW = new THREE.Vector3();
     room.onBeforeRender = (_r, _s, cam, geo) => {
@@ -12055,7 +12045,22 @@ function buildShed3DModel(THREE, p) {
       cW.setFromMatrixPosition(cam.matrixWorld);
       geo.setDrawRange(0, cW.sub(pW).dot(nW) > 0 ? Infinity : 0);
     };
-    put(room, "windowInterior");
+    return room;
+  };
+  // doorWindowIn puts the window's own casing round the hole, in the window's colour, lying in the
+  // clearance the leaf leaves it with its face behind the frame's, then the window itself through
+  // d3WindowFill's inset mode ("top" for a transom: vertical bars only, no double-hung rail), then the
+  // room seen through it (glassRoom), from the leaf's back face: every leaf's slab is 0.16 deep, centred.
+  const doorWindowIn = (put, og, wf, hole, win) => {
+    const c = SS_DOOR_WIN_CASE_FT, wm = mat(win.it.colorHex || "#3A3F45", { roughness: 0.6 });
+    put(wallBox(wm, wf, hole.x0 - c, hole.x0, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x1, hole.x1 + c, hole.y0 - c, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), "windowCasing");
+    put(wallBox(wm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), "windowCasing");
+    const n0 = og.children.length;
+    d3WindowFill(og, wf, { it: win.it, a0: hole.x0, a1: hole.x1, y0: hole.y0, y1: hole.y1 }, hole.x0, hole.x1, win.at === "top" ? "top" : true);
+    for (let k = n0; k < og.children.length; k++) og.children[k].userData.ssDoorPart = "window";
+    put(glassRoom(wf, hole.x0, hole.x1, hole.y0, hole.y1, 0.08), "windowInterior");
   };
   // A TRANSOM's frame, the same on every door that takes one: the TRANSOM RAIL, one board F tall under
   // the window's casing and the full width of the leaf (the stiles stop under it, so nothing beside it
@@ -12983,6 +12988,8 @@ function buildShed3DModel(THREE, p) {
           if (ob.a0 >= o.a1) limR = Math.min(limR, ob.a0);
         });
         d3WindowFill(og, wf, o, limL, limR);
+        // The room seen through it (glassRoom), from the wall's inner face, the size of the opening.
+        og.add(glassRoom(wf, o.a0, o.a1, o.y0, o.y1, T / 2));
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
         // A board-and-batten door is BUILT, and its photo is deliberately NOT layered over
@@ -18058,9 +18065,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           e.model.gableMat.depthWrite = !e.interior;
           e.model.gableMat.needsUpdate = true;
         }
-        // The rooms behind door glass (doorWindowIn) hide with the walls: seen through ghosted walls
-        // from above they would be boxes standing inside the building.
-        e.model.openingsGroup.traverse((o) => { if (o.userData && o.userData.ssDoorPart === "windowInterior") o.visible = !e.interior; });
+        // The rooms behind glass (glassRoom: doors and wall windows) hide with the walls: seen through
+        // ghosted walls from above they would be boxes standing inside the building.
+        e.model.openingsGroup.traverse((o) => { if (o.userData && o.userData.ssGlassRoom) o.visible = !e.interior; });
         if (e.model.battenMat) {
           // Board & batten's proud strips sit ON the walls in wallsGroup, so without this
           // "look inside" leaves a cage of opaque battens floating over a ghosted building.

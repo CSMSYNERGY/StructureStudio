@@ -52,7 +52,8 @@
 //      footer row takes it out and puts it back, and Get Estimate sends doorWindowAt 'top' per leaf.
 //   PN. PANES (migration 324): a window row's own pane count. Transoms at plain glass, 2, 3, 4 and 6
 //      draw 0, 1, 2, 3 and 5 equal-spaced vertical bars and no rail; a wall window set to 4 and a panel
-//      lite set to 3 keep their double-hung rail; an automatic wall window draws as it always did.
+//      lite set to 3 keep their double-hung rail; an automatic wall window draws as it always did. Every
+//      pane, a wall window's too, has the 2.5 ft room behind it (glassRoom, 2026-10-21).
 //
 // SS_DOOR_BASELINE=1 prints only the board-and-batten door's digest and exits, which is how
 // PLANK_DIGEST was recorded (on the tree before the generator, where the new looks draw as 'auto').
@@ -805,6 +806,14 @@ async function runPanes3D(browser, rect) {
     const rails = pieces.filter((m) => m.box && near(m.box[1], 0.07, 1e-3) && near(m.box[2], 0.09, 1e-3));
     ok(`PN ${d.key}: ${d.bars} vertical bar(s)${d.rail ? " and the double-hung rail" : ", no rail"}`, bars.length === d.bars && rails.length === d.rail,
       `${bars.length} bars, ${rails.length} rails`);
+    // Behind the glass, the room it looks into (glassRoom, 2026-10-21): one, 2.5 ft deep; a wall window's
+    // starts at the wall's inner face, a door pane's at the leaf's back face.
+    const gr = await page.evaluate((id) => {
+      const E = window.__ss3dEngine, g = E.model.openingsGroup.children.find((x) => x.userData && x.userData.itemId === id), out = [];
+      g.traverse((o) => { if (o.userData && o.userData.ssGlassRoom) out.push(+o.geometry.parameters.depth.toFixed(3)); });
+      return out;
+    }, items[i].id);
+    ok(`PN ${d.key}: one room behind the glass, 2.5 ft deep`, JSON.stringify(gr) === JSON.stringify([2.5]), JSON.stringify(gr));
     if (d.bars > 0) {
       // Equal panes: the bars split the glass into even widths.
       const glass = pieces.find((m) => m.transparent);
