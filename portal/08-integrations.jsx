@@ -4231,7 +4231,7 @@ function taxCodesUnavailable(err) {
 
 // ─── Your sales tax rate (Settings → Company → Tax, 2026-10-09) ───
 // The company rate (client_settings.ss_tax_rate / ss_tax_label / ss_tax_delivery, migration 158)
-// lived only on CRM Connection → Estimates & Invoices; it is set here now, through
+// lived only on GHL Connection → Estimates & Invoices; it is set here now, through
 // save_company_tax, and that card shows a read-only summary with a link back. Nothing about how
 // tax is worked out changes: every taxable item gets the one rate the chain picks (a rate verified
 // for the delivery address, else the sales location's own, else this one), and an item marked not
@@ -4587,7 +4587,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
             the rate on every taxable item unless a closer one applies. In CRM mode with a CRM
             connected the CRM works the tax out (submit-estimate sends the CRM's estimate). In CRM
             mode with NO CRM every estimate is refused today (submit-estimate's first check), and
-            the way out is the paperwork switch on CRM Connection, which needs this rate saved
+            the way out is the paperwork switch on GHL Connection, which needs this rate saved
             first: that card's save judges the STORED rate since it stopped posting one. Those two
             steps are told only to someone who can take them; a reader gets the situation and who
             can change it. */}
@@ -4596,8 +4596,8 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
             ? <>Charged on every taxable item. Items marked not taxable in your catalog are never taxed. A sales location's own rate, or a rate verified for the delivery address, is used instead. Enter 0 if you don't collect sales tax.</>
             : d.crmConfigured === true
               ? <>Your CRM works out the tax on your estimates, so this rate isn't used.</>
-              : <>Your estimates can't go out until you switch to StructureStudio paperwork.{canEditTax && <> Save your rate here first (0 counts), then {connectionLink("make the switch on CRM Connection")}.</>}</>}
-          {!canEditTax && " Only someone who can edit CRM Connection settings can change this."}
+              : <>Your estimates can't go out until you switch to StructureStudio paperwork.{canEditTax && <> Save your rate here first (0 counts), then {connectionLink("make the switch on GHL Connection")}.</>}</>}
+          {!canEditTax && " Only someone who can edit GHL Connection settings can change this."}
         </div>
         {canEditTax ? (<>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, maxWidth: 520 }}>
@@ -4664,7 +4664,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
         everything that code covers — each building style and option heading takes one code. You (or your accountant)
         choose the codes, so they match how you file. The notes beside common codes are suggestions, not tax advice.
         {/* Said up front rather than left to missing buttons, as on the location rates. */}
-        {d && !canEditTax && " Only someone who can edit CRM Connection settings can change these codes."}
+        {d && !canEditTax && " Only someone who can edit GHL Connection settings can change these codes."}
       </div>
       {/* Every state gets the note, because in none of them does a code change a quote yet. It is
           the amber warning when this account is not on per-line-ready tax at all (CRM mode, or
@@ -4678,7 +4678,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
         </div>
       )}
 
-      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view CRM Connection settings can see your tax codes.</p>}
+      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view GHL Connection settings can see your tax codes.</p>}
       {canReadTax && !data && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
       {data && data.err && data.unavailable && (
         <p style={{ fontSize: 13, color: "#64748B" }}>Tax codes aren't available on your account yet — check back soon.</p>
@@ -5074,13 +5074,40 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
       {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
       {/* The whole tab is settings_crm (SETTINGS_TAB_AREA.tax), so reading is already implied by
           the tab being here; editing is passed separately, the same pair LocationsCard gets. The
-          company rate block's "switch to StructureStudio paperwork" link opens CRM Connection
+          company rate block's "switch to StructureStudio paperwork" link opens GHL Connection
           (also settings_crm) without leaving the page. */}
       {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} onOpenConnection={() => onSub("connection")} />}
       {/* Read-only (workstream 1 phase 4): the card account is managed by the Structure Studio team,
           so the tab only shows it. The tab rides settings_branding (SETTINGS_TAB_AREA.payments),
           the same gate as payments_status, so whoever sees it may read it. */}
       {sub === "payments" && <PaymentsCard />}
+    </div>
+  );
+}
+
+// ── Customer Hub ─────────────────────────────────────────────────────────────────────────
+// The customer-facing config that is OURS (Carolyn 2026-10-22). Two tabs: the built-in
+// pipelines and card statuses, and how a customer gets their login code. GHL Connection is a
+// separate rail item and stays one — this hub is deliberately not about anyone else's CRM.
+//
+// Pipelines keeps the entitlement gate it had as a rail item: statuses and stages belong to the
+// built-in CRM and every crm_* action refuses without it, so an unentitled tenant gets the
+// teaser rather than a screen whose every button 403s. The Customer login tab is NOT gated —
+// the customer login is ours whether or not a tenant has the CRM add-on or a GHL connection,
+// which is exactly why that card was worth lifting off the connection page.
+function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false }) {
+  // The same clamp SettingsShell and CompanyShell run: an unknown slug must land on a tab that
+  // really renders, or the sub-tab bar appears over an empty body.
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      {sub === "pipelines" && (crmUnlocked || crmPending
+        ? <PipelineSettings viewing={!!viewingLabel} />
+        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+      {/* One card, its own section of SettingsView — the form state covers every field whichever
+          section renders and this card posts only its own, so nothing else is touched. */}
+      {sub === "customer-login" && <SettingsView section="customer-login" />}
     </div>
   );
 }
@@ -5161,10 +5188,13 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       )}
       {/* The company rate lives on Company → Tax now; the Estimates & Invoices card links there. */}
       {sub === "connection" && <SettingsView section="connection" onOpenTax={() => setSub("tax")} />}
-      {/* Statuses and pipeline stages belong to the built-in CRM (the actions refuse without it). */}
-      {sub === "pipelines" && (crmUnlocked || crmPending
-        ? <PipelineSettings viewing={!!viewingLabel} />
-        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+      {/* CUSTOMER HUB is a hub with its own top navigation, the Company shape: two tabs behind
+          one rail item, each still a real /settings/<slug>. `pipelines` is unchanged as an
+          address, which is the point — see ssCustomerHubTabs. */}
+      {hubs.pipelines.some((t) => t[0] === sub) && (
+        <CustomerHubShell sub={sub} onSub={setSub} tabs={hubs.pipelines}
+          viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending} />
+      )}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked

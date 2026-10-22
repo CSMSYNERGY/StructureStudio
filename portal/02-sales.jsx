@@ -3295,7 +3295,7 @@ async function ssTaxOutcome(res) {
 // button in the estimate and it creates the taxes for them." It shows the tax line the quote
 // carries and which rate priced it, lets whoever may edit the design move it to another sales
 // location, and offers the one deliberate, billed lookup — only when the account's lookups are
-// switched on and the reader may edit CRM Connection settings, the area that owns the company
+// switched on and the reader may edit GHL Connection settings, the area that owns the company
 // rate.
 //
 // ⚠️ IT READS THE DESIGN ITSELF, which the record page above it deliberately never does. The

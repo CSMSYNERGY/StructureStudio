@@ -2017,9 +2017,15 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  // The five functions that between them define every settings slug. Anchored on the
-  // declaration, so a rename surfaces here rather than quietly shrinking the slug set.
-  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs"];
+  // The functions that between them define every settings slug. Anchored on the declaration, so
+  // a rename surfaces here rather than quietly shrinking the slug set.
+  //
+  // ⚠️ A NEW HUB MEANS A NEW NAME HERE. ssCustomerHubTabs (2026-10-22) was the first hub added
+  // after this check was written, and until it was listed its tabs were the one part of Settings
+  // with no route coverage — the exact blindness the messages below are worded against. The
+  // count guard beneath only catches the list going EMPTY, not it going stale.
+  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs",
+    "ssCustomerHubTabs"];
   const slugs = new Set();
   for (const name of TAB_FNS) {
     const at = core.indexOf(`function ${name}(`);
