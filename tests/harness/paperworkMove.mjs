@@ -2,7 +2,7 @@
 // 280; Carolyn 2026-09-07, "All other builders will only have the option to invoice through SS").
 //
 // 280 changes the column default and nothing on this page. Each existing builder moves when the owner,
-// or an operator viewing as them, saves Settings → CRM Connection → Estimates & Invoices with, if they
+// or an operator viewing as them, saves Settings → GHL Connection → Estimates & Invoices with, if they
 // have them, their own next estimate and invoice numbers: since migration 283 (Carolyn 2026-10-06) a
 // blank number starts at 1000. The builder's tax rate is still required, and since 2026-10-09 it is
 // SET on Company → Tax (save_company_tax): this card shows it as a read-only summary with a link there,
@@ -152,7 +152,7 @@ const boot = async (shape) => {
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.getByText("Settings", { exact: true }).last().click();
   await page.waitForTimeout(900);
-  await page.getByText("CRM Connection", { exact: true }).last().click();
+  await page.getByText("GHL Connection", { exact: true }).last().click();
   await waitText(SAVE);
   await page.waitForTimeout(400);
 };

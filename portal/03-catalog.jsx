@@ -1,7 +1,7 @@
 // ─── Settings (via portal-settings edge function; API key is write-only) ───
 
 // Is a failed `tax_settings` read a "no tax section here" rather than a fault to show?
-// These answers qualify, and each renders NOTHING (the sales-tax UI on CRM Connection and
+// These answers qualify, and each renders NOTHING (the sales-tax UI on GHL Connection and
 // on Company → Locations reads this):
 //   • A portal-settings OLDER than this page. The frontend deploys itself on push and edge
 //     functions deploy separately, so for a while the page can be ahead of the function.
@@ -239,7 +239,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
       // 269 never sees the key, so this page can ship ahead of either without breaking the save.
       ...(quoteDaysReady ? { quoteValidDays: quoteDaysBlank ? 30 : Number(form.quoteValidDays) } : {}),
       // Only when `status` could read the column (migration 276), and only when the owner changed
-      // it: a save from Branding or CRM Connection, or one from a tab opened before someone else
+      // it: a save from Branding or GHL Connection, or one from a tab opened before someone else
       // flipped the switch, then never writes back a value nobody on this screen chose.
       ...(cornerReady && form.quoteCornerViews !== status.quoteCornerViews ? { quoteCornerViews: form.quoteCornerViews === true } : {}),
     };
@@ -262,7 +262,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
   // Junior Barns as he is an active user. All other builders will only have the option to
   // invoice through SS. They can still have the customer info pass to GHL if they choose."
   //
-  // So this hides ONE checkbox. The CRM Connection card above is untouched — location id,
+  // So this hides ONE checkbox. The GHL Connection card above is untouched — location id,
   // API key, pipeline and stages stay for everyone, and submit-estimate keeps mirroring
   // contacts and opportunities into a connected CRM while we issue the paperwork.
   //
@@ -300,7 +300,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
   // it here, never flip it. No price is shown — the meters are off, and a price read follows
   // the catalog redaction precedent when it is needed.
   //
-  // Asked only on the CRM Connection screen, and only when the SAVED row is SS mode —
+  // Asked only on the GHL Connection screen, and only when the SAVED row is SS mode —
   // `status.invoiceInGhl === false`, the same test submit-estimate makes
   // (`invoice_in_ghl !== false` is the CRM path). NOT `ssMode` above: that one is true for a
   // grandfathered tenant without the capability whose row still says CRM, so their
@@ -585,27 +585,27 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
 
       {show("connection") && (<>
       <div style={S.card}>
-        <div style={S.h2}>CRM Connection</div>
+        <div style={S.h2}>GHL Connection</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected. Optional — connect one to mirror contacts and estimates into it. With no CRM, contacts stay in Structure Studio and estimates go out through Structure Studio paperwork (switch it on below).</>}
+            : <>Not connected. Optional — connect GHL to mirror contacts and estimates into it. With no connection, contacts stay in Structure Studio and estimates go out through Structure Studio paperwork (switch it on below).</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-          <div><span style={S.lbl}>CRM Location ID</span>
+          <div><span style={S.lbl}>GHL Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
-          <div><span style={S.lbl}>CRM API Key</span>
+          <div><span style={S.lbl}>GHL API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
           <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
           {status && status.configured && (
-            <button type="button" onClick={disconnectGhl} disabled={ghlBusy} style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", opacity: ghlBusy ? 0.6 : 1 }}>Disconnect CRM</button>
+            <button type="button" onClick={disconnectGhl} disabled={ghlBusy} style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", opacity: ghlBusy ? 0.6 : 1 }}>Disconnect GHL</button>
           )}
         </div>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GHL and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
       </div>
 
       {/* Quotes & Invoices (migration 121). ON is what every tenant has done since day one:
@@ -820,12 +820,21 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
         </div>
       )}
 
+      </>)}
+
       {/* CUSTOMER LOGIN CODE (migration 231; plan 3.6, Ahsan 2026-09-15: "Text AND email login
           codes before the expo"). The designer's Log in sheet offers Text | Email; this picks
           which one comes FIRST. customer-auth login_options only ever treats it as a preference
           among the channels the platform can actually deliver, so choosing Email before email
           codes are switched on changes nothing a customer sees — the copy says so rather than
-          promising a route. Every tenant, CRM or not: the login is ours either way. */}
+          promising a route. Every tenant, CRM or not: the login is ours either way.
+
+          ITS OWN SECTION since 2026-10-22 — Settings → Customer Hub → Customer login. It sat on
+          the connection page under the GHL credentials, which read as though it were part of
+          them; the sentence above is the reason it never was. The card is unchanged and so is
+          its save (saveLoginDefault, posting only customerLoginDefault), so moving it writes
+          nothing differently. */}
+      {show("customer-login") && (
       <div style={S.card}>
         <div style={S.h2}>Customer login code</div>
         <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
@@ -853,7 +862,9 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
           </div>
         )}
       </div>
+      )}
 
+      {show("connection") && (<>
       {status && status.configured && (
         <div style={S.card}>
           <div style={S.h2}>Pipeline &amp; Stages</div>
@@ -1130,7 +1141,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
           Gated on branding-or-company rather than hoisted unconditionally: `show()` returns
           true for EVERY key when `section` is null, so an unconditional button is correct for
           the legacy all-sections render but would also add a second, whole-form Save to the
-          CRM Connection tab, which deliberately has its own three narrow saves. */}
+          GHL Connection tab, which deliberately has its own three narrow saves. */}
       {(show("branding") || show("company")) && (
         <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
       )}
@@ -4824,7 +4835,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
             <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
             Taxable
             {/* The twin of "Charge tax on delivery" on Company → Tax (both write ss_tax_delivery;
-                until 2026-10-09 the other one was on CRM Connection → Estimates & Invoices). It used to
+                until 2026-10-09 the other one was on GHL Connection → Estimates & Invoices). It used to
                 point at Company → Business details, which has no such switch. */}
             <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as Company &rarr; Tax)</span>
           </label>

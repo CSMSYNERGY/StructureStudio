@@ -4201,7 +4201,7 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
           instead of your company rate{tax.companyRatePct != null ? ` (${pctText(tax.companyRatePct)}%, set in Company → Tax)` : " (set in Company → Tax)"}.
           {/* Said up front rather than left to a missing button: a reader who can see the
               rates but not change them should know who can, not wonder where the control went. */}
-          {!canEditTax && " Only someone who can edit CRM Connection settings can change these rates."}
+          {!canEditTax && " Only someone who can edit GHL Connection settings can change these rates."}
         </>}
       </div>
       {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}

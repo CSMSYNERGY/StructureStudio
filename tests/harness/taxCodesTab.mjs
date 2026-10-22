@@ -33,7 +33,7 @@
 //   K. a blank rate in paperwork mode: the server's own sentence, nothing claims it saved; a
 //      paperwork-mode builder with no rate on file sees the amber warning
 //   L. CRM mode with a CRM connected: "Your CRM works out the tax on your estimates…"
-//   M. CRM mode with NO CRM: the paperwork sentence and a link that opens CRM Connection in the same
+//   M. CRM mode with NO CRM: the paperwork sentence and a link that opens GHL Connection in the same
 //      document, keeping ?view=
 //   N. switching codes off posts the switch alone, folds the editor to one line and keeps every
 //      code; a reload stays folded; switching back on brings the saved rows back
@@ -466,7 +466,7 @@ try {
   ok("D: no Add, no picker, no checklist", (await page.getByRole("button", { name: "+ Add tax code" }).count()) === 0
     && (await page.locator('input[aria-label="Search tax codes"]').count()) === 0
     && (await page.getByRole("button", { name: "Change what it covers" }).count()) === 0);
-  ok("D: the reader is told who can change the codes", tD.includes("Only someone who can edit CRM Connection settings can change these codes."));
+  ok("D: the reader is told who can change the codes", tD.includes("Only someone who can edit GHL Connection settings can change these codes."));
   // Scoped to the rows: the explainer above them says "Pick a code, then tick…" to everyone.
   const rowsD = await page.locator("[data-tax-row]").evaluateAll((els) => els.map((e) => e.innerText).join("\n"));
   ok("D: no suggested rows are shown to a reader", (await page.locator("[data-tax-row]").count()) === 2 && !/Pick a code|PRODUCTS|SERVICES/.test(rowsD), rowsD.replace(/\n/g, " | "));
@@ -595,13 +595,13 @@ try {
   await page.waitForTimeout(300);
   const copyM = (await page.locator("[data-company-tax-copy]").innerText()).trim();
   ok("M: no CRM: estimates can't go out until the paperwork switch",
-    copyM === "Your estimates can't go out until you switch to StructureStudio paperwork. Save your rate here first (0 counts), then make the switch on CRM Connection.", copyM);
-  const link = block().getByRole("link", { name: "make the switch on CRM Connection" });
+    copyM === "Your estimates can't go out until you switch to StructureStudio paperwork. Save your rate here first (0 counts), then make the switch on GHL Connection.", copyM);
+  const link = block().getByRole("link", { name: "make the switch on GHL Connection" });
   const href = await link.getAttribute("href").catch(() => null);
-  ok("M: the link is CRM Connection's address and keeps the query string", href === "/settings/connection?harness=keep", String(href));
+  ok("M: the link is GHL Connection's address and keeps the query string", href === "/settings/connection?harness=keep", String(href));
   await page.evaluate(() => { window.__ssSameDoc = true; });
   await link.click().catch(() => {});
-  ok("M: it opens CRM Connection", await waitText("Save Estimate & Invoice Settings"));
+  ok("M: it opens GHL Connection", await waitText("Save Estimate & Invoice Settings"));
   ok("M: …in the same document (no reload) at the real address",
     (await page.evaluate(() => window.__ssSameDoc === true)) && new URL(page.url()).pathname === "/settings/connection", page.url());
 
@@ -648,7 +648,7 @@ try {
   await page.waitForTimeout(400);
   const ro = await page.locator("[data-company-tax-readonly]").innerText().catch(() => "");
   ok("P: the reader sees the stored rate as text", /Rate:\s*6\.5%/.test(ro) && /Label on documents:\s*Sales tax/.test(ro) && /Tax on delivery:\s*yes/.test(ro), ro.replace(/\n/g, " | "));
-  ok("P: …is told who can change it", (await page.locator("[data-company-tax-copy]").innerText()).includes("Only someone who can edit CRM Connection settings can change this."));
+  ok("P: …is told who can change it", (await page.locator("[data-company-tax-copy]").innerText()).includes("Only someone who can edit GHL Connection settings can change this."));
   ok("P: …and has no boxes and no Save", (await rateBox().count()) === 0 && (await saveRateBtn().count()) === 0);
   ok("P: the switch shows the setting but cannot be flipped", (await switchBox().isChecked()) && await switchBox().isDisabled());
   // CRM mode with no CRM: the two steps out (save a rate, make the switch) are for an editor.
@@ -657,7 +657,7 @@ try {
   await page.waitForTimeout(400);
   const copyP = (await page.locator("[data-company-tax-copy]").innerText().catch(() => "")).trim();
   ok("P: no CRM, a reader: the situation and who can change it, no steps they cannot take",
-    copyP === "Your estimates can't go out until you switch to StructureStudio paperwork. Only someone who can edit CRM Connection settings can change this.", copyP);
+    copyP === "Your estimates can't go out until you switch to StructureStudio paperwork. Only someone who can edit GHL Connection settings can change this.", copyP);
   ok("P: …and no link to make the switch", (await block().locator("a").count()) === 0);
 
   // ── Q: a database without 290 ──

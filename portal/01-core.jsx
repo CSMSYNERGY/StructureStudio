@@ -896,6 +896,11 @@ const SETTINGS_TAB_AREA = {
   connection: "settings_crm",
   // Statuses and pipeline stages (migration 302): every write is gated settings_crm:edit.
   pipelines: "settings_crm",
+  // The Customer login code card (migration 231), lifted off the connection page into the
+  // Customer Hub. Same area it had there — it saves through portal-settings' global `save`,
+  // which is gated settings_crm:edit AND settings_branding:edit, exactly as it was when the
+  // card sat on GHL Connection.
+  "customer-login": "settings_crm",
   // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
   // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
   // the company rate and the location rates — a tab on any other area would show someone a
@@ -1700,7 +1705,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // nothing else, while /settings/team still rendered perfectly for anyone who
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
     // settings_crm joined on 2026-09-17 with the Tax tab, for the same reason: someone granted
-    // CRM Connection but neither Branding nor Team would otherwise have a Tax tab they may read
+    // GHL Connection but neither Branding nor Team would otherwise have a Tax tab they may read
     // and no rail item that leads to it.
     ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team")
       || ssCanRead(access, "settings_crm"))
@@ -1720,10 +1725,21 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // it towards since she said the catalog four "aren't grouped ... they have their own nav
     // on the side". Only My Profile still carries a heading, because it is the one item on this
     // rail that configures the PERSON rather than the business.
-    // Card statuses and the built-in pipelines' stages (migration 302, Carolyn 2026-10-11:
-    // "I do want to have these stages in the settings"). Above CRM Connection, which is GHL's.
-    ["pipelines", "Pipelines", "Card statuses, when each is set automatically, and each pipeline's stages", null],
-    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
+    // CUSTOMER HUB is a HUB, not a page (Carolyn 2026-10-22: "a new tab in settings called
+    // Customer Hub for all the CRM Items in SS"). It holds the customer-facing config that is
+    // OURS — the built-in pipelines and card statuses, and how a customer gets their login
+    // code — as against GHL Connection below, which is somebody else's CRM. See
+    // ssCustomerHubTabs for the list that renders inside it.
+    //
+    // ⚠️ THE SLUG STAYS `pipelines`. Only the LABEL is new, which is the shape every hub here
+    // has: the rail id IS the first tab's slug (Billing → "Subscription", Colors → "Paint"), so
+    // the rail item is a real address and /settings/pipelines — the link people hold, and the
+    // path contactsHub_test.ts pins — opens exactly the page it always did. A rail id that is
+    // NOT a slug was tried first and the preflight route-coverage gate refused it, rightly: an
+    // unknown sub clamps to Structures rather than erroring, so such an id is a page that
+    // silently goes somewhere else.
+    ["pipelines", "Customer Hub", "Your pipelines and card statuses, and how customers get their login code", null],
+    ["connection", "GHL Connection", "GHL credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
     // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
     // it was already the generic word, so no link moved.
@@ -1863,6 +1879,31 @@ function ssBillingTabs() {
   ];
 }
 
+// ── Inside Customer Hub ──────────────────────────────────────────────────────────────────
+// Carolyn 2026-10-22: "I want a new tab in settings called Customer Hub for all the CRM Items
+// in SS." The split she chose is by WHOSE CRM it is: this hub is the one we build (pipelines,
+// card statuses, the customer's login code), and GHL Connection stays its own rail item for
+// the credentials and stage mapping of somebody else's.
+//
+// ⚠️ `pipelines` STAYS THE FIRST TAB and keeps its slug — and it is the HUB's own rail id too,
+// the shape every hub here has. It is the address the rail pointed at until today, it is in
+// bookmarks, and tests/.../contactsHub_test.ts pins /settings/pipelines as a routable path — so
+// the hub opens on exactly the page that slug always opened.
+//
+// Both tabs are settings_crm and both were already behind it, so this is a relocation in the
+// UI and not a change of access — the same thing Company's absorption of Team was. No per-tab
+// filter is needed for that reason, but the hub gate in ssSettingsTabs still decides whether
+// the rail item appears at all.
+function ssCustomerHubTabs() {
+  return [
+    ["pipelines", "Pipelines & Statuses", "Card statuses, when each is set automatically, and each pipeline's stages"],
+    // Lifted off the connection page, where it sat under the GHL credentials and read as part
+    // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
+    // card's own note in 03-catalog.jsx), which is precisely why it belongs here.
+    ["customer-login", "Customer login", "How customers get the code that logs them in to accept estimates and pay invoices"],
+  ];
+}
+
 // ── Inside Options ───────────────────────────────────────────────────────────────────────
 // Nine catalog editors that used to stack down one scrolling column, banded into three colour
 // groups by OptionsGroup. Carolyn 2026-09-11: "I want to have each segment on their own tab,
@@ -1914,6 +1955,9 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     colors: ssColorTabs(),
     billing: ssBillingTabs(),
     options: ssOptionTabs(),
+    // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
+    // its first tab's slug. See ssCustomerHubTabs.
+    pipelines: ssCustomerHubTabs(),
   };
 }
 
