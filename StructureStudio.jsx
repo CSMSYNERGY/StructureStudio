@@ -12087,6 +12087,11 @@ function buildShed3DModel(THREE, p) {
     }
     room.userData.noShadow = true;
     room.userData.ssGlassRoom = true;
+    // Never picked. It sits behind the glass and around it, so a click or an orbit drag on the siding
+    // beside a window (or on a workbench under it, in look inside, where it is hidden but keeps its
+    // draw range) would grab the window instead (2026-10-23 promotion review). Hidden meshes still
+    // raycast in three, so the room opts out here rather than in pickItem3.
+    room.raycast = () => {};
     // A point on the pane and the wall's outward normal, in the model's frame (wallBox's): the camera
     // is outside when it is on the normal's side of the pane, worked out per render in world space.
     const ac = (a0 + a1) / 2;
@@ -25286,6 +25291,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [resizing, setResizing] = useState(null);
   const [showExport, setShowExport] = useState(false);
   const [exportUrl, setExportUrl] = useState(null);
+  // The plan preview sits on document.body, so in the portal a Back (button, gesture, Alt+Left) that
+  // only hides the designer left it over the next page: a history move closes it (2026-10-23
+  // promotion review). The scrim covers the portal's own nav, so Back is the only way out past it.
+  useEffect(() => {
+    if (!showExport) return undefined;
+    const close = () => { setShowExport(false); setExportUrl(null); };
+    window.addEventListener("popstate", close);
+    return () => window.removeEventListener("popstate", close);
+  }, [showExport]);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState(null);

@@ -10,6 +10,11 @@
 //   B  portal: a delete with nothing to report flashes one line, no link, and clears itself;
 //   C  /admin.html (the break-glass console): the same report and link after its own delete, sticky
 //      too, and its dialog describes the same scope;
+//   D  portal: the builders list failing to reload right after the delete (a 503) still shows the
+//      report and the export link: the flash comes first, as in admin.html (2026-10-23 promotion
+//      review: the refresh's throw used to swallow the only link to their customers' data); and the
+//      Builders list's number-requests load failing in the same outage shows its error beside the
+//      report instead of replacing it;
 //   every scenario: no uncaught page error.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -56,6 +61,9 @@ const { ok, failed, results } = reporter();
 const { browser, ctx: unused } = await launch({ width: 1400, height: 1000 });
 await unused.close();
 
+// failListAfterDelete: list_clients and number_requests_list answer 503 once the delete has gone
+// through (case D).
+const S = { failListAfterDelete: false };
 async function open(path, deleteAnswer) {
   const calls = [];
   const pageErrors = [];
@@ -97,6 +105,7 @@ async function open(path, deleteAnswer) {
       if (/[?&]warm=1/.test(url)) return json(route, { ok: true });
       calls.push(body);
       const clients = deletedOnce ? [] : [{ client_id: CLIENT, company_name: "Harness Sheds" }];
+      if ((body.action === "list_clients" || body.action === "number_requests_list") && deletedOnce && S.failListAfterDelete) return json(route, { error: "Service unavailable" }, 503);
       if (body.action === "list_clients") return json(route, { ok: true, clients, features: [] });
       if (body.action === "get_master") return json(route, { ok: true, layoutItemTypes: [] });
       if (body.action === "get_client_catalog") return json(route, { ok: true, styles: [], sizes: [], items: [] });
@@ -175,6 +184,24 @@ try {
   ok("B: and it clears itself as before", (await flashText(B.page)) === "");
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
   await B.ctx.close();
+
+  // ── D ──
+  S.failListAfterDelete = true;
+  let D = null, dErr = "";
+  try { D = await portalDelete(MESSY); } catch (e) { dErr = String(e && e.message || e).split(/\r?\n/)[0]; }
+  S.failListAfterDelete = false;
+  ok("D: the list failing to reload after the delete still shows the report", !!D && D.flash.startsWith("Deleted “harness-builder”"), dErr || (D && D.flash));
+  ok("D: …and the export link", !!D && (await D.page.locator("[data-adm-export-link]").count()) === 1);
+  if (D) await D.page.waitForTimeout(2000);
+  const dCalls = D ? D.calls.map((c) => c.action) : [];
+  ok("D: the Builders list's number-requests load failed too (the outage reached it)", dCalls.includes("number_requests_list"), dCalls.join(","));
+  ok("D: …and the report and link are still there, the error beside them",
+    !!D && (await flashText(D.page)).startsWith("Deleted “harness-builder”") && (await D.page.locator("[data-adm-export-link]").count()) === 1
+      && (await D.page.getByText("Service unavailable").count()) > 0, D ? await flashText(D.page) : "");
+  if (D) {
+    ok("D: no uncaught page errors", D.pageErrors.length === 0, D.pageErrors.join(" | "));
+    await D.ctx.close();
+  }
 
   // ── C ──
   const C = await open("/admin.html", MESSY);

@@ -43,6 +43,10 @@
 //      of a window across it; a scoped rebuild of that wall, as a drag makes, closes them with the
 //      windows lowered under the plate and opens them again with the windows back up (shedBand,
 //      2026-10-21)
+//   R8 no room can ever be picked: rays through every room from five sides, its draw range forced full
+//      (as on a wall facing the camera, and as a hidden one keeps it in look inside), hit nothing, so a
+//      click or an orbit drag on the siding beside a window, or on a workbench under it in look inside,
+//      never grabs the window (2026-10-23 promotion review)
 // Shots and the corner sheet go to the shots folder, named by TAG (default "after"), so a run against
 // the tree before the change gives the matching "before" set (its R checks fail there, as they should).
 //
@@ -151,6 +155,29 @@ const readRooms = (page) => page.evaluate(() => {
     return { id: g.userData.itemId, wall: g.userData.wall, rooms, glass };
   });
 });
+
+// R8: rays through each room from five sides, its draw range forced full and put back after.
+const pickCheck = (page) => page.evaluate(async (url) => {
+  const THREE = await import(url);
+  const E = window.__ss3dEngine;
+  E.scene.updateMatrixWorld(true);
+  const ray = new THREE.Raycaster();
+  let rooms = 0, hits = 0;
+  E.model.openingsGroup.traverse((o) => {
+    if (!o.isMesh || !(o.userData && o.userData.ssGlassRoom)) return;
+    rooms++;
+    const dr = { start: o.geometry.drawRange.start, count: o.geometry.drawRange.count };
+    o.geometry.setDrawRange(0, Infinity);
+    const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+    for (const d of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0.6, 0.3, 0.74]]) {
+      const dir = new THREE.Vector3(...d).normalize();
+      ray.set(c.clone().addScaledVector(dir, -20), dir);
+      if (ray.intersectObject(o, false).length) hits++;
+    }
+    o.geometry.setDrawRange(dr.start, dr.count);
+  });
+  return { rooms, hits };
+}, THREE_URL);
 
 // R3: segments from just behind the glass, and from just in front of it, to the room's far and half-way
 // corners, against everything opaque in the scene but the window's own group, the rooms, and the
@@ -388,6 +415,8 @@ async function runDesign(browser, d) {
     const g = wins.find((x) => x.id === idOf("gableHigh"));
     ok(`R4 ${tag} the window high in the gable end: its room stays under the 8 ft wall top`, !!(g && g.rooms[0] && g.rooms[0].max[1] <= 8 + 1e-3), g && g.rooms[0] ? g.rooms[0].max[1].toFixed(3) : "no room");
   }
+  const pk = await pickCheck(page);
+  ok(`R8 ${tag} no room can be picked: rays through all ${pk.rooms} rooms from five sides, draw range full, hit none`, pk.rooms > 0 && pk.hits === 0, `${pk.hits} hits`);
   // R5: from outside the south wall (corners and many), the south rooms draw and the north ones do not;
   // in look inside, none shows.
   if (d.key === "corners" || d.key === "many") {

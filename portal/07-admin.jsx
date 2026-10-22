@@ -2002,7 +2002,13 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   // makes a fresh object), so a superseded timer no-ops instead of clobbering.
   // A `sticky` message (a delete that left data behind, 2026-10-21) stays until dismissed: six
   // seconds is not long enough to read what was kept.
-  const flash = (m) => { setMsg(m); if (m && m.ok && !m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
+  // A sticky report that carries a link (a deleted builder's customer-data export, the only copy)
+  // keeps it when an unrelated error arrives: the error shows above it instead (2026-10-23 promotion
+  // review: the Builders list's number-requests load, failing in the same outage, replaced it).
+  const flash = (m) => {
+    setMsg((cur) => (m && m.err && !m.ok && cur && cur.ok && cur.sticky && cur.link ? { ...cur, err: m.err } : m));
+    if (m && m.ok && !m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000);
+  };
   const selRow = (clients || []).find((c) => c.client_id === sel) || null;
   const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
   const needsClient = active[3] === "client";
@@ -3150,14 +3156,18 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             const parts = admDeletedSummary(r && r.deleted);
             const report = admDeleteReport(r);
             const exportUrl = r && r.export && r.export.url;
-            await onReloadClients();
             // Sticky while there is anything to read, and always with an export: the link is the only
-            // copy of their customers' data.
+            // copy of their customers' data. Shown BEFORE the list refresh, as admin.app.jsx does: a
+            // failed refresh must not swallow it (2026-10-23 promotion review).
             onFlash({
               ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}${report ? ` ${report}` : ""}`,
               sticky: !!(report || exportUrl),
               link: exportUrl ? { href: exportUrl, label: "Download the customer-data export" } : null,
             });
+            try { await onReloadClients(); } catch (e) {
+              // The list catches up on the next load; the flash above already holds the link.
+              if (window.ssLogError) window.ssLogError("portal", `Builders list did not reload after deleting ${id}: ${(e && e.message) || e}`, "delete_list_reload");
+            }
             onDeleted();
           }} />
       )}

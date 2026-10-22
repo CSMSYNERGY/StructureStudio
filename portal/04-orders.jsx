@@ -3714,6 +3714,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     })();
     return () => { alive = false; };
   }, [payOpen, o.id]);
+  // Closed, the answer goes too: OrderDetail stays mounted, and the next open would otherwise fill
+  // the box from THIS answer (the deposit, or a balance since paid) before its own arrives, and
+  // keep it when the new one says nothing can be charged (2026-10-23 promotion review).
+  useEffect(() => { if (!payOpen) setPayOpts(null); }, [payOpen]);
 
   // Choosing Card or Bank lands on "Take it now", but only an account that CAN charge draws
   // the Already collected / Take it now toggle. Without it, landing on "charge" was a dead end:
@@ -4364,7 +4368,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     });
     setBusy(false);
     if (error) { setMsg({ err: error.message }); return; }
-    setPayOpen(false); setAmount(""); setReference(""); setMethod("cash");
+    // Everything closePay resets too (the Swipe choice, the reader's hint and stuck flag, the card),
+    // so the next open starts clean (2026-10-23 promotion review), then this path's own.
+    closePay(); setAmount(""); setReference(""); setMethod("cash");
     setMsg({ ok: "Payment recorded." });
     onChanged();
   };

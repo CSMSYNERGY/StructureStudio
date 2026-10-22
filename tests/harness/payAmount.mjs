@@ -16,6 +16,10 @@
 //      Card > Bank / ACH > Card and Already collected > Charge it now
 //   F  the server's own refusal of an amount shows in the modal (a balance that moved meanwhile)
 //   G  Already collected records the typed figure (a payments row of 75000 for "750")
+//   H  reopened on the same order, the box never takes the LAST open's answer (the deposit): while the
+//      new pay_options is on its way, and after it says nothing can be charged (paid in full), the box
+//      keeps the balance it opened on (2026-10-23 promotion review: a stale 2000.00 stayed, and typing
+//      after it made "2000.00150")
 //   X  no uncaught page errors; nothing left the machine
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
@@ -50,7 +54,7 @@ const PORTAL_OVERRIDE = process.env.SS_PORTAL_ARTIFACT ? readFileSync(process.en
 
 // chargeNext: the next `charge` gets this { status, body } once. payOptionsDelayMs: pay_options is
 // held back, so a chip picked before it lands can be checked against it.
-const S = { minted: 0, chargeNext: null, payOptionsDelayMs: 0 };
+const S = { minted: 0, chargeNext: null, payOptionsDelayMs: 0, payOptionsNext: null };
 const fnCalls = [];
 const inserts = [];
 const offBox = [];
@@ -94,6 +98,7 @@ const handler = async (route) => {
     fnCalls.push(body);
     if (body.action === "pay_options") {
       if (S.payOptionsDelayMs) await new Promise((r) => setTimeout(r, S.payOptionsDelayMs));
+      if (S.payOptionsNext) return json(route, S.payOptionsNext);
       return json(route, { ok: true, canCharge: true, askCents: DEPOSIT, askKind: "deposit", balanceCents: TOTAL, settledCents: 0, pendingCents: 0, depositCents: DEPOSIT, minCents: 100, maxCents: 5000000, billingPrefill: { name: "Pat Example", street: "12 Main St", zip: "65801" }, tokenizer: TOKENIZER });
     }
     if (body.action === "charge") {
@@ -267,6 +272,21 @@ try {
   ok("G: Already collected records the typed figure (75000 cents, cash)",
     await until(() => inserts.length > nG, 6000) && inserts.slice(-1)[0].amount_cents === 75000 && inserts.slice(-1)[0].method === "cash",
     JSON.stringify(inserts.slice(-1).map((r) => ({ a: r.amount_cents, m: r.method }))));
+
+  // ── H ──
+  // G's modal closed on a canCharge answer asking the deposit. The next open is slow to hear back, and
+  // what it hears is "paid in full": the old deposit must never reach the box.
+  S.payOptionsDelayMs = 1500;
+  S.payOptionsNext = { ok: true, canCharge: false, reason: "paid_in_full", balanceCents: 0, askCents: 0 };
+  await openModal();
+  await page.waitForTimeout(300);
+  const hOpen = await boxValue();
+  ok("H: reopened, the box does not take the last open's deposit while the new answer is on its way", hOpen !== null && hOpen !== "2000.00", String(hOpen));
+  await page.waitForTimeout(2500);
+  const hLate = await boxValue();
+  ok("H: …nor after the new answer says nothing can be charged; the box keeps what it opened on", hLate === hOpen, `${hOpen} -> ${hLate}`);
+  await closeModal();
+  S.payOptionsDelayMs = 0; S.payOptionsNext = null;
 
   ok("X: no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
   ok("X: nothing tried to leave the machine but blocked fonts or the like",

@@ -8,6 +8,9 @@
 //   M2 the close button and the three action buttons are wholly on screen
 //   M3 the whole page preview shows above the buttons, at a readable size (desktop sizes)
 //   M4 nothing scrolls the page sideways
+//   M5 (portal) Back with the preview open (the browser's button, Android's gesture, Alt+Left) leaves the
+//      designer AND closes the preview: it sits on document.body, so hiding the designer used to leave
+//      it over the next page (2026-10-23 promotion review)
 // Sizes: 1366x768, 1440x900, 1920x1080, 1920x945 (a 1080 screen less Chrome's own bars), 1536x730
 // and 1280x620 (that screen at 125% / 150% scaling) on both surfaces, and 390x844 (a phone) on the
 // public page. Each size is screenshotted as
@@ -133,6 +136,17 @@ async function portalRun(browser) {
   await page.locator("[data-ss-style]").first().click().catch(() => {});
   await page.waitForTimeout(1200);
   for (const [w, h] of DESK) await checkSize(page, "portal", w, h);
+  // M5
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.locator("button.ssd-ft-pdf").first().click();
+  const planOpen = () => page.evaluate(() => [...document.querySelectorAll("h3")].some((h) => /Floorplan PDF/.test(h.textContent || "")));
+  await page.waitForFunction(() => [...document.querySelectorAll("h3")].some((h) => /Floorplan PDF/.test(h.textContent || "")), null, { timeout: 30000 });
+  await page.evaluate(() => history.back());
+  await page.waitForTimeout(1000);
+  const stillOpen = await planOpen();
+  const designerHidden = await page.evaluate(() => { const fr = document.querySelector(".ssd-frame.is-embedded"); return !fr || fr.offsetParent === null; });
+  ok("M5 portal: Back with the preview open leaves the designer and closes the preview with it", designerHidden && !stillOpen,
+    `designer ${designerHidden ? "hidden" : "still shown"}, preview ${stillOpen ? "still open" : "closed"}`);
   ok("portal: no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
