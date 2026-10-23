@@ -5857,7 +5857,7 @@ function ssfRenderer() {
   if (!ssfRendererP) {
     ssfRendererP = new Promise((resolve, reject) => {
       const s = document.createElement("script");
-      s.src = "/forms-render.js?v=2";
+      s.src = "/forms-render.js?v=3";
       s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
       s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
       document.head.appendChild(s);
@@ -6443,7 +6443,7 @@ function SsfStylePanel({ def, meta, onStyle, onDef, disabled }) {
       </div>
       {t === "styles" && (<>
         <SsfSection title="Layout" open>
-          <SsfRow label="Columns"><SsfSeg disabled={disabled} value={st.layout || "single"} onChange={(v) => onStyle({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} /></SsfRow>
+          <SsfRow label="Columns" hint={(st.layout || "single") === "two" ? "Fields sit side by side, two to a row. Text boxes, headings and checkboxes stay full width." : "Each field uses its own width (Full or Half, set on the field)."}><SsfSeg disabled={disabled} value={st.layout || "single"} onChange={(v) => onStyle({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} /></SsfRow>
           <SsfRow label="Input style"><SsfSeg disabled={disabled} value={st.inputStyle || "box"} onChange={(v) => onStyle({ inputStyle: v })} options={[["box", "Box"], ["underline", "Underline"], ["rounded", "Rounded"]]} /></SsfRow>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <SsfRow label="Width"><SsfNum disabled={disabled} value={st.width} min={280} max={1200} onChange={(v) => onStyle({ width: v })} /></SsfRow>
@@ -6684,19 +6684,30 @@ function SsfSettingsTab({ def, settings, meta, onDef, onSettings, disabled }) {
 function SsfNotificationsTab({ formId, settings, meta, onSettings, disabled, save, dirty }) {
   const n = settings.notify || {};
   const ar = settings.autoreply || {};
-  const [msg, setMsg] = useState("");
-  const [err, setErr] = useState("");
-  const tpls = meta?.templates || [];
+  // One result line per button, shown beside it: a banner at the top of the tab is out of view
+  // by the time someone has scrolled down to the auto-reply.
+  const [out, setOut] = useState({});
+  const all = meta?.templates || [];
+  // Each list offers the templates made for that job (and General ones), plus whatever is already
+  // picked, so a choice made before a template's purpose changed never silently disappears.
+  const fit = (purpose, picked) => all.filter((t) => t.purpose === purpose || t.purpose === "general" || t.id === picked);
   const test = async (which) => {
-    setMsg(""); setErr("");
-    try { if (dirty) await save(); const r = await ssfCall("crm_form_test_email", { id: formId, which }); setMsg(`Test sent to ${r.sentTo}.`); } catch (e) { setErr(e.message); }
+    setOut((o) => ({ ...o, [which]: { busy: true } }));
+    try {
+      if (dirty) await save();
+      const r = await ssfCall("crm_form_test_email", { id: formId, which });
+      setOut((o) => ({ ...o, [which]: { ok: `Test sent to ${r.sentTo}.` } }));
+    } catch (e) { setOut((o) => ({ ...o, [which]: { err: e.message } })); }
+  };
+  const result = (which) => {
+    const r = out[which];
+    if (!r) return null;
+    return <span style={{ marginLeft: 10, fontSize: 12.5, fontWeight: 600, color: r.err ? "#B91C1C" : r.busy ? "#64748B" : "#15803D" }}>{r.busy ? "Sending…" : r.err || r.ok}</span>;
   };
   const toggleUser = (uid) => onSettings({ notify: { ...n, userIds: (n.userIds || []).includes(uid) ? n.userIds.filter((x) => x !== uid) : [...(n.userIds || []), uid] } });
   return (
     <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
       <div style={{ maxWidth: 720, margin: "0 auto" }}>
-        {msg && <div style={S.okMsg}>{msg}</div>}
-        {err && <div style={S.err}>{err}</div>}
         <div style={S.card}>
           <CardHead title="Tell my team about new leads" right={<label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}><input type="checkbox" disabled={disabled} checked={n.enabled !== false} onChange={(e) => onSettings({ notify: { ...n, enabled: e.target.checked } })} /> On</label>} />
           {n.enabled !== false && (<>
@@ -6715,10 +6726,10 @@ function SsfNotificationsTab({ formId, settings, meta, onSettings, disabled, sav
             <SsfRow label="Email design">
               <select disabled={disabled} value={n.templateId || ""} onChange={(e) => onSettings({ notify: { ...n, templateId: e.target.value || null } })} style={S.input}>
                 <option value="">Built-in “New website lead”</option>
-                {tpls.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                {fit("form_notification", n.templateId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </SsfRow>
-            <button type="button" style={SSF_BTN(false)} onClick={() => test("notification")}>Send me a test</button>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("notification")}>Send me a test</button>{result("notification")}
           </>)}
         </div>
         <div style={S.card}>
@@ -6728,10 +6739,10 @@ function SsfNotificationsTab({ formId, settings, meta, onSettings, disabled, sav
             <SsfRow label="Email design">
               <select disabled={disabled} value={ar.templateId || ""} onChange={(e) => onSettings({ autoreply: { ...ar, templateId: e.target.value || null } })} style={S.input}>
                 <option value="">Built-in “Thanks for reaching out”</option>
-                {tpls.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                {fit("form_autoreply", ar.templateId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </SsfRow>
-            <button type="button" style={SSF_BTN(false)} onClick={() => test("autoreply")}>Send me a test</button>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("autoreply")}>Send me a test</button>{result("autoreply")}
           </>)}
           <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 10 }}>Design your own emails under Customer Hub → Email Templates.</div>
         </div>
@@ -7036,7 +7047,7 @@ function EmailTemplateEditor({ id, canEdit, onClose }) {
   const redo = () => { if (!hist.future.length) return; const nxt = hist.future[0]; setHist({ past: [...hist.past, tpl], future: hist.future.slice(1) }); setTpl(nxt); setDirty(true); };
   const test = async () => {
     setMsg(""); setErr("");
-    try { const r = await ssfCall("crm_email_tpl_test", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader }); setMsg(`Test sent to ${r.sentTo}.`); } catch (e) { setErr(e.message); }
+    try { const r = await ssfCall("crm_email_tpl_test", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader }); setMsg(`Test sent to ${r.sentTo}.`); setTimeout(() => setMsg(""), 5000); } catch (e) { setErr(e.message); }
   };
   const back = async () => { if (latest.current.dirty) await save(); onClose(); };
 

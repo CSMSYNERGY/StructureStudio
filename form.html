@@ -22,7 +22,7 @@ body.embed .page { padding: 2px; }
 </head>
 <body>
 <div class="page"><div id="mount"><div class="state">Loading…</div></div></div>
-<script src="/forms-render.js?v=2"></script>
+<script src="/forms-render.js?v=3"></script>
 <script>
 (function () {
   "use strict";
@@ -45,8 +45,11 @@ body.embed .page { padding: 2px; }
 
   function post(msg) { if (EMBED && window.parent !== window) { try { window.parent.postMessage(msg, "*"); } catch (e) {} } }
   function emit(name, data) { post({ source: "ss-form", type: "event", event: name, data: data || {} }); }
-  function height() { post({ source: "ss-form", type: "height", height: document.documentElement.scrollHeight }); }
-  if (EMBED && window.ResizeObserver) new ResizeObserver(height).observe(document.body);
+  // Measured off the content, never the document: inside a 900px frame the document is at least
+  // 900px tall, so a form that gets SHORTER (the thank-you after a submit) would never shrink the frame.
+  var page = document.querySelector(".page");
+  function height() { post({ source: "ss-form", type: "height", height: Math.ceil(page.getBoundingClientRect().height) }); }
+  if (EMBED && window.ResizeObserver) new ResizeObserver(height).observe(page);
 
   function state(text) { mount.textContent = ""; var d = document.createElement("div"); d.className = "state"; d.textContent = text; mount.appendChild(d); height(); }
   function call(body) {
@@ -70,7 +73,7 @@ body.embed .page { padding: 2px; }
         return call({ action: "submit", clientId: clientId, formId: formId, answers: answers, hp: meta.hp, elapsedMs: meta.elapsedMs, pageUrl: pageUrl, referrer: document.referrer || "", utm: utm })
           .then(function (r) { if (r && r.ok) emit("ss_form_submit", { formId: formId, formName: f.name }); return r; });
       },
-      onDone: height
+      onDone: function () { height(); post({ source: "ss-form", type: "scrollTop" }); }
     });
     mount.textContent = "";
     mount.appendChild(node);

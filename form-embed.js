@@ -46,6 +46,9 @@
     if (!f) return;
     if (e.data.type === "height" && typeof e.data.height === "number") {
       f.style.height = Math.max(200, Math.min(20000, Math.ceil(e.data.height))) + "px";
+    } else if (e.data.type === "scrollTop") {
+      // After a submit the form becomes a short thank-you: bring it into view.
+      try { f.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (err) {}
     } else if (e.data.type === "event" && typeof e.data.event === "string" && /^ss_form_[a-z_]{1,30}$/.test(e.data.event)) {
       window.dataLayer = window.dataLayer || [];
       var payload = { event: e.data.event };

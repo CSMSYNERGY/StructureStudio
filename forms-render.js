@@ -63,7 +63,8 @@
       S + " .ssf-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:" + gap + "px}",
       S + " .ssf-f{grid-column:span 2;min-width:0}",
       S + " .ssf-half{grid-column:span 1}",
-      S + ".ssf-single .ssf-half{grid-column:span 2}",
+      // Two columns puts every ordinary field side by side; Single column uses each field's own width.
+      S + ".ssf-two .ssf-f:not(.ssf-wide){grid-column:span 1}",
       S + " .ssf-label{display:block;font-weight:600;margin-bottom:6px;color:" + hex(c.label, "#111827") + "}",
       S + " .ssf-req{color:#DC2626;margin-left:2px}",
       S + ".ssf-left .ssf-row," + S + ".ssf-right .ssf-row{display:flex;gap:12px;align-items:flex-start}",
@@ -231,7 +232,8 @@
     var fieldEls = {};
     for (var i = 0; i < def.fields.length; i++) {
       var f = def.fields[i];
-      var box = el("div", "ssf-f" + (f.width === "half" ? " ssf-half" : ""));
+      var wide = ["heading", "paragraph", "divider", "image", "textarea", "sms_consent", "terms", "checkboxes", "radio"].indexOf(f.type) >= 0;
+      var box = el("div", "ssf-f" + (f.width === "half" ? " ssf-half" : "") + (wide ? " ssf-wide" : ""));
       box.setAttribute("data-field-id", f.id);
       if (f.type === "hidden") {
         if (!opts.designer) continue;
@@ -276,7 +278,7 @@
     hp.appendChild(hpIn);
     form.appendChild(hp);
 
-    var actions = el("div", "ssf-actions ssf-f");
+    var actions = el("div", "ssf-actions ssf-f ssf-wide");
     var btn = el("button", "ssf-btn", (st.button && st.button.text) || "Submit");
     btn.type = "submit";
     actions.appendChild(btn);
