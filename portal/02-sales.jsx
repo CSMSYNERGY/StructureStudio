@@ -3070,14 +3070,20 @@ const SS_CRM_MAPS = {
   maps_delivery: { label: "Map it", street: "street", city: "city", state: "state", zip: "zip" },
   maps_billing: { label: "Map it", street: "billing_street", city: "billing_city", state: "billing_state", zip: "billing_zip" },
 };
+// The link for four address parts, whatever they are called where they came from. Taking the
+// PARTS and not a contact row is what lets the EDITOR build one from the boxes as they are being
+// typed — `edit` spells the billing keys `billingStreet`, the row spells them `billing_street`,
+// and neither has to know about the other.
+function ssCrmMapsFrom({ street, city, state, zip }) {
+  const s = String(street || "").trim();
+  if (!s) return "";
+  const q = [s, city, state, zip].map((v) => String(v || "").trim()).filter(Boolean).join(", ");
+  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+}
 function ssCrmMapsUrl(contact, which) {
   const m = SS_CRM_MAPS[which];
   if (!m || !contact) return "";
-  const street = String(contact[m.street] || "").trim();
-  if (!street) return "";
-  const q = [street, contact[m.city], contact[m.state], contact[m.zip]]
-    .map((v) => String(v || "").trim()).filter(Boolean).join(", ");
-  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+  return ssCrmMapsFrom({ street: contact[m.street], city: contact[m.city], state: contact[m.state], zip: contact[m.zip] });
 }
 
 // One input, by type. Deliberately the same S.input the rest of the editor uses, so a builder's
@@ -3125,6 +3131,37 @@ function CrmCustomInput({ field, value, onChange, disabled = false }) {
 // it" that opens a search for nothing is worse than no link. `which` is the catalogue's id
 // (maps_delivery / maps_billing), so the label override and Hide from the Fields tab key on the
 // same string the register shows.
+// ── THE LINK UNDER THE ADDRESS IN THE EDITOR (Carolyn 2026-10-23) ───────────────────────
+// "The map hyperlink doesn't show when I open the card ... it should be right under the address."
+// It shipped on the read-only card only, which is the one place the address ITSELF is not shown —
+// so it read as floating under the phone number, and the screen where she was actually looking at
+// an address had no link at all.
+//
+// Built from the BOXES, not from the saved row, so it follows what is being typed: paste an
+// address and the link is right there to check it before saving. Same rule as everywhere else —
+// no street, no link — so it appears as soon as the street has something in it.
+//
+// `keys` is the same CRM_ADDR_DELIVERY / CRM_ADDR_BILLING map CrmAddressFields takes, so the two
+// cannot disagree about which boxes make up which address.
+function CrmEditMapsLink({ edit, keys, label }) {
+  const url = ssCrmMapsFrom({
+    street: edit[keys.street], city: edit[keys.city], state: edit[keys.state], zip: edit[keys.zip],
+  });
+  if (!url) return null;
+  return (
+    <div style={{ margin: "-2px 0 9px" }}>
+      <a href={url} target="_blank" rel="noopener noreferrer" data-ss-maps-edit={keys.street}
+        style={{ display: "inline-flex", alignItems: "center", gap: 4, color: ACCENT, fontWeight: 700, fontSize: 12 }}>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
+        </svg>
+        {label}
+      </a>
+    </div>
+  );
+}
+
 function CrmMapsLink({ contact, which, label }) {
   const url = ssCrmMapsUrl(contact, which);
   if (!url) return null;
@@ -5381,8 +5418,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 would re-point live stops at a billing address with nothing raising. */}
             <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+            {/* Right under the address she is looking at (Carolyn 2026-10-23), and live as
+                it is typed. Honours the same Hide and relabel as the card's own link. */}
+            {!cOff("maps_delivery") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_DELIVERY} label={cLbl("maps_delivery", "Map it")} />}
             <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+            {!cOff("maps_billing") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_BILLING} label={cLbl("maps_billing", "Map it")} />}
             <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
@@ -5886,8 +5927,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       would re-point live stops at a billing address with nothing raising. */}
                   <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+                  {/* Right under the address she is looking at (Carolyn 2026-10-23), and live as
+                      it is typed. Honours the same Hide and relabel as the card's own link. */}
+                  {!cOff("maps_delivery") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_DELIVERY} label={cLbl("maps_delivery", "Map it")} />}
                   <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+                  {!cOff("maps_billing") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_BILLING} label={cLbl("maps_billing", "Map it")} />}
                   <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
