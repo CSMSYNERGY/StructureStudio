@@ -3583,6 +3583,194 @@ function AiTranscriptsCard({ viewing = false, onOpenPhone = null }) {
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
 // _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
 const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+// ─── My connections (My Profile) ───────────────────────────────────────────────────────────
+// ONE segment with tabs, in MY PROFILE, not Settings → Meetings (Carolyn 2026-10-23: "I want
+// calendars and zoom and hangouts and teams all in one segment with tabs along the top. and I
+// want this moved to my profile"). It belongs here because every one of these is PER PERSON:
+// a meeting is created in the host's own account, and a calendar that blocks a slot is their
+// own calendar. Nobody connects an account on a colleague's behalf — a manager may only
+// disconnect one, from the Team screen, after someone leaves.
+//
+// This is the exception the "settings live under Settings" rule already makes for My Profile:
+// the page is explicitly "your settings, not the business's". The business half of Meetings —
+// the booking link, the hours, the meeting types, the booking pages — stays where it was.
+//
+// It loads `overview` itself rather than taking props, because Settings → Meetings is now a
+// different page and may not be mounted at all.
+function MyConnectionsCard({ clientId, viewing = false }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [tab, setTab] = useState("calendars");
+
+  const call = useCallback(async (action, body) => {
+    const { data: d, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !d || d.error) throw new Error((d && d.error) || (error ? await fnError(error) : "That didn't work."));
+    return d;
+  }, []);
+
+  const load = useCallback(async () => {
+    try { setData(await call("overview", {})); } catch (e) { setErr(e.message); }
+  }, [call]);
+  useEffect(() => { setData(null); setErr(null); load(); }, [clientId, load]);
+
+  // Back from Zoom (meetings-oauth-callback lands on ?video=connected or ?video=0&reason=…).
+  // Read once, then take the parameters off the address so a reload does not repeat it. Opening
+  // on the Zoom tab is the point: the person pressed a button there and is coming back to it.
+  const [landing, setLanding] = useState(null);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (!p.has("video")) return;
+      const reasons = {
+        denied: "You cancelled at Zoom, so nothing was connected.",
+        state: "That connection attempt expired or didn't match. Press Connect Zoom again.",
+        exchange: "Zoom didn't accept the connection. Try again.",
+        save: "The connection couldn't be saved. Try again, and tell us if it keeps happening.",
+        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
+      };
+      setLanding(p.get("video") === "connected"
+        ? { ok: "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you." }
+        : { err: reasons[p.get("reason")] || "The Zoom connection didn't complete. Try again." });
+      setTab("zoom");
+      p.delete("video"); p.delete("reason"); p.delete("provider");
+      const qs = p.toString();
+      window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+    } catch (_e) { /* an address we cannot read is one we leave alone */ }
+  }, []);
+
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+  const row = (title, state, right, dot) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", flexWrap: "wrap" }}>
+      <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 999, flex: "0 0 auto", background: dot }} />
+      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 13 }}>{title}</div>
+        <div style={{ fontSize: 11.5, color: "#64748B" }}>{state}</div>
+      </div>
+      {right}
+    </div>
+  );
+  // What a connector that needs setup on our side says. NOT a dead Connect button: a button that
+  // opens nothing is the greyed-WhatsApp-tab mistake, "a promise nobody intended to keep, sitting
+  // on a screen Carolyn shows at a trade show".
+  const comingSoon = (name, what) => (<>
+    {row(name, "Not available yet", null, "#CBD5E1")}
+    <div style={{ ...sub, marginTop: 8 }}>
+      {what} It needs setup on our side before anyone can connect, so there's nothing to press
+      here yet. Your meeting types can still send a link you paste in yourself, and Zoom is
+      ready today.
+    </div>
+  </>);
+
+  const TABS = [
+    ["calendars", "Calendars", "Google Calendar or Outlook — so your own calendar blocks a slot too"],
+    ["zoom", "Zoom", "Make a fresh Zoom meeting for every booking, in your own account"],
+    ["meet", "Google Meet", "A Google Meet link for every booking"],
+    ["teams", "Teams", "A Microsoft Teams link for every booking"],
+  ];
+
+  if (err && !data) return (<div style={S.card}><CardHead title="My connections" /><div style={S.err}>{err}</div></div>);
+
+  return (
+    <div style={S.card}>
+      <CardHead title="My connections" />
+      <p style={{ ...sub, margin: "0 0 12px" }}>
+        Your own accounts, not the business's — everyone on the team connects their own. The
+        booking link, your hours and the meeting types live in Settings → Customer Hub → Meetings.
+      </p>
+      <SubTabs tabs={TABS} sub={tab} onSub={setTab} />
+      {!data ? <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your connections…</div> : (() => {
+        const conns = data.connections || [];
+        const host = data.myHost || null;
+        const zoomConn = conns.find((c) => c.provider === "zoom") || null;
+        const ready = !!(data.videoReady && data.videoReady.zoom);
+        const connected = zoomConn && zoomConn.status === "connected";
+        const connectZoom = () => run(async () => {
+          const d = await call("video_connect", { provider: "zoom", hostId: host.id, returnTo: window.location.hostname });
+          if (d && d.url) window.location.assign(d.url);
+        });
+        const disconnectZoom = () => run(async () => {
+          if (!window.confirm("Disconnect your Zoom account?\n\nMeetings already booked keep their links. New bookings use the type's room link until you connect again.")) return;
+          await call("video_disconnect", { provider: "zoom", hostId: host.id });
+          await load();
+          setMsg({ ok: "Zoom disconnected." });
+        });
+
+        if (tab === "zoom") return (<>
+          {landing && landing.ok && (
+            <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{landing.ok}</div>
+          )}
+          {landing && landing.err && <div style={{ ...S.err, marginBottom: 10 }}>{landing.err}</div>}
+          {row("Zoom",
+            connected
+              ? `Connected${zoomConn.accountEmail ? ` as ${zoomConn.accountEmail}` : zoomConn.accountName ? ` as ${zoomConn.accountName}` : ""}`
+              : zoomConn
+                ? (zoomConn.lastError === "removed_at_zoom" ? "Removed from your Zoom account — connect again to keep making links" : "Stopped working — connect again to keep making links")
+                : !ready ? "Not available yet — Structure Studio is still setting up Zoom" : "Not connected",
+            (<>
+              {ready && !viewing && host && host.id && (
+                <button style={connected ? { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" } : S.btn(ACCENT, "#FFF")}
+                  disabled={busy} onClick={connected ? disconnectZoom : connectZoom}>
+                  {connected ? "Disconnect" : zoomConn ? "Reconnect Zoom" : "Connect Zoom"}
+                </button>
+              )}
+              {zoomConn && !connected && !viewing && (
+                <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={disconnectZoom}>Remove</button>
+              )}
+            </>),
+            connected ? "#10B981" : zoomConn ? "#F59E0B" : "#CBD5E1")}
+          <div style={{ ...sub, marginTop: 8 }}>
+            {!(host && host.id)
+              ? (<>Set up your booking link first — Zoom connects to your booking calendar. <a href={ssPagePath("settings", "meetings")} style={{ color: ACCENT, fontWeight: 700 }}>Settings → Meetings</a>.</>)
+              : viewing
+                ? "Each person connects their own Zoom account while signed in as themselves."
+                : "Connect once, and any video meeting type set to “a new Zoom meeting for every booking” makes a fresh meeting in your Zoom for each booking — and moves or deletes it when the booking changes. Your customers never need a Zoom account."}
+          </div>
+          {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+        </>);
+
+        if (tab === "meet") return comingSoon("Google Meet", "Meeting links made in your own Google account.");
+        if (tab === "teams") return comingSoon("Teams", "Meeting links made in your own Microsoft 365 account.");
+
+        // ── Calendars ───────────────────────────────────────────────────────────────────
+        // `connections` is already read here, so the day the connectors land this tab shows
+        // real status without being rewritten.
+        const cals = conns.filter((c) => c.provider !== "zoom");
+        return (<>
+          {cals.length > 0
+            ? cals.map((c) => (
+              <div key={c.provider} style={{ marginBottom: 8 }}>
+                {row(c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365",
+                  `${c.status === "connected" ? "Connected" : c.status === "needs_reauth" ? "Needs reconnecting" : "Disconnected"}${c.lastSyncedAt ? ` · last checked ${new Date(c.lastSyncedAt).toLocaleString()}` : ""}`,
+                  null,
+                  c.status === "connected" ? "#10B981" : c.status === "needs_reauth" ? "#F59E0B" : "#CBD5E1")}
+              </div>
+            ))
+            : (
+              <div style={sub}>
+                <p style={{ margin: "0 0 8px" }}>
+                  <strong style={{ color: "#0F172A" }}>Not connected to anything yet, and that's fine.</strong> Your
+                  hours and the meetings already booked in Structure Studio decide what customers
+                  are offered, so your link works today.
+                </p>
+                <p style={{ margin: 0 }}>
+                  Linking Google Calendar or Outlook — so anything already on your own calendar blocks a
+                  slot too, and new meetings appear there — is still being built. It needs setup on our
+                  side before anyone can connect, so there's nothing to press here yet.
+                </p>
+              </div>
+            )}
+        </>);
+      })()}
+    </div>
+  );
+}
+
 function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null, aiCard = false, viewing = false, onOpenPhone = null }) {
   // WHICH TAB CONTACTS OPENS ON (Carolyn 2026-10-12, C25): "we need them to set the default of
   // what they want the default to be." Contacts, the Design list, or any one pipeline. `picked` is
@@ -3852,6 +4040,11 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           top of my profile"). Who you are, then how the portal behaves for you — and it is the
           card the name-and-phone nudge sends people to, so it should be the one they land on. */}
       <YourDetailsCard profile={profile} email={email} onSaved={onProfileSaved} />
+      {/* Your own accounts — Zoom today, calendars and the other video providers as they land.
+          Second on the page on purpose: it is the one card here that a person comes BACK to
+          (the Zoom callback lands on this page), and it sits beside Your details because both
+          are "who you are", ahead of the how-the-portal-behaves cards. */}
+      <MyConnectionsCard clientId={clientId} viewing={viewing} />
       <div style={S.card}>
         <div style={S.h2}>How the Contacts tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -5723,29 +5916,6 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
 
   useEffect(() => { setData(null); setMsg(null); load(); }, [clientId, load]);
 
-  // Back from Zoom (meetings-oauth-callback lands on ?video=connected or ?video=0&reason=…).
-  // Read once, then take the parameters off the address so a reload does not repeat it.
-  const [videoLanding, setVideoLanding] = useState(null);
-  useEffect(() => {
-    try {
-      const p = new URLSearchParams(window.location.search);
-      if (!p.has("video")) return;
-      const reasons = {
-        denied: "You cancelled at Zoom, so nothing was connected.",
-        state: "That connection attempt expired or didn't match. Press Connect Zoom again.",
-        exchange: "Zoom didn't accept the connection. Try again.",
-        save: "The connection couldn't be saved. Try again, and tell us if it keeps happening.",
-        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
-      };
-      setVideoLanding(p.get("video") === "connected"
-        ? { ok: "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you." }
-        : { err: reasons[p.get("reason")] || "The Zoom connection didn't complete. Try again." });
-      p.delete("video"); p.delete("reason"); p.delete("provider");
-      const qs = p.toString();
-      window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
-    } catch (_e) { /* an address we cannot read is one we leave alone */ }
-  }, []);
-
   if (msg && msg.err && !data) return <div style={S.err}>{msg.err}</div>;
   if (!data || !host) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your meeting settings…</div>;
 
@@ -6092,102 +6262,20 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
         )}
       </div>
 
-      {/* ── MY ZOOM ACCOUNT (migration 333) ──────────────────────────────────────────────
-          Per PERSON (Carolyn 2026-10-23: "each team member"): a meeting is made in the host's
-          own account, so each host connects their own. Self only — nobody connects Zoom on a
-          colleague's behalf; a manager may only disconnect one (e.g. after someone leaves). */}
-      {(() => {
-        const zoomConn = (data.connections || []).find((c) => c.provider === "zoom") || null;
-        const ready = !!(data.videoReady && data.videoReady.zoom);
-        const connected = zoomConn && zoomConn.status === "connected";
-        const connectZoom = () => run(async () => {
-          const d = await call("video_connect", { provider: "zoom", hostId: host.id, returnTo: window.location.hostname });
-          if (d && d.url) window.location.assign(d.url);
-        });
-        const disconnectZoom = () => run(async () => {
-          if (!window.confirm("Disconnect your Zoom account?\n\nMeetings already booked keep their links. New bookings use the type's room link until you connect again.")) return;
-          await call("video_disconnect", { provider: "zoom", hostId: host.id });
-          await load();
-          flash("Zoom disconnected.");
-        });
-        return (
-          <div style={S.card}>
-            <CardHead title="My Zoom account" />
-            {videoLanding && videoLanding.ok && (
-              <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{videoLanding.ok}</div>
-            )}
-            {videoLanding && videoLanding.err && <div style={{ ...S.err, marginBottom: 10 }}>{videoLanding.err}</div>}
-            <div style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", flexWrap: "wrap" }}>
-              <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 999, flex: "0 0 auto", background: connected ? "#10B981" : zoomConn ? "#F59E0B" : "#CBD5E1" }} />
-              <div style={{ flex: "1 1 220px", minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>Zoom</div>
-                <div style={{ fontSize: 11.5, color: "#64748B" }}>
-                  {connected
-                    ? `Connected${zoomConn.accountEmail ? ` as ${zoomConn.accountEmail}` : zoomConn.accountName ? ` as ${zoomConn.accountName}` : ""}`
-                    : zoomConn
-                      ? (zoomConn.lastError === "removed_at_zoom" ? "Removed from your Zoom account — connect again to keep making links" : "Stopped working — connect again to keep making links")
-                      : !ready ? "Not available yet — Structure Studio is still setting up Zoom" : "Not connected"}
-                </div>
-              </div>
-              {ready && !viewingLabel && host.id && (
-                <button style={connected ? { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" } : S.btn(ACCENT, "#FFF")}
-                  disabled={busy} onClick={connected ? disconnectZoom : connectZoom}>
-                  {connected ? "Disconnect" : zoomConn ? "Reconnect Zoom" : "Connect Zoom"}
-                </button>
-              )}
-              {zoomConn && !connected && !viewingLabel && (
-                <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={disconnectZoom}>Remove</button>
-              )}
-            </div>
-            <div style={{ ...sub, marginTop: 8 }}>
-              {!host.id
-                ? "Save your booking link above first — Zoom connects to your booking calendar."
-                : viewingLabel
-                  ? "Each person connects their own Zoom account while signed in as themselves."
-                  : "Connect once, and any video meeting type set to “a new Zoom meeting for every booking” makes a fresh meeting in your Zoom for each booking — and moves or deletes it when the booking changes. Your customers never need a Zoom account."}
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── CONNECTED CALENDARS ───────────────────────────────────────────────────────── */}
+      {/* ── WHERE THE PER-PERSON CONNECTIONS WENT (Carolyn 2026-10-23) ──────────────────
+          "My Zoom account" and "Connected calendars" were two cards here. They are one tabbed
+          segment in My Profile now (MyConnectionsCard): they are per PERSON, and this page is
+          the business's — the booking link, the hours, the types and the booking pages. A
+          pointer rather than silence, because the meeting-type editor tells people to connect
+          their own Zoom and this is the page they are looking at when it does. */}
       <div style={S.card}>
-        <CardHead title="Connected calendars" />
-        {/* ⚠️ HONEST ABOUT WHAT IS BUILT. Google and Outlook sync are phases 3-4 and need
-            OAuth apps Carolyn has to create (Google's calendar scopes need a verification
-            review). A "Connect" button that opens nothing is the greyed-WhatsApp-tab mistake
-            CLAUDE.md records — "a promise nobody intended to keep, sitting on a screen
-            Carolyn shows at a trade show". So this card says plainly where it stands, and
-            says what DOES work today, which is the part that matters to a builder.
-            `connections` is already read and rendered below, so the day the connectors land
-            this card shows real status without being rewritten. */}
-        {/* Calendars only: the Zoom row lives in its own card above (333). */}
-        {(data.connections || []).filter((c) => c.provider !== "zoom").length > 0
-          ? (data.connections || []).filter((c) => c.provider !== "zoom").map((c) => (
-            <div key={c.provider} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", marginBottom: 8 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>{c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365"}</div>
-                <div style={{ fontSize: 11.5, color: "#64748B" }}>
-                  {c.status === "connected" ? "Connected" : c.status === "needs_reauth" ? "Needs reconnecting" : "Disconnected"}
-                  {c.lastSyncedAt ? ` · last checked ${new Date(c.lastSyncedAt).toLocaleString()}` : ""}
-                </div>
-              </div>
-            </div>
-          ))
-          : (
-            <div style={{ ...sub }}>
-              <p style={{ margin: "0 0 8px" }}>
-                <strong style={{ color: "#0F172A" }}>Not connected to anything yet, and that's fine.</strong> Your
-                hours above and the meetings already booked in Structure Studio decide what customers
-                are offered, so your link works today.
-              </p>
-              <p style={{ margin: 0 }}>
-                Linking Google Calendar or Outlook — so anything already on your own calendar blocks a
-                slot too, and new meetings appear there — is still being built. It needs setup on our
-                side before anyone can connect, so there's nothing to press here yet.
-              </p>
-            </div>
-          )}
+        <CardHead title="Zoom, calendars and video" />
+        <div style={sub}>
+          Your own accounts live in{" "}
+          <a href={ssPagePath("settings", "myprofile")} style={{ color: ACCENT, fontWeight: 700 }}>My Profile → My connections</a>
+          {" "}— Zoom, Google Meet, Teams and calendar links. Everyone on the team connects their
+          own, so a meeting is made in the host's account and their own calendar blocks a slot.
+        </div>
       </div>
 
       {/* ── THE BOOKING PAGES (the business) ──────────────────────────────────────────── */}
@@ -6368,7 +6456,7 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
               {provider === "none"
                 ? "Pick a provider and every booking of this type carries its link — in the confirmation, the reminder, and the calendar invite."
                 : generate
-                  ? "Each person who offers this type connects their own Zoom under My Zoom account below. If someone hasn't, or Zoom can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting."
+                  ? "Each person who offers this type connects their own Zoom in My Profile → My connections. If someone hasn't, or Zoom can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting."
                   : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
             </div>
             {generate && !zoomReady && (

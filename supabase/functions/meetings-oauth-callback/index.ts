@@ -25,14 +25,19 @@ import { MEETINGS_OAUTH_HOSTS, meetingsOauthRedirectUri } from "../_shared/meeti
 
 const DEFAULT_HOST = "app.structurestudiosuite.com";
 
-// The Meetings settings page at its /portal address ON PURPOSE, for the reason
-// qbo-oauth-callback gives: an edge deploy is live for production at once, and /portal/… works
-// on both the old and the new _redirects (CLAUDE.md, "App addresses").
+// My Profile at its /portal address ON PURPOSE, for the reason qbo-oauth-callback gives: an
+// edge deploy is live for production at once, and /portal/… works on both the old and the new
+// _redirects (CLAUDE.md, "App addresses").
+//
+// It was /portal/settings/meetings until 2026-10-23, when the per-person connections moved into
+// My Profile as one tabbed segment (MyConnectionsCard). Safe to change in one step because the
+// connect flow is days old and nobody on production can start one: a browser can only land here
+// carrying a state row that portal-meetings' video_connect wrote minutes earlier.
 function land(host: string, params: Record<string, string>): Response {
   const safeHost = MEETINGS_OAUTH_HOSTS.has(host) ? host : DEFAULT_HOST;
   return new Response(null, {
     status: 302,
-    headers: { Location: `https://${safeHost}/portal/settings/meetings?${new URLSearchParams(params)}` },
+    headers: { Location: `https://${safeHost}/portal/settings/myprofile?${new URLSearchParams(params)}` },
   });
 }
 
