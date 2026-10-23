@@ -1937,22 +1937,70 @@ function denoTest() {
 // deps can be installed, the migration tests are not optional. Set SS_REQUIRE_SQL_TESTS=1 on any
 // machine that has run `npm install --prefix tests/sql` and wants the gate to hold it to that.
 // `dir` and `required` are parameters so --self-test can drive both directions on a fixture.
-function sqlTestsRequired(env = process.env) {
-  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1";
+// ⚠️ AND REQUIRED WHEN THIS PUSH TOUCHES WHAT THEY TEST (2026-10-23). The two triggers above
+// are posture: somebody has to set them. That left the real hole — a machine with no install
+// pushes a change to the very thing these tests cover, the step SKIPS, the gate goes green, and
+// the break lands on beta for whoever DOES have them installed to discover. That is not a
+// hypothetical: the Meetings work added the `meetings` area to _shared/access.ts, migration277
+// and migration286 went red for everyone with the install, and beta was un-pushable until it was
+// chased down. The author saw a clean gate and had no way to know.
+//
+// So: if what you are pushing changes a migration or the permission model, these tests stop being
+// optional for you. Not for everyone, not for unrelated work — a fresh clone pushing a CSS fix
+// still needs no PGlite, which is the posture CLAUDE.md asks for ("a gate that makes the repo
+// unpushable is worse than the bugs it catches").
+const SQL_SUBJECT_RE = /^supabase\/(migrations\/|functions\/_shared\/access\.ts$)/;
+// Pure, so --self-test can drive it without a repository.
+function sqlSubjectPaths(files) {
+  return [...new Set(files.map((f) => String(f).trim().replace(/\\/g, "/")).filter((f) => SQL_SUBJECT_RE.test(f)))];
 }
-function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()) {
+// LOCAL git only — never the network, and never fatal. Anything unexpected (no upstream, a
+// detached HEAD, git missing, a brand-new branch) answers "nothing touched", which leaves the
+// old skip-and-warn posture exactly as it was. `@{u}...HEAD` is what this push would add;
+// `HEAD` catches an uncommitted edit so `npm run preflight` warns before the commit too.
+function sqlSubjectTouched(cwd = root) {
+  const out = [];
+  for (const args of [["diff", "--name-only", "@{u}...HEAD"], ["diff", "--name-only", "HEAD"]]) {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status === 0 && r.stdout) out.push(...r.stdout.split("\n"));
+    } catch (_e) { /* git unavailable: answer nothing */ }
+  }
+  return sqlSubjectPaths(out);
+}
+function sqlTestsRequired(env = process.env, touched = []) {
+  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1" || touched.length > 0;
+}
+function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired(), touched = []) {
   if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SQL_TESTS_DIR}/ does not exist`, files: [] };
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.cjs")).sort();
   if (!files.length) return { errors: [], skipped: true, why: `no *.test.cjs files in ${SQL_TESTS_DIR}/`, files };
   if (!existsSync(join(dir, "node_modules"))) {
-    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once to include ${files.join(", ")}`;
+    // The COMMAND and the COUNT, never the 53 file names: a refusal nobody can read is a
+    // refusal people reach for --no-verify to get past.
+    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once (${files.length} test file(s))`;
     if (required) {
+      // Name the files that made it required: "REQUIRED here" with no reason reads as the gate
+      // being arbitrary, and the first instinct is --no-verify.
+      const why = touched.length
+        ? `this push changes ${touched.slice(0, 4).join(", ")}${touched.length > 4 ? ` (+${touched.length - 4} more)` : ""}, which is exactly what ${files.length} migration test(s) check`
+        : "REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1)";
       return {
-        errors: [`migration tests: REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1) but ${SQL_TESTS_DIR}/node_modules is not installed — ${how}`],
+        errors: [`migration tests: ${why}, but ${SQL_TESTS_DIR}/node_modules is not installed, so they DID NOT RUN — ${how}.
+`
+          + "    These are what catch _shared/access.ts drifting from its SQL mirror. A green gate without them says nothing about it."],
         skipped: false, files,
       };
     }
-    return { errors: [], skipped: true, files, why: `${SQL_TESTS_DIR}/node_modules is not installed (${how})` };
+    // Two reasons, deliberately. `why` INSTRUCTS (the self-test pins that a skip tells you how to
+    // fix it); `shortWhy` is the one clause the banner shows, so the command appears once, on its
+    // own line, ready to copy. The first version of both pasted all 53 test file names in and
+    // buried the sentence that mattered under the list it was trying to warn about.
+    return {
+      errors: [], skipped: true, files,
+      why: `${SQL_TESTS_DIR}/node_modules is not installed — run \`npm install --prefix ${SQL_TESTS_DIR}\` once`,
+      shortWhy: `${SQL_TESTS_DIR}/node_modules is not installed`,
+    };
   }
   const errors = [];
   for (const f of files) {
@@ -2927,6 +2975,38 @@ if (process.argv.includes("--self-test")) {
       console.error("self-test FAILED: sqlTestsRequired does not read CI / SS_REQUIRE_SQL_TESTS=1");
       process.exit(1);
     }
+    // ── The third trigger: the push TOUCHES what these tests cover (2026-10-23) ──
+    // Both directions, and the matcher on its own, because this is the trigger that had to exist:
+    // the first two are posture somebody has to opt into, and nobody had.
+    const subjHit = sqlSubjectPaths([
+      "supabase/migrations/326_meetings.sql", "supabase/functions/_shared/access.ts",
+      "supabase\\migrations\\327_x.sql", "  supabase/migrations/328_y.sql  ",
+    ]);
+    const subjMiss = sqlSubjectPaths([
+      "portal/01-core.jsx", "supabase/functions/_shared/nmi.ts", "supabase/functions/portal-billing/index.ts",
+      "tests/sql/migration277.test.cjs", "docs/supabase/migrations/x.sql",
+    ]);
+    if (subjHit.length !== 4 || subjMiss.length) {
+      console.error(`self-test FAILED: the migration-test subject matcher is wrong (hit ${JSON.stringify(subjHit)}, miss ${JSON.stringify(subjMiss)})`);
+      process.exit(1);
+    }
+    if (!sqlTestsRequired({}, ["supabase/migrations/326_meetings.sql"]) || sqlTestsRequired({}, [])) {
+      console.error("self-test FAILED: touching a migration does not make the migration tests required");
+      process.exit(1);
+    }
+    // ...and the refusal NAMES what made it required, rather than reading as an arbitrary gate.
+    const touchedReq = sqlTests(tmpS, true, ["supabase/functions/_shared/access.ts"]);
+    if (touchedReq.skipped || touchedReq.errors.length !== 1
+      || !/_shared\/access\.ts/.test(touchedReq.errors[0]) || !/DID NOT RUN/.test(touchedReq.errors[0])
+      || !/npm install --prefix/.test(touchedReq.errors[0])) {
+      console.error("self-test FAILED: a push touching access.ts with no install did not fail the gate naming the file:\n" + touchedReq.errors.join("\n"));
+      process.exit(1);
+    }
+    // The probe itself must never throw and never reach the network; outside a repo it answers nothing.
+    if (sqlSubjectTouched(tmpdir()).length) {
+      console.error("self-test FAILED: sqlSubjectTouched invented touched files outside a repository");
+      process.exit(1);
+    }
     mkdirSync(join(tmpS, "node_modules"));
     const failed = sqlTests(tmpS, false);
     if (failed.skipped || failed.errors.length !== 1 || !/fails\.test\.cjs failed/.test(failed.errors[0])) {
@@ -2943,7 +3023,7 @@ if (process.argv.includes("--self-test")) {
   } finally {
     rmSync(tmpS, { recursive: true, force: true });
   }
-  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI or SS_REQUIRE_SQL_TESTS=1), and a failing one fails the gate (${realSql.files.length} file(s) found)`);
+  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI, SS_REQUIRE_SQL_TESTS=1, or because the push touches a migration or _shared/access.ts), the refusal names what made it required, the subject matcher fires both ways, and a failing test fails the gate (${realSql.files.length} file(s) found)`);
 
   // ── The script-test step (scripts/*.test.mjs, node --test) ───────────────────
   // Discovered for real (the nudge's test must be among them), and on a fixture directory a failing
@@ -3517,11 +3597,11 @@ if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
-const sql = sqlTests();
+// What this push would add, so a change to a migration or to the permission model cannot skip
+// the tests that cover it. Local git, never the network; "nothing touched" is the safe answer.
+const sqlTouched = sqlSubjectTouched();
+const sql = sqlTests(join(root, SQL_TESTS_DIR), sqlTestsRequired(process.env, sqlTouched), sqlTouched);
 errors.push(...sql.errors);
-if (sql.skipped) {
-  console.error(`preflight: migration tests SKIPPED — ${sql.why}.`);
-}
 
 const scriptRes = scriptTests();
 errors.push(...scriptRes.errors);
@@ -3537,6 +3617,22 @@ errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html")
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkEstimateWording());
+
+// The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
+// It used to be one line in the middle of the output, which is how a skipped migration suite read
+// as "green": the author of the Meetings work saw a clean gate while migration277 and migration286
+// were red for everyone who had the install, and beta could not be pushed to until it was chased
+// down. One line, mid-run, among other skips, is not a warning anybody acts on.
+if (sql.skipped) {
+  const bar = "=".repeat(68);
+  console.error(`\n${bar}`);
+  console.error(`  MIGRATION TESTS DID NOT RUN - ${sql.files.length} file(s) in ${SQL_TESTS_DIR}/ were skipped`);
+  console.error(`  Why:  ${sql.shortWhy || sql.why}`);
+  console.error(`  Fix:  npm install --prefix ${SQL_TESTS_DIR}      (once, then they run on every push)`);
+  console.error("  Until then a green gate here says NOTHING about your migrations, or about");
+  console.error("  _shared/access.ts still agreeing with its SQL mirror.");
+  console.error(`${bar}\n`);
+}
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);
