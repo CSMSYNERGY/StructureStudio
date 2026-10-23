@@ -1287,6 +1287,45 @@ function Dashboard({ session }) {
   // loading them for every builder up front would be dozens of reads nobody asked for.
   const [hoverClient, setHoverClient] = useState(null);
   const [peopleBy, setPeopleBy] = useState({});
+  // WHERE to draw the flyout, measured from the row it belongs to. It is position:fixed (see
+  // portal.html for why), so it needs real viewport coordinates rather than an offset.
+  const [hoverAt, setHoverAt] = useState(null);
+
+  /** The people on one account, fetched once and kept. Failure is recorded as an empty list
+   *  with a reason rather than left pending, so the flyout says something instead of spinning. */
+  const loadPeople = useCallback(async (clientId) => {
+    if (!clientId || peopleBy[clientId]) return;
+    setPeopleBy((m) => ({ ...m, [clientId]: { loading: true, users: [] } }));
+    try {
+      const { data, error } = await sb.functions.invoke("operator-portal", {
+        body: { action: "list_users", clientId },
+      });
+      if (error || !data || data.error) throw new Error((data && data.error) || "could not read");
+      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: data.users || [] } }));
+    } catch (_e) {
+      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: [], failed: true } }));
+    }
+  }, [peopleBy]);
+
+  // ⚠️ DECLARED ABOVE openPeople, which reads it. `const` is not hoisted — and Babel
+  // compiles it to `var`, so the wrong order does not throw: it reads `undefined` in the
+  // dependency array on the first render and silently recreates the callback. The same
+  // class of trap the placement note on ssClampTab records.
+  /** Open the flyout for one row, placed against that row. */
+  const openPeople = useCallback((clientId, el) => {
+    setHoverClient(clientId);
+    loadPeople(clientId);
+    if (!el || typeof el.getBoundingClientRect !== "function") { setHoverAt(null); return; }
+    const r = el.getBoundingClientRect();
+    const W = 250, GAP = 4, EDGE = 8;
+    // Prefer the LEFT: the menu hangs off a pill in the top-right corner, so that is where the
+    // room is. Flip right only when there is not, then clamp — on a narrow window NEITHER side
+    // fits, and an unclamped flyout walks off the edge instead of being merely cramped.
+    let left = r.left - W - GAP;
+    if (left < EDGE) left = r.right + GAP;
+    left = Math.max(EDGE, Math.min(left, window.innerWidth - W - EDGE));
+    setHoverAt({ top: Math.max(EDGE, r.top - 6), left });
+  }, [loadPeople]);
   const [pickerClients, setPickerClients] = useState(null);  // null = never loaded
   const [pickerQ, setPickerQ] = useState("");
   const pickerRef = useRef(null);
@@ -1320,21 +1359,6 @@ function Dashboard({ session }) {
     }
   };
 
-  /** The people on one account, fetched once and kept. Failure is recorded as an empty list
-   *  with a reason rather than left pending, so the flyout says something instead of spinning. */
-  const loadPeople = useCallback(async (clientId) => {
-    if (!clientId || peopleBy[clientId]) return;
-    setPeopleBy((m) => ({ ...m, [clientId]: { loading: true, users: [] } }));
-    try {
-      const { data, error } = await sb.functions.invoke("operator-portal", {
-        body: { action: "list_users", clientId },
-      });
-      if (error || !data || data.error) throw new Error((data && data.error) || "could not read");
-      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: data.users || [] } }));
-    } catch (_e) {
-      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: [], failed: true } }));
-    }
-  }, [peopleBy]);
 
   // Back/forward. Reads the URL rather than the state object, so a hand-edited address
   // and a history entry are treated identically. Every view-as history entry carries its
@@ -2560,7 +2584,6 @@ function Dashboard({ session }) {
   // never become the back target.
   if (!SS_SETTINGS_CONTEXT.includes(activeTab)) beforeSettings.current = activeTab;
 
-
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
   // Signed-in user identity for the sidebar footer. Auth users are email+password
   // (no profile name field), so prefer any metadata name and fall back to the
@@ -3249,7 +3272,10 @@ function Dashboard({ session }) {
                 <div className="ss-switch-menu" role="listbox" aria-label="Switch account">
                   <input type="search" placeholder="Search builders…" value={pickerQ} autoFocus
                     onChange={(e) => setPickerQ(e.target.value)} />
-                  <div className="ss-switch-list">
+                  {/* A position:fixed flyout does not move with the list, so it would hang in
+                      mid-air beside the wrong row. Closing on scroll is the honest answer:
+                      re-measuring on every scroll event would make it chase the pointer. */}
+                  <div className="ss-switch-list" onScroll={() => setHoverClient(null)}>
                     {pickerClients === null && <div className="ss-switch-note">Loading accounts…</div>}
                     {pickerClients !== null && pickerClients
                       .filter((c) => {
@@ -3260,13 +3286,13 @@ function Dashboard({ session }) {
                         const isCur = viewing && viewing.clientId === c.clientId;
                         return (
                           <div key={c.clientId} className="ss-switch-row"
-                            onMouseEnter={() => { setHoverClient(c.clientId); loadPeople(c.clientId); }}
+                            onMouseEnter={(e) => openPeople(c.clientId, e.currentTarget)}
                             onMouseLeave={() => setHoverClient((h) => (h === c.clientId ? null : h))}>
                             <button type="button" role="option" aria-selected={!!isCur}
                               className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}
                               /* Keyboard reaches the people too: hover is a mouse affordance, and
                                  the flyout is the only way to this feature. */
-                              onFocus={() => { setHoverClient(c.clientId); loadPeople(c.clientId); }}
+                              onFocus={(e) => openPeople(c.clientId, e.currentTarget.parentNode)}
                               aria-haspopup="menu" aria-expanded={hoverClient === c.clientId}>
                               <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
                               <span className="nm">{c.companyName || c.clientId}</span>
@@ -3278,7 +3304,8 @@ function Dashboard({ session }) {
                                 that person does — and, just as usefully, what they cannot reach.
                                 The server resolves and enforces the map; this only names who. */}
                             {hoverClient === c.clientId && (
-                              <div className="ss-switch-sub" role="menu" aria-label={`People on ${c.companyName || c.clientId}`}>
+                              <div className="ss-switch-sub" role="menu" aria-label={`People on ${c.companyName || c.clientId}`}
+                                style={hoverAt ? { top: hoverAt.top, left: hoverAt.left } : undefined}>
                                 <button type="button" role="menuitem" className="whole" onClick={() => pickAccount(c)}>
                                   The whole account
                                   <span className="sub">everything an operator can reach</span>

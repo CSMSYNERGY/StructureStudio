@@ -150,7 +150,15 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-switch-row:hover .rchev{color:#64748B}
 /* Opens to the LEFT. The menu it hangs off is right-aligned under a pill in the top-right
    corner, so a submenu on the right would start off the edge of the window. */
-.ss-switch-sub{position:absolute;top:-6px;right:calc(100% + 4px);width:250px;background:#FFF;
+/* ⛔ position:FIXED, not absolute, and this is the whole reason the flyout exists at all.
+   `.ss-switch-list` above is `overflow-y:auto`, so an absolutely-positioned child of a ROW
+   is clipped to that scroll box — and this opens to the LEFT of it, entirely outside. It
+   rendered, it had a size, and not one pixel of it was ever painted: measured at
+   left/right -24/240 against a list spanning 244/544. Carolyn: "it has the appearance of
+   being there, but isn't actually there."
+   Fixed positioning escapes the clip; the coordinates come from the hovered row, so there
+   is no top/right here to fight with them. */
+.ss-switch-sub{position:fixed;width:250px;background:#FFF;
   border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:95;
   max-height:320px;overflow-y:auto}
 .ss-switch-sub button{display:block;width:100%;background:none;border:none;color:#334155;font-size:12.5px;
@@ -337,7 +345,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=230ef4ad"></script>
-<script defer src="/portal.app.compiled.js?v=9d1449ec" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=5d231731" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline
