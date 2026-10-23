@@ -5173,8 +5173,15 @@ const ssfldType = (t) => SSFLD_TYPE_WORD[String(t)] || "Text";
 
 // A chip saying who fills a field in. Three answers, and the difference matters to a builder
 // deciding where to put something: they type it, the designer/estimate sets it, or the system does.
+//
+// ⚠️ "From the design" is keyed on the derived source NAMING `designs`, not on there being one at
+// all. Every field read out of another table carries a `derived`, and the first version of this
+// said "From the design" for all of them — so Status, whose source is `crm_statuses`, claimed to
+// come from the designer on the very row whose own note says the system sets it and nobody sets it
+// by hand. Caught on beta. A field with no `derived` is a plain column on the entity's own table.
 function SsfldWho({ field }) {
-  const [text, bg, fg] = !field.editable && field.derived
+  const fromDesign = !!field.derived && /^designs\./.test(String(field.derived));
+  const [text, bg, fg] = !field.editable && fromDesign
     ? ["From the design", "#EFF6FF", "#1D4ED8"]
     : !field.editable
       ? ["Set by the system", "#F1F5F9", "#475569"]
