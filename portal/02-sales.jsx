@@ -2937,10 +2937,12 @@ function CrmOwnerPicker({ edit, setEdit, team }) {
 // name, "but there's no places … for me to edit that company name later, because I got the
 // company name wrong." One component for the same two editors CrmAddressFields serves. "" is a
 // real answer (the server clears the field), like every input here.
-function CrmCompanyField({ edit, setEdit }) {
+function CrmCompanyField({ edit, setEdit, label = "Company" }) {
   return (
     <>
-      <span style={S.lbl}>Company</span>
+      {/* The label is the caller's since migration 330: a builder may rename this field, and both
+          editors read the same override through CrmRecord's cLbl. */}
+      <span style={S.lbl}>{label}</span>
       <input style={{ ...S.input, marginBottom: 7 }} value={edit.company || ""} placeholder="Acme Sheds" maxLength={200}
         data-ss-edit-company="" onChange={(e) => setEdit((p) => ({ ...p, company: e.target.value }))} />
     </>
@@ -2963,6 +2965,153 @@ function CrmEditHead({ children, hint }) {
       <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#475569", whiteSpace: "nowrap" }}>{children}</span>
       {hint && <span style={{ fontSize: 11, color: "#94A3B8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>}
     </div>
+  );
+}
+
+// ── A BUILDER'S OWN FIELDS, ON THE RECORD (migration 330, Carolyn 2026-10-22) ───────────
+// Settings → Customer Hub → Fields defines them; this is where they are filled in. `crm_record`
+// sends the live definitions with the record (`data.fields`), already stripped of the hidden ones
+// and with every relabel of OURS folded in, so nothing here knows which columns exist or what the
+// override rule is — the Fields tab and the card cannot drift apart because they read one answer.
+//
+// ⚠️ ABSENT IS NOT EMPTY, the same distinction the three fulfilment cards draw a few hundred lines
+// down: `data.fields` is undefined on a server that predates this (and on a failed read, where it
+// sends fieldsError instead), and an EMPTY array means this builder genuinely has no fields of
+// their own. The first draws nothing; the second also draws nothing, but for a different reason,
+// and neither may draw an empty "Your fields" heading.
+const ssCrmDefs = (data, entity) => {
+  const f = data && data.fields;
+  const list = f && f[entity];
+  return Array.isArray(list) ? list : [];
+};
+// One of OUR labels, as this builder renamed it, else ours. `key` is the catalogue's id, which for
+// every field here is the column name (_shared/crmFields.ts says so, and says why).
+const ssCrmLabel = (data, entity, key, dflt) => {
+  const f = data && data.fields;
+  const o = f && f[entity === "contact" ? "contactLabels" : "dealLabels"];
+  const row = o && o[key];
+  return row && String(row.label || "").trim() ? String(row.label) : dflt;
+};
+// Did this builder take one of OURS off the card? A field nobody has touched has no row at all.
+const ssCrmOff = (data, entity, key) => {
+  const f = data && data.fields;
+  const o = f && f[entity === "contact" ? "contactLabels" : "dealLabels"];
+  const row = o && o[key];
+  return !!(row && row.hidden);
+};
+// What one stored value reads as. A missing key, a JSON null and "" are all the same thing — empty
+// — which is what makes "clear this field" work without a second path to strip keys out (330).
+function ssCrmValueText(field, raw) {
+  if (raw === null || raw === undefined || raw === "") return "";
+  if (field.type === "checkbox") return raw === true || raw === "true" ? "Yes" : "No";
+  if (field.type === "date") return fmtDate(String(raw));
+  return String(raw);
+}
+
+// One input, by type. Deliberately the same S.input the rest of the editor uses, so a builder's
+// own field does not look bolted on beside Name and Phone.
+function CrmCustomInput({ field, value, onChange, disabled = false }) {
+  const v = value === null || value === undefined ? "" : value;
+  if (field.type === "checkbox") {
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155", marginBottom: 7 }}>
+        <input type="checkbox" checked={v === true || v === "true"} disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)} />
+        {field.help || "Yes"}
+      </label>
+    );
+  }
+  if (field.type === "select") {
+    return (
+      <select style={{ ...S.input, marginBottom: 7 }} value={String(v)} disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}>
+        {/* "" is a real answer — the server reads it as "clear this field". */}
+        <option value="">—</option>
+        {(field.choices || []).map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+    );
+  }
+  if (field.type === "textarea") {
+    return (
+      <textarea style={{ ...S.input, marginBottom: 7, minHeight: 64, fontFamily: "inherit" }}
+        value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+    );
+  }
+  return (
+    <input style={{ ...S.input, marginBottom: 7 }}
+      type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
+      value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+  );
+}
+
+// The stack of them inside the contact editor, under a heading of its own so it is obvious which
+// fields are the builder's. Nothing at all when they have none — see the absent/empty note above.
+function CrmCustomFields({ fields, values, onChange, disabled = false }) {
+  if (!fields.length) return null;
+  const get = (k) => (values && Object.prototype.hasOwnProperty.call(values, k) ? values[k] : null);
+  return (
+    <>
+      <CrmEditHead hint="from Settings → Customer Hub → Fields">Your fields</CrmEditHead>
+      {fields.map((f) => (
+        <div key={f.key}>
+          <span style={S.lbl}>
+            {f.label}
+            {f.required && <span title="Asked for every time" style={{ color: "#DC2626", marginLeft: 3 }}>*</span>}
+          </span>
+          <CrmCustomInput field={f} value={get(f.key)} disabled={disabled}
+            onChange={(v) => onChange(f.key, v)} />
+          {f.help && f.type !== "checkbox" && (
+            <div style={{ fontSize: 11, color: "#94A3B8", margin: "-4px 0 7px" }}>{f.help}</div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ONE OF THE BUILDER'S FIELDS, INSIDE THE DEAL PANEL (migration 330). Compact, to sit in the same
+// grid as Expected close and Total, and saved the way that close date is: on BLUR or Enter, never
+// on change. A date input fires change once per keystroke with whatever its segments hold so far
+// (typing "12" reports January first), and a number input does the same mid-number — so a
+// change-save stores a wrong value and then disables the box before the rest can land. Keyed on
+// the stored value so a save or a reload repaints it; Escape puts it back.
+//
+// A drop-down and a tick box commit on CHANGE, because neither has an intermediate state to get
+// wrong and waiting for a blur after picking from a list reads as nothing having happened.
+function CrmDealCustomCell({ field, value, canEdit, busy, onCommit }) {
+  const stored = value === null || value === undefined ? "" : String(value);
+  const ctl = { ...S.input, padding: "4px 7px", fontSize: 12.5, width: field.type === "textarea" ? 260 : 170, marginBottom: 0 };
+  if (!canEdit) return <span>{ssCrmValueText(field, value) || "—"}</span>;
+  if (field.type === "checkbox") {
+    return (
+      <input type="checkbox" checked={value === true || value === "true"} disabled={busy}
+        onChange={(e) => onCommit(e.target.checked)} />
+    );
+  }
+  if (field.type === "select") {
+    return (
+      <select key={stored} style={{ ...ctl, cursor: "pointer" }} defaultValue={stored} disabled={busy}
+        onChange={(e) => onCommit(e.target.value)}>
+        <option value="">—</option>
+        {(field.choices || []).map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+    );
+  }
+  const commitOnBlur = (e) => { if (e.target.value !== stored) onCommit(e.target.value); };
+  const keys = (e) => {
+    if (e.key === "Enter" && field.type !== "textarea") e.currentTarget.blur();
+    if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
+  };
+  if (field.type === "textarea") {
+    return (
+      <textarea key={stored} style={{ ...ctl, minHeight: 48, fontFamily: "inherit" }} defaultValue={stored}
+        disabled={busy} onBlur={commitOnBlur} onKeyDown={keys} />
+    );
+  }
+  return (
+    <input key={stored} style={ctl} defaultValue={stored} disabled={busy}
+      type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
+      onBlur={commitOnBlur} onKeyDown={keys} />
   );
 }
 
@@ -4661,6 +4810,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     billingCity: (data.contact && data.contact.billing_city) || "",
     billingState: (data.contact && data.contact.billing_state) || "",
     billingZip: (data.contact && data.contact.billing_zip) || "",
+    // THE BUILDER'S OWN FIELDS (migration 330). A COPY of the stored object, so Cancel really
+    // cancels; the keys are the field definitions', and a field with nothing filled in yet simply
+    // has no key here (ssCrmValueText and the inputs read a missing key as empty).
+    custom: { ...((data.contact && data.contact.custom) || {}) },
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -4677,13 +4830,52 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         billingState: edit.billingState, billingZip: edit.billingZip,
       },
     });
+    // THE BUILDER'S OWN FIELDS (migration 330), in a SECOND call, and only when they have some.
+    //
+    // ⚠️ Two calls on purpose, and in this order. crm_save_contact writes real columns through
+    // crm_update_contact, a named RPC whose argument list is pinned by every database it has ever
+    // run against (the p_company note above it says what adding one costs); the custom values are
+    // a jsonb merge with its own refusals, its own 404 and its own row-scope rule. Folding them
+    // into that RPC would mean a signature change for a feature that does not need one, and a
+    // failure in either half would then report as the other. The built-ins go first because they
+    // are the ones a duplicate phone can refuse: a refused save leaves nothing written at all.
+    let customErr = null;
+    if (!(r && r.error) && !error) {
+      const defs = ssCrmDefs(data, "contact");
+      if (defs.length && data.contact && data.contact.id) {
+        const values = {};
+        // Only the keys the definitions know, and only the ones this form actually holds — a
+        // stale tab must not blank a field somebody added while it was open.
+        defs.forEach((f) => { values[f.key] = edit.custom && Object.prototype.hasOwnProperty.call(edit.custom, f.key) ? edit.custom[f.key] : null; });
+        const { data: cr, error: ce } = await sb.functions.invoke("portal-settings", {
+          body: { action: "crm_contact_custom_save", id: data.contact.id, values },
+        });
+        customErr = (cr && cr.error) || (ce ? await fnError(ce) : null);
+      }
+    }
     setBusy(false);
     // Keep the form open on failure. Closing it would throw away what they typed, and the
     // duplicate-phone case is one they can actually act on once they have read it.
-    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null) || customErr;
     if (failMsg) { setOpErr({ where: "contact", msg: failMsg }); return; }
     setEdit(null); load();
   };
+
+  // ── WHAT THIS BUILDER CALLS OUR FIELDS, AND WHICH ONES THEY TOOK OFF THE CARD ─────────
+  // Settings → Customer Hub → Fields (migration 330) lets a builder relabel or hide one of OURS.
+  // `crm_record` sends the overrides with the record, so these three read them and every surface
+  // below goes through them rather than printing a hard-coded word. A field nobody has touched has
+  // no override row at all, so the default is what these return — which is why this is safe to put
+  // in front of a label that has always been a literal.
+  const cLbl = (key, dflt) => ssCrmLabel(data, "contact", key, dflt);
+  const cOff = (key) => ssCrmOff(data, "contact", key);
+  const dLbl = (key, dflt) => ssCrmLabel(data, "deal", key, dflt);
+  const dOff = (key) => ssCrmOff(data, "deal", key);
+  const contactDefs = ssCrmDefs(data, "contact");
+  const dealDefs = ssCrmDefs(data, "deal");
+  // One key of the contact editor's draft. Written straight into `edit.custom`, so Cancel throws
+  // the whole lot away with everything else on the form and Save sends it in one call.
+  const setCustom = (key, v) => setEdit((prev) => (!prev ? prev : { ...prev, custom: { ...(prev.custom || {}), [key]: v } }));
 
   // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
   // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
@@ -5004,6 +5196,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     catch (e2) { await load(); setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That close date did not save." }); }
     finally { setDealBusy(false); }
   };
+  // One of the builder's own fields on this card (migration 330). Painted first and written after,
+  // the shape saveLeadClose above settled on: a field typed into and then re-read from the server
+  // flickers back to its old value for the length of the round trip. A FAILURE reloads, so the
+  // card goes back to what is really stored rather than keeping an optimistic lie on screen.
+  const saveDealCustom = async (deal, key, value, rowKey) => {
+    setDealBusy(true); setOpErr(null);
+    setData((dd) => (!dd || !dd.pipeline ? dd : { ...dd, pipeline: { ...dd.pipeline,
+      deals: (dd.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, custom: { ...(x.custom || {}), [key]: value } } : x)) } }));
+    try { await ssPipeCall("crm_deal_custom_save", { id: deal.id, values: { [key]: value } }); }
+    catch (e2) { await load(); setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That did not save." }); }
+    finally { setDealBusy(false); }
+  };
   // "+ Add to a pipeline", kept from the Sales pipelines card it replaced: a new deal for this
   // person (not one of their designs, which have their cards already), in that pipeline's first
   // open stage. Reloaded rather than painted, because the new card's id comes from the server.
@@ -5033,15 +5237,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       return kind === "contact" ? (
         edit ? (
           <div style={{ fontSize: 13 }}>
-            {/* Company first, the order "+ Add lead" asks in. */}
-            <CrmCompanyField edit={edit} setEdit={setEdit} />
-            <span style={S.lbl}>Name</span>
+            {/* Company first, the order "+ Add lead" asks in. Every label here goes through cLbl
+                (migration 330), so a builder who renamed one of ours sees their own word. A field
+                they HID still appears in the editor — hiding takes it off the card, and a field
+                nobody can reach is a field nobody can correct. */}
+            <CrmCompanyField edit={edit} setEdit={setEdit} label={cLbl("company", "Company")} />
+            <span style={S.lbl}>{cLbl("name", "Name")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
               onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
-            <span style={S.lbl}>Email</span>
+            <span style={S.lbl}>{cLbl("email", "Email")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
               onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
-            <span style={S.lbl}>Phone</span>
+            <span style={S.lbl}>{cLbl("phone", "Phone")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
             <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
@@ -5053,6 +5260,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
             <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+            <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -5069,9 +5277,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {/* Only when there is one: most contacts are homeowners who came through the designer,
                 and a "No company" line on every one of them would be noise. ✎ Edit offers the
                 field either way. */}
-            {data.contact.company && <div data-ss-contact-company="" style={{ fontWeight: 700, color: "#1E293B" }}>{data.contact.company}</div>}
-            <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
-            <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
+            {data.contact.company && !cOff("company") && <div data-ss-contact-company="" style={{ fontWeight: 700, color: "#1E293B" }}>{data.contact.company}</div>}
+            {!cOff("email") && <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>}
+            {!cOff("phone") && <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>}
+            {/* The builder's own fields (migration 330), the filled-in ones only: this is the
+                three-line summary at the top of the record, not the whole card, and a run of
+                "Gate code —" lines is what the Person panel below is for. */}
+            {contactDefs.filter((f) => ssCrmValueText(f, (data.contact.custom || {})[f.key])).map((f) => (
+              <div key={f.key} data-ss-contact-custom={f.key}>
+                <span style={{ color: "#94A3B8" }}>{f.label}: </span>
+                {ssCrmValueText(f, (data.contact.custom || {})[f.key])}
+              </div>
+            ))}
             {canEditContact && (
               <button type="button" onClick={startEdit}
                 title="Edit this contact's company, name, email and phone"
@@ -5204,15 +5421,32 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 {open && (
                   <div data-ss-deal-panel={row.key} style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
-                    {fieldRow("Expected close", closeField)}
+                    {/* Every label goes through dLbl and every row through dOff (migration 330):
+                        a builder may rename one of these or take it off the panel, and the Fields
+                        tab is where they do it. The defaults are the words that were literals here. */}
+                    {!dOff("expected_close_date") && fieldRow(dLbl("expected_close_date", "Expected close"), closeField)}
                     {d ? (
                       <>
-                        {fieldRow("Style", s.style || "—")}
-                        {fieldRow("Size", s.size || "—")}
-                        {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
-                        {fieldRow("Colour", colour)}
+                        {!dOff("design_style") && fieldRow(dLbl("design_style", "Style"), s.style || "—")}
+                        {!dOff("design_size") && fieldRow(dLbl("design_size", "Size"), s.size || "—")}
+                        {!dOff("design_total") && fieldRow(dLbl("design_total", "Total"), d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
+                        {!dOff("design_colour") && fieldRow(dLbl("design_colour", "Colour"), colour)}
                       </>
-                    ) : fieldRow("Value", deal.value_cents != null ? fmtMoneyWhole(deal.value_cents) : "—")}
+                    ) : (!dOff("value_cents") && fieldRow(dLbl("value_cents", "Value"), deal.value_cents != null ? fmtMoneyWhole(deal.value_cents) : "—"))}
+                    {/* THE BUILDER'S OWN FIELDS ON THIS CARD (migration 330). Only where there IS
+                        a card: the values live on crm_deals, so a design with no card yet has
+                        nowhere to put them — which is every design on an account whose pipelines
+                        have not been seeded. They appear the moment the card does. */}
+                    {deal && dealDefs.map((f) => (
+                      <div key={f.key} data-ss-deal-custom={f.key}>
+                        {fieldRow(
+                          f.label + (f.required ? " *" : ""),
+                          <CrmDealCustomCell field={f} value={(deal.custom || {})[f.key]}
+                            canEdit={canEdit} busy={dealBusy}
+                            onCommit={(v) => saveDealCustom(deal, f.key, v, row.key)} />,
+                        )}
+                      </div>
+                    ))}
                     {deal && deal.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {deal.lost_reason}</div>}
                     {/* "Open in designer" on the left and, at the bottom right where Carolyn
                         bracketed it, the stage and the move (C37, C38). Wraps under itself in a
@@ -5506,14 +5740,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             <div style={{ border: "1px solid #E2E8F0", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "9px 9px 8px", marginTop: -1 }}>
               {edit && canEditContact ? (
                 <div style={{ fontSize: 13 }}>
-                  <CrmCompanyField edit={edit} setEdit={setEdit} />
-                  <span style={S.lbl}>Name</span>
+                  <CrmCompanyField edit={edit} setEdit={setEdit} label={cLbl("company", "Company")} />
+                  <span style={S.lbl}>{cLbl("name", "Name")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
                     onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
-                  <span style={S.lbl}>Email</span>
+                  <span style={S.lbl}>{cLbl("email", "Email")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
                     onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
-                  <span style={S.lbl}>Phone</span>
+                  <span style={S.lbl}>{cLbl("phone", "Phone")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
                   <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
@@ -5525,6 +5759,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
                   <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+                  <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -5538,11 +5773,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 </div>
               ) : (
                 <div>
-                  {data.contact.company && ro("Company", data.contact.company)}
-                  {ro("Name", data.contact.name)}
-                  {ro("Email", data.contact.email)}
-                  {ro("Phone", data.contact.phone)}
-                  {data.contact.first_seen_at && ro("First seen", fmtDate(data.contact.first_seen_at))}
+                  {data.contact.company && !cOff("company") && ro(cLbl("company", "Company"), data.contact.company)}
+                  {ro(cLbl("name", "Name"), data.contact.name)}
+                  {!cOff("email") && ro(cLbl("email", "Email"), data.contact.email)}
+                  {!cOff("phone") && ro(cLbl("phone", "Phone"), data.contact.phone)}
+                  {data.contact.first_seen_at && !cOff("first_seen_at") && ro(cLbl("first_seen_at", "First seen"), fmtDate(data.contact.first_seen_at))}
+                  {/* The builder's own fields (migration 330). ALL of them here, empty ones
+                      included: this is the panel that answers "what do we know about them?", and
+                      a field that vanishes when it is blank is one nobody remembers to fill in. */}
+                  {contactDefs.map((f) => (
+                    <div key={f.key} data-ss-contact-custom={f.key}>
+                      {ro(f.label, ssCrmValueText(f, (data.contact.custom || {})[f.key]))}
+                    </div>
+                  ))}
                   {/* Reached two ways: no permission / no contact row (the messages), or a
                       save that just landed — `saveContact` clears `edit` and reloads, so the
                       panel stays open showing the NEW values. That re-read is the receipt;

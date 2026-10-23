@@ -204,7 +204,12 @@ Deno.test("a failed pipeline read: crm_record says pipelineError, and the record
   assert(/if \(pRes\.error \|\| sRes\.error \|\| tRes\.error \|\| dRes\.error\) return null;/.test(branch),
     "a failed read must answer null (failed), not undefined (no block for this reader)");
   assert(branch.includes("const pipelineError = pipeline === null ? true : undefined;"), "crm_record must flag a failed read");
-  assert(/return json\(\{[^}]*\bpipeline: pipeline \?\? undefined, pipelineError \}\);/.test(branch),
+  // The pair, in the response, in that order. NOT anchored on the closing `});` any more:
+  // migration 330 added `fields`/`fieldsError` to the same object with the same absent-vs-failed
+  // contract, and the next key added there would have broken this assertion again while the
+  // contract it guards was untouched. What matters is that a failed read leaves `pipeline` OUT
+  // (`?? undefined`) and says so, which is what this matches.
+  assert(/return json\(\{[\s\S]*?pipeline: pipeline \?\? undefined, pipelineError/.test(branch),
     "crm_record must leave the block out on a failure and say pipelineError");
 
   // The record's rule, run as it ships.

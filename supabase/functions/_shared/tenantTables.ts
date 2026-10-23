@@ -57,6 +57,12 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   crm_pipelines: { fate: "wipe", export: true, why: "Pipelines (deleting one cascades its deals and stages)." },
   crm_pipeline_stages: { fate: "cascade", parent: "crm_pipelines", export: true, why: "Pipeline stages (deals point at them with NO ACTION)." },
   crm_statuses: { fate: "wipe", export: true, why: "Statuses (deals point at them with NO ACTION)." },
+  // Migration 330. The builder's own fields on a contact and on a deal, and their relabels of
+  // ours. WIPE: it is per-tenant configuration, like the pipelines and statuses above, and a
+  // recreated slug must not inherit the old builder's field list. Exported, because the VALUES
+  // (crm_contacts.custom, crm_deals.custom) are exported with their rows and are unreadable
+  // without these definitions — a key and no label is not an answer to "what did they record?".
+  crm_field_defs: { fate: "wipe", export: true, why: "Contact and design/deal field definitions (migration 330); the values ride on the contact and deal rows." },
   crm_deals: { fate: "cascade", parent: "crm_pipelines", export: true, why: "Deals. Also CASCADE from designs when tied to one." },
   crm_deal_stage_changes: { fate: "cascade", parent: "crm_deals", export: true, why: "A deal's stage history." },
   captured_leads: { fate: "wipe", export: true, why: "Designer visitors who left their details (no FK to designs)." },

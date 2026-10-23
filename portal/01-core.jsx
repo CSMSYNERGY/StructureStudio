@@ -1955,6 +1955,13 @@ function ssCustomerHubTabs() {
     //   * for such a rep this hub shows exactly ONE tab, labelled "Customer Hub". That reads a
     //     little oddly for them and is the accepted cost of the grouping owners asked for.
     ["meetings", "Meetings", "Your booking link and hours, the meeting types you offer, and your calendar connections"],
+    // FIELDS (migration 330, Carolyn 2026-10-22): "We need to show all the current fields for
+    // contacts and designs/deals in the customer hub tab under its own tab called fields. We need
+    // to allow to add as many custom fields as desired." A register first and an editor second —
+    // it lists what a contact and a design/deal already hold, which nothing in the product has
+    // ever shown in one place, and lets a builder add their own beside them. settings_crm like
+    // every tab here, and behind the built-in CRM (CustomerHubShell shows the teaser without it).
+    ["fields", "Fields", "Every field on a contact and on a design/deal, and your own custom fields"],
   ];
 }
 

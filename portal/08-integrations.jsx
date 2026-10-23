@@ -5121,6 +5121,427 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           component shows it. Doing it twice would mean two places deciding what "unpaid"
           looks like on one page. */}
       {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* Fields (migration 330). Behind the CRM like Pipelines and Forms: the register describes a
+          contact and a deal, which is the CRM's own data, and every crm_field_* action refuses an
+          unentitled tenant by the crm_ prefix regardless — so the teaser rather than a screen
+          whose every button 403s. */}
+      {sub === "fields" && (crmUnlocked || crmPending
+        ? <CrmFieldsHub clientId={clientId} canEdit={canEdit} />
+        : <div style={S.card}><div style={S.h2}>Fields</div><p style={{ fontSize: 13, color: "#64748B" }}>Contact and deal fields are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+    </div>
+  );
+}
+
+// ══ Customer Hub → Fields (migration 330, Carolyn 2026-10-22) ════════════════════════════
+// "We need to show all the current fields for contacts and designs/deals in the customer hub tab
+// under its own tab called fields. We need to allow to add as many custom fields as desired."
+//
+// A REGISTER FIRST, an editor second. One half of each list is every field that already exists —
+// the real columns, grouped the way the contact editor and the deal panel lay them out, with what
+// sets each one. Nothing in the product has ever shown a builder that list, and it is the half she
+// asked for first ("show all the current fields"). Their own fields sit above it, because that is
+// the half with buttons on it.
+//
+// ⚠️ THE CATALOGUE IS THE SERVER'S (_shared/crmFields.ts) and arrives with every overridden label
+// already folded in. Do NOT mirror the list of built-ins here: the columns are in code, one copy
+// of that list is the whole point, and a second copy in the browser would drift the moment a
+// column moved. This renders what crm_fields_list sends and knows nothing about which columns exist.
+//
+// WHAT MAY BE CHANGED, and it is two different lists:
+//   one of OURS     the label, and whether it shows on the card. Never the type, never deleted —
+//                   the rest of the product reads that column. A few keep their name as well
+//                   (relabel: false — Status, Stage, Created…), because other screens refer to
+//                   them by that word, and Name cannot be hidden.
+//   one of THEIRS   everything, and Delete ARCHIVES: the values stay in the jsonb and Restore
+//                   brings the lot back. One click never destroys a column of customer data.
+//
+// Reordering is up/down buttons, not drag. The built-ins are not reorderable at all (their order
+// is the card's own), so the only movable list here is usually two or three rows long — a
+// pointer-events drag for that is more ways to go wrong than it is worth, and the buttons work
+// from a keyboard, which the pipeline board's drag does not.
+const SSFLD_ENTITIES = [["contact", "Contacts"], ["deal", "Designs & deals"]];
+// The one place a built-in's `type` becomes words. The catalogue carries types the custom-field
+// list does not have (address, owner, stage, status, money, labels, link): they describe a column
+// that is not free text, and saying "Text" for "Assigned to" would be a small lie on a screen
+// whose whole job is telling a builder what they have.
+const SSFLD_TYPE_WORD = {
+  text: "Text", textarea: "Long text", number: "Number", date: "Date", select: "Drop-down",
+  checkbox: "Yes / no", address: "Address", owner: "Team member", stage: "Stage", status: "Status",
+  money: "Money", labels: "Labels", link: "Link",
+};
+const ssfldType = (t) => SSFLD_TYPE_WORD[String(t)] || "Text";
+
+// A chip saying who fills a field in. Three answers, and the difference matters to a builder
+// deciding where to put something: they type it, the designer/estimate sets it, or the system does.
+function SsfldWho({ field }) {
+  const [text, bg, fg] = !field.editable && field.derived
+    ? ["From the design", "#EFF6FF", "#1D4ED8"]
+    : !field.editable
+      ? ["Set by the system", "#F1F5F9", "#475569"]
+      : ["You fill it in", "#F0FDF4", "#15803D"];
+  return (
+    <span style={{ display: "inline-block", background: bg, color: fg, borderRadius: 999,
+      padding: "2px 8px", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" }}>{text}</span>
+  );
+}
+
+function SsfldHidden() {
+  return (
+    <span title="Hidden from the contact card and the deal panel"
+      style={{ display: "inline-block", background: "#FEF3C7", color: "#92400E", borderRadius: 999,
+        padding: "2px 8px", fontSize: 10.5, fontWeight: 800, marginLeft: 6, whiteSpace: "nowrap" }}>Hidden</span>
+  );
+}
+
+// The Add / Edit sheet for one of THEIR fields. The key is minted from the name on the server and
+// is never editable — renaming a key orphans every value already stored under it (330's header) —
+// so the name is what changes, and the key is shown, greyed, as the thing it is.
+function SsfldEditor({ entity, field, types, onClose, onSaved }) {
+  const isNew = !field;
+  const [label, setLabel] = useState(field ? field.label : "");
+  const [type, setType] = useState(field ? field.type : "text");
+  const [choices, setChoices] = useState(field && field.choices ? field.choices.join("\n") : "");
+  const [help, setHelp] = useState(field && field.help ? field.help : "");
+  const [required, setRequired] = useState(!!(field && field.required));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const entLabel = entity === "contact" ? "contact" : "design/deal";
+
+  const save = async () => {
+    setBusy(true); setErr("");
+    const body = {
+      label, type, help, required,
+      choices: type === "select" ? choices.split("\n").map((s) => s.trim()).filter(Boolean) : [],
+    };
+    try {
+      if (isNew) await ssfCall("crm_field_create", { entity, ...body });
+      else await ssfCall("crm_field_save", { id: field.id, ...body });
+      onSaved();
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <SsfModal title={isNew ? "Add a field to every " + entLabel : "Edit " + field.label} onClose={onClose}
+      footer={(
+        <>
+          <button type="button" style={SSF_BTN(false)} onClick={onClose} disabled={busy}>Cancel</button>{" "}
+          <button type="button" style={{ ...SSF_BTN(true), opacity: busy || !label.trim() ? 0.6 : 1 }}
+            disabled={busy || !label.trim()} onClick={save}>{busy ? "Saving…" : (isNew ? "Add field" : "Save")}</button>
+        </>
+      )}>
+      {err && <div style={S.err}>{err}</div>}
+      <span style={S.lbl}>Field name</span>
+      <input style={{ ...S.input, marginBottom: 10 }} value={label} maxLength={80} autoFocus
+        placeholder={entity === "contact" ? "Gate code" : "Permit number"}
+        onChange={(e) => setLabel(e.target.value)} />
+      <span style={S.lbl}>What kind of field</span>
+      <select style={{ ...S.input, marginBottom: 4 }} value={type} onChange={(e) => setType(e.target.value)}>
+        {(types || []).map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+      </select>
+      <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 10 }}>
+        {((types || []).find((t) => t.id === type) || {}).hint || ""}
+      </div>
+      {type === "select" && (
+        <>
+          <span style={S.lbl}>The choices, one per line</span>
+          <textarea style={{ ...S.input, marginBottom: 10, minHeight: 96, fontFamily: "inherit" }}
+            value={choices} placeholder={"Yes\nNo\nNot yet asked"}
+            onChange={(e) => setChoices(e.target.value)} />
+        </>
+      )}
+      <span style={S.lbl}>A hint under the field (optional)</span>
+      <input style={{ ...S.input, marginBottom: 10 }} value={help} maxLength={200}
+        placeholder="Shown in small print beside the box"
+        onChange={(e) => setHelp(e.target.value)} />
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+        <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+        Ask for it every time — the card marks it while it is empty
+      </label>
+      {!isNew && (
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, lineHeight: 1.5 }}>
+          Stored as <code>{field.key}</code>, which never changes — so renaming this field keeps
+          every value already filled in. Changing the kind of field leaves what is already stored
+          alone; it reads as whatever was typed until somebody edits it.
+        </div>
+      )}
+    </SsfModal>
+  );
+}
+
+// Rename / hide one of OURS. A sheet rather than an inline input because Reset needs explaining:
+// pressing it is not "clear the name", it is "go back to ours", and the two read the same in a
+// bare text box.
+function SsfldBuiltinEditor({ entity, field, onClose, onSaved }) {
+  const [label, setLabel] = useState(field.label);
+  const [hidden, setHidden] = useState(!!field.hidden);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const touched = field.renamed || field.hidden;
+
+  const send = async (body) => {
+    setBusy(true); setErr("");
+    try { await ssfCall("crm_builtin_field_save", { entity, builtinKey: field.id, ...body }); onSaved(); onClose(); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <SsfModal title={field.defaultLabel} onClose={onClose}
+      footer={(
+        <>
+          {touched && (
+            <button type="button" style={{ ...SSF_BTN(false), marginRight: "auto" }} disabled={busy}
+              title="Put the name and the visibility back to ours"
+              onClick={() => send({ reset: true })}>Reset to default</button>
+          )}
+          <button type="button" style={SSF_BTN(false)} onClick={onClose} disabled={busy}>Cancel</button>{" "}
+          <button type="button" style={{ ...SSF_BTN(true), opacity: busy ? 0.6 : 1 }} disabled={busy}
+            onClick={() => send({ label, hidden })}>{busy ? "Saving…" : "Save"}</button>
+        </>
+      )}>
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5, marginBottom: 12 }}>
+        This is one of ours, backed by a real field on every {entity === "contact" ? "contact" : "design/deal"}.
+        You can call it something else and you can take it off the card — it keeps working either
+        way, and it cannot be deleted.
+      </div>
+      {field.relabel === false ? (
+        <div style={{ fontSize: 12.5, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0",
+          borderRadius: 8, padding: "9px 11px", marginBottom: 12 }}>
+          This one keeps its name — other screens refer to it by that word.
+        </div>
+      ) : (
+        <>
+          <span style={S.lbl}>What to call it</span>
+          <input style={{ ...S.input, marginBottom: 4 }} value={label} maxLength={80} autoFocus
+            onChange={(e) => setLabel(e.target.value)} />
+          <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 12 }}>
+            Ours is “{field.defaultLabel}”. Typing that back is the same as Reset.
+          </div>
+        </>
+      )}
+      {field.hideable === false ? (
+        <div style={{ fontSize: 12, color: "#94A3B8" }}>This one always shows.</div>
+      ) : (
+        <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+          <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
+          Hide it from the contact card and the deal panel
+        </label>
+      )}
+    </SsfModal>
+  );
+}
+
+function CrmFieldsHub({ clientId, canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [entity, setEntity] = useState("contact");
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);            // one of theirs
+  const [editingBuiltin, setEditingBuiltin] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setErr("");
+    ssfCall("crm_fields_list").then(setData, (e) => setErr(e.message));
+  }, []);
+  useEffect(() => { setData(null); load(); }, [clientId, load]);
+
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+
+  const half = data ? data[entity] : null;
+  const custom = half ? half.custom : [];
+  const archived = half ? half.archived : [];
+  const entLabel = entity === "contact" ? "contact" : "design/deal";
+
+  // Up / down. The server takes the WHOLE live list in its new order and refuses a partial one, so
+  // the swap happens here and the full array goes over.
+  const move = (id, delta) => {
+    const i = custom.findIndex((f) => f.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= custom.length) return;
+    const ids = custom.map((f) => f.id);
+    ids[i] = custom[j].id; ids[j] = custom[i].id;
+    act(() => ssfCall("crm_fields_reorder", { entity, ids }));
+  };
+
+  // The built-ins, in the catalogue's order, with a heading each time the group changes — the same
+  // "the run IS the heading" shape the Options tabs and the setup checklist use, so there is no
+  // second ordering model to keep in step.
+  const builtinRows = [];
+  let lastGroup = null;
+  (half ? half.builtins : []).forEach((f) => {
+    if (f.group !== lastGroup) {
+      lastGroup = f.group;
+      builtinRows.push(
+        <tr key={"g:" + f.group}>
+          <td colSpan={4} style={{ padding: "12px 8px 4px", fontSize: 10.5, fontWeight: 800,
+            letterSpacing: ".06em", textTransform: "uppercase", color: "#94A3B8" }}>{f.group}</td>
+        </tr>,
+      );
+    }
+    builtinRows.push(
+      <tr key={f.group + ":" + f.id}>
+        <td style={S.td}>
+          <div style={{ fontWeight: 700, color: "#1E293B" }}>
+            {f.label}{f.hidden && <SsfldHidden />}
+            {f.renamed && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600 }}> (ours: {f.defaultLabel})</span>}
+          </div>
+          {f.note && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2, lineHeight: 1.4 }}>{f.note}</div>}
+        </td>
+        <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+        <td style={S.td}><SsfldWho field={f} /></td>
+        <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>
+          {canEdit && (f.relabel !== false || f.hideable !== false) ? (
+            <button type="button" style={SSF_BTN(false)} disabled={busy}
+              onClick={() => setEditingBuiltin(f)}>Rename / hide</button>
+          ) : <span style={{ fontSize: 11.5, color: "#CBD5E1" }}>—</span>}
+        </td>
+      </tr>,
+    );
+  });
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Fields"
+        desc="Everything a contact and a design/deal can hold — the fields that come with Structure Studio, and as many of your own as you want beside them. Your own show on the contact card and in the deal panel, where your team fills them in."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setAdding(true)}>+ Add field</button>} />
+      {/* The two halves. A segment rather than two stacked lists: each half is twenty-odd rows, and
+          she asked for ONE tab — not a page you scroll past one whole list to reach the other. */}
+      <div style={{ display: "inline-flex", border: "1px solid #CBD5E1", borderRadius: 999, overflow: "hidden", marginBottom: 12 }}>
+        {SSFLD_ENTITIES.map(([id, name]) => {
+          const on = entity === id;
+          const n = data && data[id] ? data[id].custom.length : 0;
+          return (
+            <button key={id} type="button" onClick={() => setEntity(id)} aria-pressed={on}
+              style={{ background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none",
+                padding: "7px 15px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
+              {name}{n > 0 ? " · " + n + " of yours" : ""}
+            </button>
+          );
+        })}
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {half && (
+        <>
+          {/* THEIRS FIRST on the screen even though the register is the headline, because it is the
+              part with buttons on it: a builder who came here to add a field should not scroll
+              past twenty of ours to find out whether they already did. */}
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "4px 0 6px" }}>
+            Your own fields on every {entLabel}
+          </div>
+          {custom.length === 0 ? (
+            <div style={{ border: "1px dashed #CBD5E1", borderRadius: 8, padding: "16px 14px",
+              fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginBottom: 18 }}>
+              None yet. {canEdit
+                ? "Add one and it appears on every " + entLabel + " straight away, above the fields below."
+                : "Somebody with settings access can add one."}
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto", marginBottom: 18 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={S.th}>Field</th><th style={S.th}>Kind</th><th style={S.th}>Stored as</th>
+                  <th style={{ ...S.th, textAlign: "right" }}></th>
+                </tr></thead>
+                <tbody>
+                  {custom.map((f, i) => (
+                    <tr key={f.id}>
+                      <td style={S.td}>
+                        <div style={{ fontWeight: 700, color: "#1E293B" }}>
+                          {f.label}
+                          {f.required && <span title="Asked for every time" style={{ color: "#DC2626", marginLeft: 4 }}>*</span>}
+                          {f.hidden && <SsfldHidden />}
+                        </div>
+                        {f.help && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.help}</div>}
+                        {f.type === "select" && f.choices.length > 0 && (
+                          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.choices.join(" · ")}</div>
+                        )}
+                      </td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+                      <td style={S.td}><code style={{ fontSize: 11.5, color: "#64748B" }}>{f.key}</code></td>
+                      <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>
+                        {canEdit && (
+                          <>
+                            <button type="button" style={SSF_BTN(false)} disabled={busy || i === 0}
+                              title="Move up" onClick={() => move(f.id, -1)}>↑</button>{" "}
+                            <button type="button" style={SSF_BTN(false)} disabled={busy || i === custom.length - 1}
+                              title="Move down" onClick={() => move(f.id, 1)}>↓</button>{" "}
+                            <button type="button" style={SSF_BTN(false)} disabled={busy}
+                              onClick={() => setEditing(f)}>Edit</button>{" "}
+                            <button type="button" style={{ ...SSF_BTN(false), color: "#B91C1C" }} disabled={busy}
+                              onClick={() => {
+                                if (window.confirm("Delete “" + f.label + "”? It comes off every " + entLabel + ". What your team has already filled in is kept, and you can restore it.")) {
+                                  act(() => ssfCall("crm_field_delete", { id: f.id }));
+                                }
+                              }}>Delete</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* THE REGISTER — what she asked for first: every field that already exists. */}
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "4px 0 2px" }}>
+            What comes with Structure Studio
+          </div>
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 2, lineHeight: 1.5 }}>
+            Every field a {entLabel} already has. None can be deleted — the rest of the product
+            reads them — but you can call one something else, or take it off the card.
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Field</th><th style={S.th}>Kind</th><th style={S.th}>Who fills it in</th>
+                <th style={{ ...S.th, textAlign: "right" }}></th>
+              </tr></thead>
+              <tbody>{builtinRows}</tbody>
+            </table>
+          </div>
+
+          {archived.length > 0 && (
+            <details style={{ marginTop: 16 }}>
+              <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#64748B" }}>
+                Deleted fields ({archived.length}) — what was filled in is still there
+              </summary>
+              <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
+                <tbody>
+                  {archived.map((f) => (
+                    <tr key={f.id}>
+                      <td style={S.td}><span style={{ fontWeight: 700, color: "#475569" }}>{f.label}</span></td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+                      <td style={S.td}><code style={{ fontSize: 11.5, color: "#94A3B8" }}>{f.key}</code></td>
+                      <td style={{ ...S.td, textAlign: "right" }}>
+                        {canEdit && (
+                          <button type="button" style={SSF_BTN(false)} disabled={busy}
+                            onClick={() => act(() => ssfCall("crm_field_delete", { id: f.id, restore: true }))}>Restore</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </>
+      )}
+      {adding && (
+        <SsfldEditor entity={entity} field={null} types={data ? data.types : []}
+          onClose={() => setAdding(false)} onSaved={load} />
+      )}
+      {editing && (
+        <SsfldEditor entity={entity} field={editing} types={data ? data.types : []}
+          onClose={() => setEditing(null)} onSaved={load} />
+      )}
+      {editingBuiltin && (
+        <SsfldBuiltinEditor entity={entity} field={editingBuiltin}
+          onClose={() => setEditingBuiltin(null)} onSaved={load} />
+      )}
     </div>
   );
 }

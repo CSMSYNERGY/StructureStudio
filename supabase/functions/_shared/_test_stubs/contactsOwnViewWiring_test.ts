@@ -51,6 +51,10 @@ const SETTINGS_WRITES = [
   // Card statuses (migration 302): setting one on a card is the same write as moving it. Since 303
   // the branch refuses everyone (statuses are system-driven); the gate stays, so it stays listed.
   "crm_deal_set_status",
+  // The builder's own fields on a customer and on a deal (migration 330). Writing one is writing
+  // on that customer's record, so "view only" fills nothing in — the same answer the decision
+  // gives for every row above. The DEFINITIONS are settings_crm and deliberately not here.
+  "crm_contact_custom_save", "crm_deal_custom_save",
 ];
 
 Deno.test("portal-settings: every customer-record write is a contacts:'edit' gate, and own_view fails each one", () => {

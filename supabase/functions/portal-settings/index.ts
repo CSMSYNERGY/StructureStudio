@@ -235,6 +235,8 @@ import { AI_NOTICE_VERSION, currentAnswer, parseAiAnswer } from "../_shared/aiCo
 import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, saveAiTranscripts } from "./aiTranscripts.ts";
 // Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
 import { handleLeadFormAction } from "./leadForms.ts";
+import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./crmFields.ts";
+import { coerceFieldValue } from "../_shared/crmFields.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
   DESIGN_FEED_STAYS, isUuidLike, parseDealPatch, parseIdOrder, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder,
@@ -514,6 +516,13 @@ const GATES: GateTable = {
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
+  // The builder's OWN fields on a customer and on a deal (migration 330). Writing a custom field
+  // on somebody is writing on that customer, so these sit with the contact writes at
+  // contacts:'edit' and are narrowed row by row in CONTACT_ROW_SCOPE — not with the field
+  // DEFINITIONS above, which are settings_crm. A dealer may fill in a custom field on their own
+  // customer and must not be able to fill one in on anybody else's.
+  crm_contact_custom_save: { area: "contacts", level: "edit" },
+  crm_deal_custom_save:    { area: "contacts", level: "edit" },
   // My Synergy Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
   // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
   // makes a caller limited to their own customers the new contact's owner.
@@ -551,6 +560,19 @@ const GATES: GateTable = {
   crm_deal_set_status:   { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
+
+  // ── Customer Hub → Fields (migration 330, ./crmFields.ts) ───────────────────────────────
+  // What a contact and a design/deal hold, and the builder's own fields beside it. crm_* on
+  // purpose: the CRM entitlement guard below gates them by that prefix. settings_crm, the area
+  // the Customer Hub carries — these write DEFINITIONS, never a customer's row, so none of them
+  // is a contacts gate and CONTACT_ROW_SCOPE has nothing to say about them. The two actions that
+  // write a customer's VALUES are contacts:'edit' and sit further down, with the contact writes.
+  crm_fields_list:         { area: "settings_crm", level: "view" },
+  crm_field_create:        { area: "settings_crm", level: "edit" },
+  crm_field_save:          { area: "settings_crm", level: "edit" },
+  crm_field_delete:        { area: "settings_crm", level: "edit" },
+  crm_fields_reorder:      { area: "settings_crm", level: "edit" },
+  crm_builtin_field_save:  { area: "settings_crm", level: "edit" },
 
   // ── Customer Hub → Forms + Email Templates (migration 325, ./leadForms.ts) ──────────────
   // crm_* on purpose: the CRM entitlement guard below gates them by that prefix. settings_crm,
@@ -1563,6 +1585,10 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     noCode?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
+    // Migration 330. The contact one names its contact outright; the deal one names a deal, so it
+    // finds the deal's contact the way the other three deal verbs do.
+    crm_contact_custom_save: { contactKeys: ["id"] },
+    crm_deal_custom_save:    { rowTable: "crm_deals", noCode: true },
     crm_create_contact:    { creates: true },
     // Sales pipelines (301). crm_create_lead makes the caller the new contact's owner when they
     // are narrowed (the `creates` promise); a match on an existing contact writes nothing and is
@@ -9016,7 +9042,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // absent-vs-empty distinction three of them have a comment about: Promise.all rejects on
     // the first THROW, and none of these throws — a failed read comes back on `.error` and is
     // turned into `undefined` by the same line that always did it.
-    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut, pipeline] = await Promise.all([
+    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut, pipeline, fieldDefs] = await Promise.all([
       buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true, phone: phoneFeedScope(contact?.owner_user_id ?? null) }),
       // Focus = open activities, soonest first. This is the crm_activities_focus index.
       admin.from("crm_activities")
@@ -9308,7 +9334,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // deal whose pipeline it simply failed to read. Older frontends ignore the extra key.
       (async () => {
         if (!mayReadContacts) return undefined;
-        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_reason, stage_entered_at, created_at";
+        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_reason, stage_entered_at, created_at, custom";
         const safeCodes = codes.filter((c) => /^[A-Za-z0-9_-]{1,40}$/.test(String(c)));
         let dealsQ = admin.from("crm_deals").select(dealCols).eq("client_id", clientId).is("archived_at", null);
         if (kind === "contact") {
@@ -9339,6 +9365,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           deals: dRes.data ?? [],
         };
       })(),
+      // THE BUILDER'S OWN FIELDS (migration 330), and their relabels of ours. Read HERE, in the
+      // one wait, so a contact card can draw them without a second round trip — and so the tab
+      // that defines them and the card that fills them in can never disagree about a label.
+      //
+      // ADDED, NOT CHANGED: an older frontend ignores the key. NULL on a failed read, never
+      // undefined, the same contract `pipeline` above settled on: the card then knows the
+      // difference between "this builder has no custom fields" (empty arrays) and "we could not
+      // read them" (null), and draws nothing in the second case rather than an empty section.
+      (async () => {
+        const [cf, df, co, do_] = await Promise.all([
+          readCustomFields(admin, clientId, "contact"),
+          readCustomFields(admin, clientId, "deal"),
+          readBuiltinOverrides(admin, clientId, "contact"),
+          readBuiltinOverrides(admin, clientId, "deal"),
+        ]);
+        if ("dbError" in cf || "dbError" in df || "dbError" in co || "dbError" in do_) return null;
+        const shown = (rows: Record<string, unknown>[]) => rows
+          .filter((f) => !f.hidden)
+          .map((f) => ({
+            key: String(f.key), label: String(f.label), type: String(f.field_type),
+            choices: Array.isArray(f.choices) ? (f.choices as unknown[]).map(String) : [],
+            help: f.help ? String(f.help) : null, required: !!f.required,
+          }));
+        return {
+          contact: shown(cf.fields as Record<string, unknown>[]),
+          deal: shown(df.fields as Record<string, unknown>[]),
+          contactLabels: co.overrides,
+          dealLabels: do_.overrides,
+        };
+      })(),
     ]);
 
     // Unpacked after the wait, and `contact` is merged HERE rather than inside a branch —
@@ -9355,7 +9411,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // this file exists to avoid.
     // A failed pipeline read (null) is said, never sent as a block: see EACH DEAL'S PIPELINE above.
     const pipelineError = pipeline === null ? true : undefined;
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline: pipeline ?? undefined, pipelineError });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline: pipeline ?? undefined, pipelineError,
+       // Migration 330. `undefined` on a failed read (fields === null), so the card tells "no
+       // custom fields" from "could not read them" — the same contract `pipeline` uses above.
+       fields: fieldDefs ?? undefined, fieldsError: fieldDefs === null ? true : undefined });
   }
 
   if (action === "crm_feed") {
@@ -10375,7 +10434,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
   };
 
-  const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at";
+  const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at, custom";
 
   /**
    * Deals → the same deals with their contact attached, narrowed to what this caller may see.
@@ -10527,6 +10586,67 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin, req, clientId, userId: userId ?? null, userEmail: userEmail ?? null, action,
       payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
     });
+  }
+
+  // Customer Hub → Fields (migration 330). Same shape and the same reasoning as the forms block
+  // above: after the CRM entitlement guard, and every action NAMED here rather than looked up in
+  // a set, so preflight's GATES ⇄ branch cross-check (which reads this file) sees them.
+  if (action === "crm_fields_list" ||
+      action === "crm_field_create" ||
+      action === "crm_field_save" ||
+      action === "crm_field_delete" ||
+      action === "crm_fields_reorder" ||
+      action === "crm_builtin_field_save") {
+    return await handleCrmFieldAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
+  }
+
+  // ── A CUSTOMER'S OWN FIELD VALUES (migration 330) ───────────────────────────────────────
+  // One shape for both entities, because the only thing that differs is which table the id names
+  // — and that difference is already expressed twice where it matters: in GATES (both
+  // contacts:'edit') and in CONTACT_ROW_SCOPE, which has already refused a narrowed caller naming
+  // a contact or a deal that is not theirs before this line runs.
+  //
+  // THE VALUES ARRIVE AS TYPED and are coerced against their own field's type here, so a number
+  // field holds a number and a drop-down holds one of its choices. A key the definitions do not
+  // know is DROPPED rather than refused (crm_set_custom drops it too): a browser tab left open
+  // while somebody deleted a field would otherwise fail every subsequent save on that customer.
+  if (action === "crm_contact_custom_save" || action === "crm_deal_custom_save") {
+    const entity = action === "crm_contact_custom_save" ? "contact" : "deal";
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: entity === "contact" ? "A contact id is required." : "That deal wasn't found." }, 400);
+    const values = payload.values;
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return json({ error: "Nothing to change." }, 400);
+    }
+    const got = await readCustomFields(admin, clientId, entity);
+    if ("dbError" in got) return dbFail(req, clientId, "load your fields", got.dbError);
+    const byKey = new Map(got.fields.map((f) => [String(f.key), f]));
+    const patch: Record<string, unknown> = {};
+    for (const [k, raw] of Object.entries(values as Record<string, unknown>)) {
+      const f = byKey.get(k);
+      if (!f) continue;                       // deleted since this tab loaded — see above
+      const out = coerceFieldValue({ field_type: String(f.field_type), choices: f.choices, label: String(f.label) }, raw);
+      if ("error" in out) return json({ error: out.error }, 400);
+      patch[k] = out.value;
+    }
+    if (!Object.keys(patch).length) return json({ error: "Nothing to change." }, 400);
+    const { data: changed, error } = await admin.rpc("crm_set_custom", {
+      p_client_id: clientId, p_entity: entity, p_id: id, p_patch: patch,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+    });
+    if (error) {
+      if (/must be a single value/i.test(String(error.message ?? ""))) {
+        return json({ error: "A field holds one value, not a list." }, 400);
+      }
+      return dbFail(req, clientId, "save those fields", error);
+    }
+    if (!Number(changed ?? 0)) {
+      return json({ error: entity === "contact" ? "That contact no longer exists." : "That deal no longer exists." }, 404);
+    }
+    return json({ ok: true, values: patch });
   }
 
   if (action === "crm_create_lead") {

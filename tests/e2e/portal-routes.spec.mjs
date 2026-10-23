@@ -49,7 +49,7 @@ const ROUTES = [
   "/settings/quickbooks", "/settings/email", "/settings/sms",
   // Customer Hub (2026-10-22). `pipelines` is the hub's own slug as well as its first tab's, so
   // this pair covers the rail item and both tabs inside it.
-  "/settings/pipelines", "/settings/customer-login", "/settings/forms", "/settings/email-templates",
+  "/settings/pipelines", "/settings/customer-login", "/settings/forms", "/settings/email-templates", "/settings/fields",
   // Meetings (migration 326): booking links, hours, meeting types, calendar connections.
   "/settings/meetings",
   // My Synergy Phone's calling setup. Offered only where ssPhoneOffered says so (beta hosts, a tenant
