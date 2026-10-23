@@ -226,7 +226,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
 
   const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "overview" });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, payload, action, userId, access, operator } = r.ctx;
+  const { clientId, payload, action, userId, selfUserId, access, operator } = r.ctx;
   // deno-lint-ignore no-explicit-any
   const p: any = payload || {};
 
@@ -260,8 +260,12 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
   // booking page on a builder's account. It does mean every own-scoped branch has to cope
   // with myHost being null, and operators are never own-only anyway (their access comes from
   // app_operators and resolves to the owner's map).
+  // ⛔ selfUserId, NOT userId. This is "whose calendar is this screen about", and keying it
+  // on the signed-in human meant that an operator acting as a sales rep opened Settings →
+  // Meetings and saw THEIR OWN calendar presented as the rep's. Carolyn, 2026-10-23: "I logged
+  // in as brent and went to meetings and I see the meetings for Carolyn."
   const { data: myHostRow, error: myHostErr } = await admin
-    .from("meeting_hosts").select("*").eq("client_id", clientId).eq("user_id", userId).maybeSingle();
+    .from("meeting_hosts").select("*").eq("client_id", clientId).eq("user_id", selfUserId).maybeSingle();
   if (myHostErr) throw myHostErr;
   const myHost = myHostRow || null;
 
@@ -726,8 +730,19 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       // Creating a host for SOMEBODY ELSE needs the business-wide level; creating your own
       // needs nothing more than the area. An own-only caller with no row yet is making
       // their own, which is how a rep gets a booking link without asking an owner.
-      const forUserId = typeof p.userId === "string" && p.userId ? p.userId : userId;
-      if (ownOnly && forUserId !== userId) return json({ error: "That calendar is not yours." }, 404);
+      // Whose calendar is being saved: the one named, else the person this screen is about.
+      const forUserId = typeof p.userId === "string" && p.userId ? p.userId : selfUserId;
+      if (ownOnly && forUserId !== selfUserId) return json({ error: "That calendar is not yours." }, 404);
+      // ⚠️ A SELF-SCOPED WRITE WHILE WEARING SOMEBODY IS REFUSED. Reading as them is the
+      // feature; quietly rewriting their own hours and booking link under their name is not,
+      // and the audit would read as the operator having done it to themselves. Say so plainly
+      // rather than saving it somewhere surprising.
+      if (operator && operator.asUserId && forUserId === operator.asUserId) {
+        return json({
+          error: "You're seeing this account as someone else, so their own calendar is read-only here. Exit to your own view to change it.",
+          code: "acting_as_read_only",
+        }, 409);
+      }
 
       // The person must be on this tenant's team. Without this check a host row could be
       // minted for any auth user id the browser named.

@@ -1385,7 +1385,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
-  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
+  // `userId` is WHO ACTED; `selfUserId` is WHOSE DATA this screen is about. They differ only
+  // while an operator is acting as somebody — see the field docs in resolveTenant.
+  const { clientId, role, operator, payload, action, audit, auditStrict, userId, selfUserId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
@@ -1432,7 +1434,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // phone:'own', only their own (crmFeed callVisibleToOwn); literal view/edit, all of them.
   const phoneFeedScope = (contactOwner: string | null) => ({
     level: (!canRead("phone") ? "none" : ownPhoneOnly(access) ? "own" : "team") as "none" | "own" | "team",
-    userId: isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null,
+    // selfUserId: "which of these calls are MINE". Acting as a sales rep must narrow to the
+    // REP'S calls, or the screen shows the operator's own slice wearing the rep's name.
+    userId: isUuid(String(selfUserId ?? "")) ? String(selfUserId).toLowerCase() : null,
     contactOwner,
   });
 
@@ -1455,7 +1459,11 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     if (!want.length) return new Set();
     const { data, error } = await admin.rpc("crm_visible_contact_ids", {
       p_client_id: clientId,
-      p_user_id: userId,
+      // ⛔ selfUserId. This is the row scope that makes contacts:'own' mean "the customers
+      // that are MINE" — so while an operator acts as a dealer it has to be the DEALER'S
+      // customers, not the operator's. With the signed-in id here, the narrowing was real but
+      // measured against the wrong person, which is the one thing worse than no narrowing.
+      p_user_id: selfUserId,
       p_ids: want,
     });
     if (error) {
@@ -1732,8 +1740,10 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // cannot be pointed at another person's row whatever the caller sends. Any role may use
   // it (see SELF_ACTIONS): a "user" account still needs to be able to fill in its own name.
   if (action === "get_profile") {
+    // selfUserId: the profile belongs to the person this screen is about, so acting as them
+    // shows THEIRS. Still never anything from the body.
     const { data, error } = await admin
-      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", userId).maybeSingle();
+      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", selfUserId).maybeSingle();
     if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
@@ -1750,6 +1760,14 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   }
 
   if (action === "save_profile") {
+    // ⚠️ Refused while wearing somebody: see the note on selfUserId. Changing a person's own
+    // name and phone from inside their view is not what "see what they see" asked for.
+    if (operator && operator.asUserId) {
+      return json({
+        error: "You're seeing this account as someone else, so their profile is read-only here. Exit to your own view to change yours.",
+        code: "acting_as_read_only",
+      }, 409);
+    }
     const fullName = String(payload?.fullName ?? "").trim().slice(0, 120);
     const phone = String(payload?.phone ?? "").trim().slice(0, 40);
     if (!fullName) return json({ error: "Please enter your name." }, 400);
@@ -2020,6 +2038,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // In operator view-as this is still the OPERATOR's own row -- they are the one
       // looking at the screen, and borrowing the viewed tenant's owner's layout would be
       // both wrong and a small information leak.
+      //
+      // ⚠️ DELIBERATELY `userId` AND NOT `selfUserId`, and the one place in this file where
+      // that is the right answer (2026-10-23). Acting as a named person makes every "my ..."
+      // read follow them -- their profile, their calendar, their row scope -- because the
+      // question being answered is "what can THEY reach". This is not that question. Which
+      // tab opens first and whether Designs lists or pipelines is the operator's own habit,
+      // not the other person's access, and inheriting it would reset the operator's remembered
+      // view every time they looked in on somebody. The write below keys on `userId` to match,
+      // so no refusal is needed here.
       prefs: myPrefs,
       ...crm,
       // "on" | "off" | null (no phone access, or not readable yet). See the read above.
@@ -9487,7 +9514,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_inbox") {
     const req0 = parseInboxRequest(payload);
     if ("error" in req0) return json({ error: req0.error }, 400);
-    const me = isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null;
+    // selfUserId: whose inbox this is. Every 'own' narrowing below keys on it.
+    const me = isUuid(String(selfUserId ?? "")) ? String(selfUserId).toLowerCase() : null;
     const seesCalls = canRead("phone");
     const callScope = phoneFeedScope(null);
     // deno-lint-ignore no-explicit-any
@@ -10526,7 +10554,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       canManage: canEdit("settings_crm"),
       canWrite: canEdit("contacts"),
       ownOnly: ownContacts,
-      me: userId ?? null,
+      // selfUserId: the browser marks this row as "me" and defaults the owner picker to it.
+      me: selfUserId ?? null,
     });
   }
 
@@ -10656,7 +10685,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_create_lead") {
     const lead = parseLead((payload ?? {}) as Record<string, unknown>);
     if (!lead.ok) return json({ error: lead.error }, 400);
-    const me = String(userId ?? "").toLowerCase();
+    // selfUserId: an own-scoped caller becomes the owner of what they create, and while
+    // acting as a dealer that owner has to be the DEALER -- an operator is not even on this
+    // tenant's team, so owning it as them would file the lead under nobody who works here.
+    const me = String(selfUserId ?? "").toLowerCase();
     if (ownContacts && !isUuidLike(me)) return json({ error: "Sign in again to add a lead." }, 401);
     // Narrowed: the lead is theirs, whatever the picker said (CONTACT_ROW_SCOPE `creates`).
     const owner = ownContacts ? me : lead.ownerUserId;
@@ -11395,12 +11427,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // their calls are recorded. "Which number" is the one THEIR calls show (migration 266: their
     // own, else a team line; phone_caller_context's pick), with its name and whether it's theirs.
     if (ownPhoneOnly(access)) {
-      const mine = callerNumberFor(rows, userId, (cs as { sms_number?: string | null } | null)?.sms_number ?? null);
+      // selfUserId: "the number THEIR calls show". The whole answer is about one person.
+      const mine = callerNumberFor(rows, selfUserId, (cs as { sms_number?: string | null } | null)?.sms_number ?? null);
       return json({
         ok: true, available: true, scope: "own", phoneStatus, level: "own", canEdit: false,
         number: mine ? {
           e164: mine.phone_number, label: mine.label ?? null,
-          mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(userId ?? "").toLowerCase(),
+          mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(selfUserId ?? "").toLowerCase(),
         } : null,
         // Whether their calls are recorded, and whether callers are told (2026-10-21: the owner's
         // announcement switch), so their line says so truthfully.
@@ -11833,7 +11866,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_create_contact") {
     const parsed = parseCreateContact((payload ?? {}) as Record<string, unknown>);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const me = String(userId ?? "").toLowerCase();
+    // selfUserId: same reason as crm_create_lead -- the new contact belongs to the person
+    // this screen is about, not to the operator looking through their eyes.
+    const me = String(selfUserId ?? "").toLowerCase();
     if (ownContacts && !isUuid(me)) return json({ error: "Sign in again to save a contact." }, 401);
     const { data: made, error } = await admin.rpc("crm_create_contact", {
       p_client_id: clientId,
@@ -12813,7 +12848,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawDays = Number(payload?.days ?? 30);
     const days = Number.isFinite(rawDays) ? Math.min(366, Math.max(1, Math.round(rawDays))) : 30;
     const since = new Date(Date.now() - days * 86400000).toISOString();
-    const me = String(userId ?? "").toLowerCase();
+    // selfUserId: MY is the report's default, and while acting as somebody "my" is theirs.
+    const me = String(selfUserId ?? "").toLowerCase();
 
     // PostgREST answers at most 1000 rows a request, so read in pages. A cap keeps one huge
     // tenant from turning a report into a timeout; hitting it is reported, never hidden.

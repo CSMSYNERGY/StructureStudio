@@ -209,7 +209,9 @@ Deno.test("phone_settings_get: every number with its own route, caller ID and pe
     "maxNumbers: numRes.perNumber ? MAX_NUMBERS : 1,", "canJoinTexting: rolloutOpen && mayBuyPhoneNumber(),"]) {
     assert(get.includes(k), `phone_settings_get: ${k}`);
   }
-  assert(/const mine = callerNumberFor\(rows, userId,/.test(get), "an own-level caller is told the number THEIR calls show");
+  // selfUserId since 2026-10-23: "THEIR calls" has to mean the person being acted as, or an
+  // operator looking in on a rep is shown the operator's own caller ID as if it were the rep's.
+  assert(/const mine = callerNumberFor\(rows, selfUserId,/.test(get), "an own-level caller is told the number THEIR calls show");
   assertEquals(MAX_NUMBERS, 10);
 });
 

@@ -321,7 +321,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     defaultAction: "build_board",
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, payload, action, userId, audit, role } = r.ctx;
+  // selfUserId: whose rows these are, for the contacts:'own' scope below. userId stays the
+  // actor on schedule_activity.
+  const { clientId, payload, action, userId, selfUserId, audit, role } = r.ctx;
   // Owner/admin — or an operator, whose write capability resolveTenant already checked
   // against app_operators.can_write. The ONE thing this is used for is the
   // built-before-delivered override (decision 11): the per-area gate cannot express it,
@@ -599,7 +601,9 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       let seen = new Set<string>();
       if (ids.length) {
         const { data: vis, error: vErr } = await admin.rpc("crm_visible_contact_ids", {
-          p_client_id: clientId, p_user_id: userId, p_ids: ids,
+          // ⛔ selfUserId: "which of these contacts are MINE" has to be measured against the
+          // person being acted as, or a dealer's board shows rows scoped to the operator.
+          p_client_id: clientId, p_user_id: selfUserId, p_ids: ids,
         });
         if (vErr) return fail("crm_visible_contact_ids", vErr);
         seen = new Set(((vis as string[] | null) ?? []).map(String));

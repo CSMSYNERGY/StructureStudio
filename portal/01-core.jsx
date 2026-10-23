@@ -325,6 +325,27 @@ __ssFunctions.invoke = async (name, opts) => {
       },
     };
   }
+  // ⛔ THE SECOND DOOR, and leaving it shut was a real hole (2026-10-23). The block above
+  // deliberately stands down when a caller put `targetClientId` on the body itself — and
+  // dozens do, through `scoped()` in 03-catalog.jsx. Those calls were therefore reaching the
+  // server view-as'd but with NO targetUserId, so `ctx.selfUserId` fell back to the operator
+  // and every "my ..." read answered about the wrong person: exactly the bug Carolyn found in
+  // Settings → Meetings, reappearing on whichever screens happen to scope themselves by hand.
+  // Auditing those call sites one at a time is the version of this fix that rots, so the id
+  // rides along here instead, under the same pairing rule: only while a tenant is armed, only
+  // when the body agrees about WHICH tenant, and never over an explicit value.
+  else if (
+    ssTargetUserId && ssTargetClientId &&
+    SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 &&
+    opts && opts.body && typeof opts.body === "object" &&
+    !(opts.body instanceof FormData) && !(opts.body instanceof Blob) && !(opts.body instanceof ArrayBuffer) &&
+    opts.body.targetClientId === ssTargetClientId &&
+    opts.body.targetUserId === undefined
+  ) {
+    // `injected` stays null on purpose: the echo check below is about who armed the TENANT,
+    // and this branch did not — the caller did, which is what the comment above describes.
+    opts = { ...opts, body: { ...opts.body, targetUserId: ssTargetUserId } };
+  }
   // Every catalog read asks for the items kept out of the customer's palette until priced (278's
   // partition wall): this portal's Interior items card lists one so it can be priced, and the
   // portal-settings catalog leaves it out for anyone who does not ask (production's portal from

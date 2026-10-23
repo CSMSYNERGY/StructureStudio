@@ -63,9 +63,33 @@ export type TenantCtx = {
   clientId: string;
   /** "owner" | "admin" | "user" for a normal caller; "operator" in operator mode. */
   role: string;
-  /** The signed-in caller's own id/email — the human, NOT the tenant being acted on. */
+  /**
+    * WHO DID THIS. The signed-in human, always — never the person they are acting as.
+    *
+    * ⛔ NOT "whose data am I looking at". Use `selfUserId` for that. The two were one field
+    * until 2026-10-23, and the day acting-as shipped that collision became a real bug:
+    * Settings → Meetings, opened while acting as a sales rep, showed the OPERATOR'S OWN
+    * calendar, because "my host row" was keyed on this id. Carolyn found it within the hour.
+    *
+    * Everything attributed goes here: created_by, cancelled_by, sender_user_id,
+    * recorded_by_user_id, the activity log. Wearing someone's permissions must never put
+    * their name on an action they did not take.
+    */
   userId: string;
   userEmail: string;
+  /**
+   * WHOSE DATA IS THIS. The person the screen is about: the acted-as user when an operator
+   * is wearing one, otherwise the caller themselves.
+   *
+   * Every "my …" read keys on this — my profile, my preferences, my booking calendar — and
+   * so does every row scope that asks "which of these are MINE" (crm_visible_contact_ids,
+   * which is what makes contacts:'own' mean a dealer's own customers rather than everyone's).
+   *
+   * ⚠️ READS. A self-scoped WRITE while acting as somebody is refused by the handler rather
+   * than silently rewriting that person's own record under their name — see portal-settings'
+   * save_profile.
+   */
+  selfUserId: string;
   /** Non-null only when acting on ANOTHER tenant via the operator override. */
   operator: OperatorCtx | null;
   /**
@@ -270,6 +294,8 @@ export async function resolveTenant(
         clientId: mapping.client_id,
         role: mapping.role || "user",
         userId: user.id,
+        // Nobody is being worn on this path, so the two answers are the same person.
+        selfUserId: user.id,
         userEmail: user.email ?? "",
         operator: null,
         access: acc,
@@ -469,6 +495,10 @@ export async function resolveTenant(
       clientId,
       role: "operator",
       userId: user.id,
+      // ⚠️ THE WHOLE POINT OF THE SPLIT. Acting as somebody makes the screen about THEM, so
+      // every "my …" read follows them; the line above keeps every action attributed to the
+      // operator who really performed it.
+      selfUserId: asUserId ?? user.id,
       userEmail: user.email ?? "",
       operator: {
         userId: actor.userId,
