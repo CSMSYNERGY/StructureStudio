@@ -17,7 +17,7 @@
 
 import {
   CRM_BUILTINS, CRM_FIELD_HELP_MAX, CRM_FIELD_LABEL_MAX,
-  CRM_FIELD_MAX_PER_ENTITY, CRM_FIELD_TYPE_IDS, CRM_FIELD_TYPES,
+  CRM_CURRENCIES, CRM_CURRENCY_IDS, CRM_FIELD_MAX_PER_ENTITY, CRM_FIELD_TYPE_IDS, CRM_FIELD_TYPES,
   builtinField, cleanChoices, crmFieldKey, crmFieldKeyUnique, isCrmEntity,
   type CrmEntity, type CrmFieldType,
 } from "../_shared/crmFields.ts";
@@ -37,7 +37,7 @@ export type CrmFieldCtx = {
   audit: (what: string, n: number, detail?: string) => Promise<unknown>;
 };
 
-const DEF_COLS = "id, entity, source, key, builtin_key, label, field_type, choices, help, required, hidden, position, archived_at, created_at, updated_at";
+const DEF_COLS = "id, entity, source, key, builtin_key, label, field_type, choices, currency, thousands, help, required, hidden, position, archived_at, created_at, updated_at";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v: unknown) => UUID_RE.test(String(v ?? ""));
 const label = (v: unknown) => String(v ?? "").trim().replace(/\s+/g, " ").slice(0, CRM_FIELD_LABEL_MAX);
@@ -48,6 +48,28 @@ const help = (v: unknown) => {
 
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
+
+// ── HOW A NUMBER IS SHOWN (migration 332, Carolyn 2026-10-23) ───────────────────────────
+// "with number one I want the option of currency or no. (Only USD and Canada dollar) and the
+// option to add a comma (100,000) or no comma (100000)".
+//
+// ⚠️ BOTH SETTINGS BELONG TO `number` AND ONLY `number`, and they are CLEARED when a field is
+// retyped to something else — the same rule `choices` already follows, and for the same reason:
+// 332's CHECK refuses the pair, and a field that used to be money must not keep a currency nobody
+// can see or change. `thousands` defaults to TRUE, so every field made before this reads 100,000
+// rather than silently changing how a stored number already on somebody's card is printed.
+const numberFormat = (
+  type: string, payload: Record<string, unknown>,
+): { currency: string | null; thousands: boolean } | { error: string } => {
+  if (type !== "number") return { currency: null, thousands: true };
+  // undefined = not being set. "" and null are a real instruction: no money prefix.
+  const raw = payload.currency;
+  const cur = raw === undefined || raw === null || raw === "" ? null : String(raw).toUpperCase();
+  if (cur !== null && CRM_CURRENCY_IDS.indexOf(cur) === -1) {
+    return { error: `Pick a currency: ${CRM_CURRENCIES.map((c) => c.label).join(" or ")}, or none.` };
+  }
+  return { currency: cur, thousands: payload.thousands !== false };
+};
 
 /** Position a new field after every live one, leaving room to drag between (the stage-editor rule). */
 const nextPosition = (rows: Row[], entity: CrmEntity) => {
@@ -99,6 +121,9 @@ export async function handleCrmFieldAction(ctx: CrmFieldCtx): Promise<Response> 
           note: f.note ?? null,
           relabel: f.relabel !== false,
           hideable: f.hideable !== false,
+          // Overrides the chip where none of "you / the design / the system" is honest: the maps
+          // links, which are built from other fields on the card (_shared/crmFields.ts `who`).
+          who: f.who ?? null,
         };
       });
       const custom = defs
@@ -110,6 +135,10 @@ export async function handleCrmFieldAction(ctx: CrmFieldCtx): Promise<Response> 
           label: String(r.label),
           type: String(r.field_type),
           choices: Array.isArray(r.choices) ? r.choices.map(String) : [],
+          // How a NUMBER is shown (migration 332). Null currency = no money prefix; thousands
+          // defaults true, so a field made before this reads as 100,000 rather than changing.
+          currency: r.currency ? String(r.currency) : null,
+          thousands: r.thousands !== false,
           help: r.help ? String(r.help) : null,
           required: !!r.required,
           hidden: !!r.hidden,
@@ -146,6 +175,8 @@ export async function handleCrmFieldAction(ctx: CrmFieldCtx): Promise<Response> 
     if (type === "select" && choices.length === 0) {
       return json({ error: "A drop-down needs at least one choice." }, 400);
     }
+    const money = numberFormat(type, payload);
+    if ("error" in money) return json({ error: money.error }, 400);
 
     const defs = await readDefs();
     if (defs instanceof Response) return defs;
@@ -168,6 +199,7 @@ export async function handleCrmFieldAction(ctx: CrmFieldCtx): Promise<Response> 
     const { data, error } = await admin.from("crm_field_defs").insert({
       client_id: clientId, entity, source: "custom", key, label: name,
       field_type: type, choices, help: help(payload.help),
+      currency: money.currency, thousands: money.thousands,
       required: payload.required === true,
       position: nextPosition(defs, entity),
       created_by: isUuid(userId) ? userId : null,
@@ -227,6 +259,19 @@ export async function handleCrmFieldAction(ctx: CrmFieldCtx): Promise<Response> 
       } else {
         patch.choices = [];
       }
+    }
+    // The money settings travel with the type for exactly the reason the choices do, one rule up:
+    // 332's CHECK refuses a currency on anything but a number, so retyping away from `number` has
+    // to clear them in the same statement. Keeps what is stored when neither is being touched.
+    if (payload.currency !== undefined || payload.thousands !== undefined || payload.type !== undefined) {
+      const keep = {
+        currency: payload.currency !== undefined ? payload.currency : row.currency,
+        thousands: payload.thousands !== undefined ? payload.thousands : row.thousands !== false,
+      };
+      const money = numberFormat(type, keep as Record<string, unknown>);
+      if ("error" in money) return json({ error: money.error }, 400);
+      patch.currency = money.currency;
+      patch.thousands = money.thousands;
     }
     if (payload.help !== undefined) patch.help = help(payload.help);
     if (payload.required !== undefined) patch.required = payload.required === true;
@@ -376,7 +421,7 @@ export async function readCustomFields(
   admin: any, clientId: string, entity: CrmEntity,
 ): Promise<{ fields: Row[] } | { dbError: unknown }> {
   const { data, error } = await admin.from("crm_field_defs")
-    .select("id, key, label, field_type, choices, help, required, hidden, position")
+    .select("id, key, label, field_type, choices, currency, thousands, help, required, hidden, position")
     .eq("client_id", clientId).eq("entity", entity).eq("source", "custom")
     .is("archived_at", null).order("position", { ascending: true });
   if (error) return { dbError: error };

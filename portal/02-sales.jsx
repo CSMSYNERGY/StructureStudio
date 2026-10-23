@@ -2999,13 +2999,85 @@ const ssCrmOff = (data, entity, key) => {
   const row = o && o[key];
   return !!(row && row.hidden);
 };
+// The two currencies, and nothing else (migration 332, Carolyn 2026-10-23: "Only USD and Canada
+// dollar"). The CODE rides with the symbol because both print "$".
+const SS_CRM_CUR = { USD: "US$", CAD: "CA$" };
+// A number, as its field says to show it. Both settings are DISPLAY ONLY — the jsonb holds a plain
+// number — so this is the only place the comma and the currency exist, and changing either never
+// touches a stored value. `thousands` is true unless it is exactly false, so a field stored before
+// 332 reads 100,000 rather than changing under a card somebody is looking at.
+function ssCrmNumberText(field, raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return String(raw);          // a value typed before a retype to number
+  const body = field.thousands === false ? String(n) : n.toLocaleString("en-US");
+  const pre = SS_CRM_CUR[String(field.currency || "")] || "";
+  return pre ? pre + " " + body : body;
+}
 // What one stored value reads as. A missing key, a JSON null and "" are all the same thing — empty
 // — which is what makes "clear this field" work without a second path to strip keys out (330).
 function ssCrmValueText(field, raw) {
   if (raw === null || raw === undefined || raw === "") return "";
   if (field.type === "checkbox") return raw === true || raw === "true" ? "Yes" : "No";
   if (field.type === "date") return fmtDate(String(raw));
+  if (field.type === "number") return ssCrmNumberText(field, raw);
   return String(raw);
+}
+
+// ── A STORED LINK IS UNTRUSTED, EVERY TIME IT IS DRAWN ──────────────────────────────────
+// A `url` field's value goes into an `<a href>` in every team member's browser, and `javascript:`,
+// `data:` and `vbscript:` hrefs all EXECUTE. portal-settings already refuses anything but http and
+// https on the way in (_shared/crmFields.ts cleanUrl) — this is the second gate, on the way out,
+// because a value stored before that check existed, written by a future import, or inserted by
+// hand during support never passed it. Returns null and the value is drawn as plain text.
+//
+// ⛔ Do not "simplify" this to `href={value}`. One of these two checks is not enough; the whole
+// point is that neither trusts the other.
+function ssCrmHref(field, raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (field.type === "phone") return "tel:" + s.replace(/[^\d+]/g, "");
+  if (field.type !== "url") return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : "https://" + s);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : null;
+  } catch (_e) { return null; }
+}
+
+// One stored value, drawn: a link where the field is a link, plain text otherwise. `rel` is
+// load-bearing on an external link — without noopener the opened page can reach back through
+// window.opener, and the href came from a text box.
+function CrmCustomValue({ field, value }) {
+  const text = ssCrmValueText(field, value);
+  if (!text) return <span style={{ color: "#94A3B8" }}>—</span>;
+  const href = ssCrmHref(field, value);
+  if (!href) return <>{text}</>;
+  return (
+    <a href={href} target={field.type === "phone" ? undefined : "_blank"} rel="noopener noreferrer"
+      style={{ color: ACCENT, fontWeight: 600, wordBreak: "break-all" }}>{text}</a>
+  );
+}
+
+// ── THE GOOGLE MAPS LINK (Carolyn 2026-10-23) ───────────────────────────────────────────
+// "a baked in google maps field that automatically creates a hyperlink to google maps using the
+// address fields created." BUILT, never stored: it reads the four address columns every time the
+// card draws, so it can never disagree with the address and editing one needs no second save.
+//
+// ⚠️ The STREET is the test, not "any part filled in": a contact with only a state would otherwise
+// get a link to the middle of Missouri, which reads as an address we hold. Mirrors mapsUrlFor in
+// _shared/crmFields.ts — the two must agree, and the server's copy is the one a future export or
+// email would use.
+const SS_CRM_MAPS = {
+  maps_delivery: { label: "Map it", street: "street", city: "city", state: "state", zip: "zip" },
+  maps_billing: { label: "Map it", street: "billing_street", city: "billing_city", state: "billing_state", zip: "billing_zip" },
+};
+function ssCrmMapsUrl(contact, which) {
+  const m = SS_CRM_MAPS[which];
+  if (!m || !contact) return "";
+  const street = String(contact[m.street] || "").trim();
+  if (!street) return "";
+  const q = [street, contact[m.city], contact[m.state], contact[m.zip]]
+    .map((v) => String(v || "").trim()).filter(Boolean).join(", ");
+  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
 }
 
 // One input, by type. Deliberately the same S.input the rest of the editor uses, so a builder's
@@ -3037,10 +3109,34 @@ function CrmCustomInput({ field, value, onChange, disabled = false }) {
         value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
     );
   }
+  // date, number, phone, url and text. ⚠️ `type="url"` is NOT used, deliberately: it makes the
+  // browser refuse "example.com" as invalid, and that is exactly what people type — the server
+  // puts https:// in front of it (cleanUrl). `inputMode` still gets a phone its own keypad.
   return (
     <input style={{ ...S.input, marginBottom: 7 }}
-      type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
+      type={field.type === "date" ? "date" : field.type === "number" ? "number" : field.type === "phone" ? "tel" : "text"}
+      inputMode={field.type === "url" ? "url" : undefined}
+      placeholder={field.type === "url" ? "example.com" : undefined}
       value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+  );
+}
+
+// ONE OF THE BAKED-IN MAPS LINKS, on the contact card. Nothing when the address is empty: a "Map
+// it" that opens a search for nothing is worse than no link. `which` is the catalogue's id
+// (maps_delivery / maps_billing), so the label override and Hide from the Fields tab key on the
+// same string the register shows.
+function CrmMapsLink({ contact, which, label }) {
+  const url = ssCrmMapsUrl(contact, which);
+  if (!url) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" data-ss-maps-link={which}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
+      </svg>
+      {label}
+    </a>
   );
 }
 
@@ -3081,7 +3177,7 @@ function CrmCustomFields({ fields, values, onChange, disabled = false }) {
 function CrmDealCustomCell({ field, value, canEdit, busy, onCommit }) {
   const stored = value === null || value === undefined ? "" : String(value);
   const ctl = { ...S.input, padding: "4px 7px", fontSize: 12.5, width: field.type === "textarea" ? 260 : 170, marginBottom: 0 };
-  if (!canEdit) return <span>{ssCrmValueText(field, value) || "—"}</span>;
+  if (!canEdit) return <CrmCustomValue field={field} value={value} />;
   if (field.type === "checkbox") {
     return (
       <input type="checkbox" checked={value === true || value === "true"} disabled={busy}
@@ -5286,9 +5382,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {contactDefs.filter((f) => ssCrmValueText(f, (data.contact.custom || {})[f.key])).map((f) => (
               <div key={f.key} data-ss-contact-custom={f.key}>
                 <span style={{ color: "#94A3B8" }}>{f.label}: </span>
-                {ssCrmValueText(f, (data.contact.custom || {})[f.key])}
+                <CrmCustomValue field={f} value={(data.contact.custom || {})[f.key]} />
               </div>
             ))}
+            {/* The baked-in maps links (migration 332). Each draws only when its address has a
+                street, and each honours its own Hide and relabel from the Fields tab. */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 4 }}>
+              {!cOff("maps_delivery") && <CrmMapsLink contact={data.contact} which="maps_delivery" label={cLbl("maps_delivery", "Map it")} />}
+              {!cOff("maps_billing") && <CrmMapsLink contact={data.contact} which="maps_billing" label={cLbl("maps_billing", "Map the billing address")} />}
+            </div>
             {canEditContact && (
               <button type="button" onClick={startEdit}
                 title="Edit this contact's company, name, email and phone"
@@ -5783,9 +5885,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       a field that vanishes when it is blank is one nobody remembers to fill in. */}
                   {contactDefs.map((f) => (
                     <div key={f.key} data-ss-contact-custom={f.key}>
-                      {ro(f.label, ssCrmValueText(f, (data.contact.custom || {})[f.key]))}
+                      {ro(f.label, <CrmCustomValue field={f} value={(data.contact.custom || {})[f.key]} />)}
                     </div>
                   ))}
+                  {/* The baked-in maps links (migration 332), the same pair the Summary draws. */}
+                  {!cOff("maps_delivery") && ssCrmMapsUrl(data.contact, "maps_delivery")
+                    && ro(cLbl("maps_delivery", "Map it"), <CrmMapsLink contact={data.contact} which="maps_delivery" label="Open in Google Maps" />)}
+                  {!cOff("maps_billing") && ssCrmMapsUrl(data.contact, "maps_billing")
+                    && ro(cLbl("maps_billing", "Map the billing address"), <CrmMapsLink contact={data.contact} which="maps_billing" label="Open in Google Maps" />)}
                   {/* Reached two ways: no permission / no contact row (the messages), or a
                       save that just landed — `saveContact` clears `edit` and reloads, so the
                       panel stays open showing the NEW values. That re-read is the receipt;

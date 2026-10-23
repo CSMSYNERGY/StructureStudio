@@ -24,17 +24,41 @@
 // put on a customer?" with a schema dump.
 
 /** What a field's value is, and so how it is typed in and shown. */
-export type CrmFieldType = "text" | "textarea" | "number" | "date" | "select" | "checkbox";
+export type CrmFieldType = "text" | "textarea" | "number" | "date" | "select" | "checkbox"
+  | "phone" | "url";
 
 export const CRM_FIELD_TYPES: { id: CrmFieldType; label: string; hint: string }[] = [
   { id: "text", label: "Text", hint: "One line — a name, a number plate, anything" },
   { id: "textarea", label: "Long text", hint: "A paragraph" },
-  { id: "number", label: "Number", hint: "Digits only" },
+  { id: "number", label: "Number", hint: "Digits, with the money and comma settings below" },
   { id: "date", label: "Date", hint: "A day, from a calendar" },
   { id: "select", label: "Drop-down", hint: "One of a list you write" },
   { id: "checkbox", label: "Yes / no", hint: "A tick box" },
+  // Carolyn 2026-10-23: "I want to add a few other types of fields. Phone and hyperlink."
+  { id: "phone", label: "Phone", hint: "A number your team can tap to call" },
+  { id: "url", label: "Hyperlink", hint: "A web address, shown as a link you can click" },
 ];
 export const CRM_FIELD_TYPE_IDS = CRM_FIELD_TYPES.map((t) => t.id);
+
+// ── NUMBERS: MONEY, AND THE COMMA (Carolyn 2026-10-23) ───────────────────────────────────
+// "with number one I want the option of currency or no. (Only USD and Canada dollar) and the
+// option to add a comma (100,000) or no comma (100000)".
+//
+// Both are about how the number is SHOWN, never what is stored: the jsonb always holds a plain
+// number. A builder who switches a field from US$ to no currency, or turns the comma off, must not
+// change what the last person typed — and a field somebody later does arithmetic on (an export, a
+// report) must not have to strip a currency symbol back off first.
+//
+// ⚠️ USD and CAD BOTH print "$", which is the whole reason the code is shown as well ("US$ 1,200",
+// "CA$ 1,200"). A bare "$1,200" on a Canadian builder's screen beside a US price is the kind of
+// ambiguity that ends in somebody quoting the wrong number. Carolyn asked for exactly these two.
+export const CRM_CURRENCIES: { id: string; label: string; prefix: string }[] = [
+  { id: "USD", label: "US dollars (US$)", prefix: "US$" },
+  { id: "CAD", label: "Canadian dollars (CA$)", prefix: "CA$" },
+];
+export const CRM_CURRENCY_IDS = CRM_CURRENCIES.map((c) => c.id);
+export const currencyPrefix = (id: unknown): string =>
+  CRM_CURRENCIES.find((c) => c.id === String(id ?? ""))?.prefix ?? "";
 
 export type CrmEntity = "contact" | "deal";
 
@@ -55,6 +79,9 @@ export type CrmBuiltinField = {
   relabel?: boolean;
   /** false = it cannot be hidden from the card. A contact with no name is not a contact. */
   hideable?: boolean;
+  /** Overrides the "who fills it in" chip where neither "you", "the design" nor "the system" is
+   *  the honest answer — the Google Maps links, which are BUILT from other fields on the card. */
+  who?: string;
 };
 
 // ── CONTACT ──────────────────────────────────────────────────────────────────────────────
@@ -81,11 +108,28 @@ export const CRM_CONTACT_BUILTINS: CrmBuiltinField[] = [
   { id: "city", label: "City", type: "text", group: "Delivery address", editable: true },
   { id: "state", label: "State", type: "text", group: "Delivery address", editable: true },
   { id: "zip", label: "ZIP", type: "text", group: "Delivery address", editable: true },
+  // THE MAP LINK (Carolyn 2026-10-23): "a baked in google maps field that automatically creates a
+  // hyperlink to google maps using the address fields created." Nothing is stored and nothing is
+  // typed — it is BUILT from the four fields above it every time the card draws, so it can never
+  // disagree with the address and an edited address needs no second save. Absent when there is no
+  // address to look up, and hideable like anything else.
+  {
+    id: "maps_delivery", label: "Map it", type: "link", group: "Delivery address", editable: false,
+    derived: "address", who: "Built from the address",
+    note: "Opens the delivery address in Google Maps. Nothing to fill in — it follows the four fields above",
+    relabel: true,
+  },
 
   { id: "billing_street", label: "Street", type: "text", group: "Mailing / billing address", editable: true },
   { id: "billing_city", label: "City", type: "text", group: "Mailing / billing address", editable: true },
   { id: "billing_state", label: "State", type: "text", group: "Mailing / billing address", editable: true },
   { id: "billing_zip", label: "ZIP", type: "text", group: "Mailing / billing address", editable: true },
+  {
+    id: "maps_billing", label: "Map it", type: "link", group: "Mailing / billing address", editable: false,
+    derived: "address", who: "Built from the address",
+    note: "Opens the mailing / billing address in Google Maps",
+    relabel: true,
+  },
 
   {
     id: "source", label: "Came from", type: "text", group: "Set by the system", editable: false,
@@ -178,6 +222,32 @@ export const CRM_ENTITY_LABEL: Record<CrmEntity, string> = {
 
 export const isCrmEntity = (v: unknown): v is CrmEntity => v === "contact" || v === "deal";
 
+// ── THE GOOGLE MAPS LINK (Carolyn 2026-10-23) ────────────────────────────────────────────
+// Built from the address parts, never stored. `api=1` is Google's documented, versioned search
+// URL — the one form they promise not to break — and it is a plain https link, so there is no key
+// to leak and nothing to bill. (The designer's `googleMapsApiKey` is for the embedded map; this
+// needs none.)
+//
+// ⚠️ EMPTY MEANS NO LINK, and the test is the STREET, not "any part filled in". A contact with a
+// state and nothing else would otherwise get a link to the middle of Missouri, which reads as an
+// address we hold and is worse than no link at all. Returns "" and the card draws nothing.
+export function mapsUrlFor(
+  parts: { street?: unknown; city?: unknown; state?: unknown; zip?: unknown },
+): string {
+  const street = String(parts.street ?? "").trim();
+  if (!street) return "";
+  const q = [street, String(parts.city ?? "").trim(), String(parts.state ?? "").trim(), String(parts.zip ?? "").trim()]
+    .filter(Boolean).join(", ");
+  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+}
+
+/** Which address each maps built-in is built from, so the catalogue and the card cannot disagree
+ *  about which four columns feed which link. */
+export const CRM_MAPS_SOURCES: Record<string, { street: string; city: string; state: string; zip: string }> = {
+  maps_delivery: { street: "street", city: "city", state: "state", zip: "zip" },
+  maps_billing: { street: "billing_street", city: "billing_city", state: "billing_state", zip: "billing_zip" },
+};
+
 export const builtinField = (entity: CrmEntity, id: string): CrmBuiltinField | null =>
   CRM_BUILTINS[entity].find((f) => f.id === id) ?? null;
 
@@ -220,6 +290,37 @@ export const CRM_FIELD_CHOICE_MAX = 80;
  *  product limit — every one of them renders on the contact card and rides in every record read,
  *  and a tenant with a thousand would be reporting a slow portal, not using a feature. */
 export const CRM_FIELD_MAX_PER_ENTITY = 100;
+
+// ── A HYPERLINK IS AN ATTACK SURFACE, SO THE SCHEME IS AN ALLOWLIST ──────────────────────
+// A `url` field's value lands in an `<a href>` in every team member's browser. `javascript:`,
+// `data:` and `vbscript:` hrefs all execute, so "is it a URL?" is the wrong question and
+// "is it http or https?" is the right one. Checked HERE, on the way in, AND again in the renderer
+// (02-sales.jsx ssCrmHref) — a value stored before a later change, or written by an import, must
+// not be trusted by whatever draws it. A bare "example.com" gets https:// put in front, because
+// that is what a person means when they type it.
+export const CRM_URL_MAX = 500;
+export function cleanUrl(raw: unknown): { url: string } | { error: string } {
+  const s = String(raw ?? "").trim().slice(0, CRM_URL_MAX);
+  if (!s) return { url: "" };
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(s) ? s : "https://" + s;
+  let u: URL;
+  try { u = new URL(withScheme); } catch { return { error: "That doesn't look like a web address." }; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return { error: "A link has to start with http:// or https://." };
+  }
+  if (!u.hostname || u.hostname.indexOf(".") === -1) {
+    return { error: "That doesn't look like a web address." };
+  }
+  return { url: u.toString().slice(0, CRM_URL_MAX) };
+}
+
+// ── A PHONE FIELD HOLDS WHAT WAS TYPED ───────────────────────────────────────────────────
+// Stored as typed, not normalised to E.164. This is a field a builder invented — "site contact",
+// "inspector", "the neighbour with the gate key" — and some of those are extensions, two numbers in
+// one box, or a note beside the digits. ⚠️ It is NOT `crm_contacts.phone`: that one IS normalised,
+// is the texting and calling identity, and carries a tenant-wide unique index. Nothing here feeds
+// the dialler, so there is nothing to gain by refusing what somebody wrote down.
+export const CRM_PHONE_MAX = 40;
 
 /** Clean one choice list: trimmed, de-duplicated case-insensitively, blanks dropped, capped. */
 export function cleanChoices(raw: unknown): string[] {
@@ -273,6 +374,13 @@ export function coerceFieldValue(
     if (!hit) return { error: `Pick one of the choices for ${field.label}.` };
     return { value: hit };
   }
+  if (type === "url") {
+    const out = cleanUrl(raw);
+    if ("error" in out) return { error: `${field.label}: ${out.error}` };
+    return { value: out.url || null };
+  }
+  // A phone is stored AS TYPED, capped. See CRM_PHONE_MAX for why it is not normalised.
+  if (type === "phone") return { value: String(raw).trim().slice(0, CRM_PHONE_MAX) || null };
   // text and textarea. Long text gets room for a paragraph; one line does not need it.
   const cap = type === "textarea" ? 4000 : 500;
   return { value: String(raw).slice(0, cap) };

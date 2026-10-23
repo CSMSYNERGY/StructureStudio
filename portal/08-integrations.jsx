@@ -5184,10 +5184,22 @@ const SSFLD_ENTITIES = [["contact", "Contacts"], ["deal", "Designs & deals"]];
 // whose whole job is telling a builder what they have.
 const SSFLD_TYPE_WORD = {
   text: "Text", textarea: "Long text", number: "Number", date: "Date", select: "Drop-down",
-  checkbox: "Yes / no", address: "Address", owner: "Team member", stage: "Stage", status: "Status",
+  checkbox: "Yes / no", phone: "Phone", url: "Hyperlink",
+  address: "Address", owner: "Team member", stage: "Stage", status: "Status",
   money: "Money", labels: "Labels", link: "Link",
 };
 const ssfldType = (t) => SSFLD_TYPE_WORD[String(t)] || "Text";
+// The two currencies Carolyn asked for, and nothing else (migration 332). The CODE is shown as
+// well as the symbol because USD and CAD both print "$", and a bare "$1,200" beside a US price on
+// a Canadian builder's screen is how somebody ends up quoting the wrong number.
+const SSFLD_CURRENCIES = [["", "No currency"], ["USD", "US dollars (US$)"], ["CAD", "Canadian dollars (CA$)"]];
+const SSFLD_CUR_PREFIX = { USD: "US$", CAD: "CA$" };
+// What a number field's settings read as on its row: "US$ 100,000", "100000", "100,000".
+function ssfldNumberSample(f) {
+  const n = f.thousands === false ? "100000" : "100,000";
+  const p = SSFLD_CUR_PREFIX[String(f.currency || "")] || "";
+  return p ? p + " " + n : n;
+}
 
 // A chip saying who fills a field in. Three answers, and the difference matters to a builder
 // deciding where to put something: they type it, the designer/estimate sets it, or the system does.
@@ -5198,6 +5210,15 @@ const ssfldType = (t) => SSFLD_TYPE_WORD[String(t)] || "Text";
 // come from the designer on the very row whose own note says the system sets it and nobody sets it
 // by hand. Caught on beta. A field with no `derived` is a plain column on the entity's own table.
 function SsfldWho({ field }) {
+  // `who` wins when the catalogue sets one: the Google Maps links are neither typed, nor from the
+  // designer, nor set by the system — they are built from other fields on the same card, and
+  // saying any of the other three would be a small lie on the screen that exists to say this.
+  if (field.who) {
+    return (
+      <span style={{ display: "inline-block", background: "#FEF9C3", color: "#854D0E", borderRadius: 999,
+        padding: "2px 8px", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" }}>{field.who}</span>
+    );
+  }
   const fromDesign = !!field.derived && /^designs\./.test(String(field.derived));
   const [text, bg, fg] = !field.editable && fromDesign
     ? ["From the design", "#EFF6FF", "#1D4ED8"]
@@ -5228,6 +5249,11 @@ function SsfldEditor({ entity, field, types, onClose, onSaved }) {
   const [choices, setChoices] = useState(field && field.choices ? field.choices.join("\n") : "");
   const [help, setHelp] = useState(field && field.help ? field.help : "");
   const [required, setRequired] = useState(!!(field && field.required));
+  // How a NUMBER is shown (migration 332). Kept in state whatever the type is, so switching to
+  // Drop-down and back does not lose what was picked a moment ago; the server is what clears them
+  // on a field that is no longer a number, and it is the only thing that has to.
+  const [currency, setCurrency] = useState(field && field.currency ? field.currency : "");
+  const [thousands, setThousands] = useState(!field || field.thousands !== false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const entLabel = entity === "contact" ? "contact" : "design/deal";
@@ -5237,6 +5263,9 @@ function SsfldEditor({ entity, field, types, onClose, onSaved }) {
     const body = {
       label, type, help, required,
       choices: type === "select" ? choices.split("\n").map((s) => s.trim()).filter(Boolean) : [],
+      // Sent only for a number: on any other type the server clears them, and sending a currency
+      // with a text field would be asking it to refuse something nobody chose.
+      ...(type === "number" ? { currency, thousands } : {}),
     };
     try {
       if (isNew) await ssfCall("crm_field_create", { entity, ...body });
@@ -5274,6 +5303,28 @@ function SsfldEditor({ entity, field, types, onClose, onSaved }) {
             value={choices} placeholder={"Yes\nNo\nNot yet asked"}
             onChange={(e) => setChoices(e.target.value)} />
         </>
+      )}
+      {/* HOW THE NUMBER IS SHOWN (migration 332). Both settings are about the DISPLAY: the number
+          itself is stored plain, so switching the currency or the comma later never changes what
+          anybody already typed, and a sample sits under them so the choice is not abstract. */}
+      {type === "number" && (
+        <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8,
+          padding: "10px 11px", marginBottom: 10 }}>
+          <span style={S.lbl}>Money</span>
+          <select style={{ ...S.input, marginBottom: 8 }} value={currency}
+            onChange={(e) => setCurrency(e.target.value)}>
+            {SSFLD_CURRENCIES.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+            <input type="checkbox" checked={thousands} onChange={(e) => setThousands(e.target.checked)} />
+            Group the thousands with commas
+          </label>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 7 }}>
+            Shows as <strong style={{ color: "#1E293B" }}>{ssfldNumberSample({ currency, thousands })}</strong>.
+            Only how it looks — the number itself is stored plain, so you can change this later
+            without touching a single value.
+          </div>
+        </div>
       )}
       <span style={S.lbl}>A hint under the field (optional)</span>
       <input style={{ ...S.input, marginBottom: 10 }} value={help} maxLength={200}
@@ -5482,6 +5533,11 @@ function CrmFieldsHub({ clientId, canEdit }) {
                         {f.help && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.help}</div>}
                         {f.type === "select" && f.choices.length > 0 && (
                           <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.choices.join(" · ")}</div>
+                        )}
+                        {/* A number's money and comma settings, as the thing they produce — the
+                            two switches are only meaningful as the number they print. */}
+                        {f.type === "number" && (
+                          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>Shows as {ssfldNumberSample(f)}</div>
                         )}
                       </td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>

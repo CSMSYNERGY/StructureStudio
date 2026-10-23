@@ -9386,6 +9386,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           .map((f) => ({
             key: String(f.key), label: String(f.label), type: String(f.field_type),
             choices: Array.isArray(f.choices) ? (f.choices as unknown[]).map(String) : [],
+            // How a number prints (migration 332). `thousands` is true unless it is exactly false,
+            // so a field stored before that column existed reads 100,000 rather than changing.
+            currency: f.currency ? String(f.currency) : null,
+            thousands: f.thousands !== false,
             help: f.help ? String(f.help) : null, required: !!f.required,
           }));
         return {
