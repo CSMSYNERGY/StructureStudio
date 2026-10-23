@@ -261,6 +261,30 @@ function areaKeysOf(sql) {
   // The real permission model, imported as TypeScript (Node strips the types).
   const access = await import(pathToFileURL(path.join(WT, "supabase/functions/_shared/access.ts")).href);
   const AREAS = [...new Set([...areaKeysOf(MIG("277_price_override_area.sql")), ...areaKeysOf(MIG_TEXT()), ...access.AREA_KEYS, "no_such_area"])];
+  // The areas THIS migration's SQL knows: the definition it builds on, plus its own.
+// ⚠️ THE DRIFT CHECK IS SCOPED TO THE AREAS THIS MIGRATION'S OWN SQL DEFINES, and that is the
+// point of it. It compares a HISTORICAL area_level_for against TODAY's access.ts, so every area
+// added after this migration would otherwise read "none" in SQL and its real level in access.ts
+// and be reported as drift — which is exactly what `meetings` (migration 326) did to this file
+// and to migration286's: two tests red on a clean checkout, for a mirror that was never wrong.
+// Nothing here can know about an area invented later, and nothing here should: the CURRENT
+// mirror is preflight's checkAreaMirror(), which reads whichever migration most recently defines
+// the function. This one only owns its own.
+//
+// What it still catches, and must: an area THIS migration defines that access.ts has since
+// dropped or renamed (SQL answers a level, access.ts answers none → drift), and any cell of its
+// own areas the two disagree on.
+//
+// Known limit, left deliberately: a later migration that legitimately CHANGES a preset level for
+// an area this one defines will read as drift here. That is rare, it is not silent, and it wants
+// a human to look rather than a rule to wave it through.
+  const DEFINED = new Set([...areaKeysOf(MIG("277_price_override_area.sql")), ...areaKeysOf(MIG_TEXT())]);
+  // Refuse to run blind, and say what is out of scope rather than narrowing in silence.
+  ok(DEFINED.size >= 10 && DEFINED.has("contacts"),
+    `(the drift check knows this migration's ${DEFINED.size} area(s), contacts included)`,
+    [...DEFINED].join(","));
+  const LATER = access.AREA_KEYS.filter((a) => !DEFINED.has(a));
+  if (LATER.length) console.log(`  note  area(s) added after this migration, not its business: ${LATER.join(", ")}`);
 
   console.log("migration 286: before — a stored own_view is DISCARDED (the widening the ship order exists for)");
   const db = await fresh();
@@ -305,7 +329,7 @@ function areaKeysOf(sql) {
     const expectChange = c.a === "contacts" && storesOwnView(c.m) && c.role !== "owner";
     if (expectChange) { if (now === "own_view" && c.was !== "own_view") changed++; else { moved++; firstMoved.push({ ...c, now }); } }
     else if (now !== c.was) { moved++; if (firstMoved.length < 5) firstMoved.push({ ...c, now }); }
-    if (c.a !== "no_such_area") {
+    if (c.a !== "no_such_area" && DEFINED.has(c.a)) {
       const ts = access.effectiveAccess(c.role, c.t, c.m)[c.a] ?? "none";
       if (ts !== now) { drift++; if (firstDrift.length < 5) firstDrift.push({ ...c, now, ts }); }
     }
