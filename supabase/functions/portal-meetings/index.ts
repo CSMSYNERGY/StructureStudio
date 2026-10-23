@@ -408,6 +408,8 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
           bufferBeforeMinutes: t.buffer_before_minutes, bufferAfterMinutes: t.buffer_after_minutes,
           minNoticeHours: t.min_notice_hours, maxDaysAhead: t.max_days_ahead,
           slotIntervalMinutes: t.slot_interval_minutes, color: t.color, active: t.active,
+          conferenceProvider: t.conference_provider, conferenceUrl: t.conference_url,
+          conferenceNote: t.conference_note,
         })),
         myHost: myHost ? shapeHost(myHost) : null,
         // An own-only caller gets their own row and nobody else's — the whole point of the
@@ -567,6 +569,40 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       if (!["in_person", "phone", "video", "custom"].includes(kind)) {
         return json({ error: "That is not a kind of meeting we know." }, 400);
       }
+      // ── VIDEO (migrations 328/329) ────────────────────────────────────────────────────
+      // ⚠️ https ONLY, checked here as well as at the column. This value is copied onto every
+      // booking of the type and ends up in an href in a customer's mail client and in the
+      // LOCATION of a calendar invite, so `javascript:` or a bare host must never reach it.
+      // The column refuses it too (328) — belt and braces, because a constraint violation
+      // reaches the browser as a database error while this reaches it as a sentence.
+      const confProvider = ["none", "zoom", "google_meet", "teams", "other"]
+        .includes(String(p.conferenceProvider ?? "none"))
+        ? String(p.conferenceProvider ?? "none")
+        : "none";
+      let confUrl: string | null = null;
+      if (p.conferenceUrl !== undefined && p.conferenceUrl !== null && String(p.conferenceUrl).trim() !== "") {
+        const raw = String(p.conferenceUrl).trim().slice(0, 500);
+        // ⛔ startsWith, NOT a regex, and do not "tidy" it back into one ending `\/\/`.
+        // scripts/preflight.mjs' walkBlock scans for `//` BEFORE it skips strings, so a regex
+        // literal whose source ends in an escaped slash followed by the closing delimiter
+        // reads as the start of a line comment. It then swallows the rest of the line — the
+        // opening brace of this `if` included — the brace depth goes out by one, and the
+        // GATES cross-check loses every case label after this point: nine actions reported as
+        // "listed but no branch handles it" when all nine were right there.
+        if (!raw.toLowerCase().startsWith("https://")) {
+          return json({ error: "A meeting link has to be an https address." }, 400);
+        }
+        confUrl = raw;
+      }
+      // A provider with no link is a type WAITING for a generated one (route B, not built
+      // yet). Said plainly rather than saved as a video meeting with no way in.
+      if (confProvider !== "none" && !confUrl) {
+        return json({
+          error: "Paste your meeting room link, or set the provider back to “I’ll send a link myself”.",
+          code: "conference_url_required",
+        }, 400);
+      }
+
       const num = (v: unknown, dflt: number, lo: number, hi: number) => {
         const n = Math.trunc(Number(v));
         if (!Number.isFinite(n)) return dflt;
@@ -586,6 +622,9 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         max_days_ahead: num(p.maxDaysAhead, 60, 1, 365),
         slot_interval_minutes: num(p.slotIntervalMinutes, 15, 5, 120),
         color: /^#[0-9A-Fa-f]{6}$/.test(String(p.color ?? "")) ? String(p.color) : null,
+        conference_provider: confProvider,
+        conference_url: confUrl,
+        conference_note: p.conferenceNote ? String(p.conferenceNote).slice(0, 300) : null,
         active: p.active === undefined ? true : !!p.active,
         updated_at: new Date().toISOString(),
       };

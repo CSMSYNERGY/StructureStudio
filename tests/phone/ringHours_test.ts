@@ -190,32 +190,39 @@ const nav = new Function("ssIsBetaHost", `${NAV}; return { ssClampTab, ssSetting
   ssSettingsTabs: (o: { access: unknown; phoneOffered: boolean }) => [string, ...unknown[]][];
 };
 
-// ⚠️ MEETINGS JOINED THIS RAIL ON 2026-10-22 (migration 326), and this test is the record of
-// why that is correct rather than a leak. The claim it pins is unchanged and still the point:
+// ⚠️ MEETINGS JOINED THIS RAIL ON 2026-10-22 (migration 326) and MOVED INSIDE CUSTOMER HUB
+// the same day (Carolyn: "I also want the meetings tab in Customer hub"). This test is the
+// record of why a rep still reaches it. The claim it pins is unchanged and still the point:
 // a rep holds NO `settings_*` area, so none of the business's settings pages are offered to
-// them. What they now also reach is Settings → Meetings, which keys on the WORKSPACE area
-// `meetings` (SETTINGS_TAB_AREA.meetings) — the same way Online Inventory keys on `inventory`
-// rather than a settings area of its own.
+// them.
+//
+// What they DO reach is the CUSTOMER HUB rail item — and not because they can read its first
+// three tabs, which are all settings_crm and all closed to them. Its fourth tab, Meetings,
+// keys on the WORKSPACE area `meetings`, and the rail entry is gated as a HUB: visible if ANY
+// of its tabs is readable. Inside it, such a person sees Meetings alone.
 //
 // That page is mostly about the person looking at it: their booking link, their hours, their
 // days off, which meeting types they take. A booking link only an owner can configure is not
 // self-service, which is the whole point of the feature. The business half of the page —
 // the meeting types, and the switch that makes the pages live — renders READ-ONLY for them,
 // enforced server-side by portal-meetings' TENANT_WIDE set, not by hiding the rail entry.
-Deno.test("a sales rep, dealer or sales manager reaches Settings › Meetings, Phone (Your calls) and My Profile, and nothing else", () => {
+//
+// ⛔ If this ever reads ["phone", "myprofile"] again, the hub gate in ssSettingsTabs or its
+// exemption in the filter below it has been lost — and every rep's booking link went with it.
+Deno.test("a sales rep, dealer or sales manager reaches Settings › Customer Hub, Phone (Your calls) and My Profile, and nothing else", () => {
   for (const title of ["sales_rep", "dealer", "sales_manager"] as const) {
     const access = PRESETS[title];
     assert(access.phone === "own" || access.phone === "view", `${title} answers the phone`);
     assert(!Object.keys(access).some((k) => k.startsWith("settings_") && access[k] !== "none"), `${title} holds no settings area`);
     // The one non-settings_* area that opens a Settings page for them, named so a future
-    // reader can tell this entry from a drift.
+    // reader can tell this entry from a drift. It reaches them through the Customer Hub.
     assert(access.meetings === "own" || access.meetings === "edit", `${title} runs a diary`);
     assertEquals(nav.ssClampTab("settings", false, false, access), "settings", `${title}: /portal/settings is theirs`);
-    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: true }).map((t) => t[0]), ["meetings", "phone", "myprofile"], title);
-    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: false }).map((t) => t[0]), ["meetings", "myprofile"], `${title}, calling not offered`);
+    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: true }).map((t) => t[0]), ["pipelines", "phone", "myprofile"], title);
+    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: false }).map((t) => t[0]), ["pipelines", "myprofile"], `${title}, calling not offered`);
   }
-  // A crew member holds neither, so neither page is offered — the rail does not gain Meetings
-  // for everybody just because it is not a settings_* area.
+  // A crew member holds neither, so neither page is offered — the rail does not gain the
+  // Customer Hub for everybody just because one of its tabs is not a settings_* area.
   assertEquals(nav.ssSettingsTabs({ access: PRESETS.crew_member, phoneOffered: true }).map((t) => t[0]), ["myprofile"]);
   // Someone with no phone access and no settings area is still sent to their own page.
   assert(nav.ssClampTab("settings", false, false, PRESETS.crew_member) !== "settings");

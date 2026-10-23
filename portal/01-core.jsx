@@ -1712,15 +1712,6 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // Inventory tab and moved here. Per-building listing (photos, show price) stays on Inventory,
     // because that is editing a building, not configuring the feature.
     ["online-inventory", "Online Inventory", "Your public page of lot buildings: switch it on, prices, deposit, tracking and the code for your website", null],
-    // MEETINGS (migration 326, Carolyn 2026-10-22). A person's booking link, their hours,
-    // the meeting types the business offers, and the Google/Outlook connections.
-    //
-    // Gated through SETTINGS_TAB_AREA.meetings like every tab here, which means an own-only
-    // holder — a sales rep, a dealer — DOES get this page: it is mostly about themselves, and
-    // a booking link nobody but an owner can configure is not self-service. portal-meetings
-    // refuses the business-wide half (meeting types, the page's own settings) for them, and
-    // the page renders those read-only rather than pretending the save will work.
-    ["meetings", "Meetings", "Your booking link and hours, the meeting types you offer, and your calendar connections", null],
     // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
     // items of their own; they are top tabs inside Company now, along with Locations, Crews
     // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this
@@ -1766,7 +1757,17 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // NOT a slug was tried first and the preflight route-coverage gate refused it, rightly: an
     // unknown sub clamps to Structures rather than erroring, so such an id is a page that
     // silently goes somewhere else.
-    ["pipelines", "Customer Hub", "Your pipelines and card statuses, and how customers get their login code", null],
+    //
+    // ⚠️ GATED AS A HUB, like Company, and NOT by SETTINGS_TAB_AREA.pipelines alone. Since
+    // Meetings moved in (2026-10-22) this hub spans TWO areas: settings_crm for its first
+    // three tabs and `meetings` for the fourth. A sales rep or dealer holds no settings_*
+    // area but does hold `meetings`, and gating the rail on settings_crm alone would leave
+    // them with no way to reach their own hours or their own booking link — while
+    // /settings/meetings still rendered perfectly for anyone who happened to have the link.
+    // The exemption in the filter at the bottom of this function is the other half of this;
+    // without it the spread adds the entry and the filter takes it straight back out.
+    ...((isAdmin || !access || ssCanRead(access, "settings_crm") || ssCanRead(access, "meetings"))
+      ? [["pipelines", "Customer Hub", "Your pipelines and card statuses, how customers get their login code, and your meetings", null]] : []),
     ["connection", "GHL Connection", "GHL credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
     // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
@@ -1813,6 +1814,12 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // settings_team holder had the entry added by the spread and taken straight back out —
     // rail showed My Profile alone, and Team was unreachable for the one person it was granted to.
     if (id === "company") return true;
+    // CUSTOMER HUB gated itself above, over two areas (settings_crm and `meetings`). It must
+    // be exempt here for exactly the reason `company` is: SETTINGS_TAB_AREA.pipelines is
+    // settings_crm, so a rep who holds only `meetings` would have the entry added by the
+    // spread and removed again here — rail shows Phone and My Profile, and the page where they
+    // set their own hours is unreachable.
+    if (id === "pipelines") return true;
     // ONLINE INVENTORY needs inventory EDIT, not view. A sales rep reads the lot (inventory:view)
     // but does not configure the public page, and Settings for a rep is Phone and My Profile only
     // (tests/phone/ringHours_test.ts pins that).
@@ -1935,6 +1942,19 @@ function ssCustomerHubTabs() {
     // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
     ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
     ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
+    // MEETINGS moved in here on 2026-10-22 at Carolyn's request ("I also want the meetings tab
+    // in Customer hub"). It was a rail item of its own for a few hours.
+    //
+    // ⚠️ IT IS THE ONE TAB IN THIS HUB THAT IS NOT settings_crm — it keys on the `meetings`
+    // area (SETTINGS_TAB_AREA.meetings). Two consequences, and both are load-bearing:
+    //   * the RAIL entry for this hub has to admit `meetings` as well, or a sales rep — who
+    //     holds no settings_* area at all — loses the only page where they set their own hours
+    //     and find their own booking link. That is the trap the Company hub's comment records
+    //     ("folding it in here under the branding area alone would have left someone granted
+    //     only Team with no way to reach it"), one hub along.
+    //   * for such a rep this hub shows exactly ONE tab, labelled "Customer Hub". That reads a
+    //     little oddly for them and is the accepted cost of the grouping owners asked for.
+    ["meetings", "Meetings", "Your booking link and hours, the meeting types you offer, and your calendar connections"],
   ];
 }
 

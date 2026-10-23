@@ -235,3 +235,68 @@ Deno.test("with no manage link, nothing offers a link that does not exist", () =
   assert(!/Reschedule or cancel/i.test(m.html));
   assert(!m.text.includes("Reschedule or cancel:"));
 });
+
+// ── Video meetings (migrations 328/329) ──────────────────────────────────────────────────
+
+const VIDEO: MeetingMailFacts = {
+  ...F,
+  typeName: "Design consultation",
+  locationKind: "video",
+  locationDetail: null,
+  conferenceUrl: "https://zoom.us/j/1234567890",
+  conferenceNote: "Passcode 4120",
+};
+
+Deno.test("a video meeting's join link reaches the customer in both parts", () => {
+  const m = meetingBookedEmail(VIDEO);
+  assert(m.html.includes("https://zoom.us/j/1234567890"), "the link is in the html");
+  assert(m.text.includes("https://zoom.us/j/1234567890"), "and in the text part");
+  // Rendered as a link whose TEXT is the URL, so a forwarded copy — or a client that strips
+  // anchors — still leaves something to copy.
+  assert(m.html.includes('href="https://zoom.us/j/1234567890"'), "it is a real anchor");
+  assert(m.html.includes("Join the video call"), "and there is a button");
+  assert(m.html.includes("Passcode 4120"), "the passcode has nowhere else to go");
+  assert(m.text.includes("Passcode 4120"));
+});
+
+Deno.test("the link replaces the generic place, rather than saying both", () => {
+  // "Where: Video call" next to the link says the same thing twice.
+  const m = meetingBookedEmail(VIDEO);
+  assert(m.html.includes(">Join<"), "the row is labelled Join");
+  assert(!m.html.includes(">Where<"), "and not also Where");
+  assert(!/^Where:/m.test(m.text), m.text);
+  assert(/^Join:/m.test(m.text), m.text);
+});
+
+Deno.test("a reminder for a video call carries the link too", () => {
+  // The reminder is the one that lands when they actually need it.
+  const m = meetingReminderEmail({ ...VIDEO, reminderHours: 2 });
+  assert(m.html.includes("Join the video call"));
+  assert(m.text.includes("https://zoom.us/j/1234567890"));
+});
+
+Deno.test("a CANCELLED video meeting never offers a join link", () => {
+  // Inviting somebody to join a meeting that is off is the one version of this nobody wants.
+  const m = meetingCancelledEmail(VIDEO);
+  assert(!m.html.includes("zoom.us"), m.html.slice(0, 200));
+  assert(!m.text.includes("zoom.us"), m.text);
+  assert(!/Join/i.test(m.text), m.text);
+});
+
+Deno.test("an in-person meeting is untouched by any of this", () => {
+  const m = meetingBookedEmail(F);
+  assert(!m.html.includes("Join the video call"));
+  assert(m.html.includes("At our lot"), "the place still shows");
+  assert(/^Where:/m.test(m.text), m.text);
+});
+
+Deno.test("a video type with no link yet still reads properly", () => {
+  // Route B (a generated link) is not built; a type set to a provider with no link saved is
+  // refused server-side, but the email must not leak a placeholder if one ever gets through.
+  const m = meetingBookedEmail({ ...VIDEO, conferenceUrl: null, conferenceNote: null, locationDetail: "We'll send a link" });
+  assert(!m.html.includes("Join the video call"));
+  assert(m.html.includes("We&#39;ll send a link") || m.html.includes("We'll send a link"));
+  for (const part of [m.subject, m.html, m.text]) {
+    assert(!/undefined|null|NaN/.test(part), part.slice(0, 160));
+  }
+});

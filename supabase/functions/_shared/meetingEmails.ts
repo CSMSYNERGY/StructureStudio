@@ -47,6 +47,12 @@ export type MeetingMailFacts = {
   previousStartsAt?: string | null;
   /** Hours before the start, for a reminder's wording ("tomorrow" vs "in 2 hours"). */
   reminderHours?: number | null;
+  /** The video join link this booking was made with (migrations 328/329), and whatever else
+   *  is needed to get in — a passcode, a dial-in number. Both come off the MEETING rather
+   *  than the type, so a builder changing their room link next month never silently moves a
+   *  meeting that is already confirmed with the old one. */
+  conferenceUrl?: string | null;
+  conferenceNote?: string | null;
 };
 
 export type MeetingMailBody = { subject: string; html: string; text: string };
@@ -117,11 +123,22 @@ function shell(f: MeetingMailFacts, preheader: string, bodyHtml: string): string
 function summary(f: MeetingMailFacts): string {
   const where = formatWhere(f);
   const length = formatLength(f.startsAt, f.endsAt);
+  // ⚠️ The join link is rendered as a LINK whose TEXT is the URL, not the word "here": a
+  // customer forwarding this to a colleague, or reading it in a client that strips anchors,
+  // still has something to copy. The href is the stored value, which the database has already
+  // constrained to https (328) — this column lands in an href in a stranger's mail client, so
+  // the scheme check belongs at the column and not only here.
+  const join = (f.conferenceUrl ?? "").trim();
   const rows = [
     detailRow("What", esc(f.typeName)),
     detailRow("When", `${esc(formatWhen(f.startsAt, f.timeZone))}`),
     length ? detailRow("How long", esc(length)) : "",
-    where ? detailRow("Where", esc(where)) : "",
+    // A video meeting's "where" IS the link; printing both "Where: Video call" and the link
+    // says the same thing twice.
+    join
+      ? detailRow("Join", `<a href="${esc(join)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;word-break:break-all;">${esc(join)}</a>`)
+      : (where ? detailRow("Where", esc(where)) : ""),
+    join && f.conferenceNote ? detailRow("To get in", esc(f.conferenceNote)) : "",
     detailRow("Who", esc(f.hostName)),
   ].filter(Boolean).join("\n");
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -147,13 +164,15 @@ Need to change it? <a href="${esc(f.manageUrl)}" target="_blank" style="color:#2
 function textOf(headline: string, f: MeetingMailFacts, extra: string[] = []): string {
   const where = formatWhere(f);
   const length = formatLength(f.startsAt, f.endsAt);
+  const join = (f.conferenceUrl ?? "").trim();
   return [
     headline,
     "",
     `What:     ${f.typeName}`,
     `When:     ${formatWhen(f.startsAt, f.timeZone)}`,
     length ? `How long: ${length}` : "",
-    where ? `Where:    ${where}` : "",
+    join ? `Join:     ${join}` : (where ? `Where:    ${where}` : ""),
+    join && f.conferenceNote ? `To get in: ${f.conferenceNote}` : "",
     `Who:      ${f.hostName}`,
     ...extra,
     "",
@@ -176,7 +195,11 @@ export function meetingBookedEmail(f: MeetingMailFacts): MeetingMailBody {
     notes
       ? para(`<span style="color:#64748B;font-size:13px;">You told us: &ldquo;${esc(notes)}&rdquo;</span>`)
       : "",
-    f.manageUrl ? ctaButton(f.manageUrl, "View or change this meeting") : "",
+    // On a VIDEO meeting the join button wins over the manage button: on the day, getting in
+    // is the only thing this email is for. Changing it is still one tap away, on the line below.
+    f.conferenceUrl
+      ? ctaButton(f.conferenceUrl, "Join the video call")
+      : (f.manageUrl ? ctaButton(f.manageUrl, "View or change this meeting") : ""),
     manageLine(f),
   ].filter(Boolean).join("\n");
   return {
@@ -253,6 +276,9 @@ export function meetingReminderEmail(f: MeetingMailFacts): MeetingMailBody {
     f.locationKind === "in_person" && where
       ? para(`<span style="color:#64748B;font-size:13px;">We're at ${esc(where)}.</span>`)
       : "",
+    // A reminder for a video call exists mostly to put the link in front of them at the
+    // moment they actually need it.
+    f.conferenceUrl ? ctaButton(f.conferenceUrl, "Join the video call") : "",
     manageLine(f),
   ].filter(Boolean).join("\n");
   return {

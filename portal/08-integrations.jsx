@@ -5116,6 +5116,11 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
       )}
       {sub === "forms" && (crmUnlocked || crmPending) && <FormsHub clientId={clientId} canEdit={canEdit} />}
       {sub === "email-templates" && (crmUnlocked || crmPending) && <EmailTemplatesHub canEdit={canEdit} />}
+      {/* MEETINGS (migration 326; moved in here 2026-10-22). No entitlement teaser of its own:
+          MeetingsSettings asks portal-meetings, which refuses with the CRM sentence and the
+          component shows it. Doing it twice would mean two places deciding what "unpaid"
+          looks like on one page. */}
+      {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
     </div>
   );
 }
@@ -5156,6 +5161,33 @@ const MEETING_PLACES = [
   ["phone", "Phone call"],
   ["video", "Video call"],
   ["custom", "Something else"],
+];
+
+// VIDEO PROVIDERS (migrations 328/329, Carolyn 2026-10-22: "We need to be able to connect
+// zoom, hangouts & teams to generate video meeting links for video meetings").
+//
+// ⚠️ WHAT THIS PICKER DOES TODAY is use the builder's STANDING ROOM LINK — the permanent
+// personal room every Zoom, Meet and Teams account has. They paste it once and every booking
+// of the type carries it, into the confirmation, the reminder and the calendar invite's
+// LOCATION (where each client turns it into its own Join button). That needs nothing
+// connected and works the moment it is saved.
+//
+// A FRESH LINK PER BOOKING, minted through each provider's API, needs an OAuth app per
+// provider that only Carolyn can create — so it is not offered here. The card below says so
+// in as many words rather than showing a Connect button that opens nothing: CLAUDE.md records
+// what that costs ("a promise nobody intended to keep, sitting on a screen Carolyn shows at a
+// trade show").
+//
+// Worth knowing before planning that: Meet and Teams need no integration of their own. A Meet
+// link is what Google's calendar API returns when the event is created with conferenceData,
+// and a Teams link is what Microsoft Graph returns the same way — so both ride the two
+// calendar connectors already planned. Only Zoom is a separate app.
+const MEETING_VIDEO = [
+  ["none", "I'll send a link myself"],
+  ["zoom", "Zoom"],
+  ["google_meet", "Google Meet"],
+  ["teams", "Microsoft Teams"],
+  ["other", "Something else"],
 ];
 
 function MeetingsSettings({ clientId, viewingLabel = null }) {
@@ -5501,6 +5533,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
                   {t.durationMinutes} min
                   {` · ${(MEETING_PLACES.find((x) => x[0] === t.locationKind) || ["", "In person"])[1]}`}
                   {t.locationDetail ? ` · ${t.locationDetail}` : ""}
+                  {t.conferenceUrl ? ` · ${(MEETING_VIDEO.find((x) => x[0] === t.conferenceProvider) || ["", "Video"])[1]} link` : ""}
                   {` · ${t.minNoticeHours}h notice`}
                   {(t.bufferBeforeMinutes || t.bufferAfterMinutes) ? ` · ${t.bufferBeforeMinutes}/${t.bufferAfterMinutes} min buffer` : ""}
                 </div>
@@ -5534,6 +5567,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
                   name: "", durationMinutes: 30, locationKind: "in_person", locationDetail: "",
                   description: "", bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
                   minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true,
+                  conferenceProvider: "none", conferenceUrl: "", conferenceNote: "",
                 })}>Add a meeting type</button>
             )
         )}
@@ -5696,6 +5730,52 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy }) {
         <input value={draft.locationDetail || ""} maxLength={300} onChange={(e) => set("locationDetail", e.target.value)}
           placeholder="At our lot — 4120 State Road 9" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
       </div>
+      {/* VIDEO, only for a video call — a dial-in for a phone type belongs in "where exactly"
+          above, and offering a meeting link on a lot walkthrough is noise. */}
+      {draft.locationKind === "video" && (
+        <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 13px", marginBottom: 10, background: "#F8FAFC" }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ flex: "0 0 200px" }}>
+              <span style={lbl}>Video provider</span>
+              <select value={draft.conferenceProvider || "none"}
+                onChange={(e) => set("conferenceProvider", e.target.value)}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {MEETING_VIDEO.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+              </select>
+            </div>
+            {(draft.conferenceProvider || "none") !== "none" && (
+              <div style={{ flex: "1 1 240px" }}>
+                <span style={lbl}>Your meeting room link</span>
+                <input value={draft.conferenceUrl || ""} maxLength={500}
+                  onChange={(e) => set("conferenceUrl", e.target.value)}
+                  placeholder="https://zoom.us/j/1234567890"
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+              </div>
+            )}
+          </div>
+          {(draft.conferenceProvider || "none") !== "none" && (
+            <div style={{ marginTop: 10 }}>
+              <span style={lbl}>Anything else they need to get in (optional)</span>
+              <input value={draft.conferenceNote || ""} maxLength={300}
+                onChange={(e) => set("conferenceNote", e.target.value)}
+                placeholder="Passcode 4120"
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#64748B", marginTop: 10, lineHeight: 1.55 }}>
+            {(draft.conferenceProvider || "none") === "none"
+              ? "Pick a provider and paste your meeting room link, and every booking of this type carries it — in the confirmation, the reminder, and the calendar invite."
+              : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
+          </div>
+          {/* Honest about the half that is NOT built, rather than a Connect button that opens
+              nothing. */}
+          <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.55 }}>
+            A different link for every booking — rather than one room you reuse — means
+            connecting your Zoom, Google or Microsoft account. That isn't built yet, and it needs
+            setup on our side before anyone can connect, so there's nothing to press for it here.
+          </div>
+        </div>
+      )}
       <div style={{ marginBottom: 10 }}>
         <span style={lbl}>What it's for (shown to the customer)</span>
         <textarea value={draft.description || ""} maxLength={2000} rows={2} onChange={(e) => set("description", e.target.value)}
@@ -5806,11 +5886,6 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           <ShopSettingsPanel clientId={clientId} canEdit={isAdmin || !access || access.inventory === "edit"} />
         </div>
       )}
-      {/* MEETINGS (migration 326). No wrapper card: the component renders several of its
-          own, like CompanyShell rather than ShopSettingsPanel. It derives what this person
-          may change from the server's `canManageBusiness` rather than from `access` here —
-          one answer, from the side that enforces it. */}
-      {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}

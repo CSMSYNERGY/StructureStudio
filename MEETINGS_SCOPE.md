@@ -1,7 +1,8 @@
 # Meetings — Calendly-style booking for builders
 
-**Status: SPEC, NOT BUILT.** Written 2026-10-22 from Carolyn's three decisions (below).
-Nothing in this document has shipped. Read it before touching anything named `meeting_*`.
+**Status: PHASES 1, 2 AND 2b ARE LIVE ON BETA** (migrations 326–329, 2026-10-22), verified
+end to end against real sends. Phases 3, 4, 4b and 5 are not built; each is blocked on an
+OAuth app Carolyn owns, except 5. Read it before touching anything named `meeting_*`.
 
 ## Why, and what was already decided
 
@@ -182,15 +183,46 @@ connect anything to us.
 and STOP rules in `portal-sms`; a reminder to someone who never opted in is a compliance
 problem, not a feature. Phase 2 ships email only; SMS is a separate decision.
 
+## Video meetings (added 2026-10-22)
+
+Carolyn: *"We need to be able to connect zoom, hangouts & teams to generate video meeting
+links for video meetings."*
+
+⚠️ **Meet and Teams need no integration of their own, and knowing that halves this work.** A
+Google Meet link is what Google's Calendar API hands back when the event is created with
+`conferenceData`; a Teams link is what Microsoft Graph hands back the same way. So both ride
+the two calendar connectors phases 3–4 already need. **Only Zoom is a separate OAuth app —
+three apps for Carolyn to create, not five.**
+
+There are two genuinely different features here, and only one of them needed anybody's
+permission:
+
+- **Route A — the standing room link. SHIPPED (migrations 328/329).** Zoom, Meet and Teams all
+  give every account a permanent personal room, and a small business very often runs every
+  call through it. The builder pastes it once on the meeting type; `book_meeting()` copies it
+  onto each booking, and it reaches the customer in the confirmation, the reminder and the
+  invite's `LOCATION` — which is where a calendar client turns it into its own Join button.
+  Nothing is connected, and it works.
+- **Route B — a fresh link per booking.** Needs the OAuth apps. The columns are already laid
+  out for it (`meetings.conference_*` is per booking, not per type) and `book_meeting()`
+  reports the provider back to its caller so a booking that is *waiting* for a generated link
+  (`'zoom'` with a null url) is distinguishable from one that never wanted one (`'none'`).
+
+⚠️ **The link lives on the MEETING, not only the type.** A builder who changes their room link
+next month must not silently move a meeting that was already confirmed with the old one — the
+same reasoning that keeps `booked_time_zone` on the row.
+
 ## Phases
 
 | # | What | Ships without |
 |---|------|---------------|
 | 1 | Schema, availability engine, `book.html`, Meeting scheduler tab, Settings → Meetings | any external calendar |
-| 2 | Confirmation + reminder email, `.ics`, cancel/reschedule links, Sales → Meetings page | — |
-| 3 | Google Calendar connector (busy read + event write) | Carolyn's Google Cloud app |
-| 4 | Microsoft/Outlook connector | Carolyn's Entra registration |
-| 5 | Team pools / round-robin, `book-embed.js` | — |
+| 2 | Confirmation + reminder email, `.ics`, cancel/reschedule links | — |
+| 2b | Video **room links** (route A), Meetings inside Settings → Customer Hub | anything connected |
+| 3 | Google Calendar connector: busy read, event write, **and Meet links** | Carolyn's Google Cloud app |
+| 4 | Microsoft connector: busy read, event write, **and Teams links** | Carolyn's Entra registration |
+| 4b | Zoom connector: a fresh meeting per booking | Carolyn's Zoom app |
+| 5 | Team pools / round-robin, `book-embed.js`, Sales → Meetings page | — |
 
 ## What Carolyn has to do (phases 3–4 cannot start without these)
 
@@ -200,8 +232,20 @@ problem, not a feature. Phase 2 ships email only; SMS is a separate decision.
    to weeks and is the long pole on phase 3.
 2. **Microsoft Entra app registration** → client ID + secret, delegated `Calendars.ReadWrite` +
    `offline_access`, same redirect shape.
-3. Both client IDs and secrets go in as **Supabase function secrets**, added by her — per the
+3. **Zoom** → a Server-to-Server OAuth or OAuth app on marketplace.zoom.us, scope
+   `meeting:write`, for route B only. Route A needs nothing.
+4. Both client IDs and secrets go in as **Supabase function secrets**, added by her — per the
    standing rule, no key values are read, printed or fingerprinted here.
+
+## What is actually running the reminders
+
+⚠️ **pg_cron is NOT installed on this project** (CLAUDE.md records it verified absent on
+2026-08-08, and records the cost: `sync_all` says "Run by pg_cron every 10 minutes" and has
+never run once). Reminders are therefore driven by the **phone-api Cloudflare Worker's
+one-minute cron tick**, every five minutes on `MEETINGS_MINUTE_MOD5`, which POSTs to the
+`meeting-reminders` edge function. That Worker's deploy is MANUAL and it serves the live phone
+line, so the reminder job ships on its next deploy — confirmations, reschedules and
+cancellations do not wait for it.
 
 ## Verified-after-deploy
 

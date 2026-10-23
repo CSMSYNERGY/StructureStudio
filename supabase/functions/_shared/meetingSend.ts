@@ -80,6 +80,7 @@ export async function sendMeetingEmail(
       .select(
         "id, client_id, starts_at, ends_at, booked_time_zone, status, customer_name, customer_email, " +
           "customer_notes, cancel_token, rescheduled_from, ics_sequence, " +
+          "conference_provider, conference_url, conference_note, " +
           "meeting_types!inner(name, location_kind, location_detail), " +
           "meeting_hosts!inner(public_name)",
       )
@@ -129,6 +130,10 @@ export async function sendMeetingEmail(
       manageUrl,
       previousStartsAt: m.rescheduled_from ?? null,
       reminderHours: opts.reminderHours ?? null,
+      // Off the MEETING, not the type — see the column comment on meetings.conference_url:
+      // a builder changing their room link must not move a meeting already confirmed.
+      conferenceUrl: m.conference_url ?? null,
+      conferenceNote: m.conference_note ?? null,
     };
 
     const body = which === "booked"
@@ -152,10 +157,19 @@ export async function sendMeetingEmail(
         startsAt: m.starts_at,
         endsAt: m.ends_at,
         title: `${facts.typeName} with ${facts.hostName}`,
-        description: facts.customerNotes
-          ? `${facts.typeName} with ${facts.hostName}.\nYou told us: ${facts.customerNotes}`
-          : `${facts.typeName} with ${facts.hostName}.`,
-        location: facts.locationDetail ?? null,
+        description: [
+          `${facts.typeName} with ${facts.hostName}.`,
+          // Repeated in the body as well as in LOCATION below: clients differ about which of
+          // the two they show, and a passcode has nowhere else to go at all.
+          facts.conferenceUrl ? `Join: ${facts.conferenceUrl}` : "",
+          facts.conferenceNote ? `To get in: ${facts.conferenceNote}` : "",
+          facts.customerNotes ? `You told us: ${facts.customerNotes}` : "",
+        ].filter(Boolean).join("\n"),
+        // ⚠️ FOR A VIDEO MEETING THE LINK *IS* THE LOCATION, and that is not cosmetic: every
+        // calendar client turns a URL in LOCATION into its own Join button, which is how a
+        // customer gets in from their phone's lock screen without finding the email again.
+        // "Video call" would be true there and useless.
+        location: facts.conferenceUrl || facts.locationDetail || null,
         organizerName: businessName,
         organizerEmail: ORGANIZER_FALLBACK,
         attendeeName: m.customer_name,
