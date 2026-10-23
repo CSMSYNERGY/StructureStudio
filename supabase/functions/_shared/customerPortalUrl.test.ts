@@ -1,6 +1,6 @@
 // Deliberately dependency-free (no jsr:/npm: imports), like the other _shared tests, so it
 // runs on a machine with no registry access. Preflight discovers _shared/*.test.ts itself.
-import { customerHomeUrl, myQuotesUrl, portalOrderUrl } from "./customerPortalUrl.ts";
+import { bookManageUrl, customerHomeUrl, myQuotesUrl, portalOrderUrl } from "./customerPortalUrl.ts";
 
 function assertEq(actual: unknown, expected: unknown, msg?: string) {
   if (actual !== expected) {
@@ -58,4 +58,15 @@ Deno.test("customerHomeUrl: an unknown view is quotes, and a ref that is not a s
   assertEq(customerHomeUrl("x", null, { ref: "  SS-ABC234 " }), `${base}&q=SS-ABC234`, "surrounding space trimmed");
   // The old link is untouched by the new one.
   assertEq(myQuotesUrl("x"), "https://app.structurestudiosuite.com/my-quotes?client=x");
+});
+
+Deno.test("bookManageUrl: the capability link, on the same host rule, and the token is encoded", () => {
+  // Migration 327. The token IS the authentication, so the only things that matter here are
+  // that it is encoded and that a confirmation sent from beta points at beta.
+  assertEq(bookManageUrl("abc123"), "https://app.structurestudiosuite.com/book?manage=abc123");
+  assertEq(bookManageUrl("abc123", withOrigin("https://beta.structurestudiosuite.com")), "https://beta.structurestudiosuite.com/book?manage=abc123");
+  assertEq(bookManageUrl("abc123", withOrigin("https://evil.example")), "https://app.structurestudiosuite.com/book?manage=abc123");
+  assertEq(bookManageUrl("a b&c=d"), "https://app.structurestudiosuite.com/book?manage=a%20b%26c%3Dd");
+  // No client id rides along: book-public reads the tenant off the booking the token names.
+  if (bookManageUrl("abc123").includes("client=")) throw new Error("the manage link must not carry a tenant slug");
 });

@@ -141,6 +141,23 @@ textarea { resize: vertical; }
       <p>The link may be out of date. Please get in touch with the business directly.</p>
     </div>
 
+    <!-- MANAGE (migration 327): what the link in a confirmation email opens. The token in the
+         URL is the whole of the authentication, so there is no sign-in here and never will
+         be - the person holding the link is the person who booked. -->
+    <div id="screen-manage" hidden>
+      <div style="padding:26px 24px">
+        <h1 id="m-head" style="font-size:23px;margin:0 0 4px">Your meeting</h1>
+        <div class="note" id="m-sub" style="margin-bottom:16px"></div>
+        <div class="recap" id="m-recap"></div>
+        <div id="m-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px">
+          <button class="btn" id="m-move" type="button">Pick a different time</button>
+          <button class="btn ghost" id="m-cancel" type="button">Cancel this meeting</button>
+        </div>
+        <div class="err" id="m-err" hidden></div>
+        <div class="powered" style="margin-top:22px">Powered by <strong>Structure Studio</strong></div>
+      </div>
+    </div>
+
     <div class="cols" id="screen-book" hidden>
       <div class="side">
         <button class="back" id="back" type="button" hidden>
@@ -242,6 +259,12 @@ textarea { resize: vertical; }
   var clientId = (params.get("client") || "").trim().toLowerCase();
   var hostSlug = (params.get("with") || "").trim().toLowerCase();
   var typeFromUrl = (params.get("type") || "").trim().toLowerCase();
+  // The manage link from a confirmation email: /book?manage=<token>. It deliberately carries
+  // no client or host - the token resolves the booking on its own (see book-public).
+  var manageToken = (params.get("manage") || "").trim().toLowerCase();
+  // While rescheduling, the booking we are moving. Non-null means the slot list books a MOVE
+  // rather than a new meeting, which is the one branch the confirm button has to know about.
+  var moving = null;
   var EMBED = params.get("embed") === "1";
   if (EMBED) document.body.className = "embed";
 
@@ -258,7 +281,7 @@ textarea { resize: vertical; }
   }
 
   function screen(name) {
-    ["loading", "missing", "book"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
+    ["loading", "missing", "book", "manage"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
     postHeight();
   }
   function step(name) {
@@ -349,6 +372,7 @@ textarea { resize: vertical; }
 
   // ── Load the page ───────────────────────────────────────────────────────────────────────
   function boot() {
+    if (manageToken) { bootManage(); return; }
     if (!/^[a-z0-9-]{1,64}$/.test(clientId) || !/^[a-z0-9-]{1,40}$/.test(hostSlug)) {
       screen("missing");
       return;
@@ -574,6 +598,9 @@ textarea { resize: vertical; }
       b.onclick = function () {
         chosenSlot = s.startsAt;
         paintSide();
+        // Moving an existing booking needs no name, email or notes - we already have them.
+        // Going to the details form would ask a customer to retype what they told us.
+        if (moving) { doReschedule(); return; }
         $("consent").textContent = "By scheduling you agree to "
           + (page.business.name || "this business") + " contacting you about this meeting.";
         step("who");
@@ -601,7 +628,45 @@ textarea { resize: vertical; }
   };
 
   // ── Book it ─────────────────────────────────────────────────────────────────────────────
+  // MOVING an existing booking: the slot list is the same, so the step after it is where the
+  // two paths diverge. One call, one refusal vocabulary, one "that time has gone" recovery.
+  function doReschedule() {
+    if (busy) return;
+    busy = true;
+    var errBox = $("bookerr");
+    errBox.hidden = true;
+    fn("reschedule", { token: moving.token, startsAt: chosenSlot })
+      .then(function (d) {
+        busy = false;
+        if (!d || d.ok !== true) {
+          errBox.textContent = (d && d.error) || "We couldn\u2019t move it. Please try again.";
+          errBox.hidden = false;
+          if (d && (d.code === "slot_taken" || d.code === "not_bookable")) {
+            chosenSlot = null;
+            paintSide();
+            step("when");
+            loadMonth();
+          }
+          postHeight();
+          return;
+        }
+        // Back to the manage view, now showing the new time.
+        managed = d.meeting || managed;
+        if (managed) managed.status = "booked";
+        moving = null;
+        screen("manage");
+        paintManage();
+      })
+      .catch(function () {
+        busy = false;
+        errBox.textContent = "We couldn\u2019t reach the booking service. Please try again.";
+        errBox.hidden = false;
+        postHeight();
+      });
+  }
+
   $("confirm").onclick = function () {
+    if (moving) { doReschedule(); return; }
     if (busy) return;
     var name = $("f-name").value.trim();
     var email = $("f-email").value.trim();
@@ -678,6 +743,128 @@ textarea { resize: vertical; }
     r.lastChild.style.color = "var(--muted)";
     step("done");
   }
+
+  // ── MANAGE ──────────────────────────────────────────────────────────────────────────────
+  var managed = null;   // what lookup returned
+
+  function fn(action, body) {
+    var payload = { action: action };
+    for (var k in (body || {})) payload[k] = body[k];
+    return fetch(SUPABASE_URL + "/functions/v1/book-public?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS, body: JSON.stringify(payload)
+    }).then(function (r) { return r.json(); });
+  }
+
+  function bootManage() {
+    if (!/^[0-9a-f]{24,64}$/.test(manageToken)) { screen("missing"); return; }
+    fn("lookup", { token: manageToken })
+      .then(function (d) {
+        if (!d || d.ok !== true || !d.meeting) { screen("missing"); return; }
+        managed = d.meeting;
+        paintManage();
+      })
+      .catch(function () { screen("missing"); });
+  }
+
+  function paintManage() {
+    var m = managed;
+    // The customer's OWN zone, the one they booked in, named on screen. Same rule as the
+    // emails: a time with no zone beside it is how somebody arrives an hour early.
+    var tz = m.timeZone || customerTz;
+    var when = (function () {
+      try {
+        return new Intl.DateTimeFormat(undefined, {
+          timeZone: tz, weekday: "long", day: "numeric", month: "long",
+          hour: "numeric", minute: "2-digit", timeZoneName: "short"
+        }).format(new Date(m.startsAt));
+      } catch (e) { return m.startsAt; }
+    })();
+
+    var gone = m.status !== "booked";
+    $("m-head").textContent = gone
+      ? (m.status === "cancelled" ? "This meeting was cancelled" : "This meeting has already happened")
+      : "Your meeting";
+    $("m-sub").textContent = gone
+      ? "Nothing is booked for this link any more."
+      : "Everything you need is below. No sign-in needed \u2014 this link is yours.";
+
+    var r = $("m-recap");
+    r.textContent = "";
+    r.appendChild(el("div", null, m.typeName || "Meeting"));
+    var w = el("div");
+    w.innerHTML = "<strong>" + esc(when) + "</strong>";
+    r.appendChild(w);
+    var place = placeText({ locationKind: m.locationKind, locationDetail: m.locationDetail });
+    if (place) r.appendChild(el("div", null, place));
+    if (m.hostName) {
+      r.appendChild(el("div", null, "With " + m.hostName));
+      r.lastChild.style.color = "var(--muted)";
+    }
+
+    // Only a live booking can be moved or cancelled, and only while the person is still
+    // taking bookings (canReschedule). A button that cannot work is not shown.
+    $("m-actions").hidden = gone;
+    $("m-move").hidden = !m.canReschedule;
+    postHeight();
+  }
+
+  $("m-move").onclick = function () {
+    // Reuse the whole booking flow for the move: same calendar, same slot rules, same
+    // availability call. `moving` is what makes the confirm step send a reschedule.
+    if (!managed || !managed.canReschedule) return;
+    moving = { token: manageToken };
+    clientId = managed.clientId || clientId;
+    hostSlug = managed.hostSlug || hostSlug;
+    if (!clientId || !hostSlug || !managed.typeSlug) {
+      $("m-err").textContent = "We can\u2019t offer times for this one. Please get in touch with the business.";
+      $("m-err").hidden = false;
+      return;
+    }
+    // Load the page's own config so the branding, the host card and the types are right.
+    fetch(SUPABASE_URL + "/rest/v1/rpc/get_public_booking", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ p_client_id: clientId, p_host_slug: hostSlug })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.ok !== true) { screen("missing"); return; }
+        page = d;
+        paintBrand();
+        paintHost();
+        var t = findType(managed.typeSlug);
+        if (!t) { screen("missing"); return; }
+        screen("book");
+        pickType(t);
+      })
+      .catch(function () { screen("missing"); });
+  };
+
+  $("m-cancel").onclick = function () {
+    if (!managed) return;
+    if (!window.confirm("Cancel this meeting? We\u2019ll let them know.")) return;
+    $("m-err").hidden = true;
+    $("m-cancel").disabled = true;
+    $("m-cancel").textContent = "Cancelling\u2026";
+    fn("cancel", { token: manageToken })
+      .then(function (d) {
+        $("m-cancel").disabled = false;
+        $("m-cancel").textContent = "Cancel this meeting";
+        if (!d || d.ok !== true) {
+          $("m-err").textContent = (d && d.error) || "That didn\u2019t work. Please try again.";
+          $("m-err").hidden = false;
+          return;
+        }
+        managed = d.meeting || managed;
+        managed.status = "cancelled";
+        paintManage();
+      })
+      .catch(function () {
+        $("m-cancel").disabled = false;
+        $("m-cancel").textContent = "Cancel this meeting";
+        $("m-err").textContent = "We couldn\u2019t reach the booking service. Please try again.";
+        $("m-err").hidden = false;
+      });
+  };
 
   boot();
 })();

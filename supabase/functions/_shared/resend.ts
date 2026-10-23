@@ -627,6 +627,20 @@ export type RsSendInput = {
    */
   replyTo?: string | string[];
   tags?: { name: string; value: string }[];
+  /**
+   * Files to attach. `content` is BASE64 of the file's bytes — Resend's own field name and
+   * encoding (resend.com/docs/api-reference/emails/send-email). Added 2026-10-22 for the
+   * calendar invite a meeting confirmation carries (_shared/meetingIcs.ts).
+   *
+   * `contentType` is optional and worth passing: without it a .ics lands as
+   * application/octet-stream, which several mail clients show as a download rather than an
+   * invite the calendar offers to add.
+   *
+   * ⚠️ An attachment is the ONE part of a send whose size is not bounded by this codebase —
+   * Resend's limit is 40 MB across the whole message. Nothing here attaches anything but a
+   * ~1 KB .ics, so no cap is enforced; a future caller attaching a PDF should impose its own.
+   */
+  attachments?: { filename: string; content: string; contentType?: string }[];
   /** Custom RFC 5322 headers. Used for `Message-ID`, so a reply's In-Reply-To is matchable —
    *  the provider's own send id never is (see _shared/emailInbound.ts buildThreadMessageId).
    *  Omitted from the wire entirely when absent, so a caller that passes nothing sends
@@ -686,6 +700,15 @@ export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
       // Undefined when the caller passed none, and JSON.stringify then drops the key.
       headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
       tags: input.tags?.map((t) => ({ name: sanitizeTag(t.name), value: sanitizeTag(t.value) })),
+      // Undefined when the caller passed none, and JSON.stringify then drops the key — so
+      // every existing send goes out on exactly the wire it did before.
+      attachments: input.attachments?.length
+        ? input.attachments.map((a) => ({
+            filename: a.filename,
+            content: a.content,
+            content_type: a.contentType,
+          }))
+        : undefined,
     }),
   });
   const msg = (raw ?? {}) as Record<string, unknown>;

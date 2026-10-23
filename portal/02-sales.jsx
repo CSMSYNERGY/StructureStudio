@@ -4141,6 +4141,14 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
     await loadMine();
   });
 
+  // "They never got the email." Goes to the address already on the booking and nowhere else —
+  // portal-meetings refuses an address from the request body, because that would be a way to
+  // have the platform mail a stranger under the builder's domain.
+  const resend = (m) => run(async () => {
+    const d = await call("resend", { id: m.id });
+    setMsg({ ok: d.sentTo ? `Sent again to ${d.sentTo}.` : "Sent again." });
+  });
+
   const STATUS = {
     booked: ["#B45309", "Upcoming"],
     completed: ["#047857", "Completed"],
@@ -4260,7 +4268,8 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
               )}
               <div style={{ ...sub, marginTop: 7 }}>
                 Booking this is the same as the customer doing it on the booking page — one diary, one
-                set of rules. There's no separate "log a meeting", on purpose.
+                set of rules, and they get the same confirmation and calendar invite. There's no
+                separate "log a meeting", on purpose.
               </div>
             </>
           )}
@@ -4296,6 +4305,8 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
                       style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Mark done</button>
                     <button type="button" disabled={busy} onClick={() => mark(m, "no_show")}
                       style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>No-show</button>
+                    <button type="button" disabled={busy} onClick={() => resend(m)}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Resend email</button>
                     <button type="button" disabled={busy} onClick={() => cancel(m)}
                       style={{ background: "none", border: "none", padding: 0, color: "#B91C1C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   </div>

@@ -39,6 +39,20 @@ export function portalInventoryUrl(req?: Request | null): string {
   return `https://${hostFor(req)}/portal/inventory`;
 }
 
+/**
+ * Where a customer manages one booking: `/book?manage=<token>` (migration 327).
+ *
+ * The token IS the authentication — the same capability model a design short_code uses — so
+ * this link goes only to the person who booked, in their own confirmation. It carries no
+ * client id: book-public reads the tenant off the booking the token names, and putting the
+ * slug in the URL as well would only invite someone to edit it.
+ *
+ * Same host rule as every link here, so a confirmation sent from beta points at beta.
+ */
+export function bookManageUrl(token: string, req?: Request | null): string {
+  return `https://${hostFor(req)}/book?manage=${encodeURIComponent(token)}`;
+}
+
 export function myQuotesUrl(clientId: string, req?: Request | null): string {
   return `https://${hostFor(req)}/my-quotes?client=${encodeURIComponent(clientId)}`;
 }

@@ -44,6 +44,7 @@ import { chargeMonthlyLineFees } from "./cron/lineFee";
 import { chargeMonthlyNumberFees } from "./cron/numberFee";
 import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
+import { runMeetingReminders } from "./cron/meetingReminders";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
@@ -56,6 +57,16 @@ export const CRON_DAILY = "0 9 * * *";
 export const CRON_TICK = "* * * * *";
 /** The minute (mod 5) the usage charges run on. */
 export const USAGE_MINUTE_MOD5 = 2;
+/**
+ * Meeting reminders (migration 327), every five minutes.
+ *
+ * A DIFFERENT offset from USAGE_MINUTE_MOD5 on purpose: the usage job asks Twilio for
+ * per-subaccount totals and can spend much of one invocation's subrequest budget, and the
+ * comment on that job already says the billing work must never be the thing starved of it.
+ * Five minutes is well inside the reminder runner's own lateness grace, so a missed tick
+ * costs nothing.
+ */
+export const MEETINGS_MINUTE_MOD5 = 4;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
@@ -295,6 +306,7 @@ export default {
     const sweepDue = event.cron === CRON_SWEEP || (tick && at.getUTCMinutes() % 15 === 0);
     const dailyDue = event.cron === CRON_DAILY || (tick && at.getUTCHours() === 9 && at.getUTCMinutes() === 0);
     const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
+    const meetingsDue = tick && at.getUTCMinutes() % 5 === MEETINGS_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
@@ -305,6 +317,12 @@ export default {
       if (usageDue) {
         // Each call and text, one wallet line each (or a shadow cost row while disarmed).
         await job("usage_charges", () => runUsageCharges(env, adminClient(env), at));
+      }
+      if (meetingsDue) {
+        // Booking reminders (migration 327). This Worker's tick is the only real scheduler on
+        // the project — pg_cron is not installed — so the meeting feature borrows it. The work
+        // is done by the meeting-reminders edge function; see that file's header.
+        await job("meeting_reminders", () => runMeetingReminders(env));
       }
       if (dailyDue) {
         await job("retention", () => retention(env));

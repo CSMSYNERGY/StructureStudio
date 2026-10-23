@@ -63,7 +63,10 @@ export type TenantMail = {
   // constraint but missing from this union until 167 (a silent drift, found by the compiler
   // only because 'login_code' was added next to it); 'login_code' is migration 167.
   // 'form_autoreply' + 'form_notification' are migration 325 (website lead forms).
-  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code" | "form_autoreply" | "form_notification";
+  // 'meeting_*' are migration 327 (Meetings phase 2): the booking confirmation, the reminder,
+  // the cancellation and the "it moved" note. Four rather than one so a builder reading their
+  // email ledger can tell a confirmation from a reminder.
+  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code" | "form_autoreply" | "form_notification" | "meeting_booked" | "meeting_reminder" | "meeting_cancelled" | "meeting_rescheduled";
   /**
    * The HUMAN reply address(es) for this send — the staff member who is writing, or whoever
    * the tenant wants a customer to reach. One address or several.
@@ -124,6 +127,15 @@ export type TenantMail = {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Files to attach; `content` is base64 (migration 327, for the meeting invite).
+   *
+   * ⚠️ NOT recorded on the email_sends row, deliberately. The ledger holds what was SAID
+   * (subject, body text) so a conversation can replay it; a base64 blob is neither readable
+   * there nor small, and the row has no column for it. What a meeting needs to remember about
+   * its invite is the SEQUENCE, which lives on the meeting (meetings.ics_sequence).
+   */
+  attachments?: { filename: string; content: string; contentType?: string }[];
 };
 
 /**
@@ -512,6 +524,7 @@ export async function sendTenantEmail(
         ...(mail.text ? { text: mail.text } : {}),
         ...(replyTo.length ? { replyTo } : {}),
         ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
+        ...(mail.attachments && mail.attachments.length ? { attachments: mail.attachments } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
         // failing the whole send.

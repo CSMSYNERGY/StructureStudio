@@ -204,8 +204,8 @@ export function formatMoney(total: string | number): string {
 function oneLine(v: unknown): string {
   return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
-
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+export const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** A bare domain becomes an https:// href; real http(s) URLs pass through. */
 function websiteHref(website: string): string {
@@ -215,8 +215,8 @@ function websiteHref(website: string): string {
 /**
  * The one primary CTA. Padding lives on the <td>, not the <a>: Outlook ignores <a>
  * padding. Explicit bgcolor so a dark-mode inversion cannot render white-on-white.
- */
-function ctaButton(url: string, label: string): string {
+ */
+export function ctaButton(url: string, label: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:24px auto 4px auto;">
   <tr>
     <td align="center" bgcolor="#1F2937" style="background-color:#1F2937;border-radius:8px;padding:15px 36px;">
@@ -226,15 +226,19 @@ function ctaButton(url: string, label: string): string {
 </table>`;
 }
 
-/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
-function detailRow(label: string, valueHtml: string): string {
+/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
+// Exported since 2026-10-22 so the meeting emails (_shared/meetingEmails.ts) render in the
+// SAME 600px card as an estimate or an invoice, with the same button and the same tenant
+// footer. A second house style for the same business is how a product starts looking like
+// two products.
+export function detailRow(label: string, valueHtml: string): string {
   return `<tr>
   <td style="padding:8px 0;font-family:${FONT};font-size:13px;color:#64748B;white-space:nowrap;">${esc(label)}</td>
   <td align="right" style="padding:8px 0 8px 18px;font-family:${FONT};font-size:14px;font-weight:600;color:#1F2937;">${valueHtml}</td>
 </tr>`;
 }
-
-interface ShellInput {
+
+export interface ShellInput {
   businessName: string;
   logoUrl?: string | null;
   phone?: string | null;
@@ -245,8 +249,8 @@ interface ShellInput {
   bodyHtml: string;
 }
 
-/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
-function htmlShell(s: ShellInput): string {
+/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
+export function htmlShell(s: ShellInput): string {
   const logo = s.logoUrl
     ? `<img src="${esc(s.logoUrl)}" alt="${esc(s.businessName)}" width="170" style="display:block;max-width:170px;max-height:64px;width:auto;height:auto;border:0;margin:0 auto 10px auto;" />`
     : "";

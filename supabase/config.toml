@@ -303,3 +303,15 @@ verify_jwt = true
 # for why that order is the whole point of them.
 [functions.book-public]
 verify_jwt = false
+
+# The reminder runner (migration 327). Server-to-server only, driven by the phone-api
+# Worker's cron tick — pg_cron is NOT installed on this project, so that tick is the only real
+# scheduler we have; see the function's own header.
+#
+# verify_jwt = true is LOAD-BEARING, for the same reason phone-call-summary's is: the function
+# accepts a JWT whose role claim is service_role as one of its three doors, and that is proof
+# ONLY because the gateway checks the signature first. With verification off, anyone could
+# forge the claim. The other two doors are a constant-time compare against the service role key
+# or MEETING_REMINDER_SECRET.
+[functions.meeting-reminders]
+verify_jwt = true

@@ -5606,13 +5606,51 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
               onChange={(e) => setPage((x) => ({ ...x, createContact: e.target.checked }))} style={{ marginTop: 2 }} />
             <span><strong>Add whoever books to Contacts</strong><span style={{ color: "#64748B" }}> — a meeting with somebody who isn't in your CRM is a lead nobody follows up</span></span>
           </label>
-          {/* ⚠️ Confirmation emails and reminders are PHASE 2. The switches are not rendered
-              yet on purpose: a checkbox that saves a value nothing reads is worse than no
-              checkbox, because somebody ticks it and believes reminders are going out. */}
+          {/* CONFIRMATIONS + REMINDERS (migration 327). These switches are rendered now
+              because they are read now — until phase 2 they were deliberately absent, since a
+              checkbox that saves a value nothing acts on is worse than no checkbox: somebody
+              ticks it and believes reminders are going out. */}
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.sendConfirmation} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, sendConfirmation: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Email a confirmation when someone books</strong><span style={{ color: "#64748B" }}> — with a calendar invite attached, and a link they can use to move or cancel it themselves</span></span>
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Reminders before the meeting</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[[2, "2 hours"], [24, "1 day"], [48, "2 days"], [168, "1 week"]].map(([h, label]) => {
+                const on = (page.reminderHours || []).indexOf(h) !== -1;
+                return (
+                  <button key={h} type="button" disabled={!canBiz}
+                    onClick={() => setPage((x) => ({
+                      ...x,
+                      reminderHours: on
+                        ? (x.reminderHours || []).filter((v) => v !== h)
+                        : (x.reminderHours || []).concat([h]).sort((a, b) => a - b),
+                    }))}
+                    style={{
+                      background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155",
+                      border: `1px solid ${on ? ACCENT : "#CBD5E1"}`, borderRadius: 999,
+                      padding: "5px 13px", fontSize: 12.5, fontWeight: 700,
+                      cursor: canBiz ? "pointer" : "default", fontFamily: "inherit",
+                    }}>{label}</button>
+                );
+              })}
+            </div>
+            <div style={{ ...sub, marginTop: 6 }}>
+              {(page.reminderHours || []).length
+                ? "Email only. Pick none and nobody gets a reminder."
+                : "Nobody gets a reminder at the moment."}
+            </div>
+          </div>
+          {/* ⚠️ Text reminders are NOT a switch here, and that is deliberate rather than
+              unfinished: a text to somebody who never opted in runs into the registration,
+              consent and STOP rules in Settings → Text Messaging, and it is a compliance
+              question before it is a feature. Said plainly so nobody goes looking for the
+              toggle. */}
           <div style={{ ...sub, marginBottom: 12 }}>
-            Confirmation emails and reminders are next. Today a booking appears on the meeting
-            scheduler and on the customer's contact record, and nothing is emailed automatically —
-            so tell them what happens next when you speak to them.
+            Reminders go by email. Text reminders aren't offered yet — texting a customer needs
+            their consent on record, which is a separate thing to set up.
           </div>
           {canBiz && (
             <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={savePage}>

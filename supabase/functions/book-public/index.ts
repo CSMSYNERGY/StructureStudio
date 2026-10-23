@@ -4,6 +4,7 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
+import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
 
 // BOOK-PUBLIC — the public booking page's only server. Migration 325, phase 1 of
 // MEETINGS_SCOPE.md. Four actions, all ANON (the anon key passes the gateway; config.toml
@@ -87,6 +88,98 @@ const TOKEN = /^[0-9a-f]{24,64}$/;
 // over a regex costs a builder a sale.
 const EMAILISH = /^[^@\s]+@[^@\s.]+\.[^@\s]{2,}$/;
 
+/**
+ * Would the engine have OFFERED this exact start for this host and type?
+ *
+ * ⚠️ The security boundary for both `book` and `reschedule`, and the reason it is one
+ * function rather than two copies: a posted `startsAt` is a number a stranger chose. Free is
+ * not enough — without this, a hand-made request lands a lot walkthrough at 02:07 on a
+ * Sunday, outside the host's hours, off the slot grid, in a gap no buffer protects.
+ *
+ * Answers WHICH refusal applies, because the two read very differently to a customer:
+ *   "taken"         it was on offer; somebody got there first while they were typing
+ *   "not_bookable"  it was never on offer at all
+ * Telling someone a time "isn't open any more" when it never was sends them back to the
+ * calendar hunting for what changed.
+ *
+ * `excludeMeetingId` is for RESCHEDULE: a meeting must not block its own move. Without it,
+ * shifting a 9:00 booking to 9:30 is refused by the 9:00 booking itself.
+ */
+async function slotStatus(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  host: { id: string; user_id: string; time_zone: string },
+  // deno-lint-ignore no-explicit-any
+  type: any,
+  startMs: number,
+  excludeMeetingId?: string | null,
+): Promise<"ok" | "taken" | "not_bookable"> {
+  const { data: overrides, error: oe } = await admin.from("meeting_overrides")
+    .select("on_date, blocked, hours").eq("host_id", host.id);
+  if (oe) throw oe;
+
+  const windowFrom = new Date(startMs - 2 * 86_400_000).toISOString();
+  const windowTo = new Date(startMs + 2 * 86_400_000).toISOString();
+  let bookedQ = admin.from("meetings")
+    .select("id, starts_at, ends_at, meeting_types!inner(buffer_before_minutes, buffer_after_minutes)")
+    .eq("host_user_id", host.user_id).eq("status", "booked")
+    .lt("starts_at", windowTo).gt("ends_at", windowFrom);
+  if (excludeMeetingId) bookedQ = bookedQ.neq("id", excludeMeetingId);
+  const [{ data: booked, error: be }, { data: ext, error: ee }, { data: hostFull, error: hfe }] = await Promise.all([
+    bookedQ,
+    admin.from("meeting_busy").select("starts_at, ends_at")
+      .eq("host_id", host.id).lt("starts_at", windowTo).gt("ends_at", windowFrom),
+    admin.from("meeting_hosts").select("weekly_hours").eq("id", host.id).single(),
+  ]);
+  if (be) throw be;
+  if (ee) throw ee;
+  if (hfe) throw hfe;
+
+  const rules = {
+    timeZone: host.time_zone,
+    weeklyHours: hostFull.weekly_hours || {},
+    // deno-lint-ignore no-explicit-any
+    overrides: ((overrides ?? []) as any[]).map((o) => ({
+      onDate: o.on_date, blocked: o.blocked, hours: o.hours || [],
+    })),
+    type: {
+      durationMinutes: type.duration_minutes,
+      bufferBeforeMinutes: type.buffer_before_minutes,
+      bufferAfterMinutes: type.buffer_after_minutes,
+      minNoticeHours: type.min_notice_hours,
+      maxDaysAhead: type.max_days_ahead,
+      // 1-minute grid: the grid is the PAGE's affordance, and a customer who took a
+      // perfectly good 09:05 from a link we sent should not be refused because the tenant
+      // later moved to 15-minute steps.
+      slotIntervalMinutes: 1,
+    },
+    // Two days either side: a slot near midnight belongs to a different calendar day in the
+    // host's zone than the UTC date of its instant.
+    fromDate: new Date(startMs - 86_400_000).toISOString().slice(0, 10),
+    toDate: new Date(startMs + 86_400_000).toISOString().slice(0, 10),
+    now: new Date(),
+  };
+  const busyNow = widenBusy(
+    // deno-lint-ignore no-explicit-any
+    ((booked ?? []) as any[]).map((m) => ({
+      startsAt: m.starts_at,
+      endsAt: m.ends_at,
+      bufferBeforeMinutes: m.meeting_types?.buffer_before_minutes ?? 0,
+      bufferAfterMinutes: m.meeting_types?.buffer_after_minutes ?? 0,
+    })),
+    // deno-lint-ignore no-explicit-any
+  ).concat(widenBusy(((ext ?? []) as any[]).map((b) => ({ startsAt: b.starts_at, endsAt: b.ends_at }))));
+
+  const wanted = new Date(startMs).toISOString();
+  const isSlot = (days: ReturnType<typeof availableSlots>) =>
+    days.some((d) => d.slots.some((sl) => sl.startsAt === wanted));
+
+  if (isSlot(availableSlots({ ...rules, busy: busyNow }))) return "ok";
+  // Re-run with an EMPTY diary to separate the two refusals. Both are refused either way;
+  // this only decides which sentence the customer reads.
+  return isSlot(availableSlots({ ...rules, busy: [] })) ? "taken" : "not_bookable";
+}
+
 Deno.serve(withErrorLog("book-public", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
@@ -106,7 +199,13 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
   const clientId = str(body.clientId, 64).toLowerCase();
   const ip = clientIp(req) || "unknown";
 
-  if (!SLUG.test(clientId)) return json({ ok: false, error: "not_found" }, 404);
+  // ⚠️ THE TENANT SLUG IS REQUIRED ONLY FOR THE TWO ACTIONS THAT NAME A HOST.
+  // `lookup`, `reschedule` and `cancel` are keyed on the booking's own token, which is
+  // globally unique (meetings_cancel_token_unique, 326) and therefore resolves the tenant by
+  // itself. That is why bookManageUrl puts no client id in the link: a slug in the URL is one
+  // more thing for somebody to edit, and it would have to agree with the token anyway.
+  const tokenAction = action === "lookup" || action === "reschedule" || action === "cancel";
+  if (!tokenAction && !SLUG.test(clientId)) return json({ ok: false, error: "not_found" }, 404);
 
   // ── The page has to be switched on, and the account has to have the CRM ───────────────
   // get_public_booking answers {ok:false, reason:'not_found'} for a tenant that does not
@@ -304,80 +403,15 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
       }
 
       // The start must be a time the engine would actually have offered — not merely free.
-      // Otherwise a hand-made request can land a meeting at 02:07 on a Sunday: outside the
-      // host's hours, off the slot grid, and in a gap no buffer protects.
-      const { data: overrides, error: oe } = await admin.from("meeting_overrides")
-        .select("on_date, blocked, hours").eq("host_id", host.id);
-      if (oe) throw oe;
-      const windowFrom = new Date(startMs - 2 * 86_400_000).toISOString();
-      const windowTo = new Date(startMs + 2 * 86_400_000).toISOString();
-      const [{ data: booked2, error: be2 }, { data: ext2, error: ee2 }] = await Promise.all([
-        admin.from("meetings")
-          .select("starts_at, ends_at, meeting_types!inner(buffer_before_minutes, buffer_after_minutes)")
-          .eq("host_user_id", host.user_id).eq("status", "booked")
-          .lt("starts_at", windowTo).gt("ends_at", windowFrom),
-        admin.from("meeting_busy").select("starts_at, ends_at")
-          .eq("host_id", host.id).lt("starts_at", windowTo).gt("ends_at", windowFrom),
-      ]);
-      if (be2) throw be2;
-      if (ee2) throw ee2;
-      const { data: hostFull, error: hfe } = await admin.from("meeting_hosts")
-        .select("weekly_hours").eq("id", host.id).single();
-      if (hfe) throw hfe;
-
-      const rules = {
-        timeZone: host.time_zone,
-        weeklyHours: hostFull.weekly_hours || {},
-        // deno-lint-ignore no-explicit-any
-        overrides: ((overrides ?? []) as any[]).map((o) => ({
-          onDate: o.on_date, blocked: o.blocked, hours: o.hours || [],
-        })),
-        type: {
-          durationMinutes: type.duration_minutes,
-          bufferBeforeMinutes: type.buffer_before_minutes,
-          bufferAfterMinutes: type.buffer_after_minutes,
-          minNoticeHours: type.min_notice_hours,
-          maxDaysAhead: type.max_days_ahead,
-          // 1-minute grid: the grid is the PAGE's affordance, and a customer who took a
-          // perfectly good 09:05 from a link we sent should not be refused because the
-          // tenant later moved to 15-minute steps.
-          slotIntervalMinutes: 1,
-        },
-        // Two days either side: a slot near midnight belongs to a different calendar day in
-        // the host's zone than the UTC date of its instant.
-        fromDate: new Date(startMs - 86_400_000).toISOString().slice(0, 10),
-        toDate: new Date(startMs + 86_400_000).toISOString().slice(0, 10),
-        now: new Date(),
-      };
-      const busyNow = widenBusy(
-        // deno-lint-ignore no-explicit-any
-        ((booked2 ?? []) as any[]).map((m) => ({
-          startsAt: m.starts_at,
-          endsAt: m.ends_at,
-          bufferBeforeMinutes: m.meeting_types?.buffer_before_minutes ?? 0,
-          bufferAfterMinutes: m.meeting_types?.buffer_after_minutes ?? 0,
-        })),
-        // deno-lint-ignore no-explicit-any
-      ).concat(widenBusy(((ext2 ?? []) as any[]).map((b) => ({ startsAt: b.starts_at, endsAt: b.ends_at }))));
-
-      const wanted = new Date(startMs).toISOString();
-      const isSlot = (days: ReturnType<typeof availableSlots>) =>
-        days.some((d) => d.slots.some((s) => s.startsAt === wanted));
-
-      if (!isSlot(availableSlots({ ...rules, busy: busyNow }))) {
-        // ⚠️ TWO DIFFERENT REFUSALS, and the difference is worth a second availability pass.
-        // Re-running with an EMPTY diary separates "somebody took it while you were typing"
-        // from "that was never a time on offer" (outside the host's hours, or off a
-        // hand-made request that skipped the page). Both are refused either way — the check
-        // above is the security boundary — but telling a customer a time "isn't open any
-        // more" when it never was sends them back to the calendar looking for what changed.
-        const neverOffered = !isSlot(availableSlots({ ...rules, busy: [] }));
+      // slotStatus is the shared rule; see its header for why this cannot be skipped.
+      const status = await slotStatus(admin, host, type, startMs);
+      if (status !== "ok") {
         return json({
           ok: false,
-          error: neverOffered
-            ? "That isn't a time they take bookings. Pick one from the calendar and it'll go straight in."
-            : "That time was just taken. Pick another and it'll go straight in.",
-          code: neverOffered ? "not_bookable" : "slot_taken",
+          error: status === "taken"
+            ? "That time was just taken. Pick another and it'll go straight in."
+            : "That isn't a time they take bookings. Pick one from the calendar and it'll go straight in.",
+          code: status === "taken" ? "slot_taken" : "not_bookable",
         }, 409);
       }
 
@@ -440,15 +474,25 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         }, 409);
       }
 
-      // Phase 2 sends the confirmation and the .ics from here. Deliberately not stubbed with
-      // a silent no-op that looks like it works: the response says plainly whether anything
-      // was sent, so the page can tell the customer the truth today ("we have your booking")
-      // rather than promising an email that is not written yet.
+      // ── The confirmation, with the calendar invite ────────────────────────────────────
+      // BEST EFFORT, and the ordering is the point: the booking is already committed, so a
+      // mail failure cannot cost the customer their slot. claimConfirmation makes the send
+      // once-only in the UPDATE itself, so a retried request cannot double-send.
+      //
+      // The response tells the page what REALLY happened — a tenant who has not set up
+      // sending is a supported, permanent state, and the page then says "they'll be in touch"
+      // instead of promising an email that is never coming.
+      let confirmationSent = false;
+      if (await claimConfirmation(admin, result.id)) {
+        const mail = await sendMeetingEmail(admin, { meetingId: result.id, which: "booked", req });
+        confirmationSent = mail.sent;
+      }
+
       return json({
         ok: true,
         id: result.id,
         manageToken: result.cancelToken,
-        confirmationSent: false,
+        confirmationSent,
         meeting: {
           typeName: type.name,
           startsAt: new Date(startMs).toISOString(),
@@ -461,7 +505,13 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
     }
 
     // ══ LOOKUP / CANCEL — token-authenticated ═══════════════════════════════════════════
+    // ⚠️ The token is the WHOLE of the authentication for these three, and that is
+    // deliberate: it is an unguessable value that reached one person in their own
+    // confirmation, the same capability model a design's short_code uses. It is NOT the email
+    // address - anyone can type a customer's address, and a cancel-by-email endpoint is a way
+    // to empty a builder's diary from the outside.
     case "lookup":
+    case "reschedule":
     case "cancel": {
       const token = str(body.token, 64).toLowerCase();
       // Same answer for a malformed token, an unknown one and one belonging to another
@@ -470,13 +520,20 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
       const cap = await overCap(admin, `book:token:ip:${ip}`, RATE_BOOK_PER_IP * 4);
       if (cap.over) return json({ ok: false, error: "busy" }, 429);
 
+      // Resolved by TOKEN ALONE; the tenant comes off the row. A client id in the body, if
+      // one was sent, is deliberately not used as a filter: it would make a wrong-tenant
+      // guess distinguishable from a wrong token.
       const { data: m, error } = await admin.from("meetings")
-        .select("id, client_id, starts_at, ends_at, booked_time_zone, status, customer_name, meeting_types!inner(name, location_kind, location_detail), meeting_hosts!inner(public_name, slug)")
-        .eq("client_id", clientId).eq("cancel_token", token).maybeSingle();
+        .select("id, client_id, host_id, type_id, starts_at, ends_at, booked_time_zone, status, customer_name, reschedule_count, meeting_types!inner(id, name, slug, location_kind, location_detail, duration_minutes, buffer_before_minutes, buffer_after_minutes, min_notice_hours, max_days_ahead), meeting_hosts!inner(id, user_id, slug, public_name, time_zone, accepting, active)")
+        .eq("cancel_token", token).maybeSingle();
       if (error) throw error;
       if (!m) return json({ ok: false, error: "not_found" }, 404);
 
       const shaped = {
+        // The tenant, so the manage page can load the branding and ask for availability when
+        // the customer wants a different time. It comes off the ROW, never off the request —
+        // that is what lets the manage link carry no slug of its own.
+        clientId: m.client_id,
         startsAt: m.starts_at,
         endsAt: m.ends_at,
         timeZone: m.booked_time_zone,
@@ -494,7 +551,106 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         hostSlug: (m as any).meeting_hosts?.slug,
       };
 
-      if (action === "lookup") return json({ ok: true, meeting: shaped });
+      if (action === "lookup") {
+        // The page needs the TYPE SLUG to ask for availability when the customer wants a
+        // different time. It cannot invent one, and having it pass ids instead would make
+        // internal ids a surface a stranger can probe.
+        return json({
+          ok: true,
+          meeting: {
+            ...shaped,
+            // deno-lint-ignore no-explicit-any
+            typeSlug: (m as any).meeting_types?.slug ?? null,
+            canReschedule: m.status === "booked"
+              // deno-lint-ignore no-explicit-any
+              && (m as any).meeting_hosts?.accepting === true
+              // deno-lint-ignore no-explicit-any
+              && (m as any).meeting_hosts?.active === true,
+          },
+        });
+      }
+
+      // -- RESCHEDULE ---------------------------------------------------------------------
+      if (action === "reschedule") {
+        if (m.status !== "booked") {
+          return json({ ok: false, error: "That meeting isn't active any more.", code: "not_active" }, 409);
+        }
+        const newStart = Date.parse(str(body.startsAt, 40));
+        if (!Number.isFinite(newStart)) return json({ ok: false, error: "Pick a time." }, 400);
+
+        // deno-lint-ignore no-explicit-any
+        const rHost = (m as any).meeting_hosts;
+        // deno-lint-ignore no-explicit-any
+        const rType = (m as any).meeting_types;
+        if (!rHost?.accepting || !rHost?.active) {
+          return json({ ok: false, error: "They aren't taking bookings right now." }, 409);
+        }
+
+        // The same two windows `book` re-checks, and for the same reason: a posted time is a
+        // number a stranger chose, so the page hiding these slots proves nothing here.
+        const nowMs2 = Date.now();
+        if (newStart < nowMs2 + rType.min_notice_hours * 3_600_000) {
+          return json({ ok: false, error: "That time is too soon. Please pick a later one." }, 409);
+        }
+        if (newStart > nowMs2 + rType.max_days_ahead * 86_400_000) {
+          return json({ ok: false, error: "That date is further ahead than they're taking bookings." }, 409);
+        }
+
+        // ⚠️ EXCLUDE THIS MEETING from the busy set. Without that, moving a 9:00 booking to
+        // 9:30 is refused by the 9:00 booking itself - the commonest reschedule there is.
+        const st = await slotStatus(admin, rHost, rType, newStart, m.id);
+        if (st !== "ok") {
+          return json({
+            ok: false,
+            error: st === "taken"
+              ? "That time was just taken. Pick another and it'll go straight in."
+              : "That isn't a time they take bookings. Pick one from the calendar and it'll go straight in.",
+            code: st === "taken" ? "slot_taken" : "not_bookable",
+          }, 409);
+        }
+
+        const newEnd = newStart + rType.duration_minutes * 60_000;
+        // Conditional on the row still being `booked`, so a cancellation that lands in
+        // between wins rather than being silently undone by this update.
+        const { data: moved, error: me } = await admin.from("meetings").update({
+          starts_at: new Date(newStart).toISOString(),
+          ends_at: new Date(newEnd).toISOString(),
+          rescheduled_from: m.starts_at,
+          // deno-lint-ignore no-explicit-any
+          reschedule_count: (Number((m as any).reschedule_count) || 0) + 1,
+          updated_at: new Date().toISOString(),
+        }).eq("id", m.id).eq("status", "booked").select("id").maybeSingle();
+        if (me) {
+          // The partial unique index on (host_user_id, starts_at) is the other half of the
+          // double-book guard, and a reschedule can trip it where slotStatus just passed.
+          if (String((me as { code?: string }).code) === "23505") {
+            return json({
+              ok: false,
+              error: "That time was just taken. Pick another and it'll go straight in.",
+              code: "slot_taken",
+            }, 409);
+          }
+          throw me;
+        }
+        if (!moved) return json({ ok: false, error: "That meeting isn't active any more.", code: "not_active" }, 409);
+
+        // The SEQUENCE must increase or every calendar client ignores the new time (see
+        // meetingIcs.ts). Bump first, then send with the bumped value.
+        const seq = await bumpIcsSequence(admin, m.id);
+        const mail = await sendMeetingEmail(admin, {
+          meetingId: m.id, which: "rescheduled", req, sequence: seq,
+        });
+        return json({
+          ok: true,
+          emailSent: mail.sent,
+          meeting: {
+            ...shaped,
+            startsAt: new Date(newStart).toISOString(),
+            endsAt: new Date(newEnd).toISOString(),
+            status: "booked",
+          },
+        });
+      }
 
       if (m.status !== "booked") {
         // Idempotent: a customer who clicks Cancel twice, or follows an old link, should see
@@ -508,7 +664,13 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         updated_at: new Date().toISOString(),
       }).eq("id", m.id).eq("status", "booked");
       if (ue) throw ue;
-      return json({ ok: true, meeting: { ...shaped, status: "cancelled" } });
+      // Bump the sequence, then send METHOD:CANCEL so the event LEAVES their calendar rather
+      // than sitting there as a meeting nobody turns up to.
+      const cancelSeq = await bumpIcsSequence(admin, m.id);
+      const cancelMail = await sendMeetingEmail(admin, {
+        meetingId: m.id, which: "cancelled", req, sequence: cancelSeq,
+      });
+      return json({ ok: true, emailSent: cancelMail.sent, meeting: { ...shaped, status: "cancelled" } });
     }
 
     default:

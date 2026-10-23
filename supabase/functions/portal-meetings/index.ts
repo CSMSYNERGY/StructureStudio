@@ -5,6 +5,7 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { ownMeetingsOnly, type GateTable } from "../_shared/access.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
+import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
 
 // MEETINGS — the tenant half. Migration 325, phase 1 of MEETINGS_SCOPE.md.
 //
@@ -98,6 +99,10 @@ const GATES: GateTable = {
   book:            { all: [{ area: "meetings", level: "edit" }, { area: "contacts", level: "edit" }] },
   cancel:          { area: "meetings", level: "edit" },
   set_status:      { area: "meetings", level: "edit" },
+  // "They never got the email." Sends the confirmation again, to the address on the booking
+  // and nowhere else - deliberately NOT to an address from the request body, which would be
+  // a way to have the platform mail a stranger on a builder's behalf.
+  resend:          { area: "meetings", level: "edit" },
 
   // ── Writes about the BUSINESS (narrowed by TENANT_WIDE) ──────────────────────────────
   save_settings:   { area: "meetings", level: "edit" },
@@ -132,6 +137,7 @@ const HOST_SCOPE: Record<string, { hostKey?: string; meetingKey?: string; overri
   book:            { hostKey: "hostId" },
   cancel:          { meetingKey: "id" },
   set_status:      { meetingKey: "id" },
+  resend:          { meetingKey: "id" },
 };
 
 const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -832,7 +838,18 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         }, 409);
       }
       await r.ctx.audit("meetings_book", 1, `${host.slug} ${new Date(startMs).toISOString()}`);
-      return json({ ok: true, id: booked.id });
+
+      // ⚠️ THE SAME CONFIRMATION THE PUBLIC PAGE SENDS, through the same module. A rep
+      // booking for a customer on the phone and the customer booking themselves must produce
+      // the same email and the same calendar invite - otherwise which of the two happened
+      // becomes something the customer can tell, and the rep has to explain it.
+      // Best effort: the booking is committed, and a mail failure must not undo it.
+      let confirmationSent = false;
+      if (await claimConfirmation(admin, booked.id)) {
+        const mail = await sendMeetingEmail(admin, { meetingId: booked.id, which: "booked", req });
+        confirmationSent = mail.sent;
+      }
+      return json({ ok: true, id: booked.id, confirmationSent });
     }
 
     case "cancel": {
@@ -848,7 +865,13 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       // either, because the caller's list is stale and it should refresh.
       if (!data) return json({ ok: true, alreadyGone: true });
       await r.ctx.audit("meetings_cancel", 1, p.id);
-      return json({ ok: true });
+      // Sequence first, then METHOD:CANCEL, so it leaves the customer's calendar instead of
+      // sitting there as a meeting nobody turns up to (see meetingIcs.ts).
+      const cancelSeq = await bumpIcsSequence(admin, p.id);
+      const cancelMail = await sendMeetingEmail(admin, {
+        meetingId: p.id, which: "cancelled", req, sequence: cancelSeq,
+      });
+      return json({ ok: true, emailSent: cancelMail.sent });
     }
 
     case "set_status": {
@@ -865,6 +888,32 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       if (!data) return json({ error: "That meeting was cancelled, so it can't be marked." }, 409);
       await r.ctx.audit("meetings_set_status", 1, status);
       return json({ ok: true });
+    }
+
+    case "resend": {
+      // Only the address already on the booking. Taking one from the body would turn this
+      // into a way to have the platform email a stranger under a builder's domain.
+      const { data: m, error } = await admin.from("meetings")
+        .select("id, status, customer_email").eq("client_id", clientId).eq("id", p.id).maybeSingle();
+      if (error) throw error;
+      if (!m) return json({ error: "That meeting is not on this account." }, 404);
+      if (!m.customer_email) {
+        return json({ error: "There's no email address on that booking, so there's nothing to resend." }, 409);
+      }
+      // A cancelled meeting resends the CANCELLATION, not the confirmation: re-confirming
+      // something that is off is the one version of this nobody wants.
+      const which = m.status === "booked" ? "booked" : "cancelled";
+      const out = await sendMeetingEmail(admin, { meetingId: m.id, which, req });
+      await r.ctx.audit("meetings_resend", 1, which);
+      if (!out.sent) {
+        return json({
+          error: out.reason === "not_active"
+            ? "Your account isn't set up to send email yet — that's under Settings → Email Settings."
+            : "That didn't send. Please try again.",
+          code: out.reason,
+        }, 409);
+      }
+      return json({ ok: true, sentTo: m.customer_email });
     }
 
     default:
