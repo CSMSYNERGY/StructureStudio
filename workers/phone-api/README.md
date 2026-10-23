@@ -60,7 +60,7 @@ npx wrangler deploy --dry-run --outdir dist   # proves the bundle builds; upload
 
 `PHONE_CORE_DIR=<phone repo>/packages/phone-core npm test` also checks that `src/identity.ts` agrees with `@sss/phone-core` on every identity and number case.
 
-Deploying is manual, from this directory, and only by a person (see SETUP.md). This Worker is not connected to Workers Builds.
+Deploying is manual, from this directory: Ahsan does it, or an agent does once Ahsan has said yes to that specific deploy, with the checks at the top of SETUP.md. This Worker is not connected to Workers Builds.
 
 Deploy only from a tree that has origin/beta merged in, or from beta itself. A `wrangler deploy` uploads this whole directory, so a branch cut before 259 and 260 were merged (8f206a2, where the email-in-the-conversation work began) would remove the call handoff routes and the usage cron from the live Worker for every business.
 

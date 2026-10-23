@@ -1,6 +1,13 @@
 # Setting up phone-api (runbook for a person)
 
-No agent deploys, configures Twilio or touches the live database for this build. Everything below is for Ahsan to do by hand, in this order. Placeholders in angle brackets are values you hold; none of them belong in this repo.
+No agent configures Twilio or touches the live database for this build. Everything below is for Ahsan to do by hand, in this order. Placeholders in angle brackets are values you hold; none of them belong in this repo.
+
+**Deploying the Worker (Ahsan, 2026-10-23).** An agent may deploy it, but only after Ahsan says yes to that specific deploy. A yes covers one deploy, not the next one. The deploy runs from this directory, from origin/beta or a tree with origin/beta merged in (README, "Deploy"), with these checks:
+
+1. **Before:** note the live deployment from `<BASE>/health` (its `deployment`). That is the rollback target. List every Worker change since it, so nothing unreleased goes out unnoticed.
+2. **Build and tests:** `npx wrangler deploy --dry-run --outdir dist` builds clean, and `npm test` passes.
+3. **After:** `/health` reports the new deployment; an unauthenticated POST to `/voice/inbound`, `/voice/status` and `/voice/greeting` still answers 403; and there are no new `cron_failed` rows in `app_errors`.
+4. **Report to Ahsan:** the new deployment id, the rollback target (`npx wrangler rollback <deployment>`), and what the checks showed. Add a line to the SSS Phone work log.
 
 `<BASE>` below is the Worker's public URL: `https://phone.structurestudiosuite.com` once step 5 is done, `https://phone-api.<your-subdomain>.workers.dev` before that.
 
