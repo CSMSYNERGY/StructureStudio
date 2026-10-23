@@ -3511,7 +3511,7 @@ function Dashboard({ session }) {
                    rather than the role, so an admin narrowed out of meetings gets a greyed
                    tab instead of one that 403s. A platform operator in view-as has no map,
                    which is what canAdmin covers. */
-                canMeet={(viewing && canAdmin) || ssCanWrite(myAccess, "meetings")}
+                canMeet={(viewing && canAdmin) || ssCanRead(myAccess, "meetings")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
                    Pipeline list opens and it has to keep working. Its READ is exempt from the

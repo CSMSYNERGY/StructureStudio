@@ -81,6 +81,20 @@ function refusal(body: unknown, status: number) {
 // from "the team's" and cannot be made to.** TENANT_WIDE and HOST_SCOPE below are what
 // actually narrow an own-only caller; the levels here only separate reads from writes, which
 // is what gateIsRead() uses for the read-only-operator capability check.
+// ── "TEAM" BOOKING (Carolyn 2026-10-23) ─────────────────────────────────────────────────
+// "I want them to be able to see the entire team and schedule with anyone." So the middle
+// level, 'view', BOOKS: a caller on the phone with a lead puts the call on whoever's calendar
+// it belongs on, and can cancel, mark or resend it. What stays with 'edit' is the SETUP —
+// the business's meeting types and booking page (TENANT_WIDE), and other people's hours,
+// days off, offerings and video accounts (PERSONAL_SETUP below).
+//
+// ⚠️ WHY `any: [edit, view]` AND NOT PLAIN `view`. The gate's level does two jobs: who may
+// (checkGate — 'view' is satisfied by own/view/edit) and whether the action is a WRITE
+// (gateIsRead, used to stop a READ-ONLY OPERATOR). A plain 'view' gate would turn booking into
+// a "read" and let a read-only operator book meetings in a builder's name. Listing 'edit' as
+// well keeps it a write while 'view' still satisfies it.
+const TEAM_WRITE = { any: [{ area: "meetings", level: "edit" as const }, { area: "meetings", level: "view" as const }] };
+
 const GATES: GateTable = {
   // ── Reads ────────────────────────────────────────────────────────────────────────────
   // The whole Settings → Meetings payload: the tenant's types, this person's host row and
@@ -96,28 +110,29 @@ const GATES: GateTable = {
   contact_meetings: { all: [{ area: "meetings", level: "view" }, { area: "contacts", level: "view" }] },
 
   // ── Writes about a PERSON (narrowed by HOST_SCOPE) ───────────────────────────────────
-  save_host:       { area: "meetings", level: "edit" },
-  save_override:   { area: "meetings", level: "edit" },
-  delete_override: { area: "meetings", level: "edit" },
-  set_host_types:  { area: "meetings", level: "edit" },
+  save_host:       TEAM_WRITE,
+  save_override:   TEAM_WRITE,
+  delete_override: TEAM_WRITE,
+  set_host_types:  TEAM_WRITE,
   // Booking writes a CRM contact as well as a meeting, so it needs both areas.
-  book:            { all: [{ area: "meetings", level: "edit" }, { area: "contacts", level: "edit" }] },
-  cancel:          { area: "meetings", level: "edit" },
-  set_status:      { area: "meetings", level: "edit" },
+  // contacts:'edit' keeps this a write on its own; meetings only needs 'view' (Team).
+  book:            { all: [{ area: "meetings", level: "view" }, { area: "contacts", level: "edit" }] },
+  cancel:          TEAM_WRITE,
+  set_status:      TEAM_WRITE,
   // "They never got the email." Sends the confirmation again, to the address on the booking
   // and nowhere else - deliberately NOT to an address from the request body, which would be
   // a way to have the platform mail a stranger on a builder's behalf.
-  resend:          { area: "meetings", level: "edit" },
+  resend:          TEAM_WRITE,
   // VIDEO (migration 333). "Make the link" — retry creating the provider meeting for a booking
   // whose link could not be made, then re-send the confirmation with it.
-  make_link:       { area: "meetings", level: "edit" },
+  make_link:       TEAM_WRITE,
   // Start connecting MY Zoom account (returns the provider's authorize URL). Self only: the
   // handler refuses a host that is not the caller's own, whatever their level, because a
   // meeting created in somebody's account must be that person's own decision.
-  video_connect:   { area: "meetings", level: "edit" },
+  video_connect:   TEAM_WRITE,
   // Disconnect a video account. Your own, or — for someone who manages the whole team — a
   // colleague's, e.g. after they leave.
-  video_disconnect: { area: "meetings", level: "edit" },
+  video_disconnect: TEAM_WRITE,
 
   // ── Writes about the BUSINESS (narrowed by TENANT_WIDE) ──────────────────────────────
   save_settings:   { area: "meetings", level: "edit" },
@@ -134,6 +149,15 @@ const GATES: GateTable = {
  * whole booking page off.
  */
 const TENANT_WIDE = new Set(["save_settings", "save_type", "delete_type"]);
+
+/**
+ * A person's own SETUP: their host row and hours, days off, which types they offer, their
+ * video account. Anyone below 'edit' (own AND view) may change only their OWN; 'edit' may
+ * change anyone's. Booking on someone's calendar is not setup — 'view' does that for anyone.
+ */
+const PERSONAL_SETUP = new Set([
+  "save_host", "save_override", "delete_override", "set_host_types", "video_connect", "video_disconnect",
+]);
 
 /**
  * How to find the host row each person-scoped write touches. An own-only caller naming
@@ -249,6 +273,9 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
   }
 
   const ownOnly = ownMeetingsOnly(access);
+  // Below 'edit', a person's setup is their own (see PERSONAL_SETUP). Operators carry the
+  // owner's map, so they are 'edit' here.
+  const ownSetupOnly = access.meetings !== "edit";
 
   if (TENANT_WIDE.has(action) && ownOnly) {
     return json({ error: "Only someone who manages meetings for the whole business can change this." }, 403);
@@ -280,7 +307,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       const named = typeof p[scope.hostKey] === "string" ? p[scope.hostKey] : null;
       // An own-only caller may omit the host and mean themselves — that is the common case
       // from Settings → Meetings, where there is only ever one calendar on screen.
-      scopedHostId = named || (ownOnly ? (myHost?.id ?? null) : null);
+      scopedHostId = named || ((ownOnly || (ownSetupOnly && PERSONAL_SETUP.has(action))) ? (myHost?.id ?? null) : null);
       if (!scopedHostId) return json({ error: "Which person's calendar did you mean?" }, 400);
     } else if (scope.meetingKey) {
       const id = typeof p[scope.meetingKey] === "string" ? p[scope.meetingKey] : null;
@@ -300,7 +327,8 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       scopedHostId = o.host_id;
     }
 
-    if (ownOnly && scopedHostId && scopedHostId !== (myHost?.id ?? null)) {
+    const narrowed = ownOnly || (ownSetupOnly && PERSONAL_SETUP.has(action));
+    if (narrowed && scopedHostId && scopedHostId !== (myHost?.id ?? null)) {
       // 404, not 403: a refusal must not confirm whose calendar that id belongs to.
       return json({ error: "That calendar is not yours." }, 404);
     }
@@ -463,7 +491,9 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         overrides: (ovr ?? []).map((o: any) => ({
           id: o.id, onDate: o.on_date, blocked: o.blocked, hours: o.hours, note: o.note,
         })),
-        canManageBusiness: !ownOnly,
+        // Meeting types and the booking page: 'edit' only. 'view' (Team) sees and books the
+        // whole team, but does not change the setup — TENANT_WIDE's gates refuse it anyway.
+        canManageBusiness: access.meetings === "edit",
         viewing: !!operator,
       });
     }
@@ -732,7 +762,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       // their own, which is how a rep gets a booking link without asking an owner.
       // Whose calendar is being saved: the one named, else the person this screen is about.
       const forUserId = typeof p.userId === "string" && p.userId ? p.userId : selfUserId;
-      if (ownOnly && forUserId !== selfUserId) return json({ error: "That calendar is not yours." }, 404);
+      if (ownSetupOnly && forUserId !== selfUserId) return json({ error: "That calendar is not yours." }, 404);
       // ⚠️ A SELF-SCOPED WRITE WHILE WEARING SOMEBODY IS REFUSED. Reading as them is the
       // feature; quietly rewriting their own hours and booking link under their name is not,
       // and the audit would read as the operator having done it to themselves. Say so plainly

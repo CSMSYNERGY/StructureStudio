@@ -89,7 +89,7 @@ const ctxFor = (over: Ctx = {}): Ctx => ({
   // set only one would test a state the component cannot produce.
   canEdit: true,
   crmUnlocked: true,
-  // Meetings (migration 326). What the shell passes is ssCanWrite(myAccess, "meetings"), so
+  // Meetings (migration 326). What the shell passes is ssCanRead(myAccess, "meetings") (View books too, 2026-10-23), so
   // it is independent of canEdit — the `meetings` and `contacts` areas are separate, and a
   // rep may work a customer without running a diary.
   canMeet: true,
