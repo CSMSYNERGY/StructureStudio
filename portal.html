@@ -156,6 +156,20 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-topbar .ttl{font-size:18px;font-weight:800;color:#FFF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
 .ss-topbar .ttl span{color:#C9DCEA;font-weight:600;font-size:13px;margin-left:10px}
 .ss-topbar .tenant{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+/* The operator account switcher, moved out of the rail's foot and into this corner
+   (2026-10-23). The base .ss-switch rules above are written for the WHITE rail; these
+   repaint it for the dark gradient and flip the menu to open downward. */
+.ss-topbar .ss-switch-wrap{margin:0 0 0 auto;min-width:0}
+.ss-topbar .ss-switch{width:auto;min-width:0;background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.28);padding:5px 10px 5px 7px;gap:10px}
+.ss-topbar .ss-switch:hover{background:rgba(255,255,255,0.22)}
+.ss-topbar .ss-switch .ss-clogo{width:34px;height:34px;background:rgba(255,255,255,0.16);border-color:rgba(255,255,255,0.32);color:#FFF;font-size:12px}
+.ss-topbar .ss-switch .sname{color:#FFF;font-size:15.5px;max-width:220px}
+.ss-topbar .ss-switch .srole{color:rgba(255,255,255,0.74)}
+.ss-topbar .ss-switch .uchev{color:rgba(255,255,255,0.85)}
+/* Opens DOWNWARD now, and right-aligned under the pill rather than stretched to its
+   width: left:0;right:0 made sense against a fixed-width rail and would make this as
+   narrow as the business name here. */
+.ss-topbar .ss-switch-menu{top:calc(100% + 8px);bottom:auto;left:auto;right:0;width:300px;color:#0F172A}
 .ss-clogo{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.32);display:flex;align-items:center;justify-content:center;color:#FFF;flex-shrink:0;font-size:12px;font-weight:800}
 .ss-tname{font-size:15.5px;font-weight:800;color:#FFF;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
@@ -220,7 +234,11 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-brand{display:none}
   /* The switcher needs readable tenant names; a 48px-wide list serves nobody, and the
      sidebar's own overflow-y would clip a fly-out. The Accounts page covers this mode. */
-  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-back span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext,.ss-switch-wrap{display:none}
+  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-back span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext,.ss-side .ss-switch-wrap{display:none}
+  /* ⚠️ `.ss-switch-wrap` was UNSCOPED here until 2026-10-23, when the switcher moved
+     into the topbar. Left as it was, this rule would have hidden it on every screen under
+     900px — nothing to click, no error, and only findable by opening a tablet. Scoped to
+     the rail, which is all it ever meant. */
   .ss-nav{width:100%}
   .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
   /* The settings rail collapses like the workspace one — every sub-page has a glyph
@@ -235,6 +253,9 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-topbar{padding:12px 14px}
   .ss-topbar .ttl span{display:none}
   .ss-tname{display:none}
+  /* Same rule for the switcher: the avatar and chevron stay tappable, the words go. */
+  .ss-topbar .ss-switch .stext{display:none}
+  .ss-topbar .ss-switch-menu{width:min(300px,calc(100vw - 28px))}
   .ss-body{padding:14px 12px}
 }
 /* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
@@ -295,7 +316,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=230ef4ad"></script>
-<script defer src="/portal.app.compiled.js?v=1e0f9b0a" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=b92246b0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

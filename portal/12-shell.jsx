@@ -3025,56 +3025,6 @@ function Dashboard({ session }) {
         </div>
 
         <div className="ss-foot">
-          {/* Operator account switcher — see the pickerOpen hooks above for the design
-              rationale. Keeps the red topbar pill and the Accounts page untouched: this is
-              an ADDITIONAL entry point to the same openAccount/exitAccount, not a new
-              mechanism. Hidden on the collapsed icon rail (portal.html media query) —
-              a 52px-wide tenant list helps nobody; the Accounts page covers that mode. */}
-          {isOperator && (
-            <div className="ss-switch-wrap" ref={pickerRef}>
-              <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
-                aria-haspopup="listbox" aria-expanded={pickerOpen}
-                title={viewing ? `Viewing ${shownBusiness} — switch account` : "Switch account"}>
-                <div className="ss-clogo" aria-hidden="true">{tenantInitials}</div>
-                <span className="stext">
-                  <span className="sname">{shownBusiness}</span>
-                  <span className="srole">{viewing ? "Viewing as operator" : "Your account"}</span>
-                </span>
-                <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
-              </button>
-              {pickerOpen && (
-                <div className="ss-switch-menu" role="listbox" aria-label="Switch account">
-                  <input type="search" placeholder="Search builders…" value={pickerQ} autoFocus
-                    onChange={(e) => setPickerQ(e.target.value)} />
-                  <div className="ss-switch-list">
-                    {pickerClients === null && <div className="ss-switch-note">Loading accounts…</div>}
-                    {pickerClients !== null && pickerClients
-                      .filter((c) => {
-                        const q = pickerQ.trim().toLowerCase();
-                        return !q || String(c.companyName || "").toLowerCase().includes(q) || String(c.clientId || "").toLowerCase().includes(q);
-                      })
-                      .map((c) => {
-                        const isCur = viewing && viewing.clientId === c.clientId;
-                        return (
-                          <button type="button" key={c.clientId} role="option" aria-selected={!!isCur}
-                            className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}>
-                            <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
-                            <span className="nm">{c.companyName || c.clientId}</span>
-                            {isCur && <span className="vw">Viewing</span>}
-                          </button>
-                        );
-                      })}
-                    {pickerClients !== null && pickerClients.length === 0 && <div className="ss-switch-note">No accounts.</div>}
-                  </div>
-                  {viewing && (
-                    <button type="button" className="ss-switch-exit" onClick={() => { setPickerOpen(false); setPickerQ(""); exitAccount(); }}>
-                      ← Exit {shownBusiness}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
           {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
               OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
           <a className="ss-newlink" href={ssPagePath("support", null)} onMouseEnter={() => warmNav("support")} onFocus={() => warmNav("support")} onClick={ssNavClick(() => navigate("support"))} title="Support">
@@ -3178,10 +3128,72 @@ function Dashboard({ session }) {
               </button>
             </div>
           )}
-          <div className="tenant" title={shownBusiness}>
-            <div className="ss-clogo" aria-label={`${shownBusiness} logo`}>{tenantInitials}</div>
-            <span className="ss-tname">{shownBusiness}</span>
-          </div>
+          {/* THE ACCOUNT SWITCHER LIVES HERE (Carolyn 2026-10-23: "I want to move this to
+              this location", pointing from the rail's foot to this corner). It was in the
+              sidebar foot from the day it was built.
+
+              ⚠️ IT REPLACES THE PASSIVE BADGE RATHER THAN JOINING IT. Both named
+              `shownBusiness`, so keeping both would print the business twice in one header —
+              and the one people would click is the one that looks like an account menu.
+
+              An operator gets the switcher; EVERYONE ELSE GETS THE BADGE EXACTLY AS BEFORE.
+              The switcher has always been operator-only (there is nothing to switch to on a
+              builder's own login), and the badge is what names the business for them.
+
+              Two side effects of the move, both good: it is reachable on the collapsed icon
+              rail and on a tablet, where `.ss-switch-wrap` used to be display:none and the
+              Accounts page was the only way through — see the media queries in portal.html,
+              where that rule had to be SCOPED TO THE RAIL or it would have hidden this. */}
+          {isOperator ? (
+            <div className="ss-switch-wrap" ref={pickerRef}>
+              <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
+                aria-haspopup="listbox" aria-expanded={pickerOpen}
+                title={viewing ? `Viewing ${shownBusiness} — switch account` : "Switch account"}>
+                <div className="ss-clogo" aria-hidden="true">{tenantInitials}</div>
+                <span className="stext">
+                  <span className="sname">{shownBusiness}</span>
+                  <span className="srole">{viewing ? "Viewing as operator" : "Your account"}</span>
+                </span>
+                <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+              </button>
+              {pickerOpen && (
+                <div className="ss-switch-menu" role="listbox" aria-label="Switch account">
+                  <input type="search" placeholder="Search builders…" value={pickerQ} autoFocus
+                    onChange={(e) => setPickerQ(e.target.value)} />
+                  <div className="ss-switch-list">
+                    {pickerClients === null && <div className="ss-switch-note">Loading accounts…</div>}
+                    {pickerClients !== null && pickerClients
+                      .filter((c) => {
+                        const q = pickerQ.trim().toLowerCase();
+                        return !q || String(c.companyName || "").toLowerCase().includes(q) || String(c.clientId || "").toLowerCase().includes(q);
+                      })
+                      .map((c) => {
+                        const isCur = viewing && viewing.clientId === c.clientId;
+                        return (
+                          <button type="button" key={c.clientId} role="option" aria-selected={!!isCur}
+                            className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}>
+                            <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
+                            <span className="nm">{c.companyName || c.clientId}</span>
+                            {isCur && <span className="vw">Viewing</span>}
+                          </button>
+                        );
+                      })}
+                    {pickerClients !== null && pickerClients.length === 0 && <div className="ss-switch-note">No accounts.</div>}
+                  </div>
+                  {viewing && (
+                    <button type="button" className="ss-switch-exit" onClick={() => { setPickerOpen(false); setPickerQ(""); exitAccount(); }}>
+                      ← Exit {shownBusiness}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="tenant" title={shownBusiness}>
+              <div className="ss-clogo" aria-label={`${shownBusiness} logo`}>{tenantInitials}</div>
+              <span className="ss-tname">{shownBusiness}</span>
+            </div>
+          )}
         </div>
         <div className="ss-body">
           {/* Keep-mounted designer host — full-bleed sibling of .ss-inner (its 1240px
