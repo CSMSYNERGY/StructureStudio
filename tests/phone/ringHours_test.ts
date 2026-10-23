@@ -183,11 +183,13 @@ const NAV = [
   slice(CORE, "const TAB_AREA = {", "// Settings is a hub", "TAB_AREA and SETTINGS_TAB_AREA"),
   slice(CORE, "// Settings is a hub", "// The write half.", "SETTINGS_AREAS and ssCanRead"),
   slice(CORE, "function ssSettingsTabs(", "// ── Inside Company", "ssSettingsTabs"),
+  slice(CORE, "// ── Inside Customer Hub", "// ── Inside Options", "ssCustomerHubTabs"),
   slice(CORE, "function ssCanSeeTab(", "const ACCENT", "the tab clamp"),
 ].join("\n");
-const nav = new Function("ssIsBetaHost", `${NAV}; return { ssClampTab, ssSettingsTabs };`)(() => false) as {
+const nav = new Function("ssIsBetaHost", `${NAV}; return { ssClampTab, ssSettingsTabs, ssCustomerHubTabs };`)(() => false) as {
   ssClampTab: (tab: string, isOperator: boolean, canAdmin: boolean, access: unknown) => string;
   ssSettingsTabs: (o: { access: unknown; phoneOffered: boolean }) => [string, ...unknown[]][];
+  ssCustomerHubTabs: (o: { isAdmin?: boolean; access: unknown; phoneOffered: boolean }) => [string, ...unknown[]][];
 };
 
 // ⚠️ MEETINGS JOINED THIS RAIL ON 2026-10-22 (migration 326) and MOVED INSIDE CUSTOMER HUB
@@ -207,7 +209,7 @@ const nav = new Function("ssIsBetaHost", `${NAV}; return { ssClampTab, ssSetting
 // the meeting types, and the switch that makes the pages live — renders READ-ONLY for them,
 // enforced server-side by portal-meetings' TENANT_WIDE set, not by hiding the rail entry.
 //
-// ⛔ If this ever reads ["phone", "myprofile"] again, the hub gate in ssSettingsTabs or its
+// ⛔ If this ever reads ["myprofile"] alone, the hub gate in ssSettingsTabs or its
 // exemption in the filter below it has been lost — and every rep's booking link went with it.
 Deno.test("a sales rep, dealer or sales manager reaches Settings › Customer Hub, Phone (Your calls) and My Profile, and nothing else", () => {
   for (const title of ["sales_rep", "dealer", "sales_manager"] as const) {
@@ -218,7 +220,9 @@ Deno.test("a sales rep, dealer or sales manager reaches Settings › Customer Hu
     // reader can tell this entry from a drift. It reaches them through the Customer Hub.
     assert(access.meetings === "own" || access.meetings === "edit", `${title} runs a diary`);
     assertEquals(nav.ssClampTab("settings", false, false, access), "settings", `${title}: /portal/settings is theirs`);
-    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: true }).map((t) => t[0]), ["pipelines", "phone", "myprofile"], title);
+    // Phone is a Customer Hub tab since 2026-10-23, so the rail is the same either way; the hub
+    // itself lists Phone (and Meetings) for them — see the hub test below.
+    assertEquals(nav.ssSettingsTabs({ access, phoneOffered: true }).map((t) => t[0]), ["pipelines", "myprofile"], title);
     assertEquals(nav.ssSettingsTabs({ access, phoneOffered: false }).map((t) => t[0]), ["pipelines", "myprofile"], `${title}, calling not offered`);
   }
   // A crew member holds neither, so neither page is offered — the rail does not gain the
@@ -226,4 +230,20 @@ Deno.test("a sales rep, dealer or sales manager reaches Settings › Customer Hu
   assertEquals(nav.ssSettingsTabs({ access: PRESETS.crew_member, phoneOffered: true }).map((t) => t[0]), ["myprofile"]);
   // Someone with no phone access and no settings area is still sent to their own page.
   assert(nav.ssClampTab("settings", false, false, PRESETS.crew_member) !== "settings");
+});
+
+// EMAIL SETTINGS, TEXT MESSAGING and PHONE moved from the rail into Customer Hub on 2026-10-23
+// (Carolyn: "These need to move to customer hub... maintain the current urls"). The hub's tabs are
+// filtered per area since then, so a rep finds their Phone page there — and only Phone and
+// Meetings, never the business's configuration tabs around them.
+Deno.test("inside Customer Hub a rep sees Phone and Meetings only; an owner sees every tab", () => {
+  for (const title of ["sales_rep", "dealer", "sales_manager"] as const) {
+    const access = PRESETS[title];
+    assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: true }).map((t) => t[0]), ["phone", "meetings"], title);
+    assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: false }).map((t) => t[0]), ["meetings"], `${title}, calling not offered`);
+  }
+  assertEquals(nav.ssCustomerHubTabs({ isAdmin: true, access: PRESETS.sales_rep, phoneOffered: true }).map((t) => t[0]),
+    ["pipelines", "customer-login", "forms", "email-templates", "email", "sms", "phone", "meetings", "fields"]);
+  assertEquals(nav.ssCustomerHubTabs({ access: null, phoneOffered: false }).map((t) => t[0]).includes("phone"), false,
+    "Phone stays hidden wherever calling is not offered");
 });

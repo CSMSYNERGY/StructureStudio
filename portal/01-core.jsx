@@ -915,6 +915,10 @@ const SETTINGS_TAB_AREA = {
   // above. Every crm_form_* / crm_email_tpl_* action is gated settings_crm (view to read, edit to write).
   forms: "settings_crm",
   "email-templates": "settings_crm",
+  // Customer Hub → Fields (migration 330): crm_fields_list / crm_field_save are gated settings_crm on
+  // the server. Listed here since 2026-10-23, when the hub began filtering its tabs per area — without
+  // it the tab showed to anyone who could open the hub (a rep with only Phone or Meetings).
+  fields: "settings_crm",
   // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
   // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
   // the company rate and the location rates — a tab on any other area would show someone a
@@ -1766,21 +1770,20 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // /settings/meetings still rendered perfectly for anyone who happened to have the link.
     // The exemption in the filter at the bottom of this function is the other half of this;
     // without it the spread adds the entry and the filter takes it straight back out.
-    ...((isAdmin || !access || ssCanRead(access, "settings_crm") || ssCanRead(access, "meetings"))
-      ? [["pipelines", "Customer Hub", "Your pipelines and card statuses, how customers get their login code, and your meetings", null]] : []),
+    // Since 2026-10-23 it also holds Email Settings, Text Messaging and Phone (Carolyn: "These
+    // need to move to customer hub... maintain the current urls"), so it admits their three areas
+    // too — settings_email, settings_billing (texting's area) and `phone` (only where calling is
+    // offered). This condition and ssCustomerHubTabs' filter must admit exactly the same people,
+    // or the rail offers a hub whose tab list comes out empty.
+    ...((isAdmin || !access || ssCanRead(access, "settings_crm") || ssCanRead(access, "meetings")
+      || ssCanRead(access, "settings_email") || ssCanRead(access, "settings_billing")
+      || (phoneOffered && ssCanRead(access, "phone")))
+      ? [["pipelines", "Customer Hub", "Your pipelines, forms, customer emails and texts, your phone, and your meetings", null]] : []),
     ["connection", "GHL Connection", "GHL credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
-    // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
-    // it was already the generic word, so no link moved.
-    ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
-    // MY SYNERGY PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
-    // with. The number is bought and registered on Text Messaging; this tab is the owner's
-    // one-time setup of who answers it, plus the install links. `phoneOffered` is
-    // ssPhoneOffered()'s answer for the tenant on screen — see there for why a builder on
-    // production does not see it until calling is switched on for them. The area filter at the
-    // bottom (SETTINGS_TAB_AREA.phone) still applies on top.
-    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps", null]] : []),
+    // EMAIL SETTINGS, TEXT MESSAGING and PHONE were rail items here until 2026-10-23; they are tabs
+    // inside Customer Hub now (ssCustomerHubTabs). Their slugs — `email`, `sms`, `phone` — did NOT
+    // change, so /settings/email, /settings/sms and /settings/phone open exactly what they always did.
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
@@ -1929,7 +1932,7 @@ function ssBillingTabs() {
 // UI and not a change of access — the same thing Company's absorption of Team was. No per-tab
 // filter is needed for that reason, but the hub gate in ssSettingsTabs still decides whether
 // the rail item appears at all.
-function ssCustomerHubTabs() {
+function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
     ["pipelines", "Pipelines & Statuses", "Card statuses, when each is set automatically, and each pipeline's stages"],
     // Lifted off the connection page, where it sat under the GHL credentials and read as part
@@ -1942,6 +1945,14 @@ function ssCustomerHubTabs() {
     // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
     ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
     ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
+    // EMAIL SETTINGS, TEXT MESSAGING, PHONE — rail items until 2026-10-23 (Carolyn: "These need to
+    // move to customer hub... maintain the current urls"). Same slugs, same areas, same pages: the
+    // move changes where they are listed and nothing about who may open them. "Email Settings",
+    // not "Email Sending" (Carolyn 2026-09-11). Phone is offered only where ssPhoneOffered says
+    // (see there for why a builder on production may not see it yet).
+    ["email", "Email Settings", "Send estimates and invoices from your own email domain"],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps"]] : []),
     // MEETINGS moved in here on 2026-10-22 at Carolyn's request ("I also want the meetings tab
     // in Customer hub"). It was a rail item of its own for a few hours.
     //
@@ -1962,7 +1973,16 @@ function ssCustomerHubTabs() {
     // ever shown in one place, and lets a builder add their own beside them. settings_crm like
     // every tab here, and behind the built-in CRM (CustomerHubShell shows the teaser without it).
     ["fields", "Fields", "Every field on a contact and on a design/deal, and your own custom fields"],
-  ];
+  ]
+  // PER-TAB AREAS (2026-10-23). The hub spans five areas now — settings_crm, meetings,
+  // settings_email, settings_billing and phone — so each tab appears only to someone who can read
+  // its own, the Company hub's rule. A sales rep sees Phone and Meetings here and nothing that is
+  // the business's configuration; an owner, an admin or a null map (an operator in view-as) sees all.
+  .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
 }
 
 // ── Inside Options ───────────────────────────────────────────────────────────────────────
@@ -2010,7 +2030,7 @@ function ssOptionTabs() {
 // real /settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
-function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
+function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false, phoneOffered = false } = {}) {
   return {
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
     colors: ssColorTabs(),
@@ -2018,7 +2038,9 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     options: ssOptionTabs(),
     // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
     // its first tab's slug. See ssCustomerHubTabs.
-    pipelines: ssCustomerHubTabs(),
+    // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
+    // same ssPhoneOffered answer they give ssSettingsTabs, so the rail and the hub agree.
+    pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered }),
   };
 }
 

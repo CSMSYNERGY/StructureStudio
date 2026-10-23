@@ -5095,7 +5095,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
 // teaser rather than a screen whose every button 403s. The Customer login tab is NOT gated —
 // the customer login is ours whether or not a tenant has the CRM add-on or a GHL connection,
 // which is exactly why that card was worth lifting off the connection page.
-function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true }) {
+function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true, isAdmin = false, access = null }) {
   // The same clamp SettingsShell and CompanyShell run: an unknown slug must land on a tab that
   // really renders, or the sub-tab bar appears over an empty body.
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
@@ -5121,6 +5121,24 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           component shows it. Doing it twice would mean two places deciding what "unpaid"
           looks like on one page. */}
       {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* EMAIL SETTINGS, TEXT MESSAGING, PHONE — moved in from the rail on 2026-10-23 with their
+          slugs, props and canEdit rules exactly as they were in SettingsShell. */}
+      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
+          status is contacts-level, but every action that submits or spends is
+          settings_billing:'edit'. The component still renders read-only for everyone else
+          rather than vanishing — a rep should be able to see that texting is coming. */}
+      {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
+      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
+          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
+          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
+          operator in view-as, whose rights come from app_operators). 'own' never writes here:
+          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
+          refuses regardless. */}
+      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
+        onOpenTexting={() => onSub("sms")} />}
       {/* Fields (migration 330). Behind the CRM like Pipelines and Forms: the register describes a
           contact and a deal, which is the CRM's own data, and every crm_field_* action refuses an
           unentitled tenant by the crm_ prefix regardless — so the teaser rather than a screen
@@ -6262,7 +6280,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /settings/branding, a link people hold, would fall back to Structures.
-  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
+  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked, phoneOffered });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /settings/color) survived as-is, and since every content branch
@@ -6333,32 +6351,22 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {/* CUSTOMER HUB is a hub with its own top navigation, the Company shape: two tabs behind
           one rail item, each still a real /settings/<slug>. `pipelines` is unchanged as an
           address, which is the point — see ssCustomerHubTabs. */}
-      {hubs.pipelines.some((t) => t[0] === sub) && (
+      {/* `sub === "pipelines"` on its own as well: it is the hub's RAIL id, and since the hub's tabs
+          are filtered per area (2026-10-23) someone who holds only Phone or Meetings has no
+          Pipelines tab — the shell's own clamp then opens their first tab instead of nothing. */}
+      {(hubs.pipelines.some((t) => t[0] === sub) || (sub === "pipelines" && hubs.pipelines.length > 0)) && (
         <CustomerHubShell sub={sub} onSub={setSub} tabs={hubs.pipelines}
           viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending}
-          clientId={clientId} canEdit={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
+          clientId={clientId} canEdit={isAdmin || !access || ssCanWrite(access, "settings_crm")}
+          isAdmin={isAdmin} access={access} />
       )}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
-      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
-      {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
-          status is contacts-level, but every action that submits or spends is
-          settings_billing:'edit'. The component still renders read-only for everyone else
-          rather than vanishing — a rep should be able to see that texting is coming. */}
-      {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
-        canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
-          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
-          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
-          operator in view-as, whose rights come from app_operators). 'own' never writes here:
-          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
-          refuses regardless. */}
-      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
-        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
-        onOpenTexting={() => setSub("sms")} />}
+      {/* Email Settings, Text Messaging and Phone render inside CustomerHubShell since 2026-10-23
+          (same slugs, same props, same canEdit rules) — see ssCustomerHubTabs. */}
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
@@ -6368,7 +6376,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
         profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
         aiCard={phoneOffered} viewing={!!viewingLabel}
-        onOpenPhone={TABS.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
+        onOpenPhone={hubs.pipelines.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
         clientId={clientId} hubReach={hubReach} />}
     </div>
   );

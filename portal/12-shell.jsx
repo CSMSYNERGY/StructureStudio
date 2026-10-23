@@ -2825,7 +2825,7 @@ function Dashboard({ session }) {
   // must light COMPANY and /settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
   const hubs = (settingsPage || settingsMode)
-    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
+    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered })
     : null;
   // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
   const hubHit = onSettingsPage
