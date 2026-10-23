@@ -632,9 +632,10 @@ textarea { resize: vertical; }
         $("confirm").disabled = false;
         $("confirm").textContent = "Schedule meeting";
         if (!d || d.ok !== true) {
-          // A taken slot is the one failure with a next step, so it sends them back to the
-          // calendar with fresh availability rather than leaving them on a dead form.
-          if (d && d.code === "slot_taken") {
+          // A slot that has gone — taken while they typed, or never on offer at all — is the
+          // one failure with a next step, so it sends them back to the calendar with fresh
+          // availability rather than leaving them on a dead form.
+          if (d && (d.code === "slot_taken" || d.code === "not_bookable")) {
             fail(d.error || "That time has gone. Please pick another.");
             chosenSlot = null;
             paintSide();

@@ -325,23 +325,13 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         .select("weekly_hours").eq("id", host.id).single();
       if (hfe) throw hfe;
 
-      const offered = availableSlots({
+      const rules = {
         timeZone: host.time_zone,
         weeklyHours: hostFull.weekly_hours || {},
         // deno-lint-ignore no-explicit-any
         overrides: ((overrides ?? []) as any[]).map((o) => ({
           onDate: o.on_date, blocked: o.blocked, hours: o.hours || [],
         })),
-        busy: widenBusy(
-          // deno-lint-ignore no-explicit-any
-          ((booked2 ?? []) as any[]).map((m) => ({
-            startsAt: m.starts_at,
-            endsAt: m.ends_at,
-            bufferBeforeMinutes: m.meeting_types?.buffer_before_minutes ?? 0,
-            bufferAfterMinutes: m.meeting_types?.buffer_after_minutes ?? 0,
-          })),
-          // deno-lint-ignore no-explicit-any
-        ).concat(widenBusy(((ext2 ?? []) as any[]).map((b) => ({ startsAt: b.starts_at, endsAt: b.ends_at })))),
         type: {
           durationMinutes: type.duration_minutes,
           bufferBeforeMinutes: type.buffer_before_minutes,
@@ -358,14 +348,36 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         fromDate: new Date(startMs - 86_400_000).toISOString().slice(0, 10),
         toDate: new Date(startMs + 86_400_000).toISOString().slice(0, 10),
         now: new Date(),
-      });
+      };
+      const busyNow = widenBusy(
+        // deno-lint-ignore no-explicit-any
+        ((booked2 ?? []) as any[]).map((m) => ({
+          startsAt: m.starts_at,
+          endsAt: m.ends_at,
+          bufferBeforeMinutes: m.meeting_types?.buffer_before_minutes ?? 0,
+          bufferAfterMinutes: m.meeting_types?.buffer_after_minutes ?? 0,
+        })),
+        // deno-lint-ignore no-explicit-any
+      ).concat(widenBusy(((ext2 ?? []) as any[]).map((b) => ({ startsAt: b.starts_at, endsAt: b.ends_at }))));
+
       const wanted = new Date(startMs).toISOString();
-      const isOffered = offered.some((d) => d.slots.some((s) => s.startsAt === wanted));
-      if (!isOffered) {
+      const isSlot = (days: ReturnType<typeof availableSlots>) =>
+        days.some((d) => d.slots.some((s) => s.startsAt === wanted));
+
+      if (!isSlot(availableSlots({ ...rules, busy: busyNow }))) {
+        // ⚠️ TWO DIFFERENT REFUSALS, and the difference is worth a second availability pass.
+        // Re-running with an EMPTY diary separates "somebody took it while you were typing"
+        // from "that was never a time on offer" (outside the host's hours, or off a
+        // hand-made request that skipped the page). Both are refused either way — the check
+        // above is the security boundary — but telling a customer a time "isn't open any
+        // more" when it never was sends them back to the calendar looking for what changed.
+        const neverOffered = !isSlot(availableSlots({ ...rules, busy: [] }));
         return json({
           ok: false,
-          error: "That time isn't open any more. Pick another and it'll go straight in.",
-          code: "slot_taken",
+          error: neverOffered
+            ? "That isn't a time they take bookings. Pick one from the calendar and it'll go straight in."
+            : "That time was just taken. Pick another and it'll go straight in.",
+          code: neverOffered ? "not_bookable" : "slot_taken",
         }, 409);
       }
 
