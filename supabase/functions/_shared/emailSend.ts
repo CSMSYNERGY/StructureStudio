@@ -62,7 +62,8 @@ export type TenantMail = {
   // 'acceptance' + 'change_order' came with migration 124; 'conversation' was live in the
   // constraint but missing from this union until 167 (a silent drift, found by the compiler
   // only because 'login_code' was added next to it); 'login_code' is migration 167.
-  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code";
+  // 'form_autoreply' + 'form_notification' are migration 325 (website lead forms).
+  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code" | "form_autoreply" | "form_notification";
   /**
    * The HUMAN reply address(es) for this send — the staff member who is writing, or whoever
    * the tenant wants a customer to reach. One address or several.

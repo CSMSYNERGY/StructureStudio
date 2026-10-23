@@ -901,6 +901,10 @@ const SETTINGS_TAB_AREA = {
   // which is gated settings_crm:edit AND settings_branding:edit, exactly as it was when the
   // card sat on GHL Connection.
   "customer-login": "settings_crm",
+  // Website lead forms + their email templates (migration 325), in the Customer Hub beside the two
+  // above. Every crm_form_* / crm_email_tpl_* action is gated settings_crm (view to read, edit to write).
+  forms: "settings_crm",
+  "email-templates": "settings_crm",
   // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
   // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
   // the company rate and the location rates — a tab on any other area would show someone a
@@ -1901,6 +1905,12 @@ function ssCustomerHubTabs() {
     // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
     // card's own note in 03-catalog.jsx), which is precisely why it belongs here.
     ["customer-login", "Customer login", "How customers get the code that logs them in to accept estimates and pay invoices"],
+    // Website lead forms and the emails they send (migration 325, Carolyn 2026-10-22: "build out
+    // forms for websites so we can capture leads, and build out email templates ... This should go
+    // into the customer hub settings tab"). settings_crm like the two above, and part of the built-in
+    // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
+    ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
+    ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
   ];
 }
 

@@ -170,6 +170,13 @@ verify_jwt = true
 # bare request is refused early.
 verify_jwt = true
 
+[functions.lead-form]
+# Website lead forms (migration 325): loads a PUBLISHED form and takes its submissions. Public in
+# practice like capture-lead — the real guards are the (clientId, formId) check against a published
+# form, server-side validation against that form, a per-tenant cap and a honeypot. Kept true so a
+# bare request is refused early.
+verify_jwt = true
+
 [functions.customer-auth]
 # Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
 # protections are the Twilio Verify OTP (the caller proves control of the phone), the

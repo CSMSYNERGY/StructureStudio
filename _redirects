@@ -29,6 +29,12 @@
 /shop        /shop.html       200
 /shop/       /shop            301
 
+# Website lead forms (migration 325, 2026-10-22): a builder's form, public and embeddable on their
+# own website (form-embed.js). ?client= picks the builder, ?id= the form; no sub-paths, so no
+# /form/* rule. Deliberately NO X-Frame-Options in _headers: framing is the point.
+/form        /form.html       200
+/form/       /form            301
+
 # ── THE APP'S ADDRESSES: /<page>[/<sub>], NO /portal (Carolyn 2026-10-12) ─────────────────
 # "It's app.structurestudiosuite.com forward slash advance. Like, so let's remove portal from
 # anywhere." Every page of the app is portal.html, rewritten — 200, never 301, so the address

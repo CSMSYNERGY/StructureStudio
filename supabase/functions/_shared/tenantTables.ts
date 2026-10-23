@@ -69,6 +69,7 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   customer_sessions: { fate: "wipe", export: true, exportDrop: ["token_hash"], why: "Customer portal logins (who and when; never the token)." },
   customer_design_links: { fate: "cascade", parent: "designs", export: true, why: "Which customer login sees which design." },
   customer_email_otps: { fate: "wipe", why: "One-time login codes for customers: nothing worth exporting." },
+  lead_form_submissions: { fate: "cascade", parent: "lead_forms", export: true, why: "What visitors typed into a website lead form (migration 325)." },
 
   // ── the builder's own setup, catalog and working data: purged ────────────────────────────────
   tax_code_assignments: { fate: "wipe", why: "Tax codes picked per style and heading; heading keys are shared, so a recreated slug would show them as its own." },
@@ -126,6 +127,9 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   driver_profiles: { fate: "wipe", why: "Drivers." },
   shop_settings: { fate: "wipe", why: "Online shop settings." },
   shop_requests: { fate: "wipe", why: "Shop checkouts and requests, the inbox copy (the money is in orders and payments)." },
+  lead_forms: { fate: "wipe", why: "Website lead forms (migration 325); submissions and daily counts cascade from them." },
+  lead_form_daily_stats: { fate: "cascade", parent: "lead_forms", why: "Per-day views, starts and submissions of a lead form." },
+  email_templates: { fate: "wipe", why: "Designed email templates (migration 325)." },
   commission_settings: { fate: "wipe", why: "Commission rules." },
   commission_members: { fate: "wipe", why: "Who earns commission." },
   ai_style_calls: { fate: "wipe", why: "Our own count of AI calibration calls (what the builder was charged is in usage_charges)." },
@@ -176,6 +180,7 @@ export const TENANT_BUCKETS: Readonly<Record<string, TenantBucket>> = {
   fixtures: { fate: "wipe", why: "Door and window photos (public), {client}/{file}." },
   "feedback-attachments": { fate: "wipe", why: "Bug report screenshots." },
   "inventory-photos": { fate: "wipe", why: "Inventory photos (public), {client}/{unit}/{file}." },
+  "form-assets": { fate: "wipe", why: "Lead form and email template images (public), {client}/{file}." },
   models: { fate: "wipe", why: "3D models per style, {client}/x/y." },
   "repair-photos": { fate: "wipe", why: "Repair photos, {client}/x/y." },
   "customer-uploads": { fate: "wipe", export: true, why: "What customers sent the builder, and CRM files: exported, then swept." },

@@ -5095,7 +5095,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
 // teaser rather than a screen whose every button 403s. The Customer login tab is NOT gated —
 // the customer login is ours whether or not a tenant has the CRM add-on or a GHL connection,
 // which is exactly why that card was worth lifting off the connection page.
-function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false }) {
+function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true }) {
   // The same clamp SettingsShell and CompanyShell run: an unknown slug must land on a tab that
   // really renders, or the sub-tab bar appears over an empty body.
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
@@ -5108,6 +5108,14 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
       {/* One card, its own section of SettingsView — the form state covers every field whichever
           section renders and this card posts only its own, so nothing else is touched. */}
       {sub === "customer-login" && <SettingsView section="customer-login" />}
+      {/* Forms + Email Templates (migration 325): part of the built-in CRM, so the same gate and
+          teaser as Pipelines. The server refuses every crm_form_* / crm_email_tpl_* action for an
+          unentitled tenant regardless. */}
+      {(sub === "forms" || sub === "email-templates") && !(crmUnlocked || crmPending) && (
+        <div style={S.card}><div style={S.h2}>{sub === "forms" ? "Website forms" : "Email templates"}</div><p style={{ fontSize: 13, color: "#64748B" }}>Website lead forms and their emails are part of the built-in CRM. Add it under Settings → Billing.</p></div>
+      )}
+      {sub === "forms" && (crmUnlocked || crmPending) && <FormsHub clientId={clientId} canEdit={canEdit} />}
+      {sub === "email-templates" && (crmUnlocked || crmPending) && <EmailTemplatesHub canEdit={canEdit} />}
     </div>
   );
 }
@@ -5193,7 +5201,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           address, which is the point — see ssCustomerHubTabs. */}
       {hubs.pipelines.some((t) => t[0] === sub) && (
         <CustomerHubShell sub={sub} onSub={setSub} tabs={hubs.pipelines}
-          viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending} />
+          viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending}
+          clientId={clientId} canEdit={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
       )}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /settings/quickbooks is a link people actually have. */}
@@ -5231,3 +5240,1442 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   );
 }
 
+// ══ Customer Hub → Forms + Email Templates (migration 325, Carolyn 2026-10-22) ══════════════
+// "I want to start planning out a designer to build out forms for websites so we can capture
+// leads, and build out email templates ... This should go into the customer hub settings tab."
+// A GoHighLevel-style builder: palette on the left, the live form in the middle, Styles / Themes /
+// Advanced on the right; Edit · Settings · Submissions · Notifications · Analytics across the top.
+//
+// ONE RENDERER: the canvas and Preview call window.SSForm.build from /forms-render.js — the same
+// file the public /form page uses — so the designer cannot show something the website does not.
+// The email editor's preview is the SERVER's render (crm_email_tpl_preview), the same function
+// every real send calls. Every action is portal-settings crm_form_* / crm_email_tpl_* (./leadForms.ts
+// there), gated settings_crm and the CRM subscription.
+//
+// LIVES HERE, not in its own part file, on purpose (2026-10-22): a new part means renumbering
+// 12-shell.jsx, which ~20 tests and other branches name by path. This file already holds the
+// Customer Hub and Email Settings.
+
+const ssfCall = (action, body) => ssPipeCall(action, body);
+
+let ssfRendererP = null;
+function ssfRenderer() {
+  if (window.SSForm) return Promise.resolve(window.SSForm);
+  if (!ssfRendererP) {
+    ssfRendererP = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "/forms-render.js?v=1";
+      s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
+      s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
+      document.head.appendChild(s);
+    });
+  }
+  return ssfRendererP;
+}
+
+// The palette, in the screenshot's groups. Types and default labels mirror _shared/leadForms.ts
+// FIELD_TYPES (the server rebuilds every definition from that list, so a type missing there is
+// simply dropped on save).
+const SSF_PALETTE = [
+  ["Personal info", [["full_name", "Full name", "👤"], ["first_name", "First name", "🪪"], ["last_name", "Last name", "🪪"], ["phone", "Phone", "📞"], ["email", "Email", "✉️"], ["date_of_birth", "Date of birth", "🎂"]]],
+  ["Address", [["address", "Address", "📍"], ["city", "City", "🏙️"], ["state", "State", "🗺️"], ["postal_code", "Postal code", "📮"], ["country", "Country", "🌎"], ["organization", "Organization", "🏢"], ["website", "Website", "🔗"]]],
+  ["StructureStudio", [["building_style", "Building style", "🏠"], ["building_size", "Building size", "📐"], ["delivery_zip", "Delivery zip", "🚚"], ["timeframe", "Timeframe to buy", "⏱️"]]],
+  ["General", [["text", "Short answer", "✏️"], ["textarea", "Paragraph", "📝"], ["select", "Dropdown", "🔽"], ["radio", "Single choice", "🔘"], ["checkboxes", "Multiple choice", "☑️"], ["number", "Number", "#️⃣"], ["date", "Date", "📅"], ["hidden", "Hidden value", "🙈"]]],
+  ["Consent", [["sms_consent", "Text message consent", "💬"], ["terms", "Terms & privacy", "📄"]]],
+  ["Layout", [["heading", "Heading", "🔠"], ["paragraph", "Text", "¶"], ["divider", "Divider", "➖"], ["image", "Image", "🖼️"]]],
+];
+const SSF_LABEL = Object.fromEntries(SSF_PALETTE.flatMap(([, items]) => items.map(([t, l]) => [t, l])));
+const SSF_INPUT = (t) => !["heading", "paragraph", "divider", "image"].includes(t);
+const SSF_CHOICES = (t) => ["select", "radio", "checkboxes", "timeframe"].includes(t);
+const SSF_TIMEFRAME = ["As soon as possible", "Within 1 month", "1–3 months", "3–6 months", "Just looking"];
+const SSF_THEMES = {
+  clean: { label: "Clean", inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F3F4F6", formBg: "#FFFFFF", label: "#111827", text: "#111827", inputBg: "#FFFFFF", border: "#D1D5DB", accent: "#2563EB", buttonBg: "#2563EB", buttonText: "#FFFFFF" } },
+  brand: { label: "Your brand", inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F8FAFC", formBg: "#FFFFFF", label: "#0F172A", text: "#0F172A", inputBg: "#FFFFFF", border: "#CBD5E1", accent: "#1E3A5F", buttonBg: "#1E3A5F", buttonText: "#FFFFFF" } },
+  dark: { label: "Dark", inputStyle: "box", radius: 6, shadow: false, colors: { pageBg: "#0B1220", formBg: "#111827", label: "#F9FAFB", text: "#F9FAFB", inputBg: "#1F2937", border: "#374151", accent: "#60A5FA", buttonBg: "#3B82F6", buttonText: "#FFFFFF" } },
+  rounded: { label: "Rounded", inputStyle: "rounded", radius: 22, shadow: true, colors: { pageBg: "#FFF7ED", formBg: "#FFFFFF", label: "#1C1917", text: "#1C1917", inputBg: "#FFFBF5", border: "#E7E5E4", accent: "#EA580C", buttonBg: "#EA580C", buttonText: "#FFFFFF" } },
+};
+const SSF_FONTS = [["system", "System"], ["inter", "Inter"], ["georgia", "Georgia"], ["verdana", "Verdana"], ["trebuchet", "Trebuchet"], ["mono", "Monospace"]];
+
+function ssfNewField(type, fields) {
+  const base = type.replace(/[^a-z0-9_]/g, "_");
+  let id = base, i = 1;
+  while (fields.some((f) => f.id === id)) id = `${base}_${++i}`;
+  const f = { id, type, label: SSF_LABEL[type] || "Field", placeholder: "", help: "", required: false, width: "full", options: [] };
+  if (type === "select" || type === "radio" || type === "checkboxes") f.options = ["Option 1", "Option 2"];
+  if (type === "timeframe") f.options = [...SSF_TIMEFRAME];
+  if (type === "heading") { f.text = "Heading"; f.level = 1; }
+  if (type === "paragraph") f.text = "";
+  if (type === "hidden") { f.source = "utm_source"; f.value = ""; }
+  if (type === "terms") f.required = true;
+  if (type === "email") f.placeholder = "you@example.com";
+  if (type === "phone") f.placeholder = "(555) 555-5555";
+  return f;
+}
+
+async function ssfUpload(file) {
+  if (!file) return null;
+  if (file.size > 5 * 1024 * 1024) throw new Error("That image is over 5 MB. Choose a smaller one.");
+  const ext = (String(file.name || "").split(".").pop() || "").toLowerCase();
+  const r = await ssfCall("crm_form_upload_url", { ext });
+  const { error } = await sb.storage.from("form-assets").uploadToSignedUrl(r.path, r.token, file, { contentType: file.type || undefined });
+  if (error) throw new Error("The upload didn't finish. Try again.");
+  return r.publicUrl;
+}
+
+// The URL keeps the open editor (?form=<id> / ?tpl=<id>) so a reload lands back in it.
+function ssfUrlParam(key, value) {
+  try {
+    const u = new URL(window.location.href);
+    if (value) u.searchParams.set(key, value); else u.searchParams.delete(key);
+    window.history.replaceState(window.history.state, "", u.toString());
+  } catch (_e) { /* ignore */ }
+}
+const ssfReadParam = (key) => { try { const v = new URL(window.location.href).searchParams.get(key); return /^[0-9a-f-]{36}$/i.test(v || "") ? v : null; } catch (_e) { return null; } };
+
+const SSF_BTN = (primary) => ({ ...S.btn(primary ? ACCENT : "#FFF", primary ? "#FFF" : "#1E293B"), border: primary ? "none" : "1px solid #CBD5E1", padding: "8px 14px" });
+const SSF_CHIP = (bg, fg) => ({ fontSize: 11, fontWeight: 800, background: bg, color: fg, borderRadius: 999, padding: "2px 9px", whiteSpace: "nowrap" });
+const ssfWhen = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
+const ssfStatus = (s) => (s === "published" ? SSF_CHIP("#DCFCE7", "#166534") : s === "archived" ? SSF_CHIP("#F1F5F9", "#64748B") : SSF_CHIP("#FEF3C7", "#92400E"));
+const ssfStatusLabel = (s) => (s === "published" ? "Live" : s === "archived" ? "Archived" : "Draft");
+
+function SsfModal({ title, onClose, width = 560, children, footer }) {
+  useEffect(() => {
+    const k = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+  return (
+    <div role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 12, width: "100%", maxWidth: width, maxHeight: "90vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,.25)" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #E2E8F0" }}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: "#1E293B" }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ marginLeft: "auto", background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#64748B" }}>×</button>
+        </div>
+        <div style={{ padding: 18, overflow: "auto" }}>{children}</div>
+        {footer && <div style={{ padding: "12px 18px", borderTop: "1px solid #E2E8F0", display: "flex", gap: 8, justifyContent: "flex-end" }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SsfCopy({ text }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" style={SSF_BTN(false)} onClick={() => {
+      navigator.clipboard?.writeText(text).then(() => { setDone(true); setTimeout(() => setDone(false), 1500); }, () => {});
+    }}>{done ? "Copied ✓" : "Copy"}</button>
+  );
+}
+
+function SsfGetCode({ clientId, form, onClose }) {
+  const origin = window.location.origin;
+  const link = `${origin}/form?client=${encodeURIComponent(clientId)}&id=${form.id}`;
+  const embed = `<div data-ss-form="${clientId}/${form.id}"></div>\n<script src="${origin}/form-embed.js" async></script>`;
+  const iframe = `<iframe src="${link}&embed=1" style="width:100%;min-height:640px;border:0" title="${String(form.name || "Form").replace(/"/g, "&quot;")}"></iframe>`;
+  const box = { fontFamily: "ui-monospace,Menlo,Consolas,monospace", fontSize: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, whiteSpace: "pre-wrap", wordBreak: "break-all", flex: 1 };
+  return (
+    <SsfModal title={`Put “${form.name}” on your website`} onClose={onClose} width={640}>
+      {form.status !== "published" && <div style={S.err}>This form isn't live yet. Press Publish first, or the code below shows “This form isn't available”.</div>}
+      {[["Embed on your website (recommended)", "Paste this where the form should appear. It grows to fit and sends form views and submissions to your Google Tag Manager.", embed],
+        ["Direct link", "Share it anywhere: a text, an email, a social post or a QR code.", link],
+        ["Plain iframe", "For website builders that only accept an iframe. It won't resize itself.", iframe]].map(([t, d, code]) => (
+        <div key={t} style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{t}</div>
+          <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 6px" }}>{d}</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}><div style={box}>{code}</div><SsfCopy text={code} /></div>
+        </div>
+      ))}
+    </SsfModal>
+  );
+}
+
+// ── The list ───────────────────────────────────────────────────────────────────────────────
+function FormsHub({ clientId, canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [editId, setEditId] = useState(() => ssfReadParam("form"));
+  const [picker, setPicker] = useState(false);
+  const [code, setCode] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    setErr("");
+    ssfCall("crm_forms_list").then(setData, (e) => setErr(e.message));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const open = (id) => { ssfUrlParam("form", id); setEditId(id); };
+  const close = () => { ssfUrlParam("form", null); setEditId(null); load(); };
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+
+  if (editId) return <FormEditor id={editId} clientId={clientId} canEdit={canEdit} meta={data} onClose={close} />;
+  const forms = (data?.forms || []).filter((f) => f.status !== "archived");
+  const archived = (data?.forms || []).filter((f) => f.status === "archived");
+  const row = (f) => (
+    <tr key={f.id}>
+      <td style={S.td}><button type="button" onClick={() => open(f.id)} style={{ background: "none", border: "none", padding: 0, fontWeight: 800, color: ACCENT, cursor: "pointer", fontSize: 13, textAlign: "left" }}>{f.name}</button></td>
+      <td style={S.td}><span style={ssfStatus(f.status)}>{ssfStatusLabel(f.status)}</span></td>
+      <td style={{ ...S.td, textAlign: "right" }}>{f.submissions30d}</td>
+      <td style={S.td}>{ssfWhen(f.lastSubmission)}</td>
+      <td style={S.td}>{ssfWhen(f.updated_at)}</td>
+      <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
+        <button type="button" style={SSF_BTN(false)} onClick={() => open(f.id)}>{canEdit ? "Edit" : "Open"}</button>{" "}
+        <button type="button" style={SSF_BTN(false)} onClick={() => setCode(f)}>Get code</button>{" "}
+        {canEdit && <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(async () => { const r = await ssfCall("crm_form_duplicate", { id: f.id }); open(r.form.id); })}>Duplicate</button>}{" "}
+        {canEdit && (f.status === "archived"
+          ? <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(() => ssfCall("crm_form_archive", { id: f.id, archived: false }))}>Restore</button>
+          : <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => { if (window.confirm(`Archive “${f.name}”? It comes off your website; its submissions stay.`)) act(() => ssfCall("crm_form_archive", { id: f.id })); }}>Archive</button>)}{" "}
+        {canEdit && f.status === "archived" && <button type="button" disabled={busy} style={{ ...SSF_BTN(false), color: "#B91C1C" }} onClick={() => { if (window.confirm(`Delete “${f.name}” for good?`)) act(() => ssfCall("crm_form_delete", { id: f.id })); }}>Delete</button>}
+      </td>
+    </tr>
+  );
+  return (
+    <div style={S.card}>
+      <CardHead title="Website forms" count={data ? forms.length : null}
+        desc="Build a form, publish it, and paste one line of code into your website. Every submission becomes a contact in your CRM."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setPicker(true)}>+ New form</button>} />
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {data && !forms.length && (
+        <div style={{ textAlign: "center", padding: "28px 12px", color: "#64748B", fontSize: 13 }}>
+          No forms yet.{canEdit && <> <button type="button" onClick={() => setPicker(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 800, cursor: "pointer" }}>Create your first form</button></>}
+        </div>
+      )}
+      {data && forms.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={S.th}>Form</th><th style={S.th}>Status</th><th style={{ ...S.th, textAlign: "right" }}>Leads (30 days)</th><th style={S.th}>Last lead</th><th style={S.th}>Edited</th><th style={S.th}></th></tr></thead>
+            <tbody>{forms.map(row)}</tbody>
+          </table>
+        </div>
+      )}
+      {archived.length > 0 && (
+        <details style={{ marginTop: 14 }}>
+          <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#64748B" }}>Archived ({archived.length})</summary>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}><tbody>{archived.map(row)}</tbody></table>
+        </details>
+      )}
+      {picker && (
+        <SsfModal title="Start a new form" onClose={() => setPicker(false)}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 10 }}>
+            {(data?.starters || []).map((s) => (
+              <button key={s.key} type="button" disabled={busy}
+                onClick={() => act(async () => { const r = await ssfCall("crm_form_create", { starter: s.key }); setPicker(false); open(r.form.id); })}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 10, background: "#FFF", padding: "18px 12px", cursor: "pointer", fontWeight: 800, color: "#1E293B", fontSize: 13 }}>
+                <div style={{ fontSize: 26, marginBottom: 6 }}>{{ blank: "📄", contact: "💬", quote: "🧾", inquiry: "🏠" }[s.key] || "📄"}</div>
+                {s.key === "blank" ? "Blank form" : s.name}
+              </button>
+            ))}
+          </div>
+        </SsfModal>
+      )}
+      {code && <SsfGetCode clientId={clientId} form={code} onClose={() => setCode(null)} />}
+    </div>
+  );
+}
+
+// ── The editor ─────────────────────────────────────────────────────────────────────────────
+function FormEditor({ id, clientId, canEdit, meta, onClose }) {
+  const [form, setForm] = useState(null);
+  const [def, setDef] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  const [tab, setTab] = useState("edit");
+  const [device, setDevice] = useState("desktop");
+  const [sel, setSel] = useState(null);
+  const [hist, setHist] = useState({ past: [], future: [] });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [recs, setRecs] = useState([]);
+  const [showRecs, setShowRecs] = useState(false);
+  const [showCode, setShowCode] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const latest = useRef({});
+  latest.current = { def, settings, name, dirty };
+
+  useEffect(() => {
+    ssfCall("crm_form_get", { id }).then((r) => {
+      setForm(r.form); setDef(r.form.definition); setSettings(r.form.settings); setName(r.form.name); setRecs(r.form.recommendations || []);
+    }, (e) => setErr(e.message));
+  }, [id]);
+
+  const save = useCallback(async () => {
+    const cur = latest.current;
+    if (!canEdit || !cur.def) return null;
+    setSaving(true);
+    try {
+      const r = await ssfCall("crm_form_save", { id, name: cur.name, definition: cur.def, settings: cur.settings });
+      setForm(r.form); setRecs(r.form.recommendations || []); setDirty(false); setSavedAt(new Date()); setErr("");
+      return r.form;
+    } catch (e) { setErr(e.message); return null; } finally { setSaving(false); }
+  }, [id, canEdit]);
+  useEffect(() => {
+    if (!dirty || !canEdit) return undefined;
+    const t = setTimeout(() => { save(); }, 1200);
+    return () => clearTimeout(t);
+  }, [dirty, def, settings, name, canEdit, save]);
+
+  const change = (next) => {
+    setHist({ past: [...hist.past.slice(-49), def], future: [] });
+    setDef(next); setDirty(true);
+  };
+  const undo = () => {
+    if (!hist.past.length) return;
+    const prev = hist.past[hist.past.length - 1];
+    setHist({ past: hist.past.slice(0, -1), future: [def, ...hist.future] });
+    setDef(prev); setDirty(true);
+  };
+  const redo = () => {
+    if (!hist.future.length) return;
+    const nxt = hist.future[0];
+    setHist({ past: [...hist.past, def], future: hist.future.slice(1) });
+    setDef(nxt); setDirty(true);
+  };
+  const setFields = (fields) => change({ ...def, fields });
+  const setStyle = (patch) => change({ ...def, style: { ...def.style, ...patch } });
+  const setSet = (patch) => { setSettings((s) => ({ ...s, ...patch })); setDirty(true); };
+
+  const addField = (type, at) => {
+    if (def.fields.length >= 60) { setErr("A form can hold up to 60 fields."); return; }
+    const f = ssfNewField(type, def.fields);
+    const fields = [...def.fields];
+    fields.splice(at == null ? fields.length : at, 0, f);
+    setFields(fields); setSel(f.id);
+  };
+  const moveField = (fid, to) => {
+    const from = def.fields.findIndex((f) => f.id === fid);
+    if (from < 0) return;
+    const fields = [...def.fields];
+    const [f] = fields.splice(from, 1);
+    fields.splice(to > from ? to - 1 : to, 0, f);
+    setFields(fields);
+  };
+  const patchField = (fid, patch) => setFields(def.fields.map((f) => (f.id === fid ? { ...f, ...patch } : f)));
+  const removeField = (fid) => { setFields(def.fields.filter((f) => f.id !== fid)); setSel(null); };
+  const dupField = (fid) => {
+    const i = def.fields.findIndex((f) => f.id === fid);
+    if (i < 0) return;
+    const copy = { ...def.fields[i], id: ssfNewField(def.fields[i].type, def.fields).id };
+    const fields = [...def.fields]; fields.splice(i + 1, 0, copy); setFields(fields); setSel(copy.id);
+  };
+
+  const publish = async () => {
+    setPublishing(true); setErr("");
+    try {
+      if (latest.current.dirty) await save();
+      const r = await ssfCall("crm_form_publish", { id });
+      setForm(r.form); setRecs(r.form.recommendations || []); setSavedAt(new Date());
+    } catch (e) { setErr(e.message); }
+    setPublishing(false);
+  };
+  const unpublish = async () => {
+    if (!window.confirm("Take this form off your website? Anyone who opens it will see “This form isn't available”.")) return;
+    try { const r = await ssfCall("crm_form_unpublish", { id }); setForm(r.form); setRecs(r.form.recommendations || []); } catch (e) { setErr(e.message); }
+  };
+  const back = async () => { if (latest.current.dirty) await save(); onClose(); };
+
+  useEffect(() => {
+    const k = (e) => {
+      if (tab !== "edit") return;
+      const tag = (e.target && e.target.tagName) || "";
+      if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+      if ((e.key === "Delete" || e.key === "Backspace") && sel && canEdit) { e.preventDefault(); removeField(sel); }
+    };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  });
+
+  const shell = { position: "fixed", inset: 0, zIndex: 3000, background: "#F1F5F9", display: "flex", flexDirection: "column", fontFamily: "inherit" };
+  if (!def) return <div style={shell}><div style={{ margin: "auto", color: "#64748B" }}>{err ? <div style={S.err}>{err} <button type="button" style={SSF_BTN(false)} onClick={onClose}>Back</button></div> : "Loading form…"}</div></div>;
+  const selected = def.fields.find((f) => f.id === sel) || null;
+  const live = form?.status === "published";
+  const changedSinceLive = recs.some((r) => r.id === "unpublished");
+  const topBtn = (active) => ({ background: active ? "#EEF2FF" : "transparent", border: "1px solid " + (active ? "#C7D2FE" : "transparent"), borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontSize: 14 });
+
+  return (
+    <div style={shell}>
+      {/* Top bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", background: "#FFF", borderBottom: "1px solid #E2E8F0", flexWrap: "wrap" }}>
+        <button type="button" onClick={back} style={{ ...SSF_BTN(false), border: "none" }}>← Back</button>
+        <input value={name} disabled={!canEdit} onChange={(e) => { setName(e.target.value); setDirty(true); }} aria-label="Form name"
+          style={{ ...S.input, width: 240, fontSize: 15, fontWeight: 800, border: "1px solid transparent", background: "#F8FAFC" }} />
+        <span style={ssfStatus(form?.status)}>{ssfStatusLabel(form?.status)}{live && changedSinceLive ? " · unpublished changes" : ""}</span>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>{!canEdit ? "View only" : saving ? "Saving…" : dirty ? "Unsaved" : savedAt ? "Saved" : ""}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2 }}>
+            <button type="button" title="Desktop" aria-label="Desktop view" onClick={() => setDevice("desktop")} style={topBtn(device === "desktop")}>🖥️</button>
+            <button type="button" title="Phone" aria-label="Phone view" onClick={() => setDevice("mobile")} style={topBtn(device === "mobile")}>📱</button>
+          </div>
+          {canEdit && <><button type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!hist.past.length} onClick={undo} style={topBtn(false)}>↶</button>
+            <button type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!hist.future.length} onClick={redo} style={topBtn(false)}>↷</button></>}
+          <div style={{ position: "relative" }}>
+            <button type="button" onClick={() => setShowRecs((v) => !v)} style={{ ...SSF_BTN(false), color: "#1D4ED8", background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
+              💡 Recommendations {recs.length > 0 && <span style={SSF_CHIP("#1D4ED8", "#FFF")}>{recs.length}</span>}
+            </button>
+            {showRecs && (
+              <div style={{ position: "absolute", right: 0, top: "110%", width: 340, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,.12)", padding: 12, zIndex: 10 }}>
+                {!recs.length && <div style={{ fontSize: 13, color: "#166534" }}>✓ Looks good. Nothing to fix.</div>}
+                {recs.map((r) => <div key={r.id} style={{ fontSize: 13, color: r.blocking ? "#B91C1C" : "#1E293B", padding: "6px 0", borderBottom: "1px solid #F1F5F9" }}>{r.blocking ? "⛔ " : "• "}{r.text}</div>)}
+              </div>
+            )}
+          </div>
+          <button type="button" style={SSF_BTN(false)} onClick={() => setPreview(true)}>👁 Preview</button>
+          <button type="button" style={SSF_BTN(false)} onClick={() => setShowCode(true)}>{"</>"} Get code</button>
+          {canEdit && live && <button type="button" style={SSF_BTN(false)} onClick={unpublish}>Unpublish</button>}
+          {canEdit && <button type="button" style={SSF_BTN(true)} disabled={publishing} onClick={publish}>{publishing ? "Publishing…" : live ? (changedSinceLive || dirty ? "Update live form" : "Published ✓") : "Publish"}</button>}
+        </div>
+      </div>
+      {/* Tabs */}
+      <div style={{ display: "flex", justifyContent: "center", gap: 4, background: "#FFF", borderBottom: "1px solid #E2E8F0" }}>
+        {[["edit", "Edit"], ["settings", "Settings"], ["submissions", "Submissions"], ["notifications", "Notifications"], ["analytics", "Analytics"]].map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setTab(k)} style={{ background: "none", border: "none", borderBottom: tab === k ? `2px solid ${ACCENT}` : "2px solid transparent", color: tab === k ? ACCENT : "#475569", fontWeight: 700, fontSize: 13, padding: "10px 14px", cursor: "pointer" }}>{l}</button>
+        ))}
+      </div>
+      {err && <div style={{ ...S.err, margin: "10px 14px 0" }}>{err}</div>}
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        {tab === "edit" && (<>
+          <SsfPalette disabled={!canEdit} onAdd={(t) => addField(t)} />
+          <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "24px 16px" }} onClick={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
+            <SsfCanvas def={def} sel={sel} device={device} meta={meta} canEdit={canEdit}
+              onSelect={setSel} onAdd={addField} onMove={moveField}
+              onRemove={removeField} onDuplicate={dupField}
+              onWidth={(fid) => patchField(fid, { width: (def.fields.find((f) => f.id === fid) || {}).width === "half" ? "full" : "half" })}
+              onShift={(fid, d) => { const i = def.fields.findIndex((f) => f.id === fid); const j = i + d; if (j < 0 || j >= def.fields.length) return; const fields = [...def.fields]; [fields[i], fields[j]] = [fields[j], fields[i]]; setFields(fields); }} />
+          </div>
+          <div style={{ width: 330, flexShrink: 0, background: "#FFF", borderLeft: "1px solid #E2E8F0", overflow: "auto" }}>
+            {selected
+              ? <SsfFieldPanel key={selected.id} field={selected} meta={meta} disabled={!canEdit} onChange={(p) => patchField(selected.id, p)} onClose={() => setSel(null)} onRemove={() => removeField(selected.id)} />
+              : <SsfStylePanel def={def} meta={meta} disabled={!canEdit} onStyle={setStyle} onDef={change} />}
+          </div>
+        </>)}
+        {tab === "settings" && <SsfSettingsTab def={def} settings={settings} meta={meta} disabled={!canEdit} onDef={change} onSettings={setSet} />}
+        {tab === "submissions" && <SsfSubmissionsTab formId={id} def={def} formName={name} />}
+        {tab === "notifications" && <SsfNotificationsTab formId={id} settings={settings} meta={meta} disabled={!canEdit} onSettings={setSet} save={save} dirty={dirty} />}
+        {tab === "analytics" && <SsfAnalyticsTab formId={id} />}
+      </div>
+      {showCode && <SsfGetCode clientId={clientId} form={{ ...form, name }} onClose={() => setShowCode(false)} />}
+      {preview && <SsfPreview def={def} settings={settings} meta={meta} onClose={() => setPreview(false)} />}
+    </div>
+  );
+}
+
+function SsfPalette({ onAdd, disabled }) {
+  const [q, setQ] = useState("");
+  const match = (l) => !q.trim() || l.toLowerCase().includes(q.trim().toLowerCase());
+  return (
+    <div style={{ width: 260, flexShrink: 0, background: "#FFF", borderRight: "1px solid #E2E8F0", overflow: "auto", padding: 12 }}>
+      <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 8 }}>Form elements</div>
+      <input placeholder="Search elements" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...S.input, marginBottom: 10 }} />
+      {disabled && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>You can look, but only someone who can edit Customer Hub settings can change this form.</div>}
+      {SSF_PALETTE.map(([group, items]) => {
+        const shown = items.filter(([, l]) => match(l));
+        if (!shown.length) return null;
+        return (
+          <div key={group} style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "4px 0 6px" }}>{group}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+              {shown.map(([type, label, icon]) => (
+                <button key={type} type="button" disabled={disabled} draggable={!disabled}
+                  onDragStart={(e) => { e.dataTransfer.setData("text/ssf-new", type); e.dataTransfer.effectAllowed = "copy"; }}
+                  onClick={() => onAdd(type)} title={`Add ${label} (or drag it onto the form)`}
+                  style={{ border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF", padding: "10px 4px 8px", cursor: disabled ? "default" : "grab", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minHeight: 66 }}>
+                  <span style={{ fontSize: 18 }}>{icon}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: "#334155", lineHeight: 1.15, textAlign: "center" }}>{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// The canvas: the REAL renderer's output, with selection, drag-to-reorder and drop-to-add laid over it.
+function SsfCanvas({ def, sel, device, meta, canEdit, onSelect, onAdd, onMove, onRemove, onDuplicate, onWidth, onShift }) {
+  const host = useRef(null);
+  const wrap = useRef(null);
+  const [err, setErr] = useState("");
+  const [drop, setDrop] = useState(null);   // { index, y }
+  const [bar, setBar] = useState(null);     // selected field's toolbar position
+  useEffect(() => {
+    let dead = false;
+    ssfRenderer().then((SSF) => {
+      if (dead || !host.current) return;
+      const node = SSF.build(def, { designer: true, catalog: meta?.catalog, consentSentence: meta?.consentSentence });
+      host.current.textContent = "";
+      host.current.appendChild(node);
+      host.current.querySelectorAll("[data-field-id]").forEach((b) => {
+        b.style.cursor = canEdit ? "grab" : "pointer";
+        b.style.borderRadius = "6px";
+        b.style.outlineOffset = "4px";
+        b.draggable = !!canEdit;
+        if (b.getAttribute("data-field-id") === sel) b.style.outline = `2px solid ${ACCENT}`;
+      });
+      const s = sel && host.current.querySelector(`[data-field-id="${CSS.escape(sel)}"]`);
+      if (s && wrap.current) {
+        const a = s.getBoundingClientRect(), w = wrap.current.getBoundingClientRect();
+        setBar({ top: a.top - w.top - 30, left: a.right - w.left });
+      } else setBar(null);
+    }, (e) => setErr(e.message));
+    return () => { dead = true; };
+  }, [def, sel, device, meta, canEdit]);
+
+  const boxes = () => Array.from(host.current ? host.current.querySelectorAll("[data-field-id]") : []);
+  const indexAt = (clientY) => {
+    const bs = boxes();
+    const w = wrap.current.getBoundingClientRect();
+    for (let i = 0; i < bs.length; i++) {
+      const r = bs[i].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return { index: i, y: r.top - w.top - 6 };
+    }
+    const last = bs[bs.length - 1];
+    return { index: bs.length, y: last ? last.getBoundingClientRect().bottom - w.top + 6 : 20 };
+  };
+  const onDragStart = (e) => {
+    const b = e.target.closest && e.target.closest("[data-field-id]");
+    if (!b || !canEdit) return;
+    e.dataTransfer.setData("text/ssf-move", b.getAttribute("data-field-id"));
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (e) => {
+    if (!canEdit) return;
+    const types = Array.from(e.dataTransfer.types || []);
+    if (!types.includes("text/ssf-new") && !types.includes("text/ssf-move")) return;
+    e.preventDefault();
+    setDrop(indexAt(e.clientY));
+  };
+  const onDrop = (e) => {
+    if (!canEdit) return;
+    e.preventDefault();
+    const at = indexAt(e.clientY).index;
+    const t = e.dataTransfer.getData("text/ssf-new");
+    const m = e.dataTransfer.getData("text/ssf-move");
+    setDrop(null);
+    if (t) onAdd(t, at); else if (m) onMove(m, at);
+  };
+  const width = device === "mobile" ? 375 : Math.min(1200, Math.max(320, (def.style?.width || 640) + 48));
+  const tool = { background: "#FFF", border: "none", cursor: "pointer", padding: "4px 7px", fontSize: 13, color: "#1E293B" };
+  return (
+    <div ref={wrap} style={{ position: "relative", width, maxWidth: "100%", margin: "0 auto", background: def.style?.colors?.pageBg || "#F3F4F6", borderRadius: device === "mobile" ? 24 : 10, padding: device === "mobile" ? "28px 10px" : 24, boxShadow: device === "mobile" ? "0 0 0 10px #1E293B" : "none", transition: "width .2s" }}
+      onClick={(e) => { const b = e.target.closest && e.target.closest("[data-field-id]"); if (b) onSelect(b.getAttribute("data-field-id")); else onSelect(null); }}
+      onDragStart={onDragStart} onDragOver={onDragOver} onDragLeave={(e) => { if (!wrap.current.contains(e.relatedTarget)) setDrop(null); }} onDrop={onDrop}>
+      {err && <div style={S.err}>{err}</div>}
+      <div ref={host} />
+      {!def.fields.length && <div style={{ textAlign: "center", color: "#94A3B8", fontSize: 13, padding: 20 }}>Drag elements here from the left, or click one to add it.</div>}
+      {drop && <div style={{ position: "absolute", left: 16, right: 16, top: drop.y, height: 3, background: "#2563EB", borderRadius: 2, pointerEvents: "none" }} />}
+      {bar && canEdit && sel && (
+        <div style={{ position: "absolute", top: Math.max(0, bar.top), left: bar.left, transform: "translateX(-100%)", display: "flex", border: "1px solid #CBD5E1", borderRadius: 6, overflow: "hidden", boxShadow: "0 2px 6px rgba(0,0,0,.12)", zIndex: 5 }}
+          onClick={(e) => e.stopPropagation()}>
+          <button type="button" title="Move up" aria-label="Move up" style={tool} onClick={() => onShift(sel, -1)}>▲</button>
+          <button type="button" title="Move down" aria-label="Move down" style={tool} onClick={() => onShift(sel, 1)}>▼</button>
+          <button type="button" title="Half / full width" aria-label="Toggle width" style={tool} onClick={() => onWidth(sel)}>⇔</button>
+          <button type="button" title="Duplicate" aria-label="Duplicate" style={tool} onClick={() => onDuplicate(sel)}>⧉</button>
+          <button type="button" title="Delete" aria-label="Delete" style={{ ...tool, color: "#B91C1C" }} onClick={() => onRemove(sel)}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SsfRow({ label, children, hint }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label style={S.lbl}>{label}</label>
+      {children}
+      {hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
+    </div>
+  );
+}
+function SsfSeg({ value, options, onChange, disabled }) {
+  return (
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      {options.map(([v, l]) => (
+        <button key={String(v)} type="button" disabled={disabled} onClick={() => onChange(v)}
+          style={{ flex: 1, minWidth: 0, padding: "7px 6px", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 700, border: "1px solid " + (value === v ? ACCENT : "#CBD5E1"), background: value === v ? "#EEF2FF" : "#FFF", color: value === v ? ACCENT : "#334155" }}>{l}</button>
+      ))}
+    </div>
+  );
+}
+function SsfColor({ label, value, onChange, disabled }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#334155", marginBottom: 6 }}>
+      <input type="color" disabled={disabled} value={/^#[0-9a-f]{6}$/i.test(value || "") ? value : "#000000"} onChange={(e) => onChange(e.target.value)} style={{ width: 34, height: 26, border: "1px solid #CBD5E1", borderRadius: 4, padding: 0, background: "none" }} />
+      <span style={{ flex: 1 }}>{label}</span>
+      <code style={{ fontSize: 11, color: "#64748B" }}>{value}</code>
+    </label>
+  );
+}
+function SsfNum({ value, onChange, min, max, suffix = "px", disabled }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <input type="number" disabled={disabled} min={min} max={max} value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? min : Math.max(min, Math.min(max, Number(e.target.value))))} style={{ ...S.input }} />
+      <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>{suffix}</span>
+    </div>
+  );
+}
+function SsfSection({ title, open: start = false, children }) {
+  const [open, setOpen] = useState(start);
+  return (
+    <div style={{ borderBottom: "1px solid #F1F5F9" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={{ width: "100%", textAlign: "left", background: "#F8FAFC", border: "none", padding: "11px 14px", fontWeight: 700, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>{open ? "▾" : "▸"} {title}</button>
+      {open && <div style={{ padding: "12px 14px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function SsfStylePanel({ def, meta, onStyle, onDef, disabled }) {
+  const [t, setT] = useState("styles");
+  const st = def.style || {};
+  const c = st.colors || {};
+  const b = st.button || {};
+  const color = (k) => (v) => onStyle({ colors: { ...c, [k]: v } });
+  const btn = (patch) => onStyle({ button: { ...b, ...patch } });
+  const applyTheme = (key) => {
+    const p = SSF_THEMES[key];
+    const colors = { ...p.colors };
+    if (key === "brand" && meta?.brand?.accent) { colors.accent = meta.brand.accent; colors.buttonBg = meta.brand.accent; }
+    onDef({ ...def, theme: key, style: { ...st, inputStyle: p.inputStyle, radius: p.radius, shadow: p.shadow, colors, button: { ...b, radius: p.radius } },
+      header: key === "brand" && meta?.brand?.logoUrl && !def.header?.imageUrl ? { ...(def.header || {}), title: def.header?.title || meta.brand.companyName || "" } : def.header });
+  };
+  return (
+    <div>
+      <div style={{ display: "flex", borderBottom: "1px solid #E2E8F0" }}>
+        {[["styles", "Styles"], ["themes", "Themes"], ["advanced", "Advanced"]].map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setT(k)} style={{ flex: 1, background: "none", border: "none", borderBottom: t === k ? `2px solid ${ACCENT}` : "2px solid transparent", color: t === k ? ACCENT : "#475569", fontWeight: 700, fontSize: 13, padding: "12px 6px", cursor: "pointer" }}>{l}</button>
+        ))}
+      </div>
+      {t === "styles" && (<>
+        <SsfSection title="Layout" open>
+          <SsfRow label="Columns"><SsfSeg disabled={disabled} value={st.layout || "single"} onChange={(v) => onStyle({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} /></SsfRow>
+          <SsfRow label="Input style"><SsfSeg disabled={disabled} value={st.inputStyle || "box"} onChange={(v) => onStyle({ inputStyle: v })} options={[["box", "Box"], ["underline", "Underline"], ["rounded", "Rounded"]]} /></SsfRow>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <SsfRow label="Width"><SsfNum disabled={disabled} value={st.width} min={280} max={1200} onChange={(v) => onStyle({ width: v })} /></SsfRow>
+            <SsfRow label="Field spacing"><SsfNum disabled={disabled} value={st.fieldSpacing} min={0} max={48} onChange={(v) => onStyle({ fieldSpacing: v })} /></SsfRow>
+            <SsfRow label="Padding"><SsfNum disabled={disabled} value={st.padding} min={0} max={64} onChange={(v) => onStyle({ padding: v })} /></SsfRow>
+            <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={st.radius} min={0} max={30} onChange={(v) => onStyle({ radius: v })} /></SsfRow>
+          </div>
+          <SsfRow label="Label position"><SsfSeg disabled={disabled} value={st.labelAlign || "top"} onChange={(v) => onStyle({ labelAlign: v })} options={[["top", "Top"], ["left", "Left"], ["right", "Right"]]} /></SsfRow>
+          {st.labelAlign && st.labelAlign !== "top" && <SsfRow label="Label width"><SsfNum disabled={disabled} value={st.labelWidth} min={80} max={400} onChange={(v) => onStyle({ labelWidth: v })} /></SsfRow>}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 6 }}><input type="checkbox" disabled={disabled} checked={st.showLabels !== false} onChange={(e) => onStyle({ showLabels: e.target.checked })} /> Show field labels</label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={!!st.shadow} onChange={(e) => onStyle({ shadow: e.target.checked })} /> Drop shadow</label>
+        </SsfSection>
+        <SsfSection title="Colors & background">
+          <SsfColor disabled={disabled} label="Page background" value={c.pageBg} onChange={color("pageBg")} />
+          <SsfColor disabled={disabled} label="Form background" value={c.formBg} onChange={color("formBg")} />
+          <SsfColor disabled={disabled} label="Labels" value={c.label} onChange={color("label")} />
+          <SsfColor disabled={disabled} label="Text" value={c.text} onChange={color("text")} />
+          <SsfColor disabled={disabled} label="Field background" value={c.inputBg} onChange={color("inputBg")} />
+          <SsfColor disabled={disabled} label="Field border" value={c.border} onChange={color("border")} />
+          <SsfColor disabled={disabled} label="Accent (focus, ticks, links)" value={c.accent} onChange={color("accent")} />
+          <SsfColor disabled={disabled} label="Button" value={c.buttonBg} onChange={color("buttonBg")} />
+          <SsfColor disabled={disabled} label="Button text" value={c.buttonText} onChange={color("buttonText")} />
+        </SsfSection>
+        <SsfSection title="Typography">
+          <SsfRow label="Font"><select disabled={disabled} value={st.font || "system"} onChange={(e) => onStyle({ font: e.target.value })} style={S.input}>{SSF_FONTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></SsfRow>
+          <SsfRow label="Text size"><SsfNum disabled={disabled} value={st.fontSize} min={12} max={22} onChange={(v) => onStyle({ fontSize: v })} /></SsfRow>
+        </SsfSection>
+        <SsfSection title="Submit button">
+          <SsfRow label="Button text"><input disabled={disabled} value={b.text || ""} maxLength={60} onChange={(e) => btn({ text: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Size"><SsfSeg disabled={disabled} value={b.size || "md"} onChange={(v) => btn({ size: v })} options={[["sm", "Small"], ["md", "Medium"], ["lg", "Large"]]} /></SsfRow>
+          <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={b.align || "center"} onChange={(v) => btn({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} /></SsfRow>
+          <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={b.radius} min={0} max={30} onChange={(v) => btn({ radius: v })} /></SsfRow>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={b.fullWidth !== false} onChange={(e) => btn({ fullWidth: e.target.checked })} /> Full width</label>
+        </SsfSection>
+      </>)}
+      {t === "themes" && (
+        <div style={{ padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {Object.entries(SSF_THEMES).map(([k, th]) => (
+            <button key={k} type="button" disabled={disabled} onClick={() => applyTheme(k)}
+              style={{ border: "2px solid " + (def.theme === k ? ACCENT : "#E2E8F0"), borderRadius: 10, padding: 8, background: th.colors.pageBg, cursor: "pointer", textAlign: "left" }}>
+              <div style={{ background: th.colors.formBg, borderRadius: 6, padding: 8 }}>
+                <div style={{ height: 6, width: "60%", background: th.colors.label, opacity: 0.7, borderRadius: 3, marginBottom: 6 }} />
+                <div style={{ height: 14, border: `1px solid ${th.colors.border}`, background: th.colors.inputBg, borderRadius: th.inputStyle === "rounded" ? 10 : 3, marginBottom: 6 }} />
+                <div style={{ height: 14, background: k === "brand" && meta?.brand?.accent ? meta.brand.accent : th.colors.buttonBg, borderRadius: th.inputStyle === "rounded" ? 10 : 3 }} />
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 800, marginTop: 6, color: k === "dark" ? "#F9FAFB" : "#1E293B" }}>{th.label}</div>
+            </button>
+          ))}
+          <div style={{ gridColumn: "span 2", fontSize: 11.5, color: "#64748B" }}>A theme sets the colors, field style and corners. You can fine-tune any of it under Styles.</div>
+        </div>
+      )}
+      {t === "advanced" && (
+        <div style={{ padding: 14 }}>
+          <SsfRow label="Form header title"><input disabled={disabled} value={def.header?.title || ""} maxLength={200} onChange={(e) => onDef({ ...def, header: { ...(def.header || {}), title: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Form header subtitle"><textarea disabled={disabled} value={def.header?.subtitle || ""} maxLength={500} rows={2} onChange={(e) => onDef({ ...def, header: { ...(def.header || {}), subtitle: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Header image" hint="A logo or banner above the form. JPG, PNG or WebP, up to 5 MB.">
+            <SsfImagePick disabled={disabled} url={def.header?.imageUrl} onUrl={(u) => onDef({ ...def, header: { ...(def.header || {}), imageUrl: u } })} />
+          </SsfRow>
+          <SsfRow label="CSS class" hint="For web designers: added to the form's outer box so your site's own CSS can target it. Letters, numbers, dashes and spaces."><input disabled={disabled} value={st.cssClass || ""} maxLength={80} onChange={(e) => onStyle({ cssClass: e.target.value })} style={S.input} /></SsfRow>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SsfImagePick({ url, onUrl, disabled }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  return (
+    <div>
+      {url && <img src={url} alt="" style={{ display: "block", maxWidth: "100%", maxHeight: 110, borderRadius: 6, marginBottom: 6, border: "1px solid #E2E8F0" }} />}
+      <div style={{ display: "flex", gap: 6 }}>
+        <label style={{ ...SSF_BTN(false), display: "inline-block", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1 }}>
+          {busy ? "Uploading…" : url ? "Replace" : "Upload image"}
+          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={disabled || busy} style={{ display: "none" }}
+            onChange={async (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return; setBusy(true); setErr(""); try { onUrl(await ssfUpload(f)); } catch (x) { setErr(x.message); } setBusy(false); }} />
+        </label>
+        {url && !disabled && <button type="button" style={SSF_BTN(false)} onClick={() => onUrl("")}>Remove</button>}
+      </div>
+      {err && <div style={{ ...S.err, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }) {
+  const t = f.type;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #E2E8F0" }}>
+        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{SSF_LABEL[t] || t}</div>
+        <button type="button" onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontSize: 12 }}>Form styles →</button>
+      </div>
+      <div style={{ padding: 14 }}>
+        {t === "heading" && (<>
+          <SsfRow label="Heading text"><input disabled={disabled} value={f.text || ""} maxLength={200} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Size"><SsfSeg disabled={disabled} value={f.level === 2 ? 2 : 1} onChange={(v) => onChange({ level: v })} options={[[1, "Large"], [2, "Small"]]} /></SsfRow>
+        </>)}
+        {t === "paragraph" && <SsfRow label="Text"><textarea disabled={disabled} rows={5} maxLength={2000} value={f.text || ""} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>}
+        {t === "image" && <SsfRow label="Image"><SsfImagePick disabled={disabled} url={f.imageUrl} onUrl={(u) => onChange({ imageUrl: u })} /></SsfRow>}
+        {t === "divider" && <div style={{ fontSize: 12.5, color: "#64748B" }}>A thin line between sections. Nothing to set.</div>}
+        {SSF_INPUT(t) && t !== "sms_consent" && (
+          <SsfRow label={t === "terms" ? "Text before the links" : "Label"}><input disabled={disabled} value={f.label || ""} maxLength={200} onChange={(e) => onChange({ label: e.target.value })} style={S.input} /></SsfRow>
+        )}
+        {SSF_INPUT(t) && !SSF_CHOICES(t) && !["hidden", "sms_consent", "terms", "radio", "checkboxes"].includes(t) && (
+          <SsfRow label={t === "building_style" || t === "building_size" ? "Prompt" : "Placeholder"}><input disabled={disabled} value={f.placeholder || ""} maxLength={200} onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>
+        )}
+        {(t === "select" || t === "timeframe") && <SsfRow label="Prompt"><input disabled={disabled} value={f.placeholder || ""} maxLength={200} placeholder="Choose…" onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>}
+        {SSF_CHOICES(t) && (
+          <SsfRow label="Choices" hint="One per line.">
+            <textarea disabled={disabled} rows={Math.min(10, Math.max(3, (f.options || []).length + 1))} value={(f.options || []).join("\n")}
+              onChange={(e) => onChange({ options: e.target.value.split("\n").map((x) => x.slice(0, 120)).slice(0, 50) })} style={S.input} />
+          </SsfRow>
+        )}
+        {(t === "building_style" || t === "building_size") && (
+          <div style={{ fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            The choices come from your catalog ({t === "building_style" ? "Structures → styles" : "Structures → sizes"}) every time the form loads, so they never go out of date.
+            {((t === "building_style" ? meta?.catalog?.styles : meta?.catalog?.sizes) || []).length === 0 && " Your catalog has none yet."}
+          </div>
+        )}
+        {t === "hidden" && (<>
+          <SsfRow label="Value comes from" hint="Ad tracking parameters are read from the address of the page the form is on.">
+            <select disabled={disabled} value={f.source || "utm_source"} onChange={(e) => onChange({ source: e.target.value })} style={S.input}>
+              {["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"].map((s) => <option key={s} value={s}>{s}</option>)}
+              <option value="static">A fixed value</option>
+            </select>
+          </SsfRow>
+          {f.source === "static" && <SsfRow label="Fixed value"><input disabled={disabled} value={f.value || ""} maxLength={300} onChange={(e) => onChange({ value: e.target.value })} style={S.input} /></SsfRow>}
+        </>)}
+        {t === "sms_consent" && (
+          <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 800, marginBottom: 4 }}>The wording is set for you</div>
+            “{meta?.consentSentence}”
+            <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words and your business name, so they can't be edited. The box is never required — texting has to be optional. Before you text these leads, check that your texting registration lists this page as a place people opt in.</div>
+            {meta && meta.smsBoxOn === false && <div style={{ ...S.err, marginTop: 8, marginBottom: 0 }}>Your texting consent box is switched off in Settings, so this box won't show on your website.</div>}
+          </div>
+        )}
+        {t === "terms" && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Links to the Privacy Policy and Terms you set on the form's Settings tab. Always required.</div>}
+        {SSF_INPUT(t) && t !== "hidden" && <SsfRow label="Help text"><input disabled={disabled} value={f.help || ""} maxLength={500} onChange={(e) => onChange({ help: e.target.value })} style={S.input} /></SsfRow>}
+        {SSF_INPUT(t) && !["hidden", "sms_consent", "terms"].includes(t) && (
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 12 }}><input type="checkbox" disabled={disabled} checked={!!f.required} onChange={(e) => onChange({ required: e.target.checked })} /> Required</label>
+        )}
+        {t !== "hidden" && <SsfRow label="Width"><SsfSeg disabled={disabled} value={f.width === "half" ? "half" : "full"} onChange={(v) => onChange({ width: v })} options={[["full", "Full"], ["half", "Half"]]} /></SsfRow>}
+        {["email", "phone", "full_name", "first_name", "last_name", "address", "city", "state", "postal_code", "delivery_zip", "organization"].includes(t) && (
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 12 }}>Saved onto the contact's {t === "full_name" ? "name" : (SSF_LABEL[t] || "").toLowerCase()} in your CRM.</div>
+        )}
+        {!disabled && <button type="button" onClick={onRemove} style={{ ...SSF_BTN(false), color: "#B91C1C", width: "100%" }}>Delete this field</button>}
+      </div>
+    </div>
+  );
+}
+
+function SsfPreview({ def, settings, meta, onClose }) {
+  const host = useRef(null);
+  const [device, setDevice] = useState("desktop");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let dead = false;
+    ssfRenderer().then((SSF) => {
+      if (dead || !host.current) return;
+      host.current.textContent = "";
+      host.current.appendChild(SSF.build(def, {
+        catalog: meta?.catalog, consentSentence: meta?.consentSentence,
+        onSubmit: () => Promise.resolve({ ok: true, afterSubmit: settings?.afterSubmit?.mode === "redirect" ? { mode: "message", message: `On your website this would now go to ${settings.afterSubmit.redirectUrl}` } : settings?.afterSubmit }),
+      }));
+    }, (e) => setErr(e.message));
+    return () => { dead = true; };
+  }, [def, settings, meta, device]);
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 3500, background: def.style?.colors?.pageBg || "#F3F4F6", overflow: "auto" }}>
+      <div style={{ position: "sticky", top: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", background: "#1E293B", color: "#FFF", zIndex: 2 }}>
+        <b style={{ fontSize: 13 }}>Preview</b><span style={{ fontSize: 12, opacity: 0.8 }}>Nothing you type here is sent.</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" style={SSF_BTN(device === "desktop")} onClick={() => setDevice("desktop")}>Desktop</button>
+          <button type="button" style={SSF_BTN(device === "mobile")} onClick={() => setDevice("mobile")}>Phone</button>
+          <button type="button" style={SSF_BTN(false)} onClick={onClose}>Close preview</button>
+        </div>
+      </div>
+      {err && <div style={{ ...S.err, margin: 16 }}>{err}</div>}
+      <div style={{ width: device === "mobile" ? 375 : "100%", maxWidth: "100%", margin: "24px auto", padding: "0 16px" }}><div ref={host} /></div>
+    </div>
+  );
+}
+
+function SsfSettingsTab({ def, settings, meta, onDef, onSettings, disabled }) {
+  const a = settings.afterSubmit || {};
+  const pipes = meta?.pipelines || [];
+  const stages = (pipes.find((p) => p.id === settings.pipelineId) || {}).stages || [];
+  const wrap = { flex: 1, overflow: "auto", padding: 20 };
+  return (
+    <div style={wrap}>
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        <div style={S.card}>
+          <CardHead title="After someone submits" />
+          <SsfRow label="Then"><SsfSeg disabled={disabled} value={a.mode || "message"} onChange={(v) => onSettings({ afterSubmit: { ...a, mode: v } })} options={[["message", "Show a thank-you message"], ["redirect", "Go to a page on my website"]]} /></SsfRow>
+          {a.mode === "redirect"
+            ? <SsfRow label="Page address" hint="Must start with https://. A thank-you page is the easiest way to count conversions in Google Ads or Facebook."><input disabled={disabled} value={a.redirectUrl || ""} placeholder="https://www.yoursite.com/thank-you" onChange={(e) => onSettings({ afterSubmit: { ...a, redirectUrl: e.target.value } })} style={S.input} /></SsfRow>
+            : <SsfRow label="Thank-you message"><textarea disabled={disabled} rows={3} maxLength={1000} value={a.message || ""} onChange={(e) => onSettings({ afterSubmit: { ...a, message: e.target.value } })} style={S.input} /></SsfRow>}
+        </div>
+        <div style={S.card}>
+          <CardHead title="Where the lead goes" desc="Every submission with an email or phone number becomes a contact in your CRM, with a note listing their answers." />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <SsfRow label="Add a card to pipeline">
+              <select disabled={disabled} value={settings.pipelineId || ""} onChange={(e) => onSettings({ pipelineId: e.target.value || null, stageId: null })} style={S.input}>
+                <option value="">Don't add a card</option>
+                {pipes.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="In stage">
+              <select disabled={disabled || !settings.pipelineId} value={settings.stageId || ""} onChange={(e) => onSettings({ stageId: e.target.value || null })} style={S.input}>
+                <option value="">Choose a stage</option>
+                {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="Assign new contacts to" hint="Only when the contact has no one assigned yet.">
+              <select disabled={disabled} value={settings.assignUserId || ""} onChange={(e) => onSettings({ assignUserId: e.target.value || null })} style={S.input}>
+                <option value="">Nobody</option>
+                {(meta?.team || []).map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="Stop taking submissions on" hint="Optional. The form says it's closed after this date.">
+              <input type="date" disabled={disabled} value={settings.closesAt || ""} onChange={(e) => onSettings({ closesAt: e.target.value || null })} style={S.input} />
+            </SsfRow>
+          </div>
+          {settings.pipelineId && !settings.stageId && <div style={S.err}>Choose a stage, or no card will be made.</div>}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={settings.captureUtm !== false} onChange={(e) => onSettings({ captureUtm: e.target.checked })} /> Record ad tracking (utm_source, gclid…) from the page address</label>
+        </div>
+        <div style={S.card}>
+          <CardHead title="Legal links" desc="Shown under the form, and used by the Terms & privacy checkbox." />
+          <SsfRow label="Privacy Policy address"><input disabled={disabled} value={def.footerLinks?.privacy || ""} placeholder="https://www.yoursite.com/privacy" onChange={(e) => onDef({ ...def, footerLinks: { ...(def.footerLinks || {}), privacy: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Terms of Service address"><input disabled={disabled} value={def.footerLinks?.terms || ""} placeholder="https://www.yoursite.com/terms" onChange={(e) => onDef({ ...def, footerLinks: { ...(def.footerLinks || {}), terms: e.target.value } })} style={S.input} /></SsfRow>
+          <div style={{ fontSize: 11.5, color: "#64748B" }}>Addresses must start with https://. Anything else is dropped when the form saves.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SsfNotificationsTab({ formId, settings, meta, onSettings, disabled, save, dirty }) {
+  const n = settings.notify || {};
+  const ar = settings.autoreply || {};
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const tpls = meta?.templates || [];
+  const test = async (which) => {
+    setMsg(""); setErr("");
+    try { if (dirty) await save(); const r = await ssfCall("crm_form_test_email", { id: formId, which }); setMsg(`Test sent to ${r.sentTo}.`); } catch (e) { setErr(e.message); }
+  };
+  const toggleUser = (uid) => onSettings({ notify: { ...n, userIds: (n.userIds || []).includes(uid) ? n.userIds.filter((x) => x !== uid) : [...(n.userIds || []), uid] } });
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        {msg && <div style={S.okMsg}>{msg}</div>}
+        {err && <div style={S.err}>{err}</div>}
+        <div style={S.card}>
+          <CardHead title="Tell my team about new leads" right={<label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}><input type="checkbox" disabled={disabled} checked={n.enabled !== false} onChange={(e) => onSettings({ notify: { ...n, enabled: e.target.checked } })} /> On</label>} />
+          {n.enabled !== false && (<>
+            <SsfRow label="Who gets the email" hint="Nobody ticked = your owners and admins.">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {(meta?.team || []).map((t) => (
+                  <label key={t.userId} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, border: "1px solid #E2E8F0", borderRadius: 8, padding: "5px 9px" }}>
+                    <input type="checkbox" disabled={disabled} checked={(n.userIds || []).includes(t.userId)} onChange={() => toggleUser(t.userId)} /> {t.name}
+                  </label>
+                ))}
+              </div>
+            </SsfRow>
+            <SsfRow label="Also send to" hint="Other addresses, one per line (up to 10).">
+              <textarea disabled={disabled} rows={2} value={(n.emails || []).join("\n")} onChange={(e) => onSettings({ notify: { ...n, emails: e.target.value.split(/[\n,]/).map((x) => x.trim()).filter(Boolean).slice(0, 10) } })} style={S.input} />
+            </SsfRow>
+            <SsfRow label="Email design">
+              <select disabled={disabled} value={n.templateId || ""} onChange={(e) => onSettings({ notify: { ...n, templateId: e.target.value || null } })} style={S.input}>
+                <option value="">Built-in “New website lead”</option>
+                {tpls.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("notification")}>Send me a test</button>
+          </>)}
+        </div>
+        <div style={S.card}>
+          <CardHead title="Auto-reply to the person who filled it in" desc="Sent from your own email (Settings → Email Settings) when they gave an email address."
+            right={<label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}><input type="checkbox" disabled={disabled} checked={!!ar.enabled} onChange={(e) => onSettings({ autoreply: { ...ar, enabled: e.target.checked } })} /> On</label>} />
+          {ar.enabled && (<>
+            <SsfRow label="Email design">
+              <select disabled={disabled} value={ar.templateId || ""} onChange={(e) => onSettings({ autoreply: { ...ar, templateId: e.target.value || null } })} style={S.input}>
+                <option value="">Built-in “Thanks for reaching out”</option>
+                {tpls.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("autoreply")}>Send me a test</button>
+          </>)}
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 10 }}>Design your own emails under Customer Hub → Email Templates.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ssfCsv(rows, def) {
+  const cols = def.fields.filter((f) => SSF_INPUT(f.type));
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const head = ["Submitted", ...cols.map((c) => c.label), "Page", "Contact id"].map(q).join(",");
+  const lines = rows.map((r) => {
+    const by = Object.fromEntries((r.answers || []).map((a) => [a.id, a.value]));
+    return [new Date(r.created_at).toISOString(), ...cols.map((c) => by[c.id] ?? ""), r.page_url || "", r.contact_id || ""].map(q).join(",");
+  });
+  return [head, ...lines].join("\r\n");
+}
+
+function SsfSubmissionsTab({ formId, def, formName }) {
+  const [rows, setRows] = useState(null);
+  const [spam, setSpam] = useState(false);
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(null);
+  useEffect(() => {
+    setRows(null); setErr("");
+    ssfCall("crm_form_submissions", { id: formId, spam }).then((r) => setRows(r.submissions), (e) => setErr(e.message));
+  }, [formId, spam]);
+  const pick = (r, types) => (r.answers || []).find((a) => types.includes(a.type))?.value || "";
+  const download = () => {
+    const blob = new Blob([ssfCsv(rows || [], def)], { type: "text/csv" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `${String(formName || "form").replace(/[^\w -]+/g, "").trim() || "form"} submissions.csv`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+        <div style={S.card}>
+          <CardHead title={spam ? "Caught as spam" : "Submissions"} count={rows ? rows.length + (rows.length === 200 ? "+" : "") : null}
+            desc={spam ? "Filled in by robots (a hidden field was typed in, or the form was sent in under two seconds). These never became contacts." : "Newest first. Click one to see every answer."}
+            right={<>
+              <button type="button" style={SSF_BTN(false)} onClick={() => setSpam((v) => !v)}>{spam ? "Show real submissions" : "Show spam"}</button>
+              <button type="button" style={SSF_BTN(false)} disabled={!rows || !rows.length} onClick={download}>Export CSV</button>
+            </>} />
+          {err && <div style={S.err}>{err}</div>}
+          {!rows && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+          {rows && !rows.length && <div style={{ color: "#64748B", fontSize: 13, padding: 16, textAlign: "center" }}>{spam ? "No spam caught." : "No submissions yet."}</div>}
+          {rows && rows.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr><th style={S.th}>When</th><th style={S.th}>Name</th><th style={S.th}>Email</th><th style={S.th}>Phone</th><th style={S.th}>Contact</th></tr></thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.id} onClick={() => setOpen(r)} style={{ cursor: "pointer" }}>
+                      <td style={S.td}>{ssfWhen(r.created_at)}</td>
+                      <td style={S.td}>{pick(r, ["full_name"]) || [pick(r, ["first_name"]), pick(r, ["last_name"])].filter(Boolean).join(" ") || "—"}</td>
+                      <td style={S.td}>{pick(r, ["email"]) || "—"}</td>
+                      <td style={S.td}>{pick(r, ["phone"]) || "—"}</td>
+                      <td style={S.td}>{r.contact_id ? <a href={`/contacts/p-${r.contact_id}`} onClick={(e) => e.stopPropagation()} style={{ color: ACCENT, fontWeight: 700 }}>Open</a> : <span style={{ color: "#94A3B8" }}>—</span>}{r.notify_error && <span title={r.notify_error} style={{ marginLeft: 6 }}>⚠️</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      {open && (
+        <SsfModal title={`Submitted ${ssfWhen(open.created_at)}`} onClose={() => setOpen(null)}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody>
+            {(open.answers || []).map((a) => <tr key={a.id}><td style={{ ...S.td, color: "#64748B", width: "38%" }}>{a.label}</td><td style={{ ...S.td, whiteSpace: "pre-wrap" }}>{a.value}</td></tr>)}
+            {open.page_url && <tr><td style={{ ...S.td, color: "#64748B" }}>Page</td><td style={{ ...S.td, wordBreak: "break-all" }}>{open.page_url}</td></tr>}
+            {Object.entries(open.utm || {}).map(([k, v]) => <tr key={k}><td style={{ ...S.td, color: "#64748B" }}>{k}</td><td style={S.td}>{v}</td></tr>)}
+            {open.notify_error && <tr><td style={{ ...S.td, color: "#B91C1C" }}>Email</td><td style={{ ...S.td, color: "#B91C1C" }}>{open.notify_error}</td></tr>}
+          </tbody></table>
+          {open.contact_id && <a href={`/contacts/p-${open.contact_id}`} style={{ ...SSF_BTN(true), display: "inline-block", marginTop: 12, textDecoration: "none" }}>Open contact</a>}
+        </SsfModal>
+      )}
+    </div>
+  );
+}
+
+function SsfAnalyticsTab({ formId }) {
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  useEffect(() => { setData(null); ssfCall("crm_form_stats", { id: formId, days }).then(setData, (e) => setErr(e.message)); }, [formId, days]);
+  const rows = data?.rows || [];
+  const tot = rows.reduce((a, r) => ({ views: a.views + r.views, starts: a.starts + r.starts, submits: a.submits + r.submits }), { views: 0, starts: 0, submits: 0 });
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10}%` : "—");
+  const tile = (label, value, sub) => (
+    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, color: "#1E293B", marginTop: 4 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "#64748B" }}>{sub}</div>}
+    </div>
+  );
+  // Every day in the range, zeros included, so a quiet week reads as quiet rather than missing.
+  const series = [];
+  if (data) {
+    const by = Object.fromEntries(rows.map((r) => [r.day, r]));
+    for (let i = 0; i < data.days; i++) {
+      const d = new Date(Date.parse(data.from + "T00:00:00Z") + i * 86400000).toISOString().slice(0, 10);
+      series.push(by[d] || { day: d, views: 0, starts: 0, submits: 0 });
+    }
+  }
+  const max = Math.max(1, ...series.map((r) => r.views));
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: "#1E293B" }}>How this form is doing</div>
+          <div style={{ marginLeft: "auto", width: 220 }}><SsfSeg value={days} onChange={setDays} options={[[30, "30 days"], [90, "90 days"]]} /></div>
+        </div>
+        {err && <div style={S.err}>{err}</div>}
+        {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+        {data && (<>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 16 }}>
+            {tile("Views", tot.views.toLocaleString(), "times the form was shown")}
+            {tile("Started", tot.starts.toLocaleString(), `${pct(tot.starts, tot.views)} of views`)}
+            {tile("Submitted", tot.submits.toLocaleString(), "includes spam caught")}
+            {tile("Conversion", pct(tot.submits, tot.views), "submitted ÷ viewed")}
+          </div>
+          <div style={S.card}>
+            <CardHead title="Views and submissions per day" desc="Grey bars are views; the dark part is submissions." />
+            <div role="img" aria-label={`Daily views and submissions over the last ${data.days} days`} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 140, borderBottom: "1px solid #E2E8F0" }}>
+              {series.map((r) => (
+                <div key={r.day} title={`${r.day}: ${r.views} views, ${r.submits} submitted`} style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+                  <div style={{ height: `${(r.views / max) * 100}%`, background: "#CBD5E1", borderRadius: "2px 2px 0 0", display: "flex", flexDirection: "column", justifyContent: "flex-end", minHeight: r.views ? 2 : 0 }}>
+                    <div style={{ height: r.views ? `${Math.min(100, (r.submits / r.views) * 100)}%` : 0, background: ACCENT, minHeight: r.submits ? 2 : 0 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94A3B8", marginTop: 4 }}><span>{series[0]?.day}</span><span>{series[series.length - 1]?.day}</span></div>
+          </div>
+          <div style={S.card}>
+            <CardHead title="Where leads came from" desc="The website page each real submission was sent from." />
+            {!data.pages.length && <div style={{ fontSize: 13, color: "#64748B" }}>No submissions in this period.</div>}
+            {data.pages.map((p) => (
+              <div key={p.page} style={{ display: "flex", gap: 10, padding: "6px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+                <span style={{ flex: 1, wordBreak: "break-all" }}>{p.page}</span><b>{p.n}</b>
+              </div>
+            ))}
+          </div>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+// ── Email Templates ────────────────────────────────────────────────────────────────────────
+const SSE_BLOCKS = [
+  ["header", "Logo / header", "🏷️"], ["heading", "Heading", "🔠"], ["text", "Text", "📝"], ["image", "Image", "🖼️"],
+  ["button", "Button", "🔘"], ["divider", "Divider", "➖"], ["spacer", "Spacer", "↕️"], ["columns", "Two columns", "▥"],
+  ["social", "Social links", "🔗"], ["answers", "Form answers", "📋"], ["footer", "Footer", "📇"],
+];
+const SSE_LABEL = Object.fromEntries(SSE_BLOCKS.map(([t, l]) => [t, l]));
+const SSE_PURPOSE = [["form_autoreply", "Form auto-reply"], ["form_notification", "New-lead alert"], ["general", "General"]];
+const SSE_FONTS = [["arial", "Arial"], ["georgia", "Georgia"], ["verdana", "Verdana"], ["trebuchet", "Trebuchet"], ["tahoma", "Tahoma"]];
+const SSE_TAGS = [["contact.first_name", "First name"], ["contact.name", "Full name"], ["contact.email", "Email"], ["contact.phone", "Phone"], ["company.name", "Your business name"], ["company.phone", "Your business phone"], ["company.website", "Your website"], ["form.name", "Form name"]];
+
+function sseNewBlock(type, blocks) {
+  let i = blocks.length + 1, id = `${type}${i}`;
+  while (blocks.some((b) => b.id === id)) id = `${type}${++i}`;
+  const b = { id, type };
+  if (type === "header") Object.assign(b, { text: "{{company.name}}", align: "center", width: 160 });
+  if (type === "heading") Object.assign(b, { text: "A heading", size: 24, align: "left" });
+  if (type === "text") Object.assign(b, { html: "<p>Write something here.</p>", size: 15, align: "left" });
+  if (type === "image") Object.assign(b, { url: "", alt: "", width: 100, align: "center" });
+  if (type === "button") Object.assign(b, { text: "Visit our website", href: "{{company.website}}", align: "center" });
+  if (type === "divider") Object.assign(b, { height: 1, color: "#E5E7EB" });
+  if (type === "spacer") Object.assign(b, { height: 24 });
+  if (type === "columns") Object.assign(b, { html: "<p>Left column</p>", html2: "<p>Right column</p>" });
+  if (type === "social") Object.assign(b, { links: [{ label: "Facebook", url: "" }, { label: "Instagram", url: "" }], align: "center" });
+  if (type === "answers") Object.assign(b, { text: "What they sent" });
+  if (type === "footer") Object.assign(b, { text: "", align: "center" });
+  return b;
+}
+
+function EmailTemplatesHub({ canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [editId, setEditId] = useState(() => ssfReadParam("tpl"));
+  const [picker, setPicker] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => { setErr(""); ssfCall("crm_email_tpl_list").then(setData, (e) => setErr(e.message)); }, []);
+  useEffect(() => { load(); }, [load]);
+  const open = (id) => { ssfUrlParam("tpl", id); setEditId(id); };
+  const close = () => { ssfUrlParam("tpl", null); setEditId(null); load(); };
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+  if (editId) return <EmailTemplateEditor id={editId} canEdit={canEdit} onClose={close} />;
+  const purpose = (p) => (SSE_PURPOSE.find(([k]) => k === p) || [p, p])[1];
+  return (
+    <div style={S.card}>
+      <CardHead title="Email templates" count={data ? data.templates.length : null}
+        desc="Designed emails for your forms: the auto-reply your leads get, and the alert your team gets. Pick them on a form's Notifications tab."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setPicker(true)}>+ New template</button>} />
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {data && !data.templates.length && <div style={{ textAlign: "center", padding: "28px 12px", color: "#64748B", fontSize: 13 }}>No templates yet. Your forms use the built-in emails until you make one.</div>}
+      {data && data.templates.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={S.th}>Template</th><th style={S.th}>Used for</th><th style={S.th}>Subject</th><th style={S.th}>Edited</th><th style={S.th}></th></tr></thead>
+            <tbody>
+              {data.templates.map((t) => (
+                <tr key={t.id}>
+                  <td style={S.td}><button type="button" onClick={() => open(t.id)} style={{ background: "none", border: "none", padding: 0, fontWeight: 800, color: ACCENT, cursor: "pointer", fontSize: 13, textAlign: "left" }}>{t.name}</button></td>
+                  <td style={S.td}>{purpose(t.purpose)}</td>
+                  <td style={{ ...S.td, color: "#475569" }}>{t.subject || "—"}</td>
+                  <td style={S.td}>{ssfWhen(t.updated_at)}</td>
+                  <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
+                    <button type="button" style={SSF_BTN(false)} onClick={() => open(t.id)}>{canEdit ? "Edit" : "Open"}</button>{" "}
+                    {canEdit && <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(async () => { const r = await ssfCall("crm_email_tpl_duplicate", { id: t.id }); open(r.template.id); })}>Duplicate</button>}{" "}
+                    {canEdit && <button type="button" disabled={busy} style={{ ...SSF_BTN(false), color: "#B91C1C" }} onClick={() => { if (window.confirm(`Delete “${t.name}”? Forms using it go back to the built-in email.`)) act(() => ssfCall("crm_email_tpl_delete", { id: t.id })); }}>Delete</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {picker && (
+        <SsfModal title="Start a new email" onClose={() => setPicker(false)}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10 }}>
+            {(data?.starters || []).map((s) => (
+              <button key={s.key} type="button" disabled={busy}
+                onClick={() => act(async () => { const r = await ssfCall("crm_email_tpl_create", { starter: s.key }); setPicker(false); open(r.template.id); })}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 10, background: "#FFF", padding: "18px 12px", cursor: "pointer", fontWeight: 800, color: "#1E293B", fontSize: 13 }}>
+                <div style={{ fontSize: 26, marginBottom: 6 }}>{{ autoreply: "💌", notification: "🔔", blank: "📄" }[s.key] || "📄"}</div>
+                {s.key === "blank" ? "Blank email" : s.name}
+              </button>
+            ))}
+          </div>
+        </SsfModal>
+      )}
+    </div>
+  );
+}
+
+function EmailTemplateEditor({ id, canEdit, onClose }) {
+  const [tpl, setTpl] = useState(null);
+  const [err, setErr] = useState("");
+  const [sel, setSel] = useState(null);
+  const [hist, setHist] = useState({ past: [], future: [] });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [html, setHtml] = useState("");
+  const [subjectOut, setSubjectOut] = useState("");
+  const [device, setDevice] = useState("desktop");
+  const [msg, setMsg] = useState("");
+  const latest = useRef({});
+  latest.current = { tpl, dirty };
+
+  useEffect(() => { ssfCall("crm_email_tpl_get", { id }).then((r) => setTpl(r.template), (e) => setErr(e.message)); }, [id]);
+  // The preview is the server's render: exactly what a send produces.
+  useEffect(() => {
+    if (!tpl) return undefined;
+    const t = setTimeout(() => {
+      ssfCall("crm_email_tpl_preview", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader })
+        .then((r) => { setHtml(r.html); setSubjectOut(r.subject); }, (e) => setErr(e.message));
+    }, 450);
+    return () => clearTimeout(t);
+  }, [tpl]);
+  const save = useCallback(async () => {
+    const cur = latest.current.tpl;
+    if (!canEdit || !cur) return;
+    setSaving(true);
+    try {
+      await ssfCall("crm_email_tpl_save", { id, name: cur.name, purpose: cur.purpose, subject: cur.subject, preheader: cur.preheader, design: cur.design });
+      setDirty(false); setSavedAt(new Date()); setErr("");
+    } catch (e) { setErr(e.message); }
+    setSaving(false);
+  }, [id, canEdit]);
+  useEffect(() => {
+    if (!dirty || !canEdit) return undefined;
+    const t = setTimeout(save, 1200);
+    return () => clearTimeout(t);
+  }, [dirty, tpl, canEdit, save]);
+
+  const set = (patch, record = true) => {
+    if (record) setHist({ past: [...hist.past.slice(-49), tpl], future: [] });
+    setTpl({ ...tpl, ...patch }); setDirty(true);
+  };
+  const setDesign = (design) => set({ design });
+  const blocks = tpl?.design?.blocks || [];
+  const setBlocks = (b) => setDesign({ ...tpl.design, blocks: b });
+  const patchBlock = (bid, p) => setBlocks(blocks.map((b) => (b.id === bid ? { ...b, ...p } : b)));
+  const addBlock = (type, at) => {
+    if (blocks.length >= 60) { setErr("An email can hold up to 60 blocks."); return; }
+    const b = sseNewBlock(type, blocks);
+    const next = [...blocks];
+    next.splice(at == null ? (sel ? blocks.findIndex((x) => x.id === sel) + 1 : next.length) : at, 0, b);
+    setBlocks(next); setSel(b.id);
+  };
+  const shift = (bid, d) => { const i = blocks.findIndex((b) => b.id === bid), j = i + d; if (i < 0 || j < 0 || j >= blocks.length) return; const n = [...blocks]; [n[i], n[j]] = [n[j], n[i]]; setBlocks(n); };
+  const remove = (bid) => { setBlocks(blocks.filter((b) => b.id !== bid)); setSel(null); };
+  const undo = () => { if (!hist.past.length) return; const prev = hist.past[hist.past.length - 1]; setHist({ past: hist.past.slice(0, -1), future: [tpl, ...hist.future] }); setTpl(prev); setDirty(true); };
+  const redo = () => { if (!hist.future.length) return; const nxt = hist.future[0]; setHist({ past: [...hist.past, tpl], future: hist.future.slice(1) }); setTpl(nxt); setDirty(true); };
+  const test = async () => {
+    setMsg(""); setErr("");
+    try { const r = await ssfCall("crm_email_tpl_test", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader }); setMsg(`Test sent to ${r.sentTo}.`); } catch (e) { setErr(e.message); }
+  };
+  const back = async () => { if (latest.current.dirty) await save(); onClose(); };
+
+  const shell = { position: "fixed", inset: 0, zIndex: 3000, background: "#F1F5F9", display: "flex", flexDirection: "column" };
+  if (!tpl) return <div style={shell}><div style={{ margin: "auto", color: "#64748B" }}>{err ? <div style={S.err}>{err} <button type="button" style={SSF_BTN(false)} onClick={onClose}>Back</button></div> : "Loading template…"}</div></div>;
+  const selected = blocks.find((b) => b.id === sel) || null;
+  const topBtn = (active) => ({ background: active ? "#EEF2FF" : "transparent", border: "1px solid " + (active ? "#C7D2FE" : "transparent"), borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontSize: 14 });
+  return (
+    <div style={shell}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", background: "#FFF", borderBottom: "1px solid #E2E8F0", flexWrap: "wrap" }}>
+        <button type="button" onClick={back} style={{ ...SSF_BTN(false), border: "none" }}>← Back</button>
+        <input value={tpl.name} disabled={!canEdit} onChange={(e) => set({ name: e.target.value }, false)} aria-label="Template name"
+          style={{ ...S.input, width: 240, fontSize: 15, fontWeight: 800, border: "1px solid transparent", background: "#F8FAFC" }} />
+        <select value={tpl.purpose} disabled={!canEdit} onChange={(e) => set({ purpose: e.target.value }, false)} style={{ ...S.input, width: 170 }} aria-label="Used for">
+          {SSE_PURPOSE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>{!canEdit ? "View only" : saving ? "Saving…" : dirty ? "Unsaved" : savedAt ? "Saved" : ""}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2 }}>
+            <button type="button" aria-label="Desktop view" onClick={() => setDevice("desktop")} style={topBtn(device === "desktop")}>🖥️</button>
+            <button type="button" aria-label="Phone view" onClick={() => setDevice("mobile")} style={topBtn(device === "mobile")}>📱</button>
+          </div>
+          {canEdit && <><button type="button" aria-label="Undo" disabled={!hist.past.length} onClick={undo} style={topBtn(false)}>↶</button>
+            <button type="button" aria-label="Redo" disabled={!hist.future.length} onClick={redo} style={topBtn(false)}>↷</button></>}
+          {canEdit && <button type="button" style={SSF_BTN(false)} onClick={test}>✉ Send me a test</button>}
+          {canEdit && <button type="button" style={SSF_BTN(true)} disabled={saving || !dirty} onClick={save}>{dirty ? "Save" : "Saved ✓"}</button>}
+        </div>
+      </div>
+      {(err || msg) && <div style={{ ...(err ? S.err : S.okMsg), margin: "10px 14px 0" }}>{err || msg}</div>}
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <div style={{ width: 250, flexShrink: 0, background: "#FFF", borderRight: "1px solid #E2E8F0", overflow: "auto", padding: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 8 }}>Add a block</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginBottom: 16 }}>
+            {SSE_BLOCKS.map(([type, label, icon]) => (
+              <button key={type} type="button" disabled={!canEdit} onClick={() => addBlock(type)} title={`Add ${label}`}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF", padding: "9px 4px 7px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minHeight: 60 }}>
+                <span style={{ fontSize: 17 }}>{icon}</span><span style={{ fontSize: 10.5, fontWeight: 600, color: "#334155", textAlign: "center", lineHeight: 1.15 }}>{label}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 6 }}>Layers</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8 }}>Top to bottom, as they appear in the email.</div>
+          {blocks.map((b, i) => (
+            <div key={b.id} onClick={() => setSel(b.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 6, marginBottom: 3, cursor: "pointer", background: sel === b.id ? "#EEF2FF" : "#F8FAFC", border: "1px solid " + (sel === b.id ? "#C7D2FE" : "transparent") }}>
+              <span style={{ fontSize: 13 }}>{(SSE_BLOCKS.find((x) => x[0] === b.type) || [])[2]}</span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SSE_LABEL[b.type]}{b.type === "heading" && b.text ? `: ${b.text}` : ""}</span>
+              {canEdit && <span onClick={(e) => e.stopPropagation()} style={{ display: "flex" }}>
+                <button type="button" aria-label="Move up" disabled={i === 0} onClick={() => shift(b.id, -1)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11 }}>▲</button>
+                <button type="button" aria-label="Move down" disabled={i === blocks.length - 1} onClick={() => shift(b.id, 1)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11 }}>▼</button>
+                <button type="button" aria-label="Delete block" onClick={() => remove(b.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: "#B91C1C" }}>✕</button>
+              </span>}
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: 20 }}>
+          <div style={{ maxWidth: 720, margin: "0 auto 12px", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "90px 1fr", gap: 8, alignItems: "center" }}>
+              <label style={{ ...S.lbl, margin: 0 }}>Subject</label>
+              <SseTagInput disabled={!canEdit} value={tpl.subject} maxLength={200} onChange={(v) => set({ subject: v }, false)} />
+              <label style={{ ...S.lbl, margin: 0 }}>Preview text</label>
+              <SseTagInput disabled={!canEdit} value={tpl.preheader} maxLength={200} placeholder="The grey line inboxes show after the subject" onChange={(v) => set({ preheader: v }, false)} />
+            </div>
+            {subjectOut && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>With sample details: <b style={{ color: "#1E293B" }}>{subjectOut}</b></div>}
+          </div>
+          <div style={{ width: device === "mobile" ? 375 : 720, maxWidth: "100%", margin: "0 auto", borderRadius: device === "mobile" ? 24 : 10, overflow: "hidden", boxShadow: device === "mobile" ? "0 0 0 10px #1E293B" : "0 1px 3px rgba(0,0,0,.08)", background: "#FFF" }}>
+            <iframe title="Email preview" srcDoc={html} sandbox="" style={{ width: "100%", height: 760, border: 0, display: "block" }} />
+          </div>
+          <div style={{ textAlign: "center", fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>Sample details (“Pat Lee”) fill the merge fields here. Real emails use the lead's own.</div>
+        </div>
+        <div style={{ width: 330, flexShrink: 0, background: "#FFF", borderLeft: "1px solid #E2E8F0", overflow: "auto" }}>
+          {selected
+            ? <SseBlockPanel key={selected.id} block={selected} disabled={!canEdit} onChange={(p) => patchBlock(selected.id, p)} onClose={() => setSel(null)} onRemove={() => remove(selected.id)} />
+            : <SseStylePanel style={tpl.design.style || {}} disabled={!canEdit} onChange={(p) => setDesign({ ...tpl.design, style: { ...tpl.design.style, ...p } })} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SseTagMenu({ onPick, disabled }) {
+  return (
+    <select disabled={disabled} value="" onChange={(e) => { if (e.target.value) onPick(`{{${e.target.value}}}`); }} title="Insert a merge field"
+      style={{ ...S.input, width: 120, flexShrink: 0, fontWeight: 700, color: ACCENT }}>
+      <option value="">+ Field</option>
+      {SSE_TAGS.map(([t, l]) => <option key={t} value={t}>{l}</option>)}
+    </select>
+  );
+}
+function SseTagInput({ value, onChange, disabled, maxLength, placeholder }) {
+  const ref = useRef(null);
+  const insert = (tag) => {
+    const el = ref.current;
+    const v = value || "";
+    const at = el && el.selectionStart != null ? el.selectionStart : v.length;
+    onChange((v.slice(0, at) + tag + v.slice(el && el.selectionEnd != null ? el.selectionEnd : at)).slice(0, maxLength || 500));
+  };
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <input ref={ref} disabled={disabled} value={value || ""} maxLength={maxLength} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={S.input} />
+      <SseTagMenu disabled={disabled} onPick={insert} />
+    </div>
+  );
+}
+
+// A small rich-text box: bold, italic, underline, links, lists and merge fields. Its HTML is cut
+// down to that allow-list by the server (emailBlocks.ts cleanRichText) on every preview and save.
+function SseRichText({ html, onChange, disabled }) {
+  const ref = useRef(null);
+  // Set once per block (the panel is keyed on the block id); after that the box owns its HTML, or
+  // every keystroke would reset the caret.
+  const first = useRef(html);
+  useEffect(() => { if (ref.current) ref.current.innerHTML = first.current || ""; }, []);
+  const emit = () => { if (ref.current) onChange(ref.current.innerHTML); };
+  const cmd = (c, v) => (e) => { e.preventDefault(); if (disabled) return; ref.current.focus(); document.execCommand(c, false, v); emit(); };
+  const link = (e) => {
+    e.preventDefault();
+    if (disabled) return;
+    const url = window.prompt("Link address (https://…, mailto: or tel:)", "https://");
+    if (!url) return;
+    if (!/^(https:\/\/|mailto:|tel:)/i.test(url.trim()) && !/^\{\{\s*[a-z_.]+\s*\}\}$/.test(url.trim())) { window.alert("Links must start with https://, mailto: or tel:."); return; }
+    ref.current.focus(); document.execCommand("createLink", false, url.trim()); emit();
+  };
+  const tb = { background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 5, padding: "3px 8px", cursor: "pointer", fontSize: 12.5 };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap" }}>
+        <button type="button" style={{ ...tb, fontWeight: 800 }} onMouseDown={cmd("bold")} aria-label="Bold">B</button>
+        <button type="button" style={{ ...tb, fontStyle: "italic" }} onMouseDown={cmd("italic")} aria-label="Italic">I</button>
+        <button type="button" style={{ ...tb, textDecoration: "underline" }} onMouseDown={cmd("underline")} aria-label="Underline">U</button>
+        <button type="button" style={tb} onMouseDown={link} aria-label="Link">🔗</button>
+        <button type="button" style={tb} onMouseDown={cmd("insertUnorderedList")} aria-label="Bulleted list">• List</button>
+        <SseTagMenu disabled={disabled} onPick={(tag) => { ref.current.focus(); document.execCommand("insertText", false, tag); emit(); }} />
+      </div>
+      <div ref={ref} contentEditable={!disabled} suppressContentEditableWarning onInput={emit} onBlur={emit}
+        style={{ ...S.input, minHeight: 110, fontWeight: 400, lineHeight: 1.5, overflow: "auto", maxHeight: 320 }} />
+    </div>
+  );
+}
+
+function SseBlockPanel({ block: b, onChange, onClose, onRemove, disabled }) {
+  const t = b.type;
+  const alignRow = <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={b.align || "left"} onChange={(v) => onChange({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} /></SsfRow>;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #E2E8F0" }}>
+        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{SSE_LABEL[t]}</div>
+        <button type="button" onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontSize: 12 }}>Email styles →</button>
+      </div>
+      <div style={{ padding: 14 }}>
+        {t === "header" && (<>
+          <SsfRow label="Logo" hint="Leave empty to use the logo from your Company settings, or your business name if there's none."><SsfImagePick disabled={disabled} url={b.url} onUrl={(u) => onChange({ url: u })} /></SsfRow>
+          <SsfRow label="Text if there's no logo"><SseTagInput disabled={disabled} value={b.text} maxLength={120} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Logo width"><SsfNum disabled={disabled} value={b.width} min={40} max={400} onChange={(v) => onChange({ width: v })} /></SsfRow>
+          <SsfColor disabled={disabled} label="Background" value={b.bg} onChange={(v) => onChange({ bg: v })} />
+          {alignRow}
+        </>)}
+        {t === "heading" && (<>
+          <SsfRow label="Text"><SseTagInput disabled={disabled} value={b.text} maxLength={300} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Size"><SsfNum disabled={disabled} value={b.size} min={16} max={40} onChange={(v) => onChange({ size: v })} /></SsfRow>
+          <SsfColor disabled={disabled} label="Color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          {alignRow}
+        </>)}
+        {t === "text" && (<>
+          <SsfRow label="Text"><SseRichText disabled={disabled} html={b.html} onChange={(h) => onChange({ html: h })} /></SsfRow>
+          <SsfRow label="Text size"><SsfNum disabled={disabled} value={b.size} min={12} max={22} onChange={(v) => onChange({ size: v })} /></SsfRow>
+          {alignRow}
+        </>)}
+        {t === "image" && (<>
+          <SsfRow label="Image"><SsfImagePick disabled={disabled} url={b.url} onUrl={(u) => onChange({ url: u })} /></SsfRow>
+          <SsfRow label="Describe the image" hint="Shown when an inbox blocks images."><input disabled={disabled} value={b.alt || ""} maxLength={200} onChange={(e) => onChange({ alt: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Link when clicked (optional)"><input disabled={disabled} value={b.href || ""} placeholder="https://" onChange={(e) => onChange({ href: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Width"><SsfNum disabled={disabled} value={b.width} min={10} max={100} suffix="%" onChange={(v) => onChange({ width: v })} /></SsfRow>
+          {alignRow}
+        </>)}
+        {t === "button" && (<>
+          <SsfRow label="Button text"><SseTagInput disabled={disabled} value={b.text} maxLength={80} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Link" hint="https://…, mailto:, tel: or {{company.website}}"><input disabled={disabled} value={b.href || ""} onChange={(e) => onChange({ href: e.target.value })} style={S.input} /></SsfRow>
+          <SsfColor disabled={disabled} label="Button color" value={b.bg} onChange={(v) => onChange({ bg: v })} />
+          <SsfColor disabled={disabled} label="Text color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          {alignRow}
+        </>)}
+        {t === "divider" && (<>
+          <SsfColor disabled={disabled} label="Color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          <SsfRow label="Thickness"><SsfNum disabled={disabled} value={b.height} min={1} max={6} onChange={(v) => onChange({ height: v })} /></SsfRow>
+        </>)}
+        {t === "spacer" && <SsfRow label="Height"><SsfNum disabled={disabled} value={b.height} min={4} max={80} onChange={(v) => onChange({ height: v })} /></SsfRow>}
+        {t === "columns" && (<>
+          <SsfRow label="Left column"><SseRichText disabled={disabled} html={b.html} onChange={(h) => onChange({ html: h })} /></SsfRow>
+          <SsfRow label="Right column"><SseRichText disabled={disabled} html={b.html2} onChange={(h) => onChange({ html2: h })} /></SsfRow>
+        </>)}
+        {t === "social" && (<>
+          {(b.links || []).map((l, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr auto", gap: 6, marginBottom: 6 }}>
+              <input disabled={disabled} value={l.label} maxLength={40} placeholder="Facebook" onChange={(e) => onChange({ links: b.links.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) })} style={S.input} />
+              <input disabled={disabled} value={l.url} placeholder="https://" onChange={(e) => onChange({ links: b.links.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)) })} style={S.input} />
+              <button type="button" disabled={disabled} aria-label="Remove link" onClick={() => onChange({ links: b.links.filter((_, j) => j !== i) })} style={{ ...SSF_BTN(false), padding: "4px 8px" }}>✕</button>
+            </div>
+          ))}
+          {(b.links || []).length < 8 && <button type="button" disabled={disabled} style={SSF_BTN(false)} onClick={() => onChange({ links: [...(b.links || []), { label: "", url: "" }] })}>+ Add link</button>}
+          <div style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0" }}>Links without an https:// address are left out of the email.</div>
+          {alignRow}
+        </>)}
+        {t === "answers" && (<>
+          <SsfRow label="Title above the answers"><input disabled={disabled} value={b.text || ""} maxLength={120} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>
+          <div style={{ fontSize: 12, color: "#64748B" }}>Lists every answer from the form that was filled in. Empty when this template is sent outside a form.</div>
+        </>)}
+        {t === "footer" && (<>
+          <SsfRow label="Extra line (optional)"><SseTagInput disabled={disabled} value={b.text} maxLength={500} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Your business name, address and phone are added from Company settings.</div>
+          {alignRow}
+        </>)}
+        {!disabled && <button type="button" onClick={onRemove} style={{ ...SSF_BTN(false), color: "#B91C1C", width: "100%", marginTop: 8 }}>Delete this block</button>}
+      </div>
+    </div>
+  );
+}
+
+function SseStylePanel({ style: st, onChange, disabled }) {
+  return (
+    <div>
+      <div style={{ padding: "12px 14px", borderBottom: "1px solid #E2E8F0", fontWeight: 800, fontSize: 13, color: "#1E293B" }}>Email styles</div>
+      <div style={{ padding: 14 }}>
+        <SsfColor disabled={disabled} label="Background" value={st.bg} onChange={(v) => onChange({ bg: v })} />
+        <SsfColor disabled={disabled} label="Email body" value={st.contentBg} onChange={(v) => onChange({ contentBg: v })} />
+        <SsfColor disabled={disabled} label="Text" value={st.text} onChange={(v) => onChange({ text: v })} />
+        <SsfColor disabled={disabled} label="Links and buttons" value={st.accent} onChange={(v) => onChange({ accent: v })} />
+        <div style={{ height: 8 }} />
+        <SsfRow label="Font"><select disabled={disabled} value={st.font || "arial"} onChange={(e) => onChange({ font: e.target.value })} style={S.input}>{SSE_FONTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></SsfRow>
+        <SsfRow label="Email width" hint="600 is the standard; most inboxes show up to 640."><SsfNum disabled={disabled} value={st.width} min={400} max={800} onChange={(v) => onChange({ width: v })} /></SsfRow>
+        <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={st.radius} min={0} max={24} onChange={(v) => onChange({ radius: v })} /></SsfRow>
+        <div style={{ fontSize: 11.5, color: "#64748B" }}>Click a layer on the left to edit that block.</div>
+      </div>
+    </div>
+  );
+}

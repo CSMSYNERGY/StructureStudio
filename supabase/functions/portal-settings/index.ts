@@ -233,6 +233,8 @@ import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuick
 // mirrored in _shared/aiConsent.ts, the reads and the save in ./aiTranscripts.ts.
 import { AI_NOTICE_VERSION, currentAnswer, parseAiAnswer } from "../_shared/aiConsent.ts";
 import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, saveAiTranscripts } from "./aiTranscripts.ts";
+// Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
+import { handleLeadFormAction } from "./leadForms.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
   DESIGN_FEED_STAYS, isUuidLike, parseDealPatch, parseIdOrder, parseLead, parseMoneyCents, parsePipelineSave, parseStageOrder,
@@ -549,6 +551,32 @@ const GATES: GateTable = {
   crm_deal_set_status:   { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
+
+  // ── Customer Hub → Forms + Email Templates (migration 325, ./leadForms.ts) ──────────────
+  // crm_* on purpose: the CRM entitlement guard below gates them by that prefix. settings_crm,
+  // the area the Customer Hub carries; reads at view, everything that writes or sends at edit.
+  // None writes a contact (the public lead-form function does), so none is a contacts gate.
+  crm_forms_list:          { area: "settings_crm", level: "view" },
+  crm_form_get:            { area: "settings_crm", level: "view" },
+  crm_form_submissions:    { area: "settings_crm", level: "view" },
+  crm_form_stats:          { area: "settings_crm", level: "view" },
+  crm_form_create:         { area: "settings_crm", level: "edit" },
+  crm_form_save:           { area: "settings_crm", level: "edit" },
+  crm_form_publish:        { area: "settings_crm", level: "edit" },
+  crm_form_unpublish:      { area: "settings_crm", level: "edit" },
+  crm_form_duplicate:      { area: "settings_crm", level: "edit" },
+  crm_form_archive:        { area: "settings_crm", level: "edit" },
+  crm_form_delete:         { area: "settings_crm", level: "edit" },
+  crm_form_upload_url:     { area: "settings_crm", level: "edit" },
+  crm_form_test_email:     { area: "settings_crm", level: "edit" },
+  crm_email_tpl_list:      { area: "settings_crm", level: "view" },
+  crm_email_tpl_get:       { area: "settings_crm", level: "view" },
+  crm_email_tpl_preview:   { area: "settings_crm", level: "view" },
+  crm_email_tpl_create:    { area: "settings_crm", level: "edit" },
+  crm_email_tpl_save:      { area: "settings_crm", level: "edit" },
+  crm_email_tpl_duplicate: { area: "settings_crm", level: "edit" },
+  crm_email_tpl_delete:    { area: "settings_crm", level: "edit" },
+  crm_email_tpl_test:      { area: "settings_crm", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -10469,6 +10497,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const out = await withContacts(data ?? []);
     if (out instanceof Response) return out;
     return json({ ok: true, deals: out });
+  }
+
+  // Customer Hub → Forms + Email Templates (migration 325). After the CRM entitlement guard above,
+  // which has already refused an unpaid tenant by the crm_ prefix. Every action is NAMED here, not
+  // looked up in a set, so preflight's GATES ⇄ branch cross-check (which reads this file) sees them.
+  if (action === "crm_forms_list" ||
+      action === "crm_form_create" ||
+      action === "crm_form_get" ||
+      action === "crm_form_save" ||
+      action === "crm_form_publish" ||
+      action === "crm_form_unpublish" ||
+      action === "crm_form_duplicate" ||
+      action === "crm_form_archive" ||
+      action === "crm_form_delete" ||
+      action === "crm_form_submissions" ||
+      action === "crm_form_stats" ||
+      action === "crm_form_upload_url" ||
+      action === "crm_form_test_email" ||
+      action === "crm_email_tpl_list" ||
+      action === "crm_email_tpl_create" ||
+      action === "crm_email_tpl_get" ||
+      action === "crm_email_tpl_save" ||
+      action === "crm_email_tpl_duplicate" ||
+      action === "crm_email_tpl_delete" ||
+      action === "crm_email_tpl_preview" ||
+      action === "crm_email_tpl_test") {
+    return await handleLeadFormAction({
+      admin, req, clientId, userId: userId ?? null, userEmail: userEmail ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
   }
 
   if (action === "crm_create_lead") {
