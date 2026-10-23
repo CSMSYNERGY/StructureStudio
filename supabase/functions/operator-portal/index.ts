@@ -239,7 +239,9 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         const clientId = await assertClient(admin, payload.clientId);
         const { data: rows, error } = await admin
           .from("client_users")
-          .select("user_id, role, full_name, phone, created_at")
+          // `title` since 2026-10-23: the account switcher's user list names it ("Sales
+          // Rep"), and it is what decides the preset an operator wears when acting as them.
+          .select("user_id, role, title, full_name, phone, created_at")
           .eq("client_id", clientId)
           .order("created_at");
         if (error) throw error;
@@ -274,6 +276,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
             fullName: (r as any).full_name || "",
             phone: (r as any).phone || "",
             role: (r as any).role || "user",
+            title: (r as any).title || null,
             isOperator: Boolean(listedOp),
             operatorCanWrite: Boolean(listedOp?.can_write),
             operatorCanBill: Boolean(listedOp?.can_bill),

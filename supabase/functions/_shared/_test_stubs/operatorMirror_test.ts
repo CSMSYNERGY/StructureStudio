@@ -93,19 +93,21 @@ Deno.test("a failed view-as lookup is never stored as an answer", () => {
   );
 });
 
-Deno.test("support never falls back to the OPERATOR'S OWN access map", () => {
-  const block = codeBetween(SHELL, "const myAccess = supportView", "const mirrorAccess", "myAccess");
-  assert(block.includes("? (viewedCtx ? viewedCtx.access : null)"), "support must read only the viewed tenant's map");
+Deno.test("a mirrored operator never falls back to the OPERATOR'S OWN access map", () => {
+  // `mirrorPerson` since 2026-10-23 = supportView OR acting as a named person on the viewed
+  // account. Both wear somebody else's map; they differ only in whose.
+  const block = codeBetween(SHELL, "const myAccess = mirrorPerson", "const mirrorAccess", "myAccess");
+  assert(block.includes("? (viewedCtx ? viewedCtx.access : null)"), "a mirror must read only the viewed tenant's map");
   // The NON-support branch reads tenant.access and should — that is the caller's own portal.
   // What must never come back is the `|| tenant.access` fallback ON the support branch.
   assert(
     !/viewedCtx && viewedCtx\.access\)\s*\|\|/.test(block),
-    "support falls back to the operator's own tenant map again — that is the god view",
+    "a mirror falls back to the operator's own tenant map again — that is the god view",
   );
 });
 
 Deno.test("content surfaces get the mirrored access map, so the builder's own rules govern", () => {
-  assert(SHELL.includes("const mirrorAccess = supportView ? myAccess : (viewing ? null : myAccess);"));
+  assert(SHELL.includes("const mirrorAccess = mirrorPerson ? myAccess : (viewing ? null : myAccess);"));
   assert(SHELL.includes("const settingsAccess = mirrorAccess;"),
     "the settings rail is back on a null map — that offers a support operator Billing, Wallet and SMS");
   // The three schedule boards derive their own canEdit from this prop.
@@ -115,7 +117,15 @@ Deno.test("content surfaces get the mirrored access map, so the builder's own ru
 });
 
 Deno.test("owner-level row actions follow the owner, not the tab clamp", () => {
-  assert(SHELL.includes("const mirrorAdmin = supportView ? true : canAdmin;"));
+  // Support answers "what would the OWNER see" and mirrors as an admin. ACTING AS a named
+  // person answers "what does THIS person see", so it must NOT: a sales rep is not an admin,
+  // and a surface told otherwise would offer them owner-level row actions.
+  assert(SHELL.includes('const mirrorAdmin = supportView ? true : (wearing ? ssCanWrite(myAccess, "settings_team") : canAdmin);'),
+    "mirrorAdmin no longer distinguishes acting-as from support");
+  // And the tab clamp must stop treating an operator as an admin while they are wearing
+  // somebody, or every tab that person cannot reach is unclamped anyway.
+  assert(SHELL.includes("const canAdmin = viewing ? (isOperator && !supportView && !wearing) : isAdmin;"),
+    "canAdmin is true again while acting as a person — that is the god view wearing a name tag");
   // canAdmin must still be the thing ssClampTab is given, or the narrowed map governs nothing.
   // Its 5th argument is consolesBarred since 2026-09-23 (supportView OR a support account on
   // its own portal — see supportConsoles_test); that is read only by the admin/projects

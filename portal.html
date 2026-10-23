@@ -143,6 +143,23 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-switch-list .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ss-switch-list .vw{margin-left:auto;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px;flex-shrink:0}
 .ss-switch-note{font-size:12px;color:#94A3B8;font-weight:600;padding:8px}
+/* ACTING AS a person (2026-10-23). Each account row carries a flyout of the people on it;
+   picking one opens the account wearing THEIR access. */
+.ss-switch-row{position:relative}
+.ss-switch-row .rchev{width:13px;height:13px;margin-left:4px;color:#CBD5E1;flex-shrink:0}
+.ss-switch-row:hover .rchev{color:#64748B}
+/* Opens to the LEFT. The menu it hangs off is right-aligned under a pill in the top-right
+   corner, so a submenu on the right would start off the edge of the window. */
+.ss-switch-sub{position:absolute;top:-6px;right:calc(100% + 4px);width:250px;background:#FFF;
+  border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:95;
+  max-height:320px;overflow-y:auto}
+.ss-switch-sub button{display:block;width:100%;background:none;border:none;color:#334155;font-size:12.5px;
+  font-weight:700;padding:7px 8px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-sub button:hover{background:#F1F5F9}
+.ss-switch-sub button.cur{background:#FEF3C7}
+.ss-switch-sub button.whole{border-bottom:1px solid #E2E8F0;border-radius:7px 7px 0 0;margin-bottom:4px;padding-bottom:9px}
+.ss-switch-sub .sub{display:block;font-size:10.5px;font-weight:600;color:#94A3B8;margin-top:1px}
+.ss-switch-sub .vw{float:right;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px}
 .ss-switch-exit{display:block;width:100%;margin-top:5px;background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;font-size:12.5px;font-weight:800;padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
 .ss-switch-exit:hover{background:#FFEDD5}
 /* Sign Out owns the red hover; a neutral item must not look destructive. */
@@ -256,6 +273,10 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   /* Same rule for the switcher: the avatar and chevron stay tappable, the words go. */
   .ss-topbar .ss-switch .stext{display:none}
   .ss-topbar .ss-switch-menu{width:min(300px,calc(100vw - 28px))}
+  /* No room beside the menu at this width, so the people sit under their account rather
+     than beside it — a flyout here would open off-screen. */
+  .ss-switch-sub{position:static;width:auto;box-shadow:none;border:none;border-left:2px solid #E2E8F0;
+    border-radius:0;margin:4px 0 4px 10px;padding:2px 0 2px 6px;max-height:none}
   .ss-body{padding:14px 12px}
 }
 /* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
@@ -316,7 +337,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=230ef4ad"></script>
-<script defer src="/portal.app.compiled.js?v=b92246b0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=9d1449ec" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

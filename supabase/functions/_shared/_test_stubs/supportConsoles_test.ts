@@ -51,6 +51,10 @@ const { ssClampTab, ssFallbackTab } = new Function("window", `${CLAMP_BLOCK}; re
 
 // ── The shell's own statements, each lifted whole ──
 const SUPPORT_VIEW = between(SHELL, "const supportView =", ";", "supportView", true);
+// `wearing` (2026-10-23) — acting as a named person on the viewed account. canAdmin reads it,
+// so the sandbox below must carry its declaration too; without it every case throws a
+// ReferenceError and the suite fails for a reason that has nothing to do with what it checks.
+const WEARING = between(SHELL, "const wearing =", ";", "wearing", true);
 const CONSOLES_BARRED = between(SHELL, "const consolesBarred =", ";", "consolesBarred", true);
 const CAN_ADMIN_FOR_URL = between(SHELL, "const canAdminForUrl =", ";\n", "canAdminForUrl", true);
 const RESOLVED_TAB = between(SHELL, "const resolvedTab = ssClampTab(", ");", "the URL clamp", true);
@@ -86,7 +90,7 @@ function shell(w: World) {
   const isAdmin = w.role === "owner" || w.role === "admin";
   const f = new Function(
     "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub",
-    [SUPPORT_VIEW, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
+    [SUPPORT_VIEW, WEARING, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
       `\nreturn { supportView, consolesBarred, resolvedTab, gatesResolved, canAdmin, activeTab, adminNav: !!(${NAV![1]}), adminMount: !!(${MOUNT![1]}) };`,
   );
   return f(ssClampTab, w.isOperator, w.isSupportOp, w.viewing, tenant, w.canProjects, w.tab, isAdmin, OWN_MAP,

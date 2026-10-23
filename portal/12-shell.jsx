@@ -947,6 +947,20 @@ function Dashboard({ session }) {
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
   const supportView = !!viewing && isSupportOp;
+  // ACTING AS one named person on the viewed account (2026-10-23).
+  //
+  // ⚠️ THIS HAS TO DRIVE THE RENDERING, not only the server. resolveTenant already resolves
+  // that person's map and refuses what they cannot do — but a platform operator's UI rode
+  // `canAdmin` and would have gone on offering every button while the server answered 403 to
+  // each one. "See exactly what they see" delivered as a screen full of controls that fail is
+  // worse than not shipping it: it teaches the operator the wrong answer about the builder's
+  // access, which is the one question the feature exists to answer.
+  //
+  // So `wearing` joins supportView everywhere the mirror is chosen below. The two differ only
+  // in WHOSE map is worn — the tenant's owner, or the person picked — and never in whether it
+  // is honoured.
+  const wearing = !!(viewing && viewing.asUser && viewing.asUser.userId);
+  const mirrorPerson = supportView || wearing;
   // ⛔ BUT OUR TWO CONSOLES ARE NOT PART OF "THEIR OWN ACCOUNT", and supportView cannot say
   // so, because it is false on the support account's own portal on purpose (above). This is
   // the separate question for Admin and Projects: "is this a support account, wherever it is
@@ -1046,7 +1060,11 @@ function Dashboard({ session }) {
     // entitlementRev: an operator who subscribes or cancels FOR the viewed builder (Billing in
     // view-as) sees the builder's portal change at once, exactly as the builder would. The state is
     // not cleared first, so the old answer stays on screen until the new one lands.
-  }, [mirrorView, viewing && viewing.clientId, session.access_token, entitlementRev]);
+    // The PERSON is a dependency too (2026-10-23): switching from the whole account to
+    // somebody on it, or between two people, changes the map this fetch returns. Without it
+    // the first person's permissions would stay on screen for the second.
+  }, [mirrorView, viewing && viewing.clientId, viewing && viewing.asUser && viewing.asUser.userId,
+    session.access_token, entitlementRev]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -1205,7 +1223,18 @@ function Dashboard({ session }) {
       // operator's deep link silently loses half of itself.
     }
   }, [isOperator]);
-  const openAccount = (c) => {
+  /**
+   * Open a builder's account, optionally AS one named person on it.
+   *
+   * Carolyn, 2026-10-23: "the point of this is to be able to see their account in the exact
+   * way that they do so we can see the same access they have / don't have."
+   *
+   * ⚠️ `asUser` is a REQUEST, not a decision. The server resolves that person's own access
+   * map and enforces it (resolveTenant's acting-as branch); nothing here grants anything. It
+   * can only ever NARROW what the operator could already do, and every write stays attributed
+   * to the operator in the audit, never to the person being worn.
+   */
+  const openAccount = (c, asUser = null) => {
     // Switching account remounts the Designer, discarding anything in progress — and the Advanced
     // page, whose unsaved building (or save still going) is named too (review 2026-09-29).
     const advDirty = advancedDirtyRef.current;
@@ -1217,10 +1246,16 @@ function Dashboard({ session }) {
     // live GHL estimate refs) into what the operator expects to be a blank designer.
     setOpenDesign(null);
     ssTargetClientId = c.clientId;              // same tick as the click, before the re-render
-    setViewing(c); setTab("contacts"); setSub(null);
+    ssTargetUserId = (asUser && asUser.userId) || null;   // set together, cleared together
+    setViewing(asUser ? { ...c, asUser } : c); setTab("contacts"); setSub(null);
     // replaceState, not navigate(): entering an account is not a page change, and the path
-    // is rebuilt so ?view= rides alongside /contacts instead of replacing it.
-    try { window.history.replaceState({ page: "contacts", sub: null }, "", ssPageBase("contacts", null) + "?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
+    // is rebuilt so ?view= rides alongside /contacts instead of replacing it. `as` rides with
+    // it so a reload, or a link pasted to a colleague, lands on the same person's view.
+    try {
+      const q = "?view=" + encodeURIComponent(c.clientId)
+        + (ssTargetUserId ? "&as=" + encodeURIComponent(ssTargetUserId) : "");
+      window.history.replaceState({ page: "contacts", sub: null }, "", ssPageBase("contacts", null) + q);
+    } catch (_e) {}
   };
   const exitAccount = () => {
     // Leaving remounts the Advanced page too. Only its UNSAVED work asks: that page reports it, and
@@ -1228,6 +1263,7 @@ function Dashboard({ session }) {
     if (advancedDirtyRef.current && !window.confirm("Leaving this account will discard the building you haven't saved on the Advanced page. Continue?")) return;
     setOpenDesign(null);                        // same replay guard as openAccount
     ssTargetClientId = null;
+    ssTargetUserId = null;
     setViewing(null); setTab("accounts"); setSub(null);
     try { window.history.replaceState({ page: "accounts", sub: null }, "", ssPageBase("accounts", null)); } catch (_e) {}
   };
@@ -1243,6 +1279,14 @@ function Dashboard({ session }) {
   // the switcher pays nothing, and the Accounts page keeps its own copy.
   // Hooks HERE, with the others, above Dashboard's early returns (React #310).
   const [pickerOpen, setPickerOpen] = useState(false);
+  // ACTING AS a person (2026-10-23). `hoverClient` is the account whose people are showing;
+  // `peopleBy` caches them per account so moving along the list does not re-ask.
+  //
+  // Fetched on HOVER rather than with the account list: most switches are to a whole account,
+  // and list_users costs one auth lookup PER PERSON server-side (operator-portal says so) —
+  // loading them for every builder up front would be dozens of reads nobody asked for.
+  const [hoverClient, setHoverClient] = useState(null);
+  const [peopleBy, setPeopleBy] = useState({});
   const [pickerClients, setPickerClients] = useState(null);  // null = never loaded
   const [pickerQ, setPickerQ] = useState("");
   const pickerRef = useRef(null);
@@ -1265,10 +1309,32 @@ function Dashboard({ session }) {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [pickerOpen]);
-  const pickAccount = (c) => {
-    setPickerOpen(false); setPickerQ("");
-    if (!viewing || viewing.clientId !== c.clientId) openAccount({ clientId: c.clientId, companyName: c.companyName });
+  const pickAccount = (c, asUser = null) => {
+    setPickerOpen(false); setPickerQ(""); setHoverClient(null);
+    // ⚠️ The "already here" short-circuit has to consider the PERSON too. Without that,
+    // switching from the whole account to a person inside it — same clientId — did nothing
+    // at all, which reads as a broken menu rather than as a no-op.
+    const samePerson = (viewing && viewing.asUser ? viewing.asUser.userId : null) === (asUser ? asUser.userId : null);
+    if (!viewing || viewing.clientId !== c.clientId || !samePerson) {
+      openAccount({ clientId: c.clientId, companyName: c.companyName }, asUser);
+    }
   };
+
+  /** The people on one account, fetched once and kept. Failure is recorded as an empty list
+   *  with a reason rather than left pending, so the flyout says something instead of spinning. */
+  const loadPeople = useCallback(async (clientId) => {
+    if (!clientId || peopleBy[clientId]) return;
+    setPeopleBy((m) => ({ ...m, [clientId]: { loading: true, users: [] } }));
+    try {
+      const { data, error } = await sb.functions.invoke("operator-portal", {
+        body: { action: "list_users", clientId },
+      });
+      if (error || !data || data.error) throw new Error((data && data.error) || "could not read");
+      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: data.users || [] } }));
+    } catch (_e) {
+      setPeopleBy((m) => ({ ...m, [clientId]: { loading: false, users: [], failed: true } }));
+    }
+  }, [peopleBy]);
 
   // Back/forward. Reads the URL rather than the state object, so a hand-edited address
   // and a history entry are treated identically. Every view-as history entry carries its
@@ -1290,6 +1356,8 @@ function Dashboard({ session }) {
       const p = ssParsePath();
       const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
       const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;
+      const rawAs = (new URLSearchParams(window.location.search).get("as") || "").trim().toLowerCase();
+      const urlAsUser = (isOperator && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(rawAs)) ? rawAs : null;
       const crosses = urlView !== (viewing ? viewing.clientId : null);
       if (crosses && advancedDirtyRef.current) {
         const lose = designerOpened ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page" : "the building you haven't saved on the Advanced page";
@@ -1312,9 +1380,16 @@ function Dashboard({ session }) {
       if (crosses) {
         setOpenDesign(null);                    // same replay guard as openAccount/exitAccount
         ssTargetClientId = urlView;             // same tick as the pop, before the re-render
+        // The person, from ?as=. Only meaningful alongside a view target, so it is dropped
+        // with it — a bare ?as= on no account would otherwise be sent and answered 404.
+        ssTargetUserId = urlView ? urlAsUser : null;
         // Seeded with the slug; viewingFetch backfills the real company name, exactly as
         // the ?view= boot effect does. An unchanged tenant keeps its backfilled object.
-        setViewing(urlView ? { clientId: urlView, companyName: urlView } : null);
+        // The name is filled in by the status read that follows; the id is enough to restore
+        // the state, and a half-named row is better than losing the person on a reload.
+        setViewing(urlView
+          ? { clientId: urlView, companyName: urlView, ...(urlAsUser ? { asUser: { userId: urlAsUser } } : {}) }
+          : null);
       }
     };
     window.addEventListener("popstate", onPop);
@@ -1700,7 +1775,10 @@ function Dashboard({ session }) {
   // which is exactly the "only two tabs" symptom Carolyn reported.
   // THE LINE THAT UNCLAMPS EVERY TAB. For a support operator it must be false, or
   // ssClampTab returns every tab unmodified and the narrowed access map governs nothing.
-  const canAdmin = viewing ? (isOperator && !supportView) : isAdmin;
+  // ⚠️ `!wearing` as well as `!supportView`: an operator acting as a sales rep is NOT an admin
+  // of that account, and leaving this true would unclamp every tab the rep cannot reach — the
+  // god view wearing a name tag.
+  const canAdmin = viewing ? (isOperator && !supportView && !wearing) : isAdmin;
   // canAdmin answers TWO different questions, and a support operator needs opposite answers.
   //   (1) "unclamp every tab" — must be FALSE, or ssClampTab returns every tab unmodified and
   //       the narrowed access map governs nothing. That is what canAdmin keeps meaning.
@@ -1712,7 +1790,10 @@ function Dashboard({ session }) {
   //       server would have allowed — the mirror failing in the quiet direction.
   // Billing is NOT among them: those CTAs stay on canAdmin, because a support operator
   // genuinely cannot bill and resolveTenant clamps settings_billing to "none".
-  const mirrorAdmin = supportView ? true : canAdmin;
+  // Support answers "what would the OWNER see", so it mirrors as an admin. Acting as a named
+  // person answers "what does THIS person see", so it must not: a rep is not an admin, and
+  // the content surfaces have to be told so.
+  const mirrorAdmin = supportView ? true : (wearing ? ssCanWrite(myAccess, "settings_team") : canAdmin);
 
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
@@ -2400,14 +2481,14 @@ function Dashboard({ session }) {
   // null in viewedCtx forever (see the effect above, which no longer stores one). The
   // fallback is gone rather than re-timed: the operator's own map is never a safe stand-in
   // for a builder's, and the brief clamp to a fallback tab is the cheaper wrong answer.
-  const myAccess = supportView
+  const myAccess = mirrorPerson
     ? (viewedCtx ? viewedCtx.access : null)
     : ((tenant && tenant !== "none") ? tenant.access : null);
   // The access map to hand a CONTENT surface. Support gets the viewed tenant's real map, so
   // the builder's own rules govern what the page offers; a platform operator gets null and
   // rides canAdmin, as before. Identical to the old `viewing ? null : myAccess` for everyone
   // who is not a support operator.
-  const mirrorAccess = supportView ? myAccess : (viewing ? null : myAccess);
+  const mirrorAccess = mirrorPerson ? myAccess : (viewing ? null : myAccess);
   // The tab cache has to know WHICH ROWS this map allows, not just who is asking. `contacts`
   // gained an 'own' level on 2026-09-05 that narrows the rows every contact-and-design read
   // returns, so the same person on the same tenant gets a different payload before and after
@@ -3121,7 +3202,15 @@ function Dashboard({ session }) {
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
-              <span>Editing as operator — changes are live</span>
+              {/* ⚠️ NAMES THE PERSON when acting as one. An operator wearing somebody's
+                  permissions still writes as THEMSELVES — the audit records the operator, not
+                  the person — so the banner has to say both, or a screenshot of this screen
+                  reads as that employee having done it. */}
+              <span>
+                {viewing.asUser
+                  ? `Seeing this account as ${viewing.asUser.name || "a team member"} — their access, your changes`
+                  : "Editing as operator — changes are live"}
+              </span>
               <button type="button" onClick={exitAccount}
                 style={{ background: "#92400E", color: "#FFF", border: "none", borderRadius: 7, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                 Exit
@@ -3170,12 +3259,51 @@ function Dashboard({ session }) {
                       .map((c) => {
                         const isCur = viewing && viewing.clientId === c.clientId;
                         return (
-                          <button type="button" key={c.clientId} role="option" aria-selected={!!isCur}
-                            className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}>
-                            <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
-                            <span className="nm">{c.companyName || c.clientId}</span>
-                            {isCur && <span className="vw">Viewing</span>}
-                          </button>
+                          <div key={c.clientId} className="ss-switch-row"
+                            onMouseEnter={() => { setHoverClient(c.clientId); loadPeople(c.clientId); }}
+                            onMouseLeave={() => setHoverClient((h) => (h === c.clientId ? null : h))}>
+                            <button type="button" role="option" aria-selected={!!isCur}
+                              className={isCur ? "cur" : ""} onClick={() => pickAccount(c)}
+                              /* Keyboard reaches the people too: hover is a mouse affordance, and
+                                 the flyout is the only way to this feature. */
+                              onFocus={() => { setHoverClient(c.clientId); loadPeople(c.clientId); }}
+                              aria-haspopup="menu" aria-expanded={hoverClient === c.clientId}>
+                              <span className="ss-clogo sm" aria-hidden="true">{String(c.companyName || c.clientId || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("")}</span>
+                              <span className="nm">{c.companyName || c.clientId}</span>
+                              {isCur && <span className="vw">Viewing</span>}
+                              <svg className="rchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                            </button>
+                            {/* THE PEOPLE ON THIS ACCOUNT (Carolyn 2026-10-23). Picking one opens
+                                the account wearing THEIR access, so an operator sees exactly what
+                                that person does — and, just as usefully, what they cannot reach.
+                                The server resolves and enforces the map; this only names who. */}
+                            {hoverClient === c.clientId && (
+                              <div className="ss-switch-sub" role="menu" aria-label={`People on ${c.companyName || c.clientId}`}>
+                                <button type="button" role="menuitem" className="whole" onClick={() => pickAccount(c)}>
+                                  The whole account
+                                  <span className="sub">everything an operator can reach</span>
+                                </button>
+                                {(peopleBy[c.clientId] || {}).loading && <div className="ss-switch-note">Loading people…</div>}
+                                {(peopleBy[c.clientId] || {}).failed && <div className="ss-switch-note">Couldn’t read the people on this account.</div>}
+                                {((peopleBy[c.clientId] || {}).users || []).map((u) => {
+                                  const asCur = isCur && viewing && viewing.asUser && viewing.asUser.userId === u.userId;
+                                  const label = u.fullName || u.email || u.userId;
+                                  return (
+                                    <button type="button" role="menuitem" key={u.userId}
+                                      className={asCur ? "cur" : ""}
+                                      onClick={() => pickAccount(c, { userId: u.userId, name: label, title: u.title || u.role })}>
+                                      {label}
+                                      <span className="sub">{ssTitleLabel(u.title) || (u.role === "owner" ? "Owner" : "Team member")}</span>
+                                      {asCur && <span className="vw">Viewing</span>}
+                                    </button>
+                                  );
+                                })}
+                                {!(peopleBy[c.clientId] || {}).loading && !(peopleBy[c.clientId] || {}).failed
+                                  && ((peopleBy[c.clientId] || {}).users || []).length === 0
+                                  && <div className="ss-switch-note">Nobody has signed in on this account yet.</div>}
+                              </div>
+                            )}
+                          </div>
                         );
                       })}
                     {pickerClients !== null && pickerClients.length === 0 && <div className="ss-switch-note">No accounts.</div>}

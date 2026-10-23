@@ -218,6 +218,14 @@ window.ssLoadDesigner = function () {
 // server-side delete) or send_invoice is unrecoverable and invisible. Here, forgetting is
 // impossible. Same module-level-transport-state pattern as ssOnSessionExpired above.
 let ssTargetClientId = null;   // set by Dashboard during render; null when not viewing
+// ACTING AS one named person inside the viewed account (2026-10-23). Set in the same tick
+// as ssTargetClientId and cleared with it, so the two can never describe different states.
+//
+// ⚠️ IT IS A REQUEST, NOT A DECISION. The server resolves that person's own access map and
+// enforces it (resolveTenant); this only says who to ask about. A browser that sets it to
+// somebody on another tenant gets a 404, and one that sets it without being an operator is
+// ignored entirely — the field is read inside the operator branch and nowhere else.
+let ssTargetUserId = null;
 
 // Allow-list, not a deny-list: a function added later gets NO injection until it is named
 // here. operator-portal is deliberately absent — it passes its own explicit clientId, and
@@ -304,7 +312,18 @@ __ssFunctions.invoke = async (name, opts) => {
   ) {
     injected = ssTargetClientId;
     // Never mutate the caller's object — several call sites build a local `body` and reuse it.
-    opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
+    // targetUserId rides with it and ONLY with it: acting as a person is meaningless without
+    // the account they are on, and sending one without the other is a state the server would
+    // have to interpret. Omitted entirely when null, so an ordinary view-as call is byte for
+    // byte what it was before this existed.
+    opts = {
+      ...opts,
+      body: {
+        ...opts.body,
+        targetClientId: injected,
+        ...(ssTargetUserId ? { targetUserId: ssTargetUserId } : {}),
+      },
+    };
   }
   // Every catalog read asks for the items kept out of the customer's palette until priced (278's
   // partition wall): this portal's Interior items card lists one so it can be priced, and the

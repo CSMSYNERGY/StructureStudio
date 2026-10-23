@@ -32,6 +32,10 @@ import {
 // deno-lint-ignore no-explicit-any
 type Admin = any;
 
+/** The shape a Supabase auth user id has. Used to reject a `targetUserId` that is not one
+ *  before it reaches a query, so a malformed value can never be a lookup. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export type OperatorCtx = {
   userId: string;
   email: string;
@@ -40,6 +44,18 @@ export type OperatorCtx = {
   /** A SUPPORT operator sees the tenant the way its own owner does, minus Billing — rather
    *  than the god view every other operator gets. See the support branch below. */
   supportOnly: boolean;
+  /**
+   * ACTING AS one named person on the viewed tenant (2026-10-23), or null.
+   *
+   * Carolyn asked to be able to pick a user inside the account she is viewing and "see their
+   * account in the exact way that they do … the same access they have / don't have". That is
+   * the support-operator mechanism with the person CHOSEN instead of assumed to be an owner.
+   *
+   * ⚠️ IT IS NOT A CHANGE OF IDENTITY. Every write is still attributed to the OPERATOR —
+   * `userId` above is unchanged, and so is every audit row. Wearing someone's permissions to
+   * see what they see must never make their name the one on an action they did not take.
+   */
+  asUserId: string | null;
 };
 
 export type TenantCtx = {
@@ -317,6 +333,28 @@ export async function resolveTenant(
   const actor = { userId: user.id, email: op.email || user.email || "" };
   const a = makeAudit(admin, actor, clientId);
 
+  // ── ACTING AS one person on the viewed tenant (2026-10-23) ───────────────────
+  // `targetUserId` rides beside `targetClientId` and is honoured for operators only — it is
+  // read here, inside the operator branch, so a builder's own request can never reach it.
+  //
+  // ⚠️ THE ROW MUST BE ON THE TENANT BEING VIEWED. Resolving it by user id alone would let an
+  // operator wear a map from somewhere else entirely. A user who is not on this tenant gets
+  // the same 404 an unknown one does, so a refusal never confirms that an account exists.
+  const rawAsUser = (payload as { targetUserId?: unknown } | null)?.targetUserId;
+  const asUserId = typeof rawAsUser === "string" && UUID_RE.test(rawAsUser.trim()) ? rawAsUser.trim() : null;
+  let asUserRow: { role?: string; title?: string; access?: Record<string, unknown> | null } | null = null;
+  if (asUserId) {
+    const { data: row, error: asErr } = await admin
+      .from("client_users")
+      .select("role, title, access")
+      .eq("client_id", clientId)
+      .eq("user_id", asUserId)
+      .maybeSingle();
+    if (asErr) return { ok: false, status: 500, body: { error: asErr.message } };
+    if (!row) return { ok: false, status: 404, body: { error: "That person is not on this account." } };
+    asUserRow = row as { role?: string; title?: string; access?: Record<string, unknown> | null };
+  }
+
   // ── The operator's access map ────────────────────────────────────────────────
   // A PLATFORM operator in view-as has NO client_users row on the viewed tenant, so there is
   // no title or override map to resolve. Their rights come from app_operators and were
@@ -341,7 +379,28 @@ export async function resolveTenant(
   // strictly narrower than the god view it replaces.
   const supportOnly = !!op.support_only;
   let opAcc: Record<string, Level>;
-  if (!supportOnly) {
+  if (asUserRow) {
+    // ── ACTING AS a chosen person ──────────────────────────────────────────────
+    // Their effective map, exactly as they would resolve it themselves: the title's preset
+    // with their stored overrides applied. This is the whole feature — what they can reach,
+    // and just as importantly what they cannot.
+    //
+    // ⚠️ IT CAN ONLY EVER NARROW, and that is true by construction rather than by a check.
+    // A platform operator's map is full edit with the gate skipped entirely; a support
+    // operator's is the owner's map. Any single user's map is a subset of the first, and at
+    // most equal to the second (when the person chosen IS an owner). There is no combination
+    // in which putting someone's own permissions on gives the operator something they did not
+    // already have.
+    //
+    // Billing is forced off for the same reason it is for a support operator: "what this
+    // person sees" is the goal, and the card that pays for the product is not part of
+    // answering a support question. An owner picked here therefore shows Billing closed,
+    // which is a deliberate and visible difference from what that owner really sees.
+    opAcc = {
+      ...effectiveAccess(asUserRow.role ?? "user", asUserRow.title ?? null, asUserRow.access ?? null),
+      settings_billing: "none",
+    };
+  } else if (!supportOnly) {
     opAcc = effectiveAccess("owner", "owner", null);
   } else {
     // limit(1), not maybeSingle(): a duplicate owner row must not lock support out entirely.
@@ -393,7 +452,13 @@ export async function resolveTenant(
   // since 2026-09-15 no operator is exempt from it anywhere (portal-settings' RTP / CRM /
   // QuickBooks checks run for operators too — Carolyn: what the builder cannot use, we
   // cannot use on their account either).
-  if (supportOnly && gated) {
+  // ⚠️ `mirroring` — wearing SOMEBODY'S map rather than the god view — is what decides
+  // whether the map is enforced at all. Narrowing opAcc without this is decorative: the
+  // operator would carry the person's map and still be waved through every gated action,
+  // which is the one outcome this feature must not have. "See exactly what they can do" is
+  // a lie if the refusals do not happen too.
+  const mirroring = supportOnly || !!asUserRow;
+  if (mirroring && gated) {
     const denied = checkGate(gate, opAcc);
     if (denied) return { ok: false, status: 403, body: { error: denied } };
   }
@@ -411,19 +476,33 @@ export async function resolveTenant(
         canWrite: !!op.can_write,
         canBill: !!op.can_bill,
         supportOnly,
+        asUserId: asUserId,
       },
       access: opAcc,
       // Support answers per area, from the map. A platform operator keeps the blanket yes —
       // narrowing it would silently change what every existing operator can do.
-      canRead: supportOnly ? (area: string) => canRead(opAcc, area) : () => true,
-      canEdit: supportOnly
+      canRead: mirroring ? (area: string) => canRead(opAcc, area) : () => true,
+      // `can_write` still applies on top: a read-only operator stays read-only however
+      // permissive the person they are wearing happens to be. The two are separate axes and
+      // this is the AND of them, never the chosen person's answer alone.
+      canEdit: mirroring
         ? (area: string) => !!op.can_write && canEdit(opAcc, area)
         : () => !!op.can_write,
       payload,
       action,
-      audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
-      auditStrict: (act, n = null, note = null) => a(act, n, note, true),
+      // ⚠️ The ACTOR is unchanged — every row still names the operator. What is added is
+      // WHO THEY WERE WEARING, appended to the note, so a write made while acting as someone
+      // reads as "the operator did this, seeing what Dana sees" and never as "Dana did this".
+      audit: (act, n = null, note = null) => a(act, n, asNote(note), false).catch(() => {}),
+      auditStrict: (act, n = null, note = null) => a(act, n, asNote(note), true),
       authPath,
     },
   };
+
+  /** Appends the acting-as person to an audit note, when there is one. */
+  function asNote(note: string | null): string | null {
+    if (!asUserId) return note;
+    const tag = `acting as ${asUserId}`;
+    return note ? `${note} (${tag})` : tag;
+  }
 }
