@@ -333,7 +333,8 @@
           var done = el("div", "ssf-done");
           done.appendChild(el("b", "", "Thank you!"));
           done.appendChild(el("div", "", a.message || "We got your information and will be in touch soon."));
-          root.appendChild(done);
+          // Right where the form was, above the legal links.
+          root.insertBefore(done, form.nextSibling);
           if (opts.onDone) try { opts.onDone(); } catch (e) {}
         } else if (res && res.errors) {
           showErrors(res.errors);

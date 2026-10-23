@@ -5264,7 +5264,7 @@ function ssfRenderer() {
   if (!ssfRendererP) {
     ssfRendererP = new Promise((resolve, reject) => {
       const s = document.createElement("script");
-      s.src = "/forms-render.js?v=1";
+      s.src = "/forms-render.js?v=2";
       s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
       s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
       document.head.appendChild(s);
