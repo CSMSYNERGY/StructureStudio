@@ -257,6 +257,29 @@ export const AREAS: Area[] = [
   { key: "commissions",       label: "Commissions",        group: "workspace", hint: "Payouts — 'Own only' hides everyone else's",
     levels: ["none", "own", "edit"] },
   { key: "reports",           label: "Reports",            group: "workspace", hint: "Sales, leads, revenue",               levels: RVE },
+  // MEETINGS (migration 326, 2026-10-22): the booking pages, each person's hours, and the
+  // meetings themselves. Spec + Carolyn's decisions in MEETINGS_SCOPE.md.
+  //   own   my booking link, my hours, my meetings — and I may change them
+  //   view  also the whole team's meetings
+  //   edit  also manage anyone's meetings and edit the tenant's meeting types
+  //
+  // ownWrites, like `contacts` and unlike `commissions`. Your own calendar is yours to run:
+  // a rep who cannot set their own working hours has to ask an owner every time they take a
+  // Friday off, which is the opposite of what a self-service booking link is for. The thing
+  // 'own' withholds is OTHER people's calendars, not the ability to write.
+  //
+  // ⚠️ RANK scores 'own' and 'view' the same (both read), so a check that only asks canRead()
+  // cannot tell "my meetings" from "the team's". portal-meetings narrows every read and write
+  // by host for an 'own' caller — see HOST_SCOPE there, which is this area's equivalent of
+  // CONTACT_ROW_SCOPE and exists for the same reason: without it, 'own' is a blanket edit on
+  // every person's calendar in the business.
+  //
+  // Booking is additionally gated on the CRM entitlement (Carolyn 2026-10-22: it is part of
+  // the CRM, not a plan of its own), which is a BILLING check and deliberately not expressed
+  // here — an area says what a person may do, never what the account has bought.
+  { key: "meetings",          label: "Meetings",           group: "workspace",
+    hint: "Booking pages and meetings — 'Own' is just this person's own calendar; 'Team' adds everyone's; Edit also changes the meeting types",
+    levels: ["none", "own", "view", "edit"], ownWrites: true },
   // MY SYNERGY PHONE (migration 254, 2026-09-29): making and taking calls, voicemail, the team's call
   // history and the Calls report. Plan: _Extras/Structure Studio Phone Plan 2026-09-28.md §7.
   //   own   make and take calls; see your OWN calls and voicemails
@@ -358,6 +381,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     price_override: "edit",
     change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
+    meetings: "edit",
     phone: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
     settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",
@@ -394,6 +418,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
     change_orders: "edit",
     build_schedule: "view", delivery_schedule: "view", repairs: "view", reports: "view",
+    meetings: "edit",
     phone: "view",
     settings_branding: "edit", settings_quickbooks: "edit",
   },
@@ -410,6 +435,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   sales_manager: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "view",
     orders: "edit", change_orders: "edit", commissions: "edit", reports: "edit",
+    meetings: "edit",
     phone: "view",
   },
   sales_rep: {
@@ -421,6 +447,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     // rather than 'none': omission is how a preset denies, and spelling it out would suggest
     // the list is exhaustive when new areas must keep defaulting closed.
     inventory: "view", orders: "edit", commissions: "own",
+    meetings: "own",
   },
   // The independent salesperson the contacts:'own' scope was built for (see the AREAS comment
   // on `contacts`, quoting Carolyn on a builder whose reps are dealers: "he also doesn't want
@@ -442,6 +469,9 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     designer: "edit", designs: "edit", contacts: "own",
     inventory: "view", orders: "edit", commissions: "own",
     phone: "own",
+    // 'own' for the same reason their contacts are: a dealer runs their own book. They get a
+    // booking link of their own and set their own hours; they do not see anyone else's diary.
+    meetings: "own",
   },
   // Owns all three boards. Everything else is 'view' because a scheduler has to see WHAT they
   // are scheduling and WHO it is for — the building on the order, the customer to call about
@@ -576,6 +606,29 @@ export function ownContactsOnly(access: Record<string, Level>): boolean {
  */
 export function ownPhoneOnly(access: Record<string, Level>): boolean {
   const lvl = access.phone;
+  return lvl !== "view" && lvl !== "edit";
+}
+
+/**
+ * Is this caller limited to their OWN calendar? (migration 326)
+ *
+ * The same trap `ownPhoneOnly` exists for, in a second area: RANK scores 'own' and 'view'
+ * identically (both read), so canRead(meetings) cannot tell "my diary" from "the team's".
+ * Every read of somebody ELSE's meetings, and every write to somebody else's host row, must
+ * ask this instead of canRead.
+ *
+ * ⚠️ FAILS CLOSED, like its phone twin: anything that is not literally 'view' or 'edit' is
+ * own-only, 'none' and a missing key included. So this can never widen access on a path that
+ * forgot to run the gate first.
+ *
+ * ⚠️ It does NOT answer "may they write". `meetings` is ownWrites, so canEdit() is true for
+ * an 'own' holder — on purpose, because your own hours are yours to set. What distinguishes
+ * the two is WHOSE row: portal-meetings' HOST_SCOPE narrows an own-only caller to their own
+ * host, and refuses the tenant-wide actions (meeting types, the booking page's settings)
+ * outright. Owners are 'edit' by construction, so an owner always sees the whole team.
+ */
+export function ownMeetingsOnly(access: Record<string, Level>): boolean {
+  const lvl = access.meetings;
   return lvl !== "view" && lvl !== "edit";
 }
 

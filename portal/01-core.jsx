@@ -227,7 +227,13 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // would inject targetClientId and hand operators exactly that. The function itself refuses
 // a targetClientId with a 403, so adding it here would break every operator call rather
 // than quietly widening access — that pairing is intentional, not an oversight to fix.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments"];
+// portal-meetings joined on 2026-10-22 (migration 326). Operator view-as has to reach a
+// builder's booking setup — it is the kind of thing support gets asked about — and the
+// function resolves the caller the standard way, so the injection is all it needs.
+// ⚠️ An operator has no client_users row on the viewed tenant and therefore no host row of
+// their own there: portal-meetings answers `myHost: null` for them, deliberately. A CSM
+// Synergy operator does not have a booking page on a builder's account.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -855,6 +861,10 @@ const SETTINGS_TAB_AREA = {
   // Online Inventory (migration 310): shop_settings / save_shop_settings are gated on the
   // inventory area server-side, so the page follows it — no new area, no access.ts row.
   "online-inventory": "inventory",
+  // Meetings (migration 326): its own area, because booking really is a new permission
+  // surface — a rep sets their own hours and sees their own diary, which no existing area
+  // could express. portal-meetings gates on the same key.
+  meetings: "meetings",
   options: "settings_options",
   colors: "settings_options",
   // The two tabs Colors was split into on 2026-09-11. Same catalog, same area — a split of
@@ -971,7 +981,12 @@ function ssCanRead(access, area) {
 // duplication and dangerous enough to be worth naming: adding an area to it without the
 // server agreeing renders buttons that 403, and the reverse hides a button somebody has
 // every right to press.
-const OWN_WRITE_AREAS = new Set(["contacts"]);
+// `meetings` joined on 2026-10-22 (migration 326). Your own hours, your own booking link and
+// your own diary are yours to change — a rep who has to ask an owner to take a Friday off is
+// the opposite of what a self-service booking link is for. The server agrees (ownWrites on the
+// area in access.ts), and narrows an own-only caller to their OWN host row rather than refusing
+// the write — portal-meetings' HOST_SCOPE, the same shape contacts has in CONTACT_ROW_SCOPE.
+const OWN_WRITE_AREAS = new Set(["contacts", "meetings"]);
 function ssCanWrite(access, area) {
   if (!access) return false;
   const v = access[area];
@@ -1697,6 +1712,15 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // Inventory tab and moved here. Per-building listing (photos, show price) stays on Inventory,
     // because that is editing a building, not configuring the feature.
     ["online-inventory", "Online Inventory", "Your public page of lot buildings: switch it on, prices, deposit, tracking and the code for your website", null],
+    // MEETINGS (migration 326, Carolyn 2026-10-22). A person's booking link, their hours,
+    // the meeting types the business offers, and the Google/Outlook connections.
+    //
+    // Gated through SETTINGS_TAB_AREA.meetings like every tab here, which means an own-only
+    // holder — a sales rep, a dealer — DOES get this page: it is mostly about themselves, and
+    // a booking link nobody but an owner can configure is not self-service. portal-meetings
+    // refuses the business-wide half (meeting types, the page's own settings) for them, and
+    // the page renders those read-only rather than pretending the save will work.
+    ["meetings", "Meetings", "Your booking link and hours, the meeting types you offer, and your calendar connections", null],
     // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
     // items of their own; they are top tabs inside Company now, along with Locations, Crews
     // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this

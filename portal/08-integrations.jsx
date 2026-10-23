@@ -5120,6 +5120,594 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
   );
 }
 
+// ── Settings → Meetings (migration 326, Carolyn 2026-10-22) ──────────────────────────────
+// A person's booking link and hours, the meeting types the business offers, and the
+// Google/Outlook connections. Spec + her decisions in MEETINGS_SCOPE.md.
+//
+// Carolyn's standing rule: every feature's settings get their own page under the Settings
+// tab, never a panel on the working tab. So the diary itself lives on the CRM record's
+// Meeting scheduler tab, and everything that CONFIGURES it lives here.
+//
+// ⚠️ TWO AUDIENCES ON ONE PAGE, and the split is the `meetings` area's own:
+//   * an 'own' holder (sales rep, dealer) sees and edits THEIR link, hours and types-offered
+//   * 'view'/'edit' additionally see the business half — the meeting types and the page's
+//     own settings — and only 'edit' may save it (`canManageBusiness` from the server)
+// The business cards render READ-ONLY for an own-only holder rather than being hidden: a rep
+// needs to see what "Lot walkthrough — 30 min" means to pick it, and a card that vanishes
+// reads as "not built" where a disabled one reads as "not yours". Same reasoning as the
+// greyed CRM tabs in 02-sales.jsx.
+const MEETING_DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+
+// The zones a US shed builder actually works in, plus whatever this browser is set to, so the
+// list is short and the right answer is usually already in it. A zone we do not list is still
+// storable — the server accepts any zone Intl knows — but nobody has asked for one yet.
+function ssMeetingZones(current) {
+  const base = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix",
+    "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"];
+  let here = null;
+  try { here = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { here = null; }
+  const out = [];
+  for (const z of [current, here, ...base]) if (z && out.indexOf(z) === -1) out.push(z);
+  return out;
+}
+
+const MEETING_PLACES = [
+  ["in_person", "In person"],
+  ["phone", "Phone call"],
+  ["video", "Video call"],
+  ["custom", "Something else"],
+];
+
+function MeetingsSettings({ clientId, viewingLabel = null }) {
+  const [data, setData] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [host, setHost] = useState(null);       // the draft of MY host row
+  const [page, setPage] = useState(null);       // the draft of the tenant's settings
+  const [editType, setEditType] = useState(null);
+  const [newDate, setNewDate] = useState("");
+
+  const call = useCallback(async (action, body) => {
+    const { data: d, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !d || d.error) throw new Error((d && d.error) || (error ? await fnError(error) : "That didn't work."));
+    return d;
+  }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await call("overview", {});
+      setData(d);
+      setHost(d.myHost
+        ? { ...d.myHost, weeklyHours: d.myHost.weeklyHours || {} }
+        // No host row yet — this person has never had a booking link. Seed a sensible week
+        // rather than an empty one: a brand-new link with no hours shows a customer a
+        // calendar with nothing on it, which reads as broken.
+        : {
+            id: null, slug: "", publicName: "", publicTitle: "", photoUrl: null,
+            timeZone: (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Chicago"; } catch (_e) { return "America/Chicago"; } })(),
+            weeklyHours: { mon: [["08:00", "17:00"]], tue: [["08:00", "17:00"]], wed: [["08:00", "17:00"]], thu: [["08:00", "17:00"]], fri: [["08:00", "17:00"]] },
+            accepting: true, typeIds: [],
+          });
+      setPage(d.settings || { enabled: false, heading: "", intro: "", sendConfirmation: true, reminderHours: [24], createContact: true });
+    } catch (e) {
+      setMsg({ err: e.message });
+    }
+  }, [call]);
+
+  useEffect(() => { setData(null); setMsg(null); load(); }, [clientId, load]);
+
+  if (msg && msg.err && !data) return <div style={S.err}>{msg.err}</div>;
+  if (!data || !host) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your meeting settings…</div>;
+
+  const canBiz = !!data.canManageBusiness;
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const bookUrl = host.slug
+    ? `${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`
+    : null;
+
+  const setHostField = (k, v) => setHost((h) => ({ ...h, [k]: v }));
+  const flash = (ok) => { setMsg({ ok }); setTimeout(() => setMsg((m) => (m && m.ok === ok ? null : m)), 2600); };
+
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  // ── My hours ────────────────────────────────────────────────────────────────────────────
+  const blocksFor = (key) => host.weeklyHours[key] || [];
+  const setBlocks = (key, blocks) => setHost((h) => {
+    const next = { ...h.weeklyHours };
+    if (blocks && blocks.length) next[key] = blocks; else delete next[key];
+    return { ...h, weeklyHours: next };
+  });
+  const toggleDay = (key, on) => setBlocks(key, on ? [["08:00", "17:00"]] : []);
+  const editBlock = (key, i, which, value) => {
+    const blocks = blocksFor(key).map((b, n) => (n === i ? (which === 0 ? [value, b[1]] : [b[0], value]) : b));
+    setBlocks(key, blocks);
+  };
+
+  const saveHost = () => run(async () => {
+    const d = await call("save_host", {
+      hostId: host.id || undefined,
+      slug: host.slug || undefined,
+      publicName: host.publicName,
+      publicTitle: host.publicTitle,
+      timeZone: host.timeZone,
+      weeklyHours: host.weeklyHours,
+      accepting: host.accepting,
+    });
+    setHost((h) => ({ ...h, ...d.host, typeIds: h.typeIds }));
+    flash(host.id ? "Saved." : "Your booking link is ready.");
+    if (!host.id) load();
+  });
+
+  const saveMyTypes = (ids) => run(async () => {
+    if (!host.id) { setMsg({ err: "Save your booking link first, then choose what you offer." }); return; }
+    await call("set_host_types", { hostId: host.id, typeIds: ids });
+    setHost((h) => ({ ...h, typeIds: ids }));
+    flash("Saved.");
+  });
+
+  const savePage = () => run(async () => {
+    const d = await call("save_settings", page);
+    setPage(d.settings);
+    flash(d.settings.enabled ? "Saved. Your booking pages are live." : "Saved. Your booking pages are switched off.");
+  });
+
+  const saveType = (t) => run(async () => {
+    await call("save_type", t);
+    setEditType(null);
+    await load();
+    flash("Saved.");
+  });
+
+  const removeType = (t) => run(async () => {
+    if (!window.confirm(`Delete “${t.name}”? Anyone offering it stops offering it.`)) return;
+    await call("delete_type", { id: t.id });
+    await load();
+    flash("Deleted.");
+  });
+
+  const addOverride = () => run(async () => {
+    if (!host.id) { setMsg({ err: "Save your booking link first." }); return; }
+    if (!newDate) { setMsg({ err: "Pick the date you're away." }); return; }
+    await call("save_override", { hostId: host.id, onDate: newDate, blocked: true });
+    setNewDate("");
+    await load();
+    flash("Blocked out.");
+  });
+
+  const dropOverride = (o) => run(async () => {
+    await call("delete_override", { id: o.id });
+    await load();
+    flash("Back on.");
+  });
+
+  const copyLink = async () => {
+    if (!bookUrl) return;
+    try { await navigator.clipboard.writeText(bookUrl); setCopied(true); setTimeout(() => setCopied(false), 1600); }
+    catch (_e) { window.prompt("Copy this:", bookUrl); }
+  };
+
+  return (
+    <div>
+      {viewingLabel && (
+        <div style={{ ...sub, marginBottom: 10 }}>
+          You're looking at <strong>{viewingLabel}</strong>. A booking link belongs to a person on their
+          team, so there isn't one of yours to set up here.
+        </div>
+      )}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "9px 13px", color: "#065F46", fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+          {msg.ok}
+        </div>
+      )}
+
+      {/* ── MY BOOKING LINK ───────────────────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="My booking link" />
+        {!data.myHost && (
+          <div style={{ ...sub, marginBottom: 12 }}>
+            You don't have a booking link yet. Add the name customers should see, check your hours
+            below, and save — the link is yours from then on.
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={{ flex: "1 1 220px" }}>
+            <span style={lbl}>Name customers see</span>
+            <input value={host.publicName || ""} maxLength={80} onChange={(e) => setHostField("publicName", e.target.value)}
+              placeholder="Jamie Fulton" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: "1 1 180px" }}>
+            <span style={lbl}>Title (optional)</span>
+            <input value={host.publicTitle || ""} maxLength={80} onChange={(e) => setHostField("publicTitle", e.target.value)}
+              placeholder="Sales Rep" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: "1 1 180px" }}>
+            <span style={lbl}>Time zone</span>
+            <select value={host.timeZone} onChange={(e) => setHostField("timeZone", e.target.value)}
+              style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+              {ssMeetingZones(host.timeZone).map((z) => <option key={z} value={z}>{z.replace(/_/g, " ")}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <span style={lbl}>The link</span>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 260px", minWidth: 0 }}>
+              <span style={{ ...sub, whiteSpace: "nowrap" }}>/book?with=</span>
+              <input value={host.slug || ""} maxLength={40} onChange={(e) => setHostField("slug", e.target.value)}
+                placeholder="jamie" style={{ ...S.input, flex: 1, minWidth: 0 }} />
+            </div>
+            {bookUrl && (
+              <>
+                <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={copyLink}>{copied ? "Copied" : "Copy link"}</button>
+                <a href={bookUrl} target="_blank" rel="noopener noreferrer" style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", textDecoration: "none" }}>Open</a>
+              </>
+            )}
+          </div>
+          {bookUrl && <div style={{ ...sub, marginTop: 5, wordBreak: "break-all" }}>{bookUrl}</div>}
+          {/* The page is dark for EVERY person on the account until this switch is on. Said
+              here, next to the link, because that is where somebody discovers their link
+              shows "not available" and has no idea why. */}
+          {canBiz && page && !page.enabled && (
+            <div style={{ ...sub, marginTop: 6, color: "#92400E" }}>
+              Booking pages are switched off for this account, so this link isn't live yet — there's a
+              switch for it further down.
+            </div>
+          )}
+          {!canBiz && page && !page.enabled && (
+            <div style={{ ...sub, marginTop: 6, color: "#92400E" }}>
+              Booking pages aren't switched on for this account yet, so this link isn't live. Ask an
+              owner or admin to turn them on.
+            </div>
+          )}
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
+          <input type="checkbox" checked={!!host.accepting} onChange={(e) => setHostField("accepting", e.target.checked)} style={{ marginTop: 2 }} />
+          <span><strong>Accepting bookings</strong><span style={{ color: "#64748B" }}> — turn this off while you're away and the page says so instead of showing an empty calendar</span></span>
+        </label>
+      </div>
+
+      {/* ── MY HOURS ──────────────────────────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="My hours" />
+        <div style={{ ...sub, marginBottom: 10 }}>
+          The hours customers can book, in <strong>{host.timeZone.replace(/_/g, " ")}</strong>. Times are
+          24-hour. These are the same kind of hours your phone uses, so they read the same way.
+        </div>
+        {MEETING_DAYS.map(([key, label]) => {
+          const blocks = blocksFor(key);
+          const on = blocks.length > 0;
+          return (
+            <div key={key} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 7, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, width: 92, cursor: "pointer", flex: "0 0 auto" }}>
+                <input type="checkbox" checked={on} onChange={(e) => toggleDay(key, e.target.checked)} />
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: "#334155" }}>{label}</span>
+              </label>
+              {!on && <span style={{ fontSize: 12.5, color: "#94A3B8", paddingTop: 3 }}>Not available</span>}
+              {on && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {blocks.map((b, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input value={b[0]} maxLength={5} aria-label={`${label} start`} onChange={(e) => editBlock(key, i, 0, e.target.value)}
+                        placeholder="08:00" style={{ ...S.input, width: 82 }} />
+                      <span style={{ fontSize: 12.5, color: "#64748B" }}>to</span>
+                      <input value={b[1]} maxLength={5} aria-label={`${label} end`} onChange={(e) => editBlock(key, i, 1, e.target.value)}
+                        placeholder="17:00" style={{ ...S.input, width: 82 }} />
+                      {blocks.length > 1 && (
+                        <button type="button" aria-label={`Remove this block on ${label}`} onClick={() => setBlocks(key, blocks.filter((_x, n) => n !== i))}
+                          style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "4px 9px" }}>Remove</button>
+                      )}
+                      {i === blocks.length - 1 && blocks.length < 6 && (
+                        <button type="button" aria-label={`Add another block on ${label}`} onClick={() => setBlocks(key, blocks.concat([["13:00", "17:00"]]))}
+                          style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "4px 9px" }}>Add</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
+          <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={saveHost}>
+            {busy ? "Saving…" : (data.myHost ? "Save my link and hours" : "Create my booking link")}
+          </button>
+          <span style={sub}>A lunch break is two blocks on the same day — 08:00 to 12:00, then 13:00 to 17:00.</span>
+        </div>
+      </div>
+
+      {/* ── DAYS OFF ──────────────────────────────────────────────────────────────────── */}
+      {data.myHost && (
+        <div style={S.card}>
+          <CardHead title="Days off" />
+          <div style={{ ...sub, marginBottom: 10 }}>
+            A holiday or a day away. A blocked day beats your hours above, so nobody can book you on it.
+          </div>
+          {(data.overrides || []).length === 0 && (
+            <div style={{ ...sub, marginBottom: 10 }}>Nothing blocked out between now and the end of your booking window.</div>
+          )}
+          {(data.overrides || []).map((o) => (
+            <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#0F172A", width: 110 }}>{o.onDate}</span>
+              <span style={{ fontSize: 12.5, color: "#64748B", flex: 1 }}>
+                {o.blocked ? "Blocked out" : `Working ${(o.hours || []).map((b) => b[0] + "–" + b[1]).join(", ")}`}
+              </span>
+              <button style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "4px 10px" }}
+                disabled={busy} onClick={() => dropOverride(o)}>Remove</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+            <input type="date" value={newDate} aria-label="Date to block out" onChange={(e) => setNewDate(e.target.value)} style={{ ...S.input, width: "auto" }} />
+            <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !newDate} onClick={addOverride}>Block out this day</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── WHAT I OFFER ──────────────────────────────────────────────────────────────── */}
+      {data.myHost && (
+        <div style={S.card}>
+          <CardHead title="What I offer" />
+          <div style={{ ...sub, marginBottom: 10 }}>
+            Which of the business's meeting types customers can book with you. Tick none and your link
+            has nothing to offer, so it won't take bookings.
+          </div>
+          {(data.types || []).filter((t) => t.active).length === 0 && (
+            <div style={sub}>The business hasn't set up any meeting types yet.</div>
+          )}
+          {(data.types || []).filter((t) => t.active).map((t) => {
+            const on = (host.typeIds || []).indexOf(t.id) !== -1;
+            return (
+              <label key={t.id} style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 7, cursor: "pointer" }}>
+                <input type="checkbox" checked={on} disabled={busy}
+                  onChange={(e) => saveMyTypes(e.target.checked
+                    ? (host.typeIds || []).concat([t.id])
+                    : (host.typeIds || []).filter((x) => x !== t.id))}
+                  style={{ marginTop: 2 }} />
+                <span>
+                  <strong>{t.name}</strong>
+                  <span style={{ color: "#64748B" }}>
+                    {" — "}{t.durationMinutes} min
+                    {t.locationDetail ? ` · ${t.locationDetail}` : ""}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── MEETING TYPES (the business) ──────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="Meeting types" />
+        <div style={{ ...sub, marginBottom: 12 }}>
+          {canBiz
+            ? "What this business offers. Each person then picks which of these they take."
+            : "What this business offers. Only an owner or admin changes these."}
+        </div>
+        {(data.types || []).map((t) => (
+          <div key={t.id} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 11, flexWrap: "wrap" }}>
+              <span style={{ width: 4, alignSelf: "stretch", minHeight: 30, borderRadius: 3, background: t.color || ACCENT, flex: "0 0 auto" }} />
+              <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13.5, color: "#0F172A" }}>
+                  {t.name}{!t.active && <span style={{ color: "#94A3B8", fontWeight: 600 }}> · switched off</span>}
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B" }}>
+                  {t.durationMinutes} min
+                  {` · ${(MEETING_PLACES.find((x) => x[0] === t.locationKind) || ["", "In person"])[1]}`}
+                  {t.locationDetail ? ` · ${t.locationDetail}` : ""}
+                  {` · ${t.minNoticeHours}h notice`}
+                  {(t.bufferBeforeMinutes || t.bufferAfterMinutes) ? ` · ${t.bufferBeforeMinutes}/${t.bufferAfterMinutes} min buffer` : ""}
+                </div>
+              </div>
+              {canBiz && (
+                <>
+                  <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "5px 11px" }}
+                    onClick={() => setEditType(editType && editType.id === t.id ? null : { ...t })}>
+                    {editType && editType.id === t.id ? "Close" : "Edit"}
+                  </button>
+                  <button style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "5px 11px" }}
+                    disabled={busy} onClick={() => removeType(t)}>Delete</button>
+                </>
+              )}
+            </div>
+            {editType && editType.id === t.id && (
+              <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} />
+            )}
+          </div>
+        ))}
+        {canBiz && (
+          editType && !editType.id
+            ? (
+              <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px" }}>
+                <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} />
+              </div>
+            )
+            : (
+              <button style={S.btn(ACCENT, "#FFF")} disabled={busy}
+                onClick={() => setEditType({
+                  name: "", durationMinutes: 30, locationKind: "in_person", locationDetail: "",
+                  description: "", bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
+                  minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true,
+                })}>Add a meeting type</button>
+            )
+        )}
+      </div>
+
+      {/* ── CONNECTED CALENDARS ───────────────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="Connected calendars" />
+        {/* ⚠️ HONEST ABOUT WHAT IS BUILT. Google and Outlook sync are phases 3-4 and need
+            OAuth apps Carolyn has to create (Google's calendar scopes need a verification
+            review). A "Connect" button that opens nothing is the greyed-WhatsApp-tab mistake
+            CLAUDE.md records — "a promise nobody intended to keep, sitting on a screen
+            Carolyn shows at a trade show". So this card says plainly where it stands, and
+            says what DOES work today, which is the part that matters to a builder.
+            `connections` is already read and rendered below, so the day the connectors land
+            this card shows real status without being rewritten. */}
+        {(data.connections || []).length > 0
+          ? (data.connections || []).map((c) => (
+            <div key={c.provider} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", marginBottom: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365"}</div>
+                <div style={{ fontSize: 11.5, color: "#64748B" }}>
+                  {c.status === "connected" ? "Connected" : c.status === "needs_reauth" ? "Needs reconnecting" : "Disconnected"}
+                  {c.lastSyncedAt ? ` · last checked ${new Date(c.lastSyncedAt).toLocaleString()}` : ""}
+                </div>
+              </div>
+            </div>
+          ))
+          : (
+            <div style={{ ...sub }}>
+              <p style={{ margin: "0 0 8px" }}>
+                <strong style={{ color: "#0F172A" }}>Not connected to anything yet, and that's fine.</strong> Your
+                hours above and the meetings already booked in Structure Studio decide what customers
+                are offered, so your link works today.
+              </p>
+              <p style={{ margin: 0 }}>
+                Linking Google Calendar or Outlook — so anything already on your own calendar blocks a
+                slot too, and new meetings appear there — is still being built. It needs setup on our
+                side before anyone can connect, so there's nothing to press here yet.
+              </p>
+            </div>
+          )}
+      </div>
+
+      {/* ── THE BOOKING PAGES (the business) ──────────────────────────────────────────── */}
+      {page && (
+        <div style={S.card}>
+          <CardHead title="Booking pages" />
+          {!canBiz && <div style={{ ...sub, marginBottom: 10 }}>Only an owner or admin changes these.</div>}
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 10, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.enabled} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, enabled: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Booking pages are live</strong><span style={{ color: "#64748B" }}> — until this is on, every booking link on this account says it isn't available</span></span>
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Heading</span>
+            <input value={page.heading || ""} disabled={!canBiz} maxLength={120}
+              onChange={(e) => setPage((x) => ({ ...x, heading: e.target.value }))}
+              placeholder="Come and see us" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Intro</span>
+            <textarea value={page.intro || ""} disabled={!canBiz} maxLength={1000} rows={2}
+              onChange={(e) => setPage((x) => ({ ...x, intro: e.target.value }))}
+              placeholder="Pick a time that suits you and we'll walk the lot together."
+              style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.createContact} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, createContact: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Add whoever books to Contacts</strong><span style={{ color: "#64748B" }}> — a meeting with somebody who isn't in your CRM is a lead nobody follows up</span></span>
+          </label>
+          {/* ⚠️ Confirmation emails and reminders are PHASE 2. The switches are not rendered
+              yet on purpose: a checkbox that saves a value nothing reads is worse than no
+              checkbox, because somebody ticks it and believes reminders are going out. */}
+          <div style={{ ...sub, marginBottom: 12 }}>
+            Confirmation emails and reminders are next. Today a booking appears on the meeting
+            scheduler and on the customer's contact record, and nothing is emailed automatically —
+            so tell them what happens next when you speak to them.
+          </div>
+          {canBiz && (
+            <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={savePage}>
+              {busy ? "Saving…" : "Save booking page settings"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The editor for one meeting type. Split out because it renders in two places — inline on an
+// existing type, and on its own for a new one — and duplicating eleven fields is how two
+// copies of a form drift apart.
+function MeetingTypeEditor({ draft, onChange, onSave, busy }) {
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const set = (k, v) => onChange({ ...draft, [k]: v });
+  const num = (k, v) => set(k, v === "" ? "" : Math.max(0, Math.trunc(Number(v)) || 0));
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #E2E8F0" }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={lbl}>Name</span>
+          <input value={draft.name} maxLength={80} onChange={(e) => set("name", e.target.value)}
+            placeholder="Lot walkthrough" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 120px" }}>
+          <span style={lbl}>Minutes</span>
+          <input type="number" min="5" max="480" value={draft.durationMinutes}
+            onChange={(e) => num("durationMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 150px" }}>
+          <span style={lbl}>Where</span>
+          <select value={draft.locationKind} onChange={(e) => set("locationKind", e.target.value)}
+            style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+            {MEETING_PLACES.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <span style={lbl}>Where exactly (shown to the customer)</span>
+        <input value={draft.locationDetail || ""} maxLength={300} onChange={(e) => set("locationDetail", e.target.value)}
+          placeholder="At our lot — 4120 State Road 9" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <span style={lbl}>What it's for (shown to the customer)</span>
+        <textarea value={draft.description || ""} maxLength={2000} rows={2} onChange={(e) => set("description", e.target.value)}
+          placeholder="Walk the lot and see what's ready now. Bring your measurements if you have them."
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ flex: "0 0 130px" }}>
+          <span style={lbl}>Buffer before</span>
+          <input type="number" min="0" max="240" value={draft.bufferBeforeMinutes}
+            onChange={(e) => num("bufferBeforeMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 130px" }}>
+          <span style={lbl}>Buffer after</span>
+          <input type="number" min="0" max="240" value={draft.bufferAfterMinutes}
+            onChange={(e) => num("bufferAfterMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Least notice (hours)</span>
+          <input type="number" min="0" max="720" value={draft.minNoticeHours}
+            onChange={(e) => num("minNoticeHours", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Book up to (days)</span>
+          <input type="number" min="1" max="365" value={draft.maxDaysAhead}
+            onChange={(e) => num("maxDaysAhead", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Times on the hour every</span>
+          <select value={draft.slotIntervalMinutes} onChange={(e) => num("slotIntervalMinutes", e.target.value)}
+            style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+            {[10, 15, 20, 30, 60].map((n) => <option key={n} value={n}>{n} min</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10, lineHeight: 1.5 }}>
+        A buffer is time nobody can book either side of this meeting — travel to the lot, or writing
+        the estimate up afterwards.
+      </div>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 10, cursor: "pointer" }}>
+        <input type="checkbox" checked={draft.active !== false} onChange={(e) => set("active", e.target.checked)} />
+        <span><strong>Offered</strong><span style={{ color: "#64748B" }}> — switch it off to stop it being bookable without losing its history</span></span>
+      </label>
+      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !String(draft.name || "").trim()} onClick={() => onSave(draft)}>
+        {busy ? "Saving…" : "Save meeting type"}
+      </button>
+    </div>
+  );
+}
+
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
@@ -5180,6 +5768,11 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           <ShopSettingsPanel clientId={clientId} canEdit={isAdmin || !access || access.inventory === "edit"} />
         </div>
       )}
+      {/* MEETINGS (migration 326). No wrapper card: the component renders several of its
+          own, like CompanyShell rather than ShopSettingsPanel. It derives what this person
+          may change from the server's `canManageBusiness` rather than from `access` here —
+          one answer, from the side that enforces it. */}
+      {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}

@@ -89,6 +89,10 @@ const ctxFor = (over: Ctx = {}): Ctx => ({
   // set only one would test a state the component cannot produce.
   canEdit: true,
   crmUnlocked: true,
+  // Meetings (migration 326). What the shell passes is ssCanWrite(myAccess, "meetings"), so
+  // it is independent of canEdit — the `meetings` and `contacts` areas are separate, and a
+  // rep may work a customer without running a diary.
+  canMeet: true,
   contact: { id: "c1", email: "a@b.com", phone: "+15555550123" },
   designs: [],
   sms: { ready: true, consented: true, optedOut: false },
@@ -171,15 +175,38 @@ Deno.test("Invoice is Simple Layout, not CRM, and survives the lock", () => {
   assertEquals(t.enabled(c), true, "invoice must stay enabled without the CRM");
 });
 
-Deno.test("Scheduler (never built) and Call (My Synergy Phone) answer to their own rules, never the CRM subscription", () => {
+Deno.test("Meeting scheduler is BUILT and IS part of the CRM; Call answers to the phone's own rules", () => {
+  // ⛔ THIS TEST SAID THE OPPOSITE UNTIL 2026-10-22 and both halves of the reversal are
+  // deliberate. It used to assert the scheduler was unbuilt ("Arrives with the calendar
+  // integration") and that it was NOT gated on the CRM subscription. Migration 325 built it,
+  // and Carolyn's decision that day was that booking is part of the CRM — no plan of its own,
+  // no billing_plans row. So the subscription now DOES gate it, which is why the old
+  // "scheduler is not gated on the CRM subscription" loop below covers only Call.
   const c = ctxFor();
-  assertEquals(tab("scheduler").enabled(c), false);
-  assert(/calendar integration/i.test(hintOf(tab("scheduler"), c)), "the scheduler is unbuilt, and says so");
+  assertEquals(tab("scheduler").enabled(c), true, "a paying tenant with meetings access can book");
+  // Held subscription → the CRM hint, worded identically to portal-meetings' own 403 so the
+  // greyed tab and any refusal that reaches the browser tell one story.
+  assertEquals(tab("scheduler").enabled(locked()), false);
+  assertEquals(hintOf(tab("scheduler"), locked()), CRM_LOCKED_HINT);
+  // No meetings access, subscription fine → a PERMISSION reason, never a billing one. Sending
+  // an owner (who holds every permission there is) to Billing over a permission problem, or a
+  // rep to Team over a billing one, is the confusion this ordering exists to prevent.
+  const noArea = ctxFor({ canMeet: false });
+  assertEquals(tab("scheduler").enabled(noArea), false);
+  assert(/permission to book meetings/i.test(hintOf(tab("scheduler"), noArea)), hintOf(tab("scheduler"), noArea));
+  assert(!/subscription/i.test(hintOf(tab("scheduler"), noArea)), "a permission problem must not blame billing");
+  // A contact with no row behind it (crm_ensure_contact swallowed, contact_id null) cannot
+  // have a meeting filed against it — the same shape SMS refuses for.
+  assertEquals(tab("scheduler").enabled(ctxFor({ contact: { id: null, email: "a@b.com" } })), false);
+  // A meeting is with the PERSON, not about one quote, so an unpicked deal does NOT disable it
+  // (the Call tab's rule). This is the one write tab on a contact record with no needsPick.
+  assertEquals(tab("scheduler").enabled(ctxFor({ kind: "contact", needsPick: true })), true);
+
   // Call is BUILT since 2026-09-29 (My Synergy Phone): it is off in this fixture only because the fixture
   // carries no phone access and no calling switch, and it says that in phone terms.
   assertEquals(tab("call").enabled(c), false);
   assert(/permission to make calls/i.test(hintOf(tab("call"), c)), hintOf(tab("call"), c));
-  for (const key of ["scheduler", "call"]) {
+  for (const key of ["call"]) {
     assert(!/subscription/i.test(hintOf(tab(key), c)), `${key} is not gated on the CRM subscription`);
   }
   // The CRM lock neither opens nor closes Call: with phone access and calling on, a locked tenant
@@ -219,14 +246,23 @@ Deno.test("on a contact with no deal picked, exactly the five writable tabs clos
   for (const key of CRM_ONLY) {
     assertEquals(tab(key).enabled(c), false, `${key} must be disabled until a deal is picked`);
   }
-  // Nothing ELSE moves. scheduler and call are off here for their own reasons (the scheduler is
-  // unbuilt; this fixture gives Call no phone access), and invoice is
-  // a design-only tab that never sees a contact — a picker must not quietly change either.
+  // Nothing ELSE moves. Call is off here because this fixture gives it no phone access, and
+  // invoice is a design-only tab that never sees a contact — a picker must not quietly
+  // change either.
+  //
+  // ⚠️ `scheduler` IS EXEMPT, and deliberately (migration 326). A meeting is with the PERSON,
+  // not about one quote — the rule the Call tab's comment states — so the Meeting scheduler is
+  // the one write tab on a contact record that does not wait for a deal. When a deal IS
+  // picked the booking is filed against it (shortCode), so nothing is lost by not requiring
+  // one. If you are here because this loop failed, check whether the tab you added really
+  // carries a short_code before adding it to this exemption.
+  const NO_PICK_NEEDED = ["scheduler"];
   for (const t of tabsFor(c)) {
-    if (CRM_ONLY.indexOf(t.key) === -1) {
+    if (CRM_ONLY.indexOf(t.key) === -1 && NO_PICK_NEEDED.indexOf(t.key) === -1) {
       assertEquals(t.enabled(c), false, `${t.key} unexpectedly enabled on a contact`);
     }
   }
+  assertEquals(tab("scheduler").enabled(c), true, "a meeting is with the person, so no deal pick is needed");
   assert(!tabsFor(c).some((t) => t.key === "invoice"), "invoice should not be offered on a contact");
 });
 

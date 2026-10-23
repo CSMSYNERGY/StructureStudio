@@ -289,3 +289,17 @@ verify_jwt = true
 # invisible from inside the database. Auth is the shared URL secret.
 [functions.twilio-events]
 verify_jwt = false
+
+# MEETINGS (migration 326). The portal half: JWT-authenticated, resolveTenant inside.
+[functions.portal-meetings]
+verify_jwt = true
+
+# The public booking page's server. A shed shopper has no account and never will, so the
+# gateway cannot verify anything for us here — the anon key passes it and that is all. The
+# real controls are inside: get_public_booking refuses a tenant with Meetings switched off,
+# every host/type id is re-read from the database rather than trusted from the body, cancel
+# and reschedule are authenticated by the booking's own cancel_token (the capability model
+# designs already use), and three rate caps run BEFORE any write — see the function's header
+# for why that order is the whole point of them.
+[functions.book-public]
+verify_jwt = false

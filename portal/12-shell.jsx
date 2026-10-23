@@ -67,6 +67,10 @@ const SETTINGS_ICONS = {
   designer: ICONS.designer,
   // A storefront — the public page of lot buildings (Settings → Online Inventory, 2026-10-17).
   "online-inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0"/><path d="M5 12v8h14v-8"/><path d="M10 20v-5h4v5"/></svg>,
+  // A calendar page with a tick — Settings → Meetings (migration 326, 2026-10-22).
+  // Deliberately NOT the schedule glyph: the three build boards are a different feature and
+  // a shared icon would read as one thing in two places.
+  meetings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M3 11h18"/><path d="M9 15.5l2 2 3.5-3.5"/></svg>,
   branding: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>,
   company: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/></svg>,
   team: ICONS.contacts,                      // two people — the same idea, one rail apart
@@ -3335,6 +3339,12 @@ function Dashboard({ session }) {
                    and un-narrowed admins resolve 'edit' here anyway; canAdmin stays only for a
                    platform operator in view-as, who has no map (priceCanOverride's rule). */
                 canEdit={(viewing && canAdmin) || ssCanWrite(myAccess, "contacts")}
+                /* MEETINGS (migration 326). Same rule as canEdit above and for the same two
+                   reasons: ssCanWrite because meetings:'own' writes, and the RESOLVED map
+                   rather than the role, so an admin narrowed out of meetings gets a greyed
+                   tab instead of one that 403s. A platform operator in view-as has no map,
+                   which is what canAdmin covers. */
+                canMeet={(viewing && canAdmin) || ssCanWrite(myAccess, "meetings")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
                    Pipeline list opens and it has to keep working. Its READ is exempt from the

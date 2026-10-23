@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Book a time</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png"/>
+<style>
+/* The public BOOKING page (migration 326, Carolyn 2026-10-22) — a builder's people, bookable
+   on a branded page their own website can embed. Deliberately PLAIN JS + inline CSS, like
+   shop.html and my-quotes.html: no React, no Babel, no /vendor/ scripts, so it loads fast on
+   a phone and inside a builder's site. The only network calls are the get_public_booking RPC
+   and the book-public edge function. Brand colours come from the builder's own config. */
+:root {
+  --accent: #B45309;
+  --accent-fg: #FFFFFF;
+  --header-bg: linear-gradient(135deg, #1E293B 0%, #334155 100%);
+  --ink: #0F172A;
+  --muted: #475569;
+  --faint: #64748B;
+  --line: #E2E8F0;
+  --card: #FFFFFF;
+  --bg: #F1F5F9;
+  --ok: #047857;
+  --err: #B91C1C;
+  --open-bg: #FEF3C7;
+  --open-line: #FCD34D;
+  --open-ink: #92400E;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+body.embed { background: transparent; }
+[hidden] { display: none !important; }
+a { color: var(--accent); }
+button { font: inherit; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+header.top { background: var(--header-bg); color: #FFF; }
+header.top .wrap { display: flex; align-items: center; gap: 14px; padding-top: 16px; padding-bottom: 16px; }
+header.top img { max-height: 52px; max-width: 180px; background: #FFF; border-radius: 8px; padding: 4px; }
+header.top .name { font-weight: 800; font-size: 20px; }
+header.top .tag { opacity: .85; font-size: 13px; }
+body.embed header.top { display: none; }
+
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; margin: 18px 0 28px; overflow: hidden; }
+.cols { display: flex; flex-wrap: wrap; }
+.side { width: 320px; flex: 0 0 auto; border-right: 1px solid var(--line); padding: 22px 20px; }
+.main { flex: 999 1 420px; min-width: 0; padding: 22px 20px; }
+
+.who { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.avatar { width: 52px; height: 52px; border-radius: 999px; background: var(--line); color: var(--muted); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 17px; flex: 0 0 auto; overflow: hidden; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.who .nm { font-weight: 700; font-size: 15px; }
+.who .ti { font-size: 12.5px; color: var(--muted); }
+.side h1 { font-size: 24px; line-height: 1.2; margin: 10px 0 12px; }
+.facts { display: flex; flex-direction: column; gap: 9px; font-size: 13.5px; color: #334155; }
+.facts div { display: flex; gap: 9px; align-items: flex-start; }
+.facts svg { flex: 0 0 auto; margin-top: 1px; }
+.blurb { font-size: 13.5px; line-height: 1.55; color: var(--muted); margin: 14px 0 0; }
+.powered { margin-top: 18px; background: #F8FAFC; border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; font-size: 12.5px; color: var(--muted); }
+
+.typelist { display: flex; flex-direction: column; gap: 10px; }
+.typecard { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: #FFF; border: 1.5px solid var(--line); border-radius: 11px; padding: 13px 14px; cursor: pointer; }
+.typecard:hover { border-color: var(--accent); }
+.typecard .bar { width: 4px; align-self: stretch; border-radius: 3px; background: var(--accent); flex: 0 0 auto; }
+.typecard .tn { font-weight: 700; font-size: 14.5px; }
+.typecard .tm { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+.calhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.calhead .mo { font-weight: 700; font-size: 15.5px; }
+.navbtn { width: 32px; height: 32px; border: 1px solid var(--line); background: #FFF; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.navbtn[disabled] { opacity: .35; cursor: default; }
+.grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.grid .dow { text-align: center; font-size: 11px; font-weight: 700; color: var(--faint); padding-bottom: 2px; }
+.day { height: 42px; border-radius: 9px; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.day.shut { color: #CBD5E1; }
+.day.open { background: var(--open-bg); color: var(--open-ink); border: 1.5px solid var(--open-line); cursor: pointer; }
+.day.on { background: var(--accent); color: var(--accent-fg); border: 1.5px solid var(--accent); cursor: pointer; }
+.legend { display: flex; gap: 16px; font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 11px; height: 11px; border-radius: 999px; display: inline-block; }
+
+.two { display: flex; gap: 22px; flex-wrap: wrap; }
+.two .cal { width: 330px; flex: 0 0 auto; }
+.two .slots { flex: 999 1 200px; min-width: 0; }
+.slots h2 { font-size: 14.5px; margin: 0 0 3px; }
+.slots .sub { font-size: 12.5px; color: var(--muted); margin-bottom: 11px; }
+.slotlist { display: flex; flex-direction: column; gap: 9px; max-height: 430px; overflow-y: auto; }
+.slot { display: block; width: 100%; text-align: center; padding: 12px 10px; border: 1.5px solid var(--accent); border-radius: 9px; color: var(--accent); background: #FFF; font-weight: 700; font-size: 14.5px; cursor: pointer; }
+.slot:hover { background: var(--accent); color: var(--accent-fg); }
+
+label { display: block; font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 5px; }
+input[type=text], input[type=email], input[type=tel], textarea, select {
+  width: 100%; padding: 10px 11px; border: 1px solid #CBD5E1; border-radius: 8px;
+  font: inherit; color: var(--ink); background: #FFF;
+}
+textarea { resize: vertical; }
+.field { margin-bottom: 12px; }
+.btn { padding: 12px 18px; background: var(--accent); color: var(--accent-fg); border: none; border-radius: 9px; font-size: 15px; font-weight: 700; cursor: pointer; }
+.btn[disabled] { opacity: .55; cursor: default; }
+.btn.ghost { background: #FFF; color: #334155; border: 1px solid #CBD5E1; }
+.back { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 700; color: var(--accent); background: none; border: none; padding: 0; cursor: pointer; margin-bottom: 14px; }
+.note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.err { color: var(--err); font-weight: 700; font-size: 13px; margin-top: 10px; }
+.state { padding: 44px 20px; text-align: center; color: var(--muted); }
+.state h2 { color: var(--ink); font-size: 19px; margin: 0 0 8px; }
+
+.done { border: 1.5px solid #A7F3D0; background: #ECFDF5; border-radius: 12px; padding: 18px; }
+.done .hd { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 17px; color: #065F46; margin-bottom: 9px; }
+.done p { margin: 0 0 8px; font-size: 13.5px; color: #065F46; line-height: 1.55; }
+.recap { border: 1px solid var(--line); border-radius: 12px; padding: 15px 17px; margin-top: 14px; }
+.recap div { font-size: 13.5px; margin-bottom: 5px; }
+
+@media (max-width: 720px) {
+  .side { width: 100%; border-right: none; border-bottom: 1px solid var(--line); }
+  .two .cal { width: 100%; }
+  .slotlist { max-height: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="top" id="top" hidden>
+  <div class="wrap">
+    <img id="logo" alt="" hidden/>
+    <div>
+      <div class="name" id="bizname"></div>
+      <div class="tag" id="biztag"></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="panel" id="panel">
+
+    <div class="state" id="screen-loading">Loading&hellip;</div>
+
+    <div class="state" id="screen-missing" hidden>
+      <h2>This booking page isn&rsquo;t available</h2>
+      <p>The link may be out of date. Please get in touch with the business directly.</p>
+    </div>
+
+    <div class="cols" id="screen-book" hidden>
+      <div class="side">
+        <button class="back" id="back" type="button" hidden>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          Back
+        </button>
+        <div class="who">
+          <div class="avatar" id="avatar"></div>
+          <div>
+            <div class="nm" id="hostname"></div>
+            <div class="ti" id="hosttitle"></div>
+          </div>
+        </div>
+        <h1 id="sideheading">Book a time</h1>
+        <div class="facts" id="facts"></div>
+        <p class="blurb" id="blurb"></p>
+        <div class="powered">Powered by <strong>Structure Studio</strong></div>
+      </div>
+
+      <div class="main">
+        <div id="step-type" hidden>
+          <h2 style="font-size:16px;margin:0 0 4px">What would you like to book?</h2>
+          <div class="sub" style="font-size:12.5px;color:var(--muted);margin-bottom:14px" id="introtext"></div>
+          <div class="typelist" id="typelist"></div>
+        </div>
+
+        <div id="step-when" hidden>
+          <div class="two">
+            <div class="cal">
+              <div class="calhead">
+                <div class="mo" id="monthlabel"></div>
+                <div>
+                  <button class="navbtn" id="prevmo" type="button" aria-label="Previous month">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+                  </button>
+                  <button class="navbtn" id="nextmo" type="button" aria-label="Next month">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="grid" id="calgrid"></div>
+              <div class="legend">
+                <span><span class="dot" style="background:var(--open-bg);border:1px solid var(--open-line)"></span>Open</span>
+                <span><span class="dot" style="background:#F1F5F9"></span>Not available</span>
+              </div>
+              <div style="margin-top:14px">
+                <label for="tz">Time zone</label>
+                <select id="tz"></select>
+              </div>
+            </div>
+            <div class="slots">
+              <h2 id="dayheading">Pick a day</h2>
+              <div class="sub" id="daysub"></div>
+              <div class="slotlist" id="slotlist"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="step-who" hidden>
+          <h2 style="font-size:16px;margin:0 0 14px">Your details</h2>
+          <div class="field"><label for="f-name">Name</label><input id="f-name" type="text" autocomplete="name"/></div>
+          <div class="field"><label for="f-email">Email</label><input id="f-email" type="email" autocomplete="email"/></div>
+          <div class="field"><label for="f-phone">Phone</label><input id="f-phone" type="tel" autocomplete="tel"/></div>
+          <div class="field"><label for="f-notes">What would you like to talk about?</label><textarea id="f-notes" rows="3"></textarea></div>
+          <button class="btn" id="confirm" type="button">Schedule meeting</button>
+          <div class="err" id="bookerr" hidden></div>
+          <p class="note" style="margin-top:10px" id="consent"></p>
+        </div>
+
+        <div id="step-done" hidden>
+          <div class="done">
+            <div class="hd">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#047857" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>
+              You&rsquo;re booked
+            </div>
+            <p id="donemsg"></p>
+          </div>
+          <div class="recap" id="donerecap"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Baked-in data connection — identical constants to index.html / shop.html /
+  // my-quotes.html. The anon key is public by design; everything this page reads goes
+  // through get_public_booking (migration 326), which returns only what a public page may
+  // show, and everything it writes goes through book-public, which re-reads every id.
+  var SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+  var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+  var HEADERS = { "Authorization": "Bearer " + SUPABASE_ANON_KEY, "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+
+  var params;
+  try { params = new URLSearchParams(location.search); } catch (e) { params = { get: function () { return null; } }; }
+  var clientId = (params.get("client") || "").trim().toLowerCase();
+  var hostSlug = (params.get("with") || "").trim().toLowerCase();
+  var typeFromUrl = (params.get("type") || "").trim().toLowerCase();
+  var EMBED = params.get("embed") === "1";
+  if (EMBED) document.body.className = "embed";
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+
+  // Embedded in a builder's site, tell the parent how tall we are so the iframe can grow —
+  // the same contract shop-embed.js already speaks.
+  function postHeight() {
+    if (!EMBED || !window.parent) return;
+    try {
+      window.parent.postMessage({ type: "ss-book-height", height: document.body.scrollHeight }, "*");
+    } catch (e) { /* a cross-origin parent that does not listen is fine */ }
+  }
+
+  function screen(name) {
+    ["loading", "missing", "book"].forEach(function (k) { $("screen-" + k).hidden = (k !== name); });
+    postHeight();
+  }
+  function step(name) {
+    ["type", "when", "who", "done"].forEach(function (k) { $("step-" + k).hidden = (k !== name); });
+    $("back").hidden = (name === "type" || name === "done");
+    postHeight();
+  }
+
+  // ── State ───────────────────────────────────────────────────────────────────────────────
+  var page = null;          // get_public_booking's answer
+  var chosenType = null;
+  var days = [];            // availability for the month on screen
+  var hostTz = "UTC";
+  var viewYear = 0, viewMonth = 0;   // the month in the calendar, 1-based month
+  var chosenDay = null;     // "yyyy-mm-dd"
+  var chosenSlot = null;    // ISO instant
+  var busy = false;
+
+  // ── Time formatting ─────────────────────────────────────────────────────────────────────
+  // Everything on screen is rendered in the CUSTOMER's chosen zone; the host's zone is named
+  // in the sidebar. Intl does the work — there is no hand-rolled offset arithmetic here, and
+  // there must not be: the browser already knows every zone's rules.
+  var customerTz = "UTC";
+  try { customerTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (e) { /* keep UTC */ }
+
+  function fmtTime(iso, tz) {
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: tz, hour: "numeric", minute: "2-digit",
+      }).format(new Date(iso));
+    } catch (e) { return iso; }
+  }
+  function fmtLongDay(day) {
+    // `day` is a calendar day in the HOST's zone. Rendering it needs no zone at all — it is
+    // a label, not an instant — so parse the three numbers rather than letting Date guess.
+    var p = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+    if (!p) return day;
+    var d = new Date(Date.UTC(+p[1], +p[2] - 1, +p[3]));
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: "UTC", weekday: "long", day: "numeric", month: "long",
+      }).format(d);
+    } catch (e) { return day; }
+  }
+  function zoneLabel(tz) { return String(tz || "").replace(/_/g, " "); }
+
+  function durationText(t) {
+    var m = t.durationMinutes;
+    if (m < 60) return m + " minutes";
+    if (m % 60 === 0) return (m / 60) + (m === 60 ? " hour" : " hours");
+    return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  }
+  function placeText(t) {
+    if (t.locationDetail) return t.locationDetail;
+    if (t.locationKind === "phone") return "Phone call";
+    if (t.locationKind === "video") return "Video call";
+    if (t.locationKind === "in_person") return "In person";
+    return "";
+  }
+
+  // ── Icons (inline, never emoji) ─────────────────────────────────────────────────────────
+  function icon(kind) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "17"); svg.setAttribute("height", "17");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "#475569"); svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("aria-hidden", "true");
+    var paths = {
+      clock: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7v5l3 2"],
+      pin: ["M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z", "M12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"],
+      globe: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M3 12h18", "M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"],
+      cal: ["M5 5h14v16H5z", "M8 3v4", "M16 3v4", "M5 11h14"]
+    }[kind] || [];
+    paths.forEach(function (d) {
+      var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      p.setAttribute("d", d);
+      svg.appendChild(p);
+    });
+    return svg;
+  }
+  function fact(kind, text, strong) {
+    var row = el("div");
+    row.appendChild(icon(kind));
+    row.appendChild(el("span", null, text));
+    if (strong) row.lastChild.style.fontWeight = "700";
+    return row;
+  }
+
+  // ── Load the page ───────────────────────────────────────────────────────────────────────
+  function boot() {
+    if (!/^[a-z0-9-]{1,64}$/.test(clientId) || !/^[a-z0-9-]{1,40}$/.test(hostSlug)) {
+      screen("missing");
+      return;
+    }
+    fetch(SUPABASE_URL + "/rest/v1/rpc/get_public_booking", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({ p_client_id: clientId, p_host_slug: hostSlug })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.ok !== true) { screen("missing"); return; }
+        page = d;
+        paintBrand();
+        paintHost();
+        if (!page.host.accepting) {
+          $("screen-missing").innerHTML =
+            "<h2>" + esc(page.host.name) + " isn’t taking bookings right now</h2>" +
+            "<p>Please get in touch with " + esc(page.business.name) + " directly.</p>";
+          screen("missing");
+          return;
+        }
+        if (!page.types.length) { screen("missing"); return; }
+        screen("book");
+        var pre = typeFromUrl && findType(typeFromUrl);
+        if (pre) { pickType(pre); } else if (page.types.length === 1) { pickType(page.types[0]); } else { paintTypes(); step("type"); }
+      })
+      .catch(function () { screen("missing"); });
+  }
+
+  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+  function findType(slug) {
+    for (var i = 0; i < page.types.length; i++) if (page.types[i].slug === slug) return page.types[i];
+    return null;
+  }
+
+  function paintBrand() {
+    var b = page.business || {};
+    if (b.accent) document.documentElement.style.setProperty("--accent", b.accent);
+    if (b.headerBg) document.documentElement.style.setProperty("--header-bg", b.headerBg);
+    $("bizname").textContent = b.name || "";
+    $("biztag").textContent = b.tagline || "";
+    if (b.logoUrl) { $("logo").src = b.logoUrl; $("logo").hidden = false; $("logo").alt = b.name || ""; }
+    $("top").hidden = false;
+    document.title = "Book a time — " + (b.name || "Structure Studio");
+    $("introtext").textContent = (page.page && page.page.intro) || "";
+  }
+
+  function paintHost() {
+    var h = page.host;
+    hostTz = h.timeZone || "UTC";
+    $("hostname").textContent = h.name || "";
+    $("hosttitle").textContent = h.title || "";
+    var av = $("avatar");
+    av.textContent = "";
+    if (h.photoUrl) {
+      var img = el("img"); img.src = h.photoUrl; img.alt = ""; av.appendChild(img);
+    } else {
+      av.textContent = (h.name || "?").split(/\s+/).slice(0, 2).map(function (w) { return w.charAt(0).toUpperCase(); }).join("");
+    }
+    // The customer's zone first (it is the one the times are in), then the host's, named so
+    // nobody has to guess whose 1pm it is.
+    var sel = $("tz");
+    sel.textContent = "";
+    var seen = {};
+    [customerTz, hostTz, "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"]
+      .forEach(function (z) {
+        if (!z || seen[z]) return;
+        seen[z] = 1;
+        var o = el("option", null, zoneLabel(z) + (z === hostTz ? " — their time" : ""));
+        o.value = z;
+        sel.appendChild(o);
+      });
+    sel.value = customerTz;
+    sel.onchange = function () { customerTz = sel.value; paintSlots(); paintSide(); };
+  }
+
+  function paintSide() {
+    $("sideheading").textContent = chosenType ? chosenType.name : "Book a time";
+    var f = $("facts");
+    f.textContent = "";
+    if (!chosenType) { $("blurb").textContent = ""; return; }
+    f.appendChild(fact("clock", durationText(chosenType)));
+    if (chosenSlot) {
+      f.appendChild(fact("cal",
+        fmtTime(chosenSlot, customerTz) + ", " + fmtLongDay(chosenDay), true));
+    }
+    var place = placeText(chosenType);
+    if (place) f.appendChild(fact("pin", place));
+    f.appendChild(fact("globe", "Times shown in " + zoneLabel(customerTz)));
+    $("blurb").textContent = chosenType.description || "";
+  }
+
+  function paintTypes() {
+    var list = $("typelist");
+    list.textContent = "";
+    page.types.forEach(function (t) {
+      var b = el("button", "typecard");
+      b.type = "button";
+      var bar = el("span", "bar");
+      if (t.color) bar.style.background = t.color;
+      b.appendChild(bar);
+      var box = el("span");
+      box.appendChild(el("span", "tn", t.name));
+      var meta = durationText(t);
+      var place = placeText(t);
+      if (place) meta += " · " + place;
+      box.appendChild(el("span", "tm", meta));
+      box.firstChild.style.display = "block";
+      box.lastChild.style.display = "block";
+      b.appendChild(box);
+      b.onclick = function () { pickType(t); };
+      list.appendChild(b);
+    });
+  }
+
+  function pickType(t) {
+    chosenType = t;
+    chosenDay = null;
+    chosenSlot = null;
+    paintSide();
+    var now = new Date();
+    viewYear = now.getUTCFullYear();
+    viewMonth = now.getUTCMonth() + 1;
+    step("when");
+    loadMonth();
+  }
+
+  // ── Availability ────────────────────────────────────────────────────────────────────────
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function monthRange(y, m) {
+    var last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return { from: y + "-" + pad(m) + "-01", to: y + "-" + pad(m) + "-" + pad(last) };
+  }
+
+  function loadMonth() {
+    var r = monthRange(viewYear, viewMonth);
+    days = [];
+    $("calgrid").textContent = "";
+    $("monthlabel").textContent = "…";
+    fetch(SUPABASE_URL + "/functions/v1/book-public?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({
+        action: "availability", clientId: clientId, hostSlug: hostSlug,
+        typeSlug: chosenType.slug, fromDate: r.from, toDate: r.to
+      })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (d) {
+        days = (d && d.ok && d.days) || [];
+        paintCalendar();
+        // Open the first day that has anything, so a customer landing here sees times
+        // rather than an instruction to click something.
+        var first = null;
+        for (var i = 0; i < days.length; i++) if (days[i].slots.length) { first = days[i].date; break; }
+        if (first) { chosenDay = first; }
+        paintCalendar();
+        paintSlots();
+      })
+      .catch(function () { days = []; paintCalendar(); paintSlots(); });
+  }
+
+  function paintCalendar() {
+    var g = $("calgrid");
+    g.textContent = "";
+    try {
+      $("monthlabel").textContent = new Intl.DateTimeFormat(undefined, {
+        timeZone: "UTC", month: "long", year: "numeric"
+      }).format(new Date(Date.UTC(viewYear, viewMonth - 1, 1)));
+    } catch (e) { $("monthlabel").textContent = viewYear + "-" + pad(viewMonth); }
+
+    ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].forEach(function (d) {
+      g.appendChild(el("div", "dow", d));
+    });
+
+    var openOn = {};
+    days.forEach(function (d) { if (d.slots.length) openOn[d.date] = d.slots.length; });
+
+    var firstDow = new Date(Date.UTC(viewYear, viewMonth - 1, 1)).getUTCDay();
+    for (var b = 0; b < firstDow; b++) g.appendChild(el("div"));
+
+    var last = new Date(Date.UTC(viewYear, viewMonth, 0)).getUTCDate();
+    for (var dnum = 1; dnum <= last; dnum++) {
+      var key = viewYear + "-" + pad(viewMonth) + "-" + pad(dnum);
+      if (openOn[key]) {
+        var btn = el("button", key === chosenDay ? "day on" : "day open", String(dnum));
+        btn.type = "button";
+        btn.setAttribute("aria-label", fmtLongDay(key) + " — " + openOn[key] + " times open");
+        btn.onclick = (function (k) {
+          return function () { chosenDay = k; chosenSlot = null; paintCalendar(); paintSlots(); paintSide(); };
+        })(key);
+        g.appendChild(btn);
+      } else {
+        g.appendChild(el("div", "day shut", String(dnum)));
+      }
+    }
+
+    // Never offer a month entirely in the past.
+    var now = new Date();
+    var atStart = (viewYear === now.getUTCFullYear() && viewMonth === now.getUTCMonth() + 1);
+    $("prevmo").disabled = atStart;
+    postHeight();
+  }
+
+  function paintSlots() {
+    var list = $("slotlist");
+    list.textContent = "";
+    var d = null;
+    for (var i = 0; i < days.length; i++) if (days[i].date === chosenDay) { d = days[i]; break; }
+    if (!chosenDay || !d || !d.slots.length) {
+      $("dayheading").textContent = chosenDay ? fmtLongDay(chosenDay) : "Pick a day";
+      $("daysub").textContent = days.length
+        ? "Nothing open that day — the highlighted days have times."
+        : "No times open this month. Try the next one.";
+      postHeight();
+      return;
+    }
+    $("dayheading").textContent = fmtLongDay(chosenDay);
+    $("daysub").textContent = d.slots.length + (d.slots.length === 1 ? " time open" : " times open")
+      + " — each one is " + durationText(chosenType);
+    d.slots.forEach(function (s) {
+      var b = el("button", "slot", fmtTime(s.startsAt, customerTz));
+      b.type = "button";
+      b.onclick = function () {
+        chosenSlot = s.startsAt;
+        paintSide();
+        $("consent").textContent = "By scheduling you agree to "
+          + (page.business.name || "this business") + " contacting you about this meeting.";
+        step("who");
+        $("f-name").focus();
+      };
+      list.appendChild(b);
+    });
+    postHeight();
+  }
+
+  $("prevmo").onclick = function () {
+    viewMonth--; if (viewMonth < 1) { viewMonth = 12; viewYear--; }
+    chosenDay = null; chosenSlot = null; loadMonth();
+  };
+  $("nextmo").onclick = function () {
+    viewMonth++; if (viewMonth > 12) { viewMonth = 1; viewYear++; }
+    chosenDay = null; chosenSlot = null; loadMonth();
+  };
+  $("back").onclick = function () {
+    if (!$("step-who").hidden) { chosenSlot = null; paintSide(); step("when"); return; }
+    if (!$("step-when").hidden) {
+      if (page.types.length > 1) { chosenType = null; chosenSlot = null; chosenDay = null; paintSide(); paintTypes(); step("type"); }
+      return;
+    }
+  };
+
+  // ── Book it ─────────────────────────────────────────────────────────────────────────────
+  $("confirm").onclick = function () {
+    if (busy) return;
+    var name = $("f-name").value.trim();
+    var email = $("f-email").value.trim();
+    var phone = $("f-phone").value.trim();
+    var errBox = $("bookerr");
+    function fail(msg) { errBox.textContent = msg; errBox.hidden = false; postHeight(); }
+    errBox.hidden = true;
+
+    if (!name) { fail("Please tell us your name."); $("f-name").focus(); return; }
+    if (!email && !phone) { fail("Add an email address or a phone number so we can confirm it."); $("f-email").focus(); return; }
+
+    busy = true;
+    $("confirm").disabled = true;
+    $("confirm").textContent = "Booking…";
+
+    fetch(SUPABASE_URL + "/functions/v1/book-public?forceFunctionRegion=us-east-1", {
+      method: "POST", headers: HEADERS,
+      body: JSON.stringify({
+        action: "book", clientId: clientId, hostSlug: hostSlug, typeSlug: chosenType.slug,
+        startsAt: chosenSlot, timeZone: customerTz,
+        name: name, email: email, phone: phone, notes: $("f-notes").value.trim(),
+        embed: EMBED
+      })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        busy = false;
+        $("confirm").disabled = false;
+        $("confirm").textContent = "Schedule meeting";
+        if (!d || d.ok !== true) {
+          // A taken slot is the one failure with a next step, so it sends them back to the
+          // calendar with fresh availability rather than leaving them on a dead form.
+          if (d && d.code === "slot_taken") {
+            fail(d.error || "That time has gone. Please pick another.");
+            chosenSlot = null;
+            paintSide();
+            step("when");
+            loadMonth();
+            return;
+          }
+          fail((d && d.error) || "We couldn’t book that just now. Please try again.");
+          return;
+        }
+        paintDone(d, email);
+      })
+      .catch(function () {
+        busy = false;
+        $("confirm").disabled = false;
+        $("confirm").textContent = "Schedule meeting";
+        fail("We couldn’t reach the booking service. Please try again.");
+      });
+  };
+
+  function paintDone(d, email) {
+    var m = d.meeting || {};
+    // ⚠️ Says only what is TRUE TODAY. The confirmation email and the .ics attachment are
+    // phase 2, and the server reports whether anything was sent (`confirmationSent`) rather
+    // than letting this page promise an email that nobody has written yet.
+    $("donemsg").textContent = d.confirmationSent
+      ? ("A confirmation is on its way to " + email + ", with a calendar invite attached.")
+      : ("You’re on " + ($("hostname").textContent || "the") + "’s calendar. "
+         + (page.business.name || "The business") + " will be in touch to confirm.");
+    var r = $("donerecap");
+    r.textContent = "";
+    r.appendChild(el("div", null, m.typeName || (chosenType && chosenType.name) || "Meeting"));
+    var when = el("div");
+    when.innerHTML = "<strong>" + esc(fmtTime(m.startsAt, customerTz)) + " – "
+      + esc(fmtTime(m.endsAt, customerTz)) + ", " + esc(fmtLongDay(chosenDay)) + "</strong>";
+    r.appendChild(when);
+    var place = placeText(chosenType || {});
+    if (place) r.appendChild(el("div", null, place));
+    r.appendChild(el("div", null, "With " + ($("hostname").textContent || "")));
+    r.lastChild.style.color = "var(--muted)";
+    step("done");
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

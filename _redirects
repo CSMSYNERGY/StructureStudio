@@ -35,6 +35,13 @@
 /form        /form.html       200
 /form/       /form            301
 
+# MEETINGS (migration 326, 2026-10-22): a person's public booking page. ?client= picks the
+# builder, ?with= the person, ?type= skips straight to one meeting type; no sub-paths, so no
+# /book/* rule. Like /shop, deliberately NO X-Frame-Options in _headers — a builder embeds
+# this in their own site, which is the point of it.
+/book        /book.html       200
+/book/       /book            301
+
 # ── THE APP'S ADDRESSES: /<page>[/<sub>], NO /portal (Carolyn 2026-10-12) ─────────────────
 # "It's app.structurestudiosuite.com forward slash advance. Like, so let's remove portal from
 # anywhere." Every page of the app is portal.html, rewritten — 200, never 301, so the address

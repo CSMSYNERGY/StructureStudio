@@ -2616,7 +2616,21 @@ const CRM_TABS = [
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canEdit ? "You don't have permission to add notes."
       : CRM_PICK_HINT("note")) },
-  { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
+  // MEETING SCHEDULER — BUILT NOW (migration 326, 2026-10-22), so it no longer says "arrives
+  // with the calendar integration". Booking here goes through the same book_meeting() path the
+  // public page uses, which is what keeps Carolyn's 2026-08-26 rule true: this is the ONLY way
+  // a meeting is created, which is why the Activity composer has no "meeting" chip.
+  //
+  // Needs its own area (`meetings`), not contacts:edit — a rep may work a customer without
+  // having a calendar, and an office manager may run the diary without being the one who
+  // books. `needsPick` is deliberately NOT a condition: a meeting is with the PERSON, not
+  // about one quote, the same reasoning the Call tab's comment gives. A deal that IS picked
+  // gets filed against the booking anyway (shortCode), so nothing is lost by not requiring one.
+  { key: "scheduler", label: "Meeting scheduler",
+    enabled: (c) => c.crmUnlocked && !!c.canMeet && !!(c.contact && c.contact.id),
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canMeet ? "You don't have permission to book meetings."
+      : "This contact needs saving before a meeting can be booked against them.") },
   // CALL — My Synergy Phone (2026-09-29). Built now, so it no longer says "arrives with the phone
   // integration". Pressing it hands the number to the My Synergy Phone extension on this computer (or
   // the app, on a phone) and the call runs THERE; this page never moves. See startCall.
@@ -3954,11 +3968,356 @@ function CrmQuickSendPicker({ channel, quick, onOpen, onInsert, fill }) {
 // targetClientId and app_operators for free, and there is no second code path to keep true.
 // (The Sales tax card it renders is the one exception, and carries its own reasons and its own
 // view-as path — see QuoteSalesTaxCard.)
+// ── The Meeting scheduler tab (migration 326, Carolyn 2026-10-22) ────────────────────────
+// The slot CRM_TABS reserved in August, filled in. Two halves, in the order Carolyn set for
+// this whole page on 2026-08-26: "the top part is about things to do. The bottom part is
+// about history" — so booking is up top and the meetings this customer has had are below it.
+//
+// ⚠️ BOOKING HERE TAKES THE SAME PATH AS THE PUBLIC PAGE. portal-meetings' `book` calls
+// book_meeting() exactly as book-public does, buffers and advisory lock included. That is
+// what makes "two ways to book the same thing is how a calendar drifts out of sync with
+// itself" survive having an internal booker at all: there are two DOORS, and one path.
+//
+// Why a rep books from here rather than sending a link: they are on the phone with the
+// customer. Sending a link and hoping is the thing a CRM is supposed to replace.
+function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
+  const [over, setOver] = useState(null);
+  const [hostId, setHostId] = useState(null);
+  const [typeId, setTypeId] = useState(null);
+  const [avail, setAvail] = useState(null);
+  const [slot, setSlot] = useState(null);
+  const [mine, setMine] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [notes, setNotes] = useState("");
+
+  const call = useCallback(async (action, body) => {
+    const { data, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !data || data.error) throw new Error((data && data.error) || (error ? await fnError(error) : "That didn't work."));
+    return data;
+  }, []);
+
+  // ── What can be booked, and by whom ─────────────────────────────────────────────────────
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const d = await call("overview", {});
+        if (!live) return;
+        setOver(d);
+        // Me first — a rep booking their own time is the common case. An operator in view-as
+        // has no host row on this tenant, so they fall through to the team's first bookable
+        // person, which is the only sensible default for somebody helping over the phone.
+        const candidates = d.myHost ? [d.myHost].concat(d.team || []) : (d.team || []);
+        const first = candidates.find((h) => h.accepting && (h.typeIds || []).length) || candidates[0] || null;
+        if (first) {
+          setHostId(first.id);
+          setTypeId((first.typeIds || [])[0] || null);
+        }
+      } catch (e) { if (live) setMsg({ err: e.message }); }
+    })();
+    return () => { live = false; };
+  }, [call, clientId]);
+
+  // ── This customer's meetings ────────────────────────────────────────────────────────────
+  const loadMine = useCallback(async () => {
+    if (!contact || !contact.id) { setMine([]); return; }
+    try {
+      const d = await call("contact_meetings", { contactId: contact.id });
+      setMine(d.meetings || []);
+    } catch (e) { setMsg({ err: e.message }); setMine([]); }
+  }, [call, contact]);
+  useEffect(() => { loadMine(); }, [loadMine]);
+
+  // ── Open times ──────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let live = true;
+    if (!hostId || !typeId) { setAvail(null); return undefined; }
+    setAvail(null);
+    setSlot(null);
+    (async () => {
+      try {
+        const today = new Date();
+        const to = new Date(today.getTime() + 21 * 86400000);
+        const d = await call("availability", {
+          hostId, typeId,
+          fromDate: today.toISOString().slice(0, 10),
+          toDate: to.toISOString().slice(0, 10),
+        });
+        if (!live) return;
+        setAvail(d);
+      } catch (e) { if (live) { setMsg({ err: e.message }); setAvail({ days: [] }); } }
+    })();
+    return () => { live = false; };
+  }, [call, hostId, typeId]);
+
+  if (msg && msg.err && !over) return <div style={S.err}>{msg.err}</div>;
+  if (!over) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading the scheduler…</div>;
+
+  const hosts = over.myHost ? [over.myHost].concat((over.team || []).filter((h) => h.id !== over.myHost.id)) : (over.team || []);
+  const host = hosts.find((h) => h.id === hostId) || null;
+  const offered = host ? (over.types || []).filter((t) => t.active && (host.typeIds || []).indexOf(t.id) !== -1) : [];
+  const type = offered.find((t) => t.id === typeId) || null;
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+
+  // The first handful of open times, flattened across days — a rep on the phone wants "how
+  // about Thursday at 2?", not a month to navigate. The full calendar is the customer's job
+  // on the public page.
+  const flat = [];
+  for (const d of ((avail && avail.days) || [])) {
+    for (const s of d.slots) {
+      if (flat.length < 12) flat.push({ date: d.date, startsAt: s.startsAt });
+    }
+    if (flat.length >= 12) break;
+  }
+
+  const tz = (avail && avail.timeZone) || (host && host.timeZone) || "UTC";
+  const fmtT = (iso) => {
+    try { return new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(iso)); }
+    catch (_e) { return iso; }
+  };
+  const fmtDay = (day) => {
+    const p = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+    if (!p) return day;
+    try {
+      return new Intl.DateTimeFormat(undefined, { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" })
+        .format(new Date(Date.UTC(+p[1], +p[2] - 1, +p[3])));
+    } catch (_e) { return day; }
+  };
+  const fmtWhen = (iso, zone) => {
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: zone || tz, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit",
+      }).format(new Date(iso));
+    } catch (_e) { return iso; }
+  };
+
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  const book = () => run(async () => {
+    if (!slot || !host || !type) return;
+    try {
+      await call("book", {
+        hostId: host.id, typeId: type.id, startsAt: slot.startsAt,
+        contactId: contact.id,
+        // The deal the record has picked, when it has one. A meeting is with the person, so a
+        // pick is never required — but when there is one, file against it.
+        shortCode: shortCode || undefined,
+        customerName: contact.name || contact.company || "Customer",
+        customerEmail: contact.email || undefined,
+        customerPhone: contact.phone || undefined,
+        notes: notes.trim() || undefined,
+      });
+    } catch (e) {
+      // A slot that went while the rep was talking is the one failure with a next step, so
+      // reload the times rather than leaving a dead button.
+      setSlot(null);
+      const d = await call("availability", {
+        hostId: host.id, typeId: type.id,
+        fromDate: new Date().toISOString().slice(0, 10),
+        toDate: new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10),
+      }).catch(() => null);
+      if (d) setAvail(d);
+      throw e;
+    }
+    setSlot(null);
+    setNotes("");
+    setMsg({ ok: "Booked." });
+    await loadMine();
+  });
+
+  const cancel = (m) => run(async () => {
+    if (!window.confirm(`Cancel the ${m.typeName || "meeting"} on ${fmtWhen(m.startsAt, m.timeZone)}?`)) return;
+    await call("cancel", { id: m.id });
+    setMsg({ ok: "Cancelled." });
+    await loadMine();
+  });
+
+  const mark = (m, status) => run(async () => {
+    await call("set_status", { id: m.id, status });
+    await loadMine();
+  });
+
+  const STATUS = {
+    booked: ["#B45309", "Upcoming"],
+    completed: ["#047857", "Completed"],
+    no_show: ["#B91C1C", "No-show"],
+    cancelled: ["#94A3B8", "Cancelled"],
+  };
+
+  return (
+    <div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{msg.ok}</div>
+      )}
+
+      {/* ── BOOK ───────────────────────────────────────────────────────────────────────── */}
+      {hosts.length === 0 && (
+        <div style={{ ...sub, marginBottom: 12 }}>
+          Nobody on this account has a booking calendar yet. Set one up under{" "}
+          <strong>Settings → Meetings</strong> and this tab can book against it.
+        </div>
+      )}
+
+      {hosts.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ flex: "1 1 170px" }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>With</span>
+              <select value={hostId || ""} onChange={(e) => { setHostId(e.target.value); const h = hosts.find((x) => x.id === e.target.value); setTypeId(((h && h.typeIds) || [])[0] || null); }}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {hosts.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.publicName}{over.myHost && h.id === over.myHost.id ? " (me)" : ""}{h.accepting ? "" : " — away"}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={{ flex: "1 1 190px" }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>Meeting type</span>
+              <select value={typeId || ""} onChange={(e) => setTypeId(e.target.value)} disabled={!offered.length}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {!offered.length && <option value="">Nothing offered</option>}
+                {offered.map((t) => <option key={t.id} value={t.id}>{t.name} — {t.durationMinutes} min</option>)}
+              </select>
+            </div>
+          </div>
+
+          {host && !host.accepting && (
+            <div style={{ ...sub, marginBottom: 10, color: "#92400E" }}>
+              {host.publicName} has booking switched off at the moment, so there are no times to offer.
+            </div>
+          )}
+          {host && host.accepting && !offered.length && (
+            <div style={{ ...sub, marginBottom: 10 }}>
+              {host.publicName} hasn't picked any meeting types yet — that's under Settings → Meetings.
+            </div>
+          )}
+
+          {host && host.accepting && !!offered.length && (
+            <>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", marginBottom: 6 }}>
+                Next times open{type ? ` · ${type.durationMinutes} min` : ""}
+                <span style={{ fontWeight: 600, color: "#94A3B8" }}>{` · ${String(tz).replace(/_/g, " ")}`}</span>
+              </div>
+              {!avail && <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>}
+              {avail && !flat.length && (
+                <div style={{ ...sub, marginBottom: 10 }}>
+                  Nothing open in the next three weeks. Their hours and days off are under Settings → Meetings.
+                </div>
+              )}
+              {!!flat.length && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                  {flat.map((s) => {
+                    const on = slot && slot.startsAt === s.startsAt;
+                    return (
+                      <button key={s.startsAt} type="button" onClick={() => setSlot(on ? null : s)}
+                        style={{
+                          background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#92400E",
+                          border: `1.5px solid ${on ? ACCENT : "#FCD34D"}`, borderRadius: 8,
+                          padding: "6px 10px", cursor: "pointer", textAlign: "center", lineHeight: 1.25,
+                        }}>
+                        <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, opacity: 0.8 }}>{fmtDay(s.date)}</span>
+                        <span style={{ display: "block", fontSize: 12.5, fontWeight: 800 }}>{fmtT(s.startsAt)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {slot && (
+                <div style={{ marginBottom: 10 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>
+                    Anything they should know? (optional)
+                  </span>
+                  <textarea value={notes} rows={2} maxLength={2000} onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Wants to see a 12×24 with a loft."
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !slot || viewing} onClick={book}>
+                  {busy ? "Booking…" : slot ? `Book ${fmtDay(slot.date)} at ${fmtT(slot.startsAt)}` : "Pick a time"}
+                </button>
+                {host.slug && (
+                  <a href={`${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", textDecoration: "none" }}>
+                    Open their booking page
+                  </a>
+                )}
+              </div>
+              {/* An operator in view-as is not a member of this team, and a meeting booked from
+                  here would go out under the builder's name with the builder's customer. Greyed
+                  for the same reason Call and Text are. */}
+              {viewing && (
+                <div style={{ ...sub, marginTop: 7 }}>Booking isn't available while viewing another account.</div>
+              )}
+              <div style={{ ...sub, marginTop: 7 }}>
+                Booking this is the same as the customer doing it on the booking page — one diary, one
+                set of rules. There's no separate "log a meeting", on purpose.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── HISTORY ────────────────────────────────────────────────────────────────────── */}
+      <div style={{ borderTop: "1px solid #E2E8F0", paddingTop: 11 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 8 }}>
+          Meetings with this customer
+        </div>
+        {!mine && <div style={sub}>Loading…</div>}
+        {mine && !mine.length && <div style={sub}>None yet.</div>}
+        {(mine || []).map((m) => {
+          const [colour, label] = STATUS[m.status] || ["#94A3B8", m.status];
+          return (
+            <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 9 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: colour, marginTop: 6, flex: "0 0 auto" }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: "#0F172A" }}>
+                  {m.typeName || "Meeting"}
+                  <span style={{ fontWeight: 600, color: colour }}>{` · ${label}`}</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B" }}>
+                  {fmtWhen(m.startsAt, m.timeZone)}
+                  {m.hostName ? ` · with ${m.hostName}` : ""}
+                  {m.locationDetail ? ` · ${m.locationDetail}` : ""}
+                </div>
+                {m.notes && <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{m.notes}</div>}
+                {m.status === "booked" && !viewing && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                    <button type="button" disabled={busy} onClick={() => mark(m, "completed")}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Mark done</button>
+                    <button type="button" disabled={busy} onClick={() => mark(m, "no_show")}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>No-show</button>
+                    <button type="button" disabled={busy} onClick={() => cancel(m)}
+                      style={{ background: "none", border: "none", padding: 0, color: "#B91C1C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
   clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
   // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
   userId = null, canCall = false, phoneOn = false,
+  // Meetings (migration 326): whether this person's access lets them run a diary at all.
+  // ssCanWrite, not a literal compare — `meetings:'own'` writes (OWN_WRITE_AREAS), and the
+  // server narrows an own-only caller to their own host rather than refusing.
+  canMeet = false,
   // The signed-in person's email signature (My Profile), shown under the Email box because the
   // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
   // which shows nothing. onEditProfile opens My Profile, where it is changed.
@@ -4188,7 +4547,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // said "Pick a deal or order on the left first" under a picked deal. Its notes, activities,
   // texts, emails and uploads file against the customer alone (shortCode null, which every one of
   // those actions takes), so nothing can land on another deal's history.
-  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
+  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, canMeet, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
     selectedCode: activeCode, needsPick: kind === "contact" && !activeCode && !pickedLead,
     // My Synergy Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
@@ -5619,6 +5978,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 untouched. Tenants have meeting and lunch rows already logged, and a chip
                 the composer no longer offers is not the same thing as a kind the history
                 can no longer render. Removing them server-side would blank those rows. */}
+            {/* MEETING SCHEDULER (migration 326). Gated on tabOn, like every composer here,
+                so it can never render for somebody the tab is greyed for. */}
+            {tab === "scheduler" && tabOn("scheduler") && (
+              <div style={{ marginBottom: 12 }}>
+                <MeetingSchedulerPanel clientId={clientId} contact={data.contact}
+                  shortCode={activeCode} viewing={!!viewingLabel} />
+              </div>
+            )}
             {tab === "activity" && tabOn("activity") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>

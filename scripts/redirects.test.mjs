@@ -118,7 +118,8 @@ test("/ and /?client=… stay the public designer; /my-quotes and /admin stay th
   const cases = [["/", "/index.html"], ["/?client=acme-sheds", "/index.html"], ["/?client=acme-sheds&account=quotes", "/index.html"],
     ["/my-quotes", "/my-quotes.html"], ["/my-quotes?client=acme-sheds", "/my-quotes.html"], ["/admin", "/admin.html"],
     ["/shop", "/shop.html"], ["/shop?client=acme-sheds&unit=x", "/shop.html"],
-    ["/form", "/form.html"], ["/form?client=acme-sheds&id=x&embed=1", "/form.html"]];
+    ["/form", "/form.html"], ["/form?client=acme-sheds&id=x&embed=1", "/form.html"],
+    ["/book", "/book.html"], ["/book?client=acme-sheds&with=jamie", "/book.html"]];
   for (const [path, asset] of cases) {
     const r = resolveRequest(REDIRECTS, path);
     assert.deepEqual([r.kind, r.asset], ["rewrite", asset], path);

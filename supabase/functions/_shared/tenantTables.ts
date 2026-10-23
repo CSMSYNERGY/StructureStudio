@@ -70,6 +70,7 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   customer_design_links: { fate: "cascade", parent: "designs", export: true, why: "Which customer login sees which design." },
   customer_email_otps: { fate: "wipe", why: "One-time login codes for customers: nothing worth exporting." },
   lead_form_submissions: { fate: "cascade", parent: "lead_forms", export: true, why: "What visitors typed into a website lead form (migration 325)." },
+  meetings: { fate: "wipe", export: true, exportDrop: ["cancel_token"], why: "Meetings booked with customers (migration 326): who, when, and what they wrote. The cancel token is a capability that cancels the booking, so it is never exported." },
 
   // ── the builder's own setup, catalog and working data: purged ────────────────────────────────
   tax_code_assignments: { fate: "wipe", why: "Tax codes picked per style and heading; heading keys are shared, so a recreated slug would show them as its own." },
@@ -100,6 +101,12 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   invoice_requests: { fate: "cascade", parent: "designs", why: "\"Invoice to approve\" requests." },
   shop_unit_holds: { fate: "cascade", parent: "inventory_units", why: "Holds taken during an online purchase." },
   inventory_unit_photos: { fate: "cascade", parent: "inventory_units", why: "Inventory photo rows (the files are in inventory-photos)." },
+  meeting_overrides: { fate: "cascade", parent: "meeting_hosts", why: "A person's days off and one-off hours (migration 326)." },
+  // ⛔ A refresh token here is a standing key to a named person's whole calendar, so this row
+  // MUST go when the tenant does. It cascades off meeting_hosts; it is listed rather than left
+  // implicit precisely so a future reader cannot mistake "not in the registry" for "kept".
+  meeting_connections: { fate: "cascade", parent: "meeting_hosts", why: "Google/Outlook tokens for a person's calendar (migration 326). Service-role only, never exported." },
+  meeting_busy: { fate: "cascade", parent: "meeting_hosts", why: "Cached busy blocks read from a person's own calendar (migration 326): times only, no titles." },
   inventory_photo_ai_edits: { fate: "cascade", parent: "inventory_units", why: "AI photo edits of inventory." },
   phone_routes: { fate: "cascade", parent: "sms_numbers", why: "Call routing per number." },
   delivery_stops: { fate: "cascade", parent: "delivery_loads", why: "Stops on a delivery load." },
@@ -128,6 +135,9 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   shop_settings: { fate: "wipe", why: "Online shop settings." },
   shop_requests: { fate: "wipe", why: "Shop checkouts and requests, the inbox copy (the money is in orders and payments)." },
   lead_forms: { fate: "wipe", why: "Website lead forms (migration 325); submissions and daily counts cascade from them." },
+  meeting_hosts: { fate: "wipe", why: "Who is bookable, their public card and their weekly hours (migration 326). Days off, calendar connections and cached busy blocks all cascade from here; the meetings themselves are RESTRICT, so tenant_purge's retry passes clear them first." },
+  meeting_types: { fate: "wipe", why: "What can be booked: durations, buffers, notice windows (migration 326)." },
+  meeting_settings: { fate: "wipe", why: "Whether the booking pages are live, and their heading and intro (migration 326)." },
   lead_form_daily_stats: { fate: "cascade", parent: "lead_forms", why: "Per-day views, starts and submissions of a lead form." },
   email_templates: { fate: "wipe", why: "Designed email templates (migration 325)." },
   commission_settings: { fate: "wipe", why: "Commission rules." },
