@@ -4394,6 +4394,14 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
     setMsg({ ok: d.sentTo ? `Sent again to ${d.sentTo}.` : "Sent again." });
   });
 
+  // VIDEO (migration 333): a fresh Zoom link that could not be made when they booked. Tries
+  // again; when it works the customer is sent the confirmation again with the link in it.
+  const makeLink = (m) => run(async () => {
+    const d = await call("make_link", { id: m.id });
+    setMsg({ ok: d.emailSent ? "Zoom link made and sent to the customer." : "Zoom link made." });
+    await loadMine();
+  });
+
   const STATUS = {
     booked: ["#B45309", "Upcoming"],
     completed: ["#047857", "Completed"],
@@ -4544,6 +4552,25 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
                   {m.locationDetail ? ` · ${m.locationDetail}` : ""}
                 </div>
                 {m.notes && <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{m.notes}</div>}
+                {m.status === "booked" && m.conferenceUrl && (
+                  <div style={{ fontSize: 12, marginTop: 2 }}>
+                    <a href={m.conferenceUrl} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontWeight: 700 }}>
+                      {m.conferenceStatus === "generated" ? "Join the Zoom meeting" : "Join link"}
+                    </a>
+                  </div>
+                )}
+                {m.status === "booked" && (m.conferenceStatus === "failed" || m.conferenceStatus === "fallback") && (
+                  <div style={{ fontSize: 12, color: "#92400E", marginTop: 2 }}>
+                    {m.conferenceStatus === "failed"
+                      ? "No Zoom link yet — the customer was told one will follow."
+                      : "A new Zoom meeting couldn't be made, so this uses your room link."}
+                    {m.conferenceError === "not_connected" ? " The host hasn't connected Zoom." : m.conferenceError === "needs_reconnect" ? " The host's Zoom connection needs reconnecting." : ""}
+                    {!viewing && (
+                      <button type="button" disabled={busy} onClick={() => makeLink(m)}
+                        style={{ background: "none", border: "none", padding: 0, marginLeft: 6, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Make the link</button>
+                    )}
+                  </div>
+                )}
                 {m.status === "booked" && !viewing && (
                   <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                     <button type="button" disabled={busy} onClick={() => mark(m, "completed")}

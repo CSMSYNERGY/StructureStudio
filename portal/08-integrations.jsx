@@ -5668,22 +5668,14 @@ const MEETING_PLACES = [
 // VIDEO PROVIDERS (migrations 328/329, Carolyn 2026-10-22: "We need to be able to connect
 // zoom, hangouts & teams to generate video meeting links for video meetings").
 //
-// ⚠️ WHAT THIS PICKER DOES TODAY is use the builder's STANDING ROOM LINK — the permanent
-// personal room every Zoom, Meet and Teams account has. They paste it once and every booking
-// of the type carries it, into the confirmation, the reminder and the calendar invite's
-// LOCATION (where each client turns it into its own Join button). That needs nothing
-// connected and works the moment it is saved.
-//
-// A FRESH LINK PER BOOKING, minted through each provider's API, needs an OAuth app per
-// provider that only Carolyn can create — so it is not offered here. The card below says so
-// in as many words rather than showing a Connect button that opens nothing: CLAUDE.md records
-// what that costs ("a promise nobody intended to keep, sitting on a screen Carolyn shows at a
-// trade show").
-//
-// Worth knowing before planning that: Meet and Teams need no integration of their own. A Meet
-// link is what Google's calendar API returns when the event is created with conferenceData,
-// and a Teams link is what Microsoft Graph returns the same way — so both ride the two
-// calendar connectors already planned. Only Zoom is a separate app.
+// Two ways to get the link, per type (migration 333, `conference_mode`):
+//   room     — the builder's STANDING ROOM LINK, pasted once; every booking carries it
+//              (328/329). Works with any provider and needs nothing connected.
+//   generate — a NEW meeting per booking, made in the HOST's own connected account by
+//              _shared/meetingVideo.ts. Zoom only for now (Carolyn 2026-10-23: "Zoom first");
+//              Meet and Teams links come from the Google / Microsoft calendar connections,
+//              which are not built. The room link, if any, is the fallback when one cannot be
+//              made, and the booking never fails for want of a link.
 const MEETING_VIDEO = [
   ["none", "I'll send a link myself"],
   ["zoom", "Zoom"],
@@ -5730,6 +5722,29 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
   }, [call]);
 
   useEffect(() => { setData(null); setMsg(null); load(); }, [clientId, load]);
+
+  // Back from Zoom (meetings-oauth-callback lands on ?video=connected or ?video=0&reason=…).
+  // Read once, then take the parameters off the address so a reload does not repeat it.
+  const [videoLanding, setVideoLanding] = useState(null);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (!p.has("video")) return;
+      const reasons = {
+        denied: "You cancelled at Zoom, so nothing was connected.",
+        state: "That connection attempt expired or didn't match. Press Connect Zoom again.",
+        exchange: "Zoom didn't accept the connection. Try again.",
+        save: "The connection couldn't be saved. Try again, and tell us if it keeps happening.",
+        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
+      };
+      setVideoLanding(p.get("video") === "connected"
+        ? { ok: "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you." }
+        : { err: reasons[p.get("reason")] || "The Zoom connection didn't complete. Try again." });
+      p.delete("video"); p.delete("reason"); p.delete("provider");
+      const qs = p.toString();
+      window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+    } catch (_e) { /* an address we cannot read is one we leave alone */ }
+  }, []);
 
   if (msg && msg.err && !data) return <div style={S.err}>{msg.err}</div>;
   if (!data || !host) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your meeting settings…</div>;
@@ -6035,7 +6050,9 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
                   {t.durationMinutes} min
                   {` · ${(MEETING_PLACES.find((x) => x[0] === t.locationKind) || ["", "In person"])[1]}`}
                   {t.locationDetail ? ` · ${t.locationDetail}` : ""}
-                  {t.conferenceUrl ? ` · ${(MEETING_VIDEO.find((x) => x[0] === t.conferenceProvider) || ["", "Video"])[1]} link` : ""}
+                  {t.conferenceMode === "generate"
+                    ? " · new Zoom link per booking"
+                    : t.conferenceUrl ? ` · ${(MEETING_VIDEO.find((x) => x[0] === t.conferenceProvider) || ["", "Video"])[1]} link` : ""}
                   {` · ${t.minNoticeHours}h notice`}
                   {(t.bufferBeforeMinutes || t.bufferAfterMinutes) ? ` · ${t.bufferBeforeMinutes}/${t.bufferAfterMinutes} min buffer` : ""}
                 </div>
@@ -6052,7 +6069,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
               )}
             </div>
             {editType && editType.id === t.id && (
-              <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} />
+              <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} video={{ ready: data.videoReady, team: data.team }} />
             )}
           </div>
         ))}
@@ -6060,7 +6077,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
           editType && !editType.id
             ? (
               <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px" }}>
-                <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} />
+                <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} video={{ ready: data.videoReady, team: data.team }} />
               </div>
             )
             : (
@@ -6069,11 +6086,69 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
                   name: "", durationMinutes: 30, locationKind: "in_person", locationDetail: "",
                   description: "", bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
                   minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true,
-                  conferenceProvider: "none", conferenceUrl: "", conferenceNote: "",
+                  conferenceProvider: "none", conferenceUrl: "", conferenceNote: "", conferenceMode: "room",
                 })}>Add a meeting type</button>
             )
         )}
       </div>
+
+      {/* ── MY ZOOM ACCOUNT (migration 333) ──────────────────────────────────────────────
+          Per PERSON (Carolyn 2026-10-23: "each team member"): a meeting is made in the host's
+          own account, so each host connects their own. Self only — nobody connects Zoom on a
+          colleague's behalf; a manager may only disconnect one (e.g. after someone leaves). */}
+      {(() => {
+        const zoomConn = (data.connections || []).find((c) => c.provider === "zoom") || null;
+        const ready = !!(data.videoReady && data.videoReady.zoom);
+        const connected = zoomConn && zoomConn.status === "connected";
+        const connectZoom = () => run(async () => {
+          const d = await call("video_connect", { provider: "zoom", hostId: host.id, returnTo: window.location.hostname });
+          if (d && d.url) window.location.assign(d.url);
+        });
+        const disconnectZoom = () => run(async () => {
+          if (!window.confirm("Disconnect your Zoom account?\n\nMeetings already booked keep their links. New bookings use the type's room link until you connect again.")) return;
+          await call("video_disconnect", { provider: "zoom", hostId: host.id });
+          await load();
+          flash("Zoom disconnected.");
+        });
+        return (
+          <div style={S.card}>
+            <CardHead title="My Zoom account" />
+            {videoLanding && videoLanding.ok && (
+              <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{videoLanding.ok}</div>
+            )}
+            {videoLanding && videoLanding.err && <div style={{ ...S.err, marginBottom: 10 }}>{videoLanding.err}</div>}
+            <div style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", flexWrap: "wrap" }}>
+              <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 999, flex: "0 0 auto", background: connected ? "#10B981" : zoomConn ? "#F59E0B" : "#CBD5E1" }} />
+              <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Zoom</div>
+                <div style={{ fontSize: 11.5, color: "#64748B" }}>
+                  {connected
+                    ? `Connected${zoomConn.accountEmail ? ` as ${zoomConn.accountEmail}` : zoomConn.accountName ? ` as ${zoomConn.accountName}` : ""}`
+                    : zoomConn
+                      ? (zoomConn.lastError === "removed_at_zoom" ? "Removed from your Zoom account — connect again to keep making links" : "Stopped working — connect again to keep making links")
+                      : !ready ? "Not available yet — Structure Studio is still setting up Zoom" : "Not connected"}
+                </div>
+              </div>
+              {ready && !viewingLabel && host.id && (
+                <button style={connected ? { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" } : S.btn(ACCENT, "#FFF")}
+                  disabled={busy} onClick={connected ? disconnectZoom : connectZoom}>
+                  {connected ? "Disconnect" : zoomConn ? "Reconnect Zoom" : "Connect Zoom"}
+                </button>
+              )}
+              {zoomConn && !connected && !viewingLabel && (
+                <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={disconnectZoom}>Remove</button>
+              )}
+            </div>
+            <div style={{ ...sub, marginTop: 8 }}>
+              {!host.id
+                ? "Save your booking link above first — Zoom connects to your booking calendar."
+                : viewingLabel
+                  ? "Each person connects their own Zoom account while signed in as themselves."
+                  : "Connect once, and any video meeting type set to “a new Zoom meeting for every booking” makes a fresh meeting in your Zoom for each booking — and moves or deletes it when the booking changes. Your customers never need a Zoom account."}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── CONNECTED CALENDARS ───────────────────────────────────────────────────────── */}
       <div style={S.card}>
@@ -6086,8 +6161,9 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
             says what DOES work today, which is the part that matters to a builder.
             `connections` is already read and rendered below, so the day the connectors land
             this card shows real status without being rewritten. */}
-        {(data.connections || []).length > 0
-          ? (data.connections || []).map((c) => (
+        {/* Calendars only: the Zoom row lives in its own card above (333). */}
+        {(data.connections || []).filter((c) => c.provider !== "zoom").length > 0
+          ? (data.connections || []).filter((c) => c.provider !== "zoom").map((c) => (
             <div key={c.provider} style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", marginBottom: 8 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365"}</div>
@@ -6202,7 +6278,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
 // The editor for one meeting type. Split out because it renders in two places — inline on an
 // existing type, and on its own for a new one — and duplicating eleven fields is how two
 // copies of a form drift apart.
-function MeetingTypeEditor({ draft, onChange, onSave, busy }) {
+function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
   const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
   const set = (k, v) => onChange({ ...draft, [k]: v });
   const num = (k, v) => set(k, v === "" ? "" : Math.max(0, Math.trunc(Number(v)) || 0));
@@ -6234,50 +6310,85 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy }) {
       </div>
       {/* VIDEO, only for a video call — a dial-in for a phone type belongs in "where exactly"
           above, and offering a meeting link on a lot walkthrough is noise. */}
-      {draft.locationKind === "video" && (
-        <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 13px", marginBottom: 10, background: "#F8FAFC" }}>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <div style={{ flex: "0 0 200px" }}>
+      {draft.locationKind === "video" && (() => {
+        const provider = draft.conferenceProvider || "none";
+        // 'generate' only means anything for Zoom today (migration 333, Carolyn 2026-10-23:
+        // Zoom first). Meet and Teams arrive with the Google / Microsoft calendar connections.
+        const generate = provider === "zoom" && draft.conferenceMode === "generate";
+        const zoomReady = !!(video && video.ready && video.ready.zoom);
+        // Who offers this type but would fall back to the room link because they haven't
+        // connected Zoom. Only someone managing the team gets the list (the server sends an
+        // empty team to an own-only caller).
+        const offering = ((video && video.team) || []).filter((h) => draft.id && (h.typeIds || []).indexOf(draft.id) !== -1);
+        const unconnected = offering.filter((h) => h.zoom !== "connected");
+        return (
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 13px", marginBottom: 10, background: "#F8FAFC" }}>
+            <div style={{ flex: "0 0 200px", maxWidth: 260, marginBottom: 10 }}>
               <span style={lbl}>Video provider</span>
-              <select value={draft.conferenceProvider || "none"}
-                onChange={(e) => set("conferenceProvider", e.target.value)}
+              <select value={provider}
+                onChange={(e) => onChange({ ...draft, conferenceProvider: e.target.value, conferenceMode: e.target.value === "zoom" ? (draft.conferenceMode || "room") : "room" })}
                 style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
                 {MEETING_VIDEO.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
               </select>
             </div>
-            {(draft.conferenceProvider || "none") !== "none" && (
-              <div style={{ flex: "1 1 240px" }}>
-                <span style={lbl}>Your meeting room link</span>
-                <input value={draft.conferenceUrl || ""} maxLength={500}
-                  onChange={(e) => set("conferenceUrl", e.target.value)}
-                  placeholder="https://zoom.us/j/1234567890"
-                  style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+
+            {provider === "zoom" && (
+              <div style={{ marginBottom: 10 }} role="radiogroup" aria-label="How the Zoom link is made">
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 6, cursor: "pointer" }}>
+                  <input type="radio" name="ss-conf-mode" checked={generate} onChange={() => set("conferenceMode", "generate")} style={{ marginTop: 2 }} />
+                  <span><strong>A new Zoom meeting for every booking</strong><span style={{ color: "#64748B" }}> — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking</span></span>
+                </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
+                  <input type="radio" name="ss-conf-mode" checked={!generate} onChange={() => set("conferenceMode", "room")} style={{ marginTop: 2 }} />
+                  <span><strong>My standing room link</strong><span style={{ color: "#64748B" }}> — the same Zoom room for every booking</span></span>
+                </label>
+              </div>
+            )}
+
+            {provider !== "none" && (
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 240px" }}>
+                  <span style={lbl}>{generate ? "Room link to use if a new meeting can't be made (optional)" : "Your meeting room link"}</span>
+                  <input value={draft.conferenceUrl || ""} maxLength={500}
+                    onChange={(e) => set("conferenceUrl", e.target.value)}
+                    placeholder="https://zoom.us/j/1234567890"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                </div>
+                <div style={{ flex: "1 1 200px" }}>
+                  <span style={lbl}>Anything else they need to get in (optional)</span>
+                  <input value={draft.conferenceNote || ""} maxLength={300}
+                    onChange={(e) => set("conferenceNote", e.target.value)}
+                    placeholder="Passcode 4120"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 10, lineHeight: 1.55 }}>
+              {provider === "none"
+                ? "Pick a provider and every booking of this type carries its link — in the confirmation, the reminder, and the calendar invite."
+                : generate
+                  ? "Each person who offers this type connects their own Zoom under My Zoom account below. If someone hasn't, or Zoom can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting."
+                  : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
+            </div>
+            {generate && !zoomReady && (
+              <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
+                Zoom isn't switched on for Structure Studio yet, so until it is, bookings of this type use the room link above.
+              </div>
+            )}
+            {generate && zoomReady && unconnected.length > 0 && (
+              <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
+                Not connected to Zoom yet: {unconnected.map((h) => h.publicName).join(", ")}. Their bookings use the room link until they connect.
+              </div>
+            )}
+            {(provider === "google_meet" || provider === "teams") && (
+              <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.55 }}>
+                A new {provider === "teams" ? "Teams" : "Meet"} link for every booking comes with the {provider === "teams" ? "Microsoft" : "Google"} calendar connection, which isn't built yet. Your room link works today.
               </div>
             )}
           </div>
-          {(draft.conferenceProvider || "none") !== "none" && (
-            <div style={{ marginTop: 10 }}>
-              <span style={lbl}>Anything else they need to get in (optional)</span>
-              <input value={draft.conferenceNote || ""} maxLength={300}
-                onChange={(e) => set("conferenceNote", e.target.value)}
-                placeholder="Passcode 4120"
-                style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
-            </div>
-          )}
-          <div style={{ fontSize: 12, color: "#64748B", marginTop: 10, lineHeight: 1.55 }}>
-            {(draft.conferenceProvider || "none") === "none"
-              ? "Pick a provider and paste your meeting room link, and every booking of this type carries it — in the confirmation, the reminder, and the calendar invite."
-              : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
-          </div>
-          {/* Honest about the half that is NOT built, rather than a Connect button that opens
-              nothing. */}
-          <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.55 }}>
-            A different link for every booking — rather than one room you reuse — means
-            connecting your Zoom, Google or Microsoft account. That isn't built yet, and it needs
-            setup on our side before anyone can connect, so there's nothing to press for it here.
-          </div>
-        </div>
-      )}
+        );
+      })()}
       <div style={{ marginBottom: 10 }}>
         <span style={lbl}>What it's for (shown to the customer)</span>
         <textarea value={draft.description || ""} maxLength={2000} rows={2} onChange={(e) => set("description", e.target.value)}

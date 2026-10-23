@@ -80,7 +80,7 @@ export async function sendMeetingEmail(
       .select(
         "id, client_id, starts_at, ends_at, booked_time_zone, status, customer_name, customer_email, " +
           "customer_notes, cancel_token, rescheduled_from, ics_sequence, " +
-          "conference_provider, conference_url, conference_note, " +
+          "conference_provider, conference_url, conference_note, conference_status, " +
           "meeting_types!inner(name, location_kind, location_detail), " +
           "meeting_hosts!inner(public_name)",
       )
@@ -134,6 +134,8 @@ export async function sendMeetingEmail(
       // a builder changing their room link must not move a meeting already confirmed.
       conferenceUrl: m.conference_url ?? null,
       conferenceNote: m.conference_note ?? null,
+      // 333: asked for a fresh link, none could be made, no room link either.
+      conferencePending: !m.conference_url && (m.conference_status === "failed" || m.conference_status === "pending"),
     };
 
     const body = which === "booked"

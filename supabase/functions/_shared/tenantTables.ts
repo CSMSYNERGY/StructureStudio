@@ -111,7 +111,8 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   // ⛔ A refresh token here is a standing key to a named person's whole calendar, so this row
   // MUST go when the tenant does. It cascades off meeting_hosts; it is listed rather than left
   // implicit precisely so a future reader cannot mistake "not in the registry" for "kept".
-  meeting_connections: { fate: "cascade", parent: "meeting_hosts", why: "Google/Outlook tokens for a person's calendar (migration 326). Service-role only, never exported." },
+  meeting_connections: { fate: "cascade", parent: "meeting_hosts", why: "Google/Outlook/Zoom tokens for a person's calendar or video account (migrations 326, 333). Service-role only, never exported." },
+  meeting_oauth_states: { fate: "cascade", parent: "meeting_hosts", why: "One-shot state for a person connecting Zoom (migration 333), burned on use and expired after ten minutes. Service-role only, never exported." },
   meeting_busy: { fate: "cascade", parent: "meeting_hosts", why: "Cached busy blocks read from a person's own calendar (migration 326): times only, no titles." },
   inventory_photo_ai_edits: { fate: "cascade", parent: "inventory_units", why: "AI photo edits of inventory." },
   phone_routes: { fate: "cascade", parent: "sms_numbers", why: "Call routing per number." },

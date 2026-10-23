@@ -1,8 +1,9 @@
 # Meetings — Calendly-style booking for builders
 
 **Status: PHASES 1, 2 AND 2b ARE LIVE ON BETA** (migrations 326–329, 2026-10-22), verified
-end to end against real sends. Phases 3, 4, 4b and 5 are not built; each is blocked on an
-OAuth app Carolyn owns, except 5. Read it before touching anything named `meeting_*`.
+end to end against real sends. **Phase 4b (Zoom, a fresh link per booking) is BUILT
+(migration 333, 2026-10-23) and dark until Carolyn's Zoom app secrets are added.** Phases 3,
+4 and 5 are not built; 3 and 4 are blocked on an OAuth app Carolyn owns. Read it before touching anything named `meeting_*`.
 
 ## Why, and what was already decided
 
@@ -203,7 +204,7 @@ permission:
   onto each booking, and it reaches the customer in the confirmation, the reminder and the
   invite's `LOCATION` — which is where a calendar client turns it into its own Join button.
   Nothing is connected, and it works.
-- **Route B — a fresh link per booking.** Needs the OAuth apps. The columns are already laid
+- **Route B — a fresh link per booking. ZOOM BUILT (migration 333), see below.** Needs the OAuth apps. The columns are already laid
   out for it (`meetings.conference_*` is per booking, not per type) and `book_meeting()`
   reports the provider back to its caller so a booking that is *waiting* for a generated link
   (`'zoom'` with a null url) is distinguishable from one that never wanted one (`'none'`).
@@ -211,6 +212,62 @@ permission:
 ⚠️ **The link lives on the MEETING, not only the type.** A builder who changes their room link
 next month must not silently move a meeting that was already confirmed with the old one — the
 same reasoning that keeps `booked_time_zone` on the row.
+
+### Route B for Zoom — how it works (migration 333, 2026-10-23)
+
+Carolyn's decisions, 2026-10-23: **each team member connects their own account** (the
+meeting is made in the host's Zoom, like Calendly); **book anyway** when a link cannot be
+made, using the type's room link, or telling the customer a link will follow, with a "Make the
+link" button for the host; **Zoom first**; connecting Google/Microsoft later should put the
+meeting on the host's calendar, with busy-time blocking after that.
+
+- **Per type:** `meeting_types.conference_mode` = `room` (route A, the default; every existing
+  type) or `generate`. `generate` requires a provider that can generate (a CHECK; only Zoom is
+  accepted by `save_type` today). In `generate` mode the room link is optional and is the
+  FALLBACK.
+- **Per person:** Settings → Customer Hub → Meetings → **My Zoom account**. `video_connect`
+  (portal-meetings, self only, even for a manager) writes a one-shot row to
+  `meeting_oauth_states` and returns Zoom's authorize URL; `meetings-oauth-callback`
+  (verify_jwt false) burns the row, exchanges the code, and upserts `meeting_connections`
+  (provider `zoom`, plus `account_email` for "Connected as …"). `video_disconnect` revokes at
+  Zoom and deletes the row (a manager may disconnect a colleague's).
+- **Per booking:** `_shared/meetingVideo.ts`. `book_meeting()` is unchanged: it already copies
+  the room link, which is the fallback. After it returns, `ensureConference` claims the row
+  (`conference_status='pending'`, one winner), creates the Zoom meeting in the host's account,
+  and swaps in the join link + `conference_external_id` (`generated`). On any failure the
+  row reads `fallback` (room link kept) or `failed` (no link: the confirmation says "Your video
+  link will follow by email" and the portal offers **Make the link**, which retries and re-sends
+  the confirmation with a bumped SEQUENCE). It never throws and every Zoom call has a timeout,
+  so a booking never fails for want of a link.
+- **Moves and cancels:** `moveConference` PATCHes the Zoom meeting before the rescheduled email
+  (a meeting deleted in Zoom by hand gets a new one; one that never got a link gets another
+  try); `dropConference` deletes it on cancel. Wired into `book-public` (book, reschedule,
+  cancel) and `portal-meetings` (book, cancel) — those are every path that changes a meeting.
+- **Zoom rotates the refresh token on every refresh.** `zoomAccess` stores the new one first,
+  and on `invalid_grant` re-reads the row before declaring the connection dead (a concurrent
+  request may have rotated it). A dead connection becomes `needs_reauth` and the page says
+  "Reconnect Zoom".
+- **`zoom-webhook`** (verify_jwt false, `x-zm-signature` HMAC) answers Zoom's URL validation
+  and drops tokens on `app_deauthorized`, which Zoom requires of a published app.
+- **Privacy:** the Zoom topic is "<type> with <business>", never the customer's name. Nothing
+  about the customer is sent to Zoom.
+- Tests: `_shared/zoomApi.test.ts`, `_shared/meetingVideo.test.ts`, one case in
+  `meetingEmails.test.ts`.
+
+### What Carolyn does to switch Zoom on (no agent handles these values)
+
+1. marketplace.zoom.us → Develop → Build App → **General App**, user-managed.
+2. OAuth Redirect URL **and** allow list:
+   `https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/meetings-oauth-callback`
+3. Scopes: `meeting:write:meeting`, `meeting:update:meeting`, `meeting:delete:meeting`,
+   `user:read:user`.
+4. Features → Event Subscriptions: endpoint
+   `https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/zoom-webhook`, event
+   "App Deauthorized".
+5. Supabase → Edge Functions → Secrets: `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`,
+   `ZOOM_WEBHOOK_SECRET_TOKEN`.
+6. Until Zoom reviews and publishes the app, only accounts in Carolyn's own Zoom account can
+   connect; other builders' Zoom accounts need the published app.
 
 ## Phases
 
@@ -221,7 +278,7 @@ same reasoning that keeps `booked_time_zone` on the row.
 | 2b | Video **room links** (route A), Meetings inside Settings → Customer Hub | anything connected |
 | 3 | Google Calendar connector: busy read, event write, **and Meet links** | Carolyn's Google Cloud app |
 | 4 | Microsoft connector: busy read, event write, **and Teams links** | Carolyn's Entra registration |
-| 4b | Zoom connector: a fresh meeting per booking | Carolyn's Zoom app |
+| 4b | Zoom connector: a fresh meeting per booking — **BUILT (333), dark until the secrets** | Carolyn's Zoom app |
 | 5 | Team pools / round-robin, `book-embed.js`, Sales → Meetings page | — |
 
 ## What Carolyn has to do (phases 3–4 cannot start without these)

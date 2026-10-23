@@ -300,3 +300,16 @@ Deno.test("a video type with no link yet still reads properly", () => {
     assert(!/undefined|null|NaN/.test(part), part.slice(0, 160));
   }
 });
+
+// 333: a fresh link was asked for and could not be made, with no room link to fall back on.
+Deno.test("a video meeting still waiting for its link says one will follow, and never offers a dead Join", () => {
+  const f = { ...F, locationKind: "video" as const, conferenceUrl: null, conferencePending: true };
+  const booked = meetingBookedEmail(f);
+  assert(booked.html.includes("Your video link will follow by email."));
+  assert(booked.text.includes("Your video link will follow by email."));
+  assert(!booked.html.includes("Join the video call"));
+  // Once the link exists it wins, and the pending line is gone.
+  const ready = meetingBookedEmail({ ...f, conferenceUrl: "https://zoom.us/j/999" });
+  assert(!ready.html.includes("will follow"));
+  assert(ready.html.includes("https://zoom.us/j/999"));
+});

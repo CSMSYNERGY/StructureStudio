@@ -304,6 +304,17 @@ verify_jwt = true
 [functions.book-public]
 verify_jwt = false
 
+# "Connect Zoom" return leg (migration 333). ⛔ MUST STAY FALSE: Zoom redirects the person's
+# BROWSER here with no Supabase JWT, so verification would 401 every connect before the
+# function runs. Auth is the one-shot state row in meeting_oauth_states, burned on first use.
+[functions.meetings-oauth-callback]
+verify_jwt = false
+
+# Zoom's event notifications (migration 333). ⛔ MUST STAY FALSE: Zoom posts server-to-server.
+# Auth is Zoom's x-zm-signature HMAC with ZOOM_WEBHOOK_SECRET_TOKEN.
+[functions.zoom-webhook]
+verify_jwt = false
+
 # The reminder runner (migration 327). Server-to-server only, driven by the phone-api
 # Worker's cron tick — pg_cron is NOT installed on this project, so that tick is the only real
 # scheduler we have; see the function's own header.

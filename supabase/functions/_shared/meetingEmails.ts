@@ -53,7 +53,13 @@ export type MeetingMailFacts = {
    *  meeting that is already confirmed with the old one. */
   conferenceUrl?: string | null;
   conferenceNote?: string | null;
+  /** A fresh link was asked for (333) but could not be made, and there was no room link to
+   *  fall back on. Say plainly that one is coming, rather than leaving a video meeting with no
+   *  way in and no word about it. Ignored when conferenceUrl is set. */
+  conferencePending?: boolean;
 };
+
+const PENDING_LINK = "Your video link will follow by email.";
 
 export type MeetingMailBody = { subject: string; html: string; text: string };
 
@@ -137,7 +143,9 @@ function summary(f: MeetingMailFacts): string {
     // says the same thing twice.
     join
       ? detailRow("Join", `<a href="${esc(join)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;word-break:break-all;">${esc(join)}</a>`)
-      : (where ? detailRow("Where", esc(where)) : ""),
+      : f.conferencePending
+        ? detailRow("Join", esc(PENDING_LINK))
+        : (where ? detailRow("Where", esc(where)) : ""),
     join && f.conferenceNote ? detailRow("To get in", esc(f.conferenceNote)) : "",
     detailRow("Who", esc(f.hostName)),
   ].filter(Boolean).join("\n");
@@ -171,7 +179,7 @@ function textOf(headline: string, f: MeetingMailFacts, extra: string[] = []): st
     `What:     ${f.typeName}`,
     `When:     ${formatWhen(f.startsAt, f.timeZone)}`,
     length ? `How long: ${length}` : "",
-    join ? `Join:     ${join}` : (where ? `Where:    ${where}` : ""),
+    join ? `Join:     ${join}` : f.conferencePending ? `Join:     ${PENDING_LINK}` : (where ? `Where:    ${where}` : ""),
     join && f.conferenceNote ? `To get in: ${f.conferenceNote}` : "",
     `Who:      ${f.hostName}`,
     ...extra,

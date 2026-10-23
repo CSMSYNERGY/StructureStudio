@@ -6,6 +6,11 @@ import { ownMeetingsOnly, type GateTable } from "../_shared/access.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
 import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
+import { denoVideoEnv, dropConference, ensureConference, videoReadiness } from "../_shared/meetingVideo.ts";
+import { zoomAuthorizeUrl, zoomCredsFromEnv, zoomRevoke } from "../_shared/zoomApi.ts";
+import {
+  MEETINGS_OAUTH_HOSTS, OAUTH_STATE_TTL_MS, meetingsOauthRedirectUri, newOauthState,
+} from "../_shared/meetingOauth.ts";
 
 // MEETINGS — the tenant half. Migration 325, phase 1 of MEETINGS_SCOPE.md.
 //
@@ -103,6 +108,16 @@ const GATES: GateTable = {
   // and nowhere else - deliberately NOT to an address from the request body, which would be
   // a way to have the platform mail a stranger on a builder's behalf.
   resend:          { area: "meetings", level: "edit" },
+  // VIDEO (migration 333). "Make the link" — retry creating the provider meeting for a booking
+  // whose link could not be made, then re-send the confirmation with it.
+  make_link:       { area: "meetings", level: "edit" },
+  // Start connecting MY Zoom account (returns the provider's authorize URL). Self only: the
+  // handler refuses a host that is not the caller's own, whatever their level, because a
+  // meeting created in somebody's account must be that person's own decision.
+  video_connect:   { area: "meetings", level: "edit" },
+  // Disconnect a video account. Your own, or — for someone who manages the whole team — a
+  // colleague's, e.g. after they leave.
+  video_disconnect: { area: "meetings", level: "edit" },
 
   // ── Writes about the BUSINESS (narrowed by TENANT_WIDE) ──────────────────────────────
   save_settings:   { area: "meetings", level: "edit" },
@@ -138,6 +153,9 @@ const HOST_SCOPE: Record<string, { hostKey?: string; meetingKey?: string; overri
   cancel:          { meetingKey: "id" },
   set_status:      { meetingKey: "id" },
   resend:          { meetingKey: "id" },
+  make_link:       { meetingKey: "id" },
+  video_connect:   { hostKey: "hostId" },
+  video_disconnect: { hostKey: "hostId" },
 };
 
 const DAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -354,7 +372,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         // what the Settings screen needs to render "Connected / Reconnect".
         myHost
           ? admin.from("meeting_connections")
-              .select("provider, status, calendar_id, last_synced_at").eq("host_id", myHost.id)
+              .select("provider, status, calendar_id, last_synced_at, account_email, account_name, last_error").eq("host_id", myHost.id)
           : Promise.resolve({ data: [], error: null }),
         myHost
           ? admin.from("meeting_overrides").select("*").eq("host_id", myHost.id)
@@ -364,6 +382,18 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       if (oe) throw oe;
       if (ce) throw ce;
       if (ove) throw ove;
+
+      // VIDEO (333): which team members have a working Zoom connection, so the type editor can
+      // say who a "new link per booking" type would fall back for. Status only — the same
+      // no-token-columns rule as above. Not for an own-only caller, who sees nobody else.
+      const videoByHost = new Map<string, string>();
+      if (!ownOnly && hostIds.length) {
+        const { data: tv, error: tve } = await admin.from("meeting_connections")
+          .select("host_id, provider, status").in("host_id", hostIds).eq("provider", "zoom");
+        if (tve) throw tve;
+        // deno-lint-ignore no-explicit-any
+        for (const row of (tv ?? []) as any[]) videoByHost.set(row.host_id, row.status);
+      }
 
       // deno-lint-ignore no-explicit-any
       const byHost = new Map<string, string[]>();
@@ -386,6 +416,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         weeklyHours: h.weekly_hours || {},
         accepting: h.accepting,
         typeIds: byHost.get(h.id) ?? [],
+        zoom: videoByHost.get(h.id) ?? null,
       });
 
       return json({
@@ -409,7 +440,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
           minNoticeHours: t.min_notice_hours, maxDaysAhead: t.max_days_ahead,
           slotIntervalMinutes: t.slot_interval_minutes, color: t.color, active: t.active,
           conferenceProvider: t.conference_provider, conferenceUrl: t.conference_url,
-          conferenceNote: t.conference_note,
+          conferenceNote: t.conference_note, conferenceMode: t.conference_mode,
         })),
         myHost: myHost ? shapeHost(myHost) : null,
         // An own-only caller gets their own row and nobody else's — the whole point of the
@@ -420,7 +451,10 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         // deno-lint-ignore no-explicit-any
         connections: (conns ?? []).map((c: any) => ({
           provider: c.provider, status: c.status, calendarId: c.calendar_id, lastSyncedAt: c.last_synced_at,
+          accountEmail: c.account_email, accountName: c.account_name, lastError: c.last_error,
         })),
+        // Which providers can make a fresh link per booking right now (secrets present).
+        videoReady: videoReadiness((k) => Deno.env.get(k)),
         // deno-lint-ignore no-explicit-any
         overrides: (ovr ?? []).map((o: any) => ({
           id: o.id, onDate: o.on_date, blocked: o.blocked, hours: o.hours, note: o.note,
@@ -436,7 +470,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         ? p.to
         : new Date(Date.now() + 60 * 86_400_000).toISOString();
       let q = admin.from("meetings")
-        .select("id, host_id, host_user_id, type_id, contact_id, short_code, starts_at, ends_at, booked_time_zone, status, customer_name, customer_email, customer_phone, customer_notes, source, meeting_types!inner(name, duration_minutes, location_kind, location_detail, color), meeting_hosts!inner(public_name)")
+        .select("id, host_id, host_user_id, type_id, contact_id, short_code, starts_at, ends_at, booked_time_zone, status, customer_name, customer_email, customer_phone, customer_notes, source, conference_provider, conference_url, conference_status, conference_error, meeting_types!inner(name, duration_minutes, location_kind, location_detail, color), meeting_hosts!inner(public_name)")
         .eq("client_id", clientId)
         .gte("starts_at", fromIso).lte("starts_at", toIso)
         .order("starts_at");
@@ -460,6 +494,8 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         startsAt: m.starts_at, endsAt: m.ends_at, timeZone: m.booked_time_zone,
         status: m.status, customerName: m.customer_name, customerEmail: m.customer_email,
         customerPhone: m.customer_phone, customerNotes: m.customer_notes, source: m.source,
+        conferenceProvider: m.conference_provider, conferenceUrl: m.conference_url,
+        conferenceStatus: m.conference_status, conferenceError: m.conference_error,
       })) });
     }
 
@@ -514,7 +550,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       const contactId = typeof p.contactId === "string" ? p.contactId : null;
       if (!contactId) return json({ error: "Which contact did you mean?" }, 400);
       let q = admin.from("meetings")
-        .select("id, host_id, starts_at, ends_at, status, booked_time_zone, customer_notes, meeting_types!inner(name, location_kind, location_detail), meeting_hosts!inner(public_name)")
+        .select("id, host_id, starts_at, ends_at, status, booked_time_zone, customer_notes, conference_provider, conference_url, conference_status, conference_error, meeting_types!inner(name, location_kind, location_detail), meeting_hosts!inner(public_name)")
         .eq("client_id", clientId).eq("contact_id", contactId)
         .order("starts_at", { ascending: false }).limit(50);
       if (ownOnly) {
@@ -529,6 +565,8 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         timeZone: m.booked_time_zone, typeName: m.meeting_types?.name,
         locationKind: m.meeting_types?.location_kind, locationDetail: m.meeting_types?.location_detail,
         hostName: m.meeting_hosts?.public_name, notes: m.customer_notes,
+        conferenceProvider: m.conference_provider, conferenceUrl: m.conference_url,
+        conferenceStatus: m.conference_status, conferenceError: m.conference_error,
       })) });
     }
 
@@ -594,9 +632,22 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         }
         confUrl = raw;
       }
-      // A provider with no link is a type WAITING for a generated one (route B, not built
-      // yet). Said plainly rather than saved as a video meeting with no way in.
-      if (confProvider !== "none" && !confUrl) {
+      // ── How the link is made (333) ───────────────────────────────────────────────────
+      // 'generate' = a fresh meeting in the host's own connected account per booking. Only
+      // Zoom can do that today (Carolyn 2026-10-23: Zoom first); Meet and Teams arrive with the
+      // Google / Microsoft calendar connections. The column refuses 'generate' without a
+      // provider that can generate (333's CHECK); this says it as a sentence.
+      const confMode = kind === "video" && String(p.conferenceMode ?? "room") === "generate" ? "generate" : "room";
+      if (confMode === "generate" && confProvider !== "zoom") {
+        return json({
+          error: "A new link for every booking works with Zoom for now. Pick Zoom, or paste your room link instead.",
+          code: "generate_needs_zoom",
+        }, 400);
+      }
+      // In 'generate' mode the room link is OPTIONAL — it is the fallback used when a link
+      // cannot be made (host not connected, Zoom down). In 'room' mode it is the whole point.
+      // A provider with no link and nothing to generate it is a video meeting with no way in.
+      if (confMode === "room" && confProvider !== "none" && !confUrl) {
         return json({
           error: "Paste your meeting room link, or set the provider back to “I’ll send a link myself”.",
           code: "conference_url_required",
@@ -625,6 +676,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         conference_provider: confProvider,
         conference_url: confUrl,
         conference_note: p.conferenceNote ? String(p.conferenceNote).slice(0, 300) : null,
+        conference_mode: confMode,
         active: p.active === undefined ? true : !!p.active,
         updated_at: new Date().toISOString(),
       };
@@ -883,12 +935,16 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       // the same email and the same calendar invite - otherwise which of the two happened
       // becomes something the customer can tell, and the rep has to explain it.
       // Best effort: the booking is committed, and a mail failure must not undo it.
+      //
+      // VIDEO (333) FIRST, so the confirmation carries the fresh link. Never throws: a link
+      // that cannot be made leaves the type's room link (or "a link will follow") in place.
+      const video = await ensureConference(admin, booked.id, denoVideoEnv());
       let confirmationSent = false;
       if (await claimConfirmation(admin, booked.id)) {
         const mail = await sendMeetingEmail(admin, { meetingId: booked.id, which: "booked", req });
         confirmationSent = mail.sent;
       }
-      return json({ ok: true, id: booked.id, confirmationSent });
+      return json({ ok: true, id: booked.id, confirmationSent, video: video.status });
     }
 
     case "cancel": {
@@ -904,6 +960,8 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       // either, because the caller's list is stale and it should refresh.
       if (!data) return json({ ok: true, alreadyGone: true });
       await r.ctx.audit("meetings_cancel", 1, p.id);
+      // Delete the Zoom meeting we made for it (333), so no dead room is left in their account.
+      await dropConference(admin, p.id, denoVideoEnv());
       // Sequence first, then METHOD:CANCEL, so it leaves the customer's calendar instead of
       // sitting there as a meeting nobody turns up to (see meetingIcs.ts).
       const cancelSeq = await bumpIcsSequence(admin, p.id);
@@ -953,6 +1011,83 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         }, 409);
       }
       return json({ ok: true, sentTo: m.customer_email });
+    }
+
+    // ══ VIDEO (migration 333) ═══════════════════════════════════════════════════════════
+    case "make_link": {
+      const { data: m, error } = await admin.from("meetings")
+        .select("id, status, conference_status, customer_email").eq("client_id", clientId).eq("id", p.id).maybeSingle();
+      if (error) throw error;
+      if (!m) return json({ error: "That meeting is not on this account." }, 404);
+      if (m.status !== "booked") return json({ error: "That meeting isn't upcoming, so it doesn't need a link." }, 409);
+      const out = await ensureConference(admin, m.id, denoVideoEnv());
+      await r.ctx.audit("meetings_make_link", 1, out.status);
+      if (out.status === "generated") {
+        // Only when this call made it: re-send the confirmation with a bumped SEQUENCE, so the
+        // customer's email and their calendar entry both carry the link (meetingIcs.ts).
+        let emailSent = false;
+        if (m.conference_status !== "generated" && m.customer_email) {
+          const seq = await bumpIcsSequence(admin, m.id);
+          const mail = await sendMeetingEmail(admin, { meetingId: m.id, which: "booked", req, sequence: seq });
+          emailSent = mail.sent;
+        }
+        return json({ ok: true, status: "generated", emailSent });
+      }
+      const why: Record<string, string> = {
+        not_connected: "The host hasn't connected their Zoom account yet. They can do that under Settings → Customer Hub → Meetings.",
+        needs_reconnect: "The host's Zoom connection has stopped working. They need to reconnect it under Settings → Customer Hub → Meetings.",
+        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
+        not_available: "A new link per booking only works with Zoom for now.",
+        room_link: "This meeting type uses your standing room link, so there's nothing to make.",
+        in_progress: "A link is being made for this meeting right now. Give it a moment and refresh.",
+      };
+      const reason = "reason" in out ? out.reason : "provider_error";
+      return json({
+        error: why[reason] || "Zoom didn't make the meeting just now. Please try again in a minute.",
+        code: reason,
+      }, 409);
+    }
+
+    case "video_connect": {
+      // SELF ONLY. HOST_SCOPE already narrowed an own-only caller; this closes it for a
+      // manager too, who could otherwise attach their own Zoom to a colleague's bookings.
+      if (!myHost || scopedHostId !== myHost.id) {
+        return json({ error: "Only the person themselves can connect their Zoom account." }, 403);
+      }
+      if (operator) return json({ error: "Connecting a Zoom account isn't available while viewing another account." }, 403);
+      const provider = String(p.provider ?? "zoom");
+      if (provider !== "zoom") return json({ error: "Only Zoom can be connected so far." }, 400);
+      const creds = zoomCredsFromEnv((k) => Deno.env.get(k));
+      if (!creds) {
+        return refusal({ error: "Zoom isn't switched on for Structure Studio yet.", code: "not_set_up" }, 503);
+      }
+      const returnHost = String(p.returnTo ?? "");
+      if (!MEETINGS_OAUTH_HOSTS.has(returnHost)) return json({ error: "Start this from the Structure Studio app." }, 400);
+      const state = newOauthState();
+      const { error } = await admin.from("meeting_oauth_states").insert({
+        state, client_id: clientId, host_id: myHost.id, user_id: userId, provider,
+        return_host: returnHost, expires_at: new Date(Date.now() + OAUTH_STATE_TTL_MS).toISOString(),
+      });
+      if (error) throw error;
+      await r.ctx.audit("meetings_video_connect", 1, provider);
+      return json({ ok: true, url: zoomAuthorizeUrl(creds, meetingsOauthRedirectUri(), state) });
+    }
+
+    case "video_disconnect": {
+      const provider = String(p.provider ?? "zoom");
+      if (provider !== "zoom") return json({ error: "Only Zoom can be connected so far." }, 400);
+      const { data: conn, error } = await admin.from("meeting_connections")
+        .select("id, access_token, refresh_token").eq("host_id", scopedHostId).eq("provider", provider).maybeSingle();
+      if (error) throw error;
+      if (!conn) return json({ ok: true, alreadyGone: true });
+      // Tell Zoom too, best effort: the row is deleted either way, so no token outlives this.
+      const creds = zoomCredsFromEnv((k) => Deno.env.get(k));
+      const tok = conn.refresh_token || conn.access_token;
+      if (creds && tok) await zoomRevoke(creds, tok);
+      const { error: de } = await admin.from("meeting_connections").delete().eq("id", conn.id);
+      if (de) throw de;
+      await r.ctx.audit("meetings_video_disconnect", 1, provider);
+      return json({ ok: true });
     }
 
     default:

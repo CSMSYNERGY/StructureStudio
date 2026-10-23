@@ -5,6 +5,7 @@ import { clientIp } from "../_shared/adminGate.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
 import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
+import { denoVideoEnv, dropConference, ensureConference, moveConference } from "../_shared/meetingVideo.ts";
 
 // BOOK-PUBLIC — the public booking page's only server. Migration 325, phase 1 of
 // MEETINGS_SCOPE.md. Four actions, all ANON (the anon key passes the gateway; config.toml
@@ -482,6 +483,11 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
       // The response tells the page what REALLY happened — a tenant who has not set up
       // sending is a supported, permanent state, and the page then says "they'll be in touch"
       // instead of promising an email that is never coming.
+      //
+      // VIDEO (migration 333) before the email, so the confirmation carries a fresh Zoom link
+      // when the type asks for one. Never throws, and every Zoom call has a timeout: a link
+      // that cannot be made leaves the room link (or "a link will follow") in place.
+      await ensureConference(admin, result.id, denoVideoEnv());
       let confirmationSent = false;
       if (await claimConfirmation(admin, result.id)) {
         const mail = await sendMeetingEmail(admin, { meetingId: result.id, which: "booked", req });
@@ -636,6 +642,8 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
 
         // The SEQUENCE must increase or every calendar client ignores the new time (see
         // meetingIcs.ts). Bump first, then send with the bumped value.
+        // Move the Zoom meeting first (333), so the email carries the right link and time.
+        await moveConference(admin, m.id, denoVideoEnv());
         const seq = await bumpIcsSequence(admin, m.id);
         const mail = await sendMeetingEmail(admin, {
           meetingId: m.id, which: "rescheduled", req, sequence: seq,
@@ -664,6 +672,8 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         updated_at: new Date().toISOString(),
       }).eq("id", m.id).eq("status", "booked");
       if (ue) throw ue;
+      // Delete the Zoom meeting we made for it (333). Best effort, never blocks the cancel.
+      await dropConference(admin, m.id, denoVideoEnv());
       // Bump the sequence, then send METHOD:CANCEL so the event LEAVES their calendar rather
       // than sitting there as a meeting nobody turns up to.
       const cancelSeq = await bumpIcsSequence(admin, m.id);
