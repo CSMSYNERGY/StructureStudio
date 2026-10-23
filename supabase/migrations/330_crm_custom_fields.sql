@@ -97,6 +97,10 @@ create table if not exists public.crm_field_defs (
   constraint crm_field_defs_key_chk check (key is null or key ~ '^[a-z][a-z0-9_]{0,38}$'),
   constraint crm_field_defs_label_chk check (btrim(label) <> '' and length(label) <= 80),
   -- A select with no choices is a drop-down a person cannot answer. Every other type has none.
+  -- ⛔ AS WRITTEN HERE THIS IS INERT FOR EXACTLY THAT CASE, and **331 is the fix** — leave this
+  -- line as it shipped (it is what the live database ran) and read 331's header before touching
+  -- the constraint: `array_length('{}', 1)` is NULL, so `NULL between 1 and 50` is NULL, and a
+  -- CHECK that evaluates to NULL PASSES. Every array_length in a CHECK needs a coalesce.
   constraint crm_field_defs_choices_chk check (
     (field_type = 'select' and array_length(choices, 1) between 1 and 50)
     or
