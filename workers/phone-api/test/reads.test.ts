@@ -1358,5 +1358,79 @@ describe("call recordings on a call (GET /calls, GET /recordings/:id/audio, GET 
       expect(r.res.status).toBe(404);
       expect(r.json.error.message).toBe("That call wasn't found.");
     });
+
+    // Carolyn 2026-10-23 (24:13): our side's lines under the team member's name, "Customer" kept.
+    describe("the team member's name instead of \"Team\"", () => {
+      const TEXT = "Customer: Hi, I'm calling about a shed. Team: is that you?\nTeam: Sure, what size?\nCustomer: Ten by twelve.\nTeam: We have that one.";
+      const NAMED = (n: string) => `Customer: Hi, I'm calling about a shed. Team: is that you?\n${n}: Sure, what size?\nCustomer: Ten by twelve.\n${n}: We have that one.`;
+      const NAMES: Record<string, string | null> = { [USER_A]: "Jordan Lee", [USER_B]: "Sam Rivera", [USER_C]: null };
+      async function named(row: ReturnType<typeof callFor>, opts: { text?: string; voicemail?: boolean } = {}) {
+        const s = await audioSetup(callerCtx({ phone_level: "view" }), { id: REC, transcript: opts.text ?? TEXT, summary: null, deleted_at: null }, row);
+        s.net.rest("GET", "phone_voicemails", () => (opts.voicemail ? [{ id: "00000000-0000-4000-8000-0000000fe001" }] : []));
+        s.net.rest("GET", "client_users", (req) => {
+          const uid = filter(req, "user_id") ?? "";
+          return filter(req, "client_id") === CLIENT && uid in NAMES ? [{ full_name: NAMES[uid] }] : [];
+        });
+        const r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+        return { ...s, ...r };
+      }
+
+      it("an inbound call answered by one person: their name on our lines, the customer's lines and words untouched", async () => {
+        const { res, json, net } = await named(callFor({ answered_by: USER_A }));
+        expect(res.status).toBe(200);
+        expect(json.transcript).toBe(NAMED("Jordan Lee"));
+        // Looked up in THIS business only.
+        expect(filter(net.reads("client_users")[0], "client_id")).toBe(CLIENT);
+        expect(filter(net.reads("client_users")[0], "user_id")).toBe(USER_A);
+        expect(filter(net.reads("phone_voicemails")[0], "call_id")).toBe(CALL);
+      });
+
+      it("an outbound call: the person who placed it, even when someone else is looking", async () => {
+        const { json } = await named(callFor({ direction: "out", placed_by: USER_B, answered_by: null }));
+        expect(json.transcript).toBe(NAMED("Sam Rivera"));
+      });
+
+      it.each([
+        ["handed on to a teammate", { answered_by: USER_B, transferred_from: USER_A }, false],
+        ["handed on, and nobody took it", { answered_by: null, transferred_from: USER_A }, false],
+        ["an outbound call with a second person on it", { direction: "out", placed_by: USER_A, answered_by: USER_B }, false],
+        ["nobody answered (a ring group nobody picked up)", { answered_by: null }, false],
+        ["a message left on the call (the greeting is on our side)", { answered_by: USER_A }, true],
+        ["status voicemail", { answered_by: USER_A, status: "voicemail" }, false],
+        ["a team member with no name set", { answered_by: USER_C }, false],
+        ["someone no longer on the team", { answered_by: "00000000-0000-4000-8000-0000000000ff" }, false],
+      ])("%s: stays \"Team\"", async (_l, over, voicemail) => {
+        const { res, json } = await named(callFor(over), { voicemail });
+        expect(res.status).toBe(200);
+        expect(json.transcript).toBe(TEXT);
+      });
+
+      it("no extra reads for a call with nobody to name, or a transcript with no \"Team\" line", async () => {
+        let s = await named(callFor({ answered_by: USER_B, transferred_from: USER_A }));
+        expect(s.net.reads("client_users")).toEqual([]);
+        expect(s.net.reads("phone_voicemails")).toEqual([]);
+        s = await named(callFor({ answered_by: USER_A }), { text: "Customer: Hello?" });
+        expect(s.json.transcript).toBe("Customer: Hello?");
+        expect(s.net.reads("client_users")).toEqual([]);
+      });
+
+      it("a name read that fails still gives the transcript, with \"Team\", and logs the code, never the text", async () => {
+        const s = await audioSetup(callerCtx({ phone_level: "view" }), { id: REC, transcript: TEXT, summary: null, deleted_at: null }, callFor({ answered_by: USER_A }));
+        s.net.rest("GET", "phone_voicemails", () => []);
+        s.net.rest("GET", "client_users", () => jsonRes({ code: "57014", message: "canceling statement due to statement timeout" }, 500));
+        const { res, json } = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+        expect(res.status).toBe(200);
+        expect(json.transcript).toBe(TEXT);
+        const rows = s.net.writes("app_errors").map((w) => w.json);
+        expect(rows.map((r) => [r.code, r.severity])).toEqual([["transcript_name_read_failed", "warn"]]);
+        expect(JSON.stringify(rows)).toContain("57014");
+        expect(JSON.stringify(rows)).not.toContain("what size");
+      });
+
+      it("the stored transcript is never rewritten", async () => {
+        const { net } = await named(callFor({ answered_by: USER_A }));
+        expect(net.writes("phone_call_recordings")).toEqual([]);
+      });
+    });
   });
 });

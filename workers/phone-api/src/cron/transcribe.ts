@@ -150,6 +150,19 @@ export function transcriptOf(us: Utterance[], max = MAX_TRANSCRIPT): string {
   return out;
 }
 
+/**
+ * A stored transcript with our side's lines under the team member's name instead of "Team"
+ * (Carolyn 2026-10-23, 24:13; "Customer" stays). Only a line's own label changes: transcriptOf
+ * writes one speaker turn per line, so "Team: " later in a line is the speaker's words. Applied
+ * when the transcript is read (routes/recordings.ts callTranscript), never stored: the summary is
+ * made from the plain labels, and a renamed person shows under their new name at once.
+ */
+export function withTeamName(transcript: string, name: string | null | undefined): string {
+  const n = String(name ?? "").replace(/\s+/g, " ").trim();
+  if (!n) return transcript;
+  return transcript.replace(/^Team: /gm, () => `${n}: `);
+}
+
 /** The utterances kept as transcript_json: as many as fit the transcript's own cap. */
 export function utterancesToKeep(us: Utterance[], max = MAX_TRANSCRIPT): Utterance[] {
   const kept: Utterance[] = [];
