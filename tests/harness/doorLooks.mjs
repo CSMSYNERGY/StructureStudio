@@ -50,10 +50,14 @@
 //      stiles, boards and braces stopping below it, the Classic's octagon and diamond shrunk under it,
 //      the slab's upper panel moved down, no strap across the glass, vertical muntins only. The 3D
 //      footer row takes it out and puts it back, and Get Estimate sends doorWindowAt 'top' per leaf.
-//   PN. PANES (migration 324): a window row's own pane count. Transoms at plain glass, 2, 3, 4 and 6
-//      draw 0, 1, 2, 3 and 5 equal-spaced vertical bars and no rail; a wall window set to 4 and a panel
-//      lite set to 3 keep their double-hung rail; an automatic wall window draws as it always did. Every
-//      pane, a wall window's too, has the 2.5 ft room behind it (glassRoom, 2026-10-21).
+//   LT. THE GRID OF LITES (migration 335, in place of 324's Panes): a window row's default grid, rows x
+//      columns, and the rep's override per placed window or door. Exactly rows - 1 horizontal and
+//      columns - 1 vertical bars, equal lites, no double-hung rail: no grid (1 x 1) plain, a 6-lite 3 x 2,
+//      a 9-lite door lite 3 x 3 and the rep's 2 x 2, Carolyn's transom one row of 5; a window with no
+//      grid set draws as it always did. The 3D footer changes the selected window's grid in place, and
+//      Get Estimate sends each window's grid.
+//   LTP. The window picker's Grid row (Default, No grid, rows and lites across) and the door picker's grid
+//      for its window, stamped on what they place.
 //
 // SS_DOOR_BASELINE=1 prints only the board-and-batten door's digest and exits, which is how
 // PLANK_DIGEST was recorded (on the tree before the generator, where the new looks draw as 'auto').
@@ -300,7 +304,7 @@ async function runPicker(browser) {
   await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), L, { timeout: 20000 });
   await settle(page, 500);
   const rect = await buildingRect(page);
-  if (BASELINE) { await ctx.close(); return rect; }
+  if (BASELINE || ONLY_LITES) { await ctx.close(); return rect; }
   const openPickerAt = async (frac) => {
     await (await revealTool(page, /^Door wall$/)).click();
     await settle(page, 300);
@@ -748,101 +752,257 @@ async function runTransom3D(browser, rect) {
   await ctx.close();
 }
 
-// ── PN. Panes (migration 324) ─────────────────────────────────────────────────────────────────
-// A window row's own pane count, read live off the catalog: five 2' x 1' transoms set to plain glass,
-// 2, 3, 4 and 6 panes, in five plank doors on the west wall beside an automatic wall window (2 ft: two
-// panes), and on the east wall a wall window set to 4 and a Classic with a panel lite set to 3.
-const pwin = (id, w, h, panes, extra) => ({ ...win(id, `Panes ${panes ?? "auto"} ${id}`, w, h, 50, false), ...(panes != null ? { panes } : {}), ...extra });
-const PNFIX = [
+// ── LT. The grid of lites (migration 335) ─────────────────────────────────────────────────────
+// Carolyn, 2026-10-23: every window drew grids although nobody asked for them. A window row's default
+// grid is ROWS x COLUMNS of lites, read live off the catalog, and the rep can change it per placed
+// window (liteRows / liteCols on a window, doorWindowLiteRows / doorWindowLiteCols on a door). On the
+// west wall: an automatic window (no grid set: the look every window had, at 2 ft one bar and the
+// double-hung rail), one set to no grid (1 x 1), a 6-lite (3 rows of 2), and a 6-lite the rep set to no
+// grid. On the east wall: a Classic with a 9-lite door lite (3 x 3), the same with the rep's 2 x 2, and
+// a board-and-batten door with Carolyn's transom, one row of 5.
+// SS_LITES_ONLY=1 runs these blocks alone and SS_SHOT_TAG prefixes their pictures, so the same design
+// can be photographed on an older build for a before/after (its checks fail there, by design).
+const ONLY_LITES = !!process.env.SS_LITES_ONLY;
+const SHOT_TAG = process.env.SS_SHOT_TAG || "";
+const lwin = (id, name, w, h, lites, extra) => ({ ...win(id, name, w, h, 50, false), ...(lites ? { liteRows: lites[0], liteCols: lites[1] } : {}), ...extra });
+const LTFIX = [
   ...FIX,
-  ...[1, 2, 3, 4, 6].map((n) => pwin(`w-top${n}`, 24, 12, n, { inDoor: true, doorWindowAt: "top" })),
-  pwin("w-wallAuto", 24, 36, null, {}),
-  pwin("w-wall4", 24, 36, 4, {}),
-  pwin("w-lite3", 18, 24, 3, { inDoor: true }),
+  lwin("w-auto", "Auto window", 24, 36, null, {}),
+  lwin("w-plain", "Plain window", 24, 36, [1, 1], {}),
+  lwin("w-six", "Six-lite window", 24, 36, [3, 2], {}),
+  lwin("w-nine", "Nine-lite door lite", 18, 24, [3, 3], { inDoor: true }),
+  lwin("w-tr5", "Transom of five", 29, 10, [1, 5], { inDoor: true, doorWindowAt: "top" }),
 ];
-const PNFIXTURES = { ...FIXTURES, items: PNFIX };
-const pnStamp = (id) => { const w = PNFIX.find((f) => f.id === id);
-  return { doorWindowId: w.id, doorWindowName: w.name, doorWindowWidthIn: w.widthIn, doorWindowHeightIn: w.heightIn, doorWindowPrice: w.price, doorWindowAt: w.doorWindowAt === "top" ? "top" : null }; };
-// bars: the vertical bars expected in the glass; rail: the double-hung middle rail (wall and panel windows keep it).
-const PNPLAN = [
-  ...[1, 2, 3, 4, 6].map((n, i) => ({ key: `top${n}`, fx: "d-plank", wall: "west", at: 3 + i * 5, op: "right", dw: pnStamp(`w-top${n}`), bars: n - 1, rail: 0 })),
-  { key: "wallAuto", win: "w-wallAuto", wall: "west", at: 28.5, sillFt: 3.5, bars: 1, rail: 1 },
-  { key: "wall4", win: "w-wall4", wall: "east", at: 6, sillFt: 3.5, bars: 3, rail: 1 },
-  { key: "lite3", fx: "d-classic", wall: "east", at: 14, op: "right", dw: pnStamp("w-lite3"), bars: 2, rail: 1 },
+const LTFIXTURES = { ...FIXTURES, items: LTFIX };
+const ltStamp = (id, lites) => { const w = LTFIX.find((f) => f.id === id);
+  return { doorWindowId: w.id, doorWindowName: w.name, doorWindowWidthIn: w.widthIn, doorWindowHeightIn: w.heightIn, doorWindowPrice: w.price,
+    doorWindowAt: w.doorWindowAt === "top" ? "top" : null, doorWindowLiteRows: lites ? lites[0] : null, doorWindowLiteCols: lites ? lites[1] : null }; };
+// v: vertical bars, h: horizontal bars, rail: the double-hung rail (the automatic grid only).
+const LTPLAN = [
+  { key: "auto", win: "w-auto", wall: "west", at: 4, sillFt: 3.5, v: 1, h: 0, rail: 1 },
+  { key: "plain", win: "w-plain", wall: "west", at: 10, sillFt: 3.5, v: 0, h: 0, rail: 0 },
+  { key: "six", win: "w-six", wall: "west", at: 16, sillFt: 3.5, v: 1, h: 2, rail: 0 },
+  { key: "sixPlain", win: "w-six", wall: "west", at: 22, sillFt: 3.5, lites: [1, 1], v: 0, h: 0, rail: 0 },
+  { key: "nine", fx: "d-classic", wall: "east", at: 5, op: "right", dw: ltStamp("w-nine"), v: 2, h: 2, rail: 0 },
+  { key: "nine2x2", fx: "d-classic", wall: "east", at: 12, op: "right", dw: ltStamp("w-nine", [2, 2]), v: 1, h: 1, rail: 0 },
+  { key: "transom5", fx: "d-plank", wall: "east", at: 19, op: "right", dw: ltStamp("w-tr5"), v: 4, h: 0, rail: 0 },
 ];
-async function runPanes3D(browser, rect) {
-  const items = PNPLAN.map((d, i) => {
+// The glass's own pieces: a door's are tagged "window"; a wall window's group is the window alone.
+const ltPieces = (d, ms) => (d.win ? ms : ms.filter((m) => m.part === "window"));
+function ltBars(pieces) {
+  const v = pieces.filter((m) => m.box && near(m.box[0], 0.06, 1e-3) && near(m.box[2], 0.09, 1e-3));
+  const h = pieces.filter((m) => m.box && near(m.box[1], 0.06, 1e-3) && near(m.box[2], 0.09, 1e-3) && m.box[0] > 0.1);
+  const rail = pieces.filter((m) => m.box && near(m.box[1], 0.07, 1e-3) && near(m.box[2], 0.09, 1e-3));
+  return { v, h, rail };
+}
+async function ltLoad(browser, rect, code) {
+  const items = LTPLAN.map((d, i) => {
     const pos = planPos(rect, d);
     if (d.win) {
-      const fx = PNFIX.find((f) => f.id === d.win);
-      return { id: 500 + i, type: "window", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name,
-        price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, sillFt: d.sillFt, sillMode: "fixed", colorId: null, colorLabel: null, colorHex: null };
+      const fx = LTFIX.find((f) => f.id === d.win);
+      return { id: 600 + i, type: "window", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name,
+        price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, sillFt: d.sillFt, sillMode: "fixed", colorId: null, colorLabel: null, colorHex: null,
+        liteRows: d.lites ? d.lites[0] : null, liteCols: d.lites ? d.lites[1] : null };
     }
     const fx = fxOf(d.fx);
-    return { id: 500 + i, type: "fixtureDoor", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name,
+    return { id: 600 + i, type: "fixtureDoor", ...pos, wall: d.wall, widthFt: fx.widthIn / 12, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name,
       planLabel: fx.planLabel, price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, swing: "out", operation: d.op, ...NO_COLOR, sillMode: "fixed", ...d.dw };
   });
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
-  const CODE = "SS-HARNPANES";
   const row = {
-    short_code: CODE, status: "draft", selections: { style: "doors", size: SIZE }, items,
+    short_code: code, status: "draft", selections: { style: "doors", size: SIZE }, items,
     contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
     paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
   };
-  await stubSupabase(page, { config: CONFIG, fixtures: PNFIXTURES, rpc: { load_design: [row] } });
+  const calls = await stubSupabase(page, { config: CONFIG, fixtures: LTFIXTURES, rpc: { load_design: [row] } });
+  // Get Estimate uploads the plan PDF first (T's stub).
+  await page.route(`**/${REF}.supabase.co/storage/v1/**`, (route) => {
+    const hdr = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" };
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: hdr, body: "" });
+    return route.fulfill({ status: 200, contentType: "application/json", headers: hdr, body: JSON.stringify({ Key: "floor-plans/harness.pdf", Id: "1" }) });
+  });
   await bypassGate(page, CONFIG.clientId);
-  await page.goto(`${BASE}/?client=${encodeURIComponent(CONFIG.clientId)}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/?client=${encodeURIComponent(CONFIG.clientId)}&id=${code}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   for (let k = 0; k < 60; k++) { await settle(page, 500); if ((((await readItems(page)) || []).length) >= items.length) break; }
   await openEditor(page);
-  for (let i = 0; i < PNPLAN.length; i++) {
-    const d = PNPLAN[i], ms = (await doorMeshes(page, items[i].id)) || [], f = frameOf(d.wall);
-    // The glass's own pieces: the door's are tagged "window"; a wall window's group is the window alone.
-    const pieces = d.win ? ms : ms.filter((m) => m.part === "window");
-    const bars = pieces.filter((m) => m.box && near(m.box[0], 0.06, 1e-3) && near(m.box[2], 0.09, 1e-3));
-    const rails = pieces.filter((m) => m.box && near(m.box[1], 0.07, 1e-3) && near(m.box[2], 0.09, 1e-3));
-    ok(`PN ${d.key}: ${d.bars} vertical bar(s)${d.rail ? " and the double-hung rail" : ", no rail"}`, bars.length === d.bars && rails.length === d.rail,
-      `${bars.length} bars, ${rails.length} rails`);
-    // Behind the glass, the room it looks into (glassRoom, 2026-10-21): one, 2.5 ft deep; a wall window's
-    // starts at the wall's inner face, a door pane's at the leaf's back face.
-    const gr = await page.evaluate((id) => {
-      const E = window.__ss3dEngine, g = E.model.openingsGroup.children.find((x) => x.userData && x.userData.itemId === id), out = [];
-      g.traverse((o) => { if (o.userData && o.userData.ssGlassRoom) out.push(+o.geometry.parameters.depth.toFixed(3)); });
-      return out;
-    }, items[i].id);
-    ok(`PN ${d.key}: one room behind the glass, 2.5 ft deep`, JSON.stringify(gr) === JSON.stringify([2.5]), JSON.stringify(gr));
-    if (d.bars > 0) {
-      // Equal panes: the bars split the glass into even widths.
-      const glass = pieces.find((m) => m.transparent);
-      const xs = [glass.min[f.along], ...bars.map((b) => ctr(b, f.along)).sort((a, b) => a - b), glass.max[f.along]];
-      const gaps = xs.slice(1).map((x, k) => x - xs[k]);
-      // A set count is truly equal (bars spaced inside the sash); the automatic one keeps its old spacing.
-      ok(`PN ${d.key}: the panes are equal`, gaps.every((g) => near(g, gaps[0], d.key === "wallAuto" ? 0.1 : 0.005)), gaps.map((g) => g.toFixed(3)).join(","));
+  return { ctx, page, errors, items, calls };
+}
+async function runLites3D(browser, rect) {
+  const { ctx, page, errors, items, calls } = await ltLoad(browser, rect, "SS-HARNLITES");
+  for (let i = 0; i < LTPLAN.length; i++) {
+    const d = LTPLAN[i], ms = (await doorMeshes(page, items[i].id)) || [], f = frameOf(d.wall);
+    const pieces = ltPieces(d, ms);
+    const { v, h, rail } = ltBars(pieces);
+    ok(`LT ${d.key}: ${d.v} vertical and ${d.h} horizontal bar(s)${d.rail ? " and the double-hung rail" : ", no rail"}`,
+      v.length === d.v && h.length === d.h && rail.length === d.rail, `${v.length} vertical, ${h.length} horizontal, ${rail.length} rails`);
+    const glass = pieces.find((m) => m.transparent);
+    if (glass && (d.v || d.h) && !d.rail) {
+      // Equal lites: the bars split the glass evenly across and up.
+      const gapsOf = (lo, cs, hi) => { const xs = [lo, ...cs.sort((a, b) => a - b), hi]; return xs.slice(1).map((x, k) => x - xs[k]); };
+      const gx = gapsOf(glass.min[f.along], v.map((b) => ctr(b, f.along)), glass.max[f.along]);
+      const gy = gapsOf(glass.min[1], h.map((b) => ctr(b, 1)), glass.max[1]);
+      ok(`LT ${d.key}: the lites are equal, across and up`, gx.every((g) => near(g, gx[0], 0.005)) && gy.every((g) => near(g, gy[0], 0.005)),
+        `across ${gx.map((g) => g.toFixed(3)).join(",")} up ${gy.map((g) => g.toFixed(3)).join(",")}`);
     }
   }
-  // Pictures: the west wall straight on (five transoms and the automatic wall window), and the east.
+  // Pictures: each window straight on, then both walls.
+  for (let i = 0; i < LTPLAN.length; i++) {
+    const clip = await aimAt(page, items[i].id, LTPLAN[i].wall, LTPLAN[i].win ? 1.6 : 1.35);
+    await settle(page, 200);
+    await page.evaluate(() => window.__ss3dEngine.render());
+    await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}${LTPLAN[i].key}.png`), clip });
+  }
   for (const [name, x] of [["west", -36], ["east", 36]]) {
     await page.evaluate((x) => { const E = window.__ss3dEngine; E.controls.minDistance = 0.5; E.camera.position.set(x, 4.2, 0); E.controls.target.set(0, 4.2, 0); E.camera.lookAt(0, 4.2, 0); E.camera.updateProjectionMatrix(); E.render(); }, x);
     await settle(page, 300);
-    await page.screenshot({ path: join(shots, `panes-${name}.png`) });
+    await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}wall-${name}.png`) });
   }
-  for (const key of ["top1", "top2", "top3", "top4", "top6", "wallAuto"]) {
-    const i = PNPLAN.findIndex((d) => d.key === key);
-    const clip = await aimAt(page, items[i].id, PNPLAN[i].wall, 1.35);
+  // The 3D footer: select the 6-lite, set it to no grid, add a lite across, then back to its default.
+  const six = LTPLAN.findIndex((d) => d.key === "six"), sixId = items[six].id;
+  const clip = await aimAt(page, sixId, "west", 1.6);
+  await settle(page, 300);
+  await page.mouse.click(clip.x + clip.width / 2, clip.y + clip.height / 2);
+  await settle(page, 600);
+  const row3 = page.locator("[data-ss-lites-3d]");
+  const rowText = (await row3.count()) ? (await row3.innerText()).replace(/\s+/g, " ") : "";
+  ok("LT the 3D footer shows the selected window's grid, its default named", /Window grid/i.test(rowText) && /Default \(6-lite\)/.test(rowText) && /6-lite \(3 rows of 2\)/.test(rowText), rowText || "no row");
+  await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}footer.png`) });
+  const barsNow = async () => ltBars(ltPieces(LTPLAN[six], (await doorMeshes(page, sixId)) || []));
+  const itemNow = async () => ((await readItems(page)) || []).find((it) => it.id === sixId);
+  const waitBars = async (nv, nh) => { let b; for (let k = 0; k < 20; k++) { await settle(page, 250); b = await barsNow(); if (b.v.length === nv && b.h.length === nh) break; } return b; };
+  if (await row3.count()) {
+    await row3.locator('[data-ss-lites-chip="plain"]').click();
+    let b = await waitBars(0, 0), it = await itemNow();
+    ok("LT No grid in the footer: plain glass, stamped 1 x 1 on the window", b.v.length === 0 && b.h.length === 0 && it && it.liteRows === 1 && it.liteCols === 1,
+      `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
+    await row3.getByRole("button", { name: "More across" }).click();
+    b = await waitBars(1, 0); it = await itemNow();
+    ok("LT ...one more across: 1 row of 2", b.v.length === 1 && b.h.length === 0 && it && it.liteRows === 1 && it.liteCols === 2, `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
+    await row3.locator('[data-ss-lites-chip="default"]').click();
+    b = await waitBars(1, 2); it = await itemNow();
+    ok("LT ...Default puts the row's 6-lite back and clears the override", b.v.length === 1 && b.h.length === 2 && it && it.liteRows === null && it.liteCols === null,
+      `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
+  }
+  // The estimate: each windows[] line sends the grid it is drawn with.
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "✕" && x.previousElementSibling && /^3D Preview/.test(x.previousElementSibling.textContent.trim()));
+    if (b) b.click();
+  });
+  await settle(page, 1500);
+  const before = calls.length;
+  const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit for Updated Estimate)$/ }).last();
+  let payload = null;
+  if (await submit.count()) {
+    await submit.click().catch(() => {});
+    for (let i = 0; i < 60 && !payload; i++) {
+      await settle(page, 250);
+      const hit = calls.slice(before).find((cl) => cl.path && cl.path.endsWith("/functions/v1/submit-estimate"));
+      if (hit) payload = hit.body;
+    }
+  }
+  ok("LT Get Estimate reached submit-estimate", !!payload);
+  if (payload) {
+    const ws = payload.windows || [];
+    const got = ws.map((w) => [w.name, w.liteRows, w.liteCols]);
+    const want = [
+      ["Auto window", null, null], ["Plain window", 1, 1], ["Six-lite window", 3, 2], ["Six-lite window", 1, 1],
+      ["Nine-lite door lite", 3, 3], ["Nine-lite door lite", 2, 2], ["Transom of five", 1, 5],
+    ];
+    ok("LT each windows[] line sends the grid it is drawn with (the override, else the row's default, else nothing)",
+      ws.length === want.length && want.every((w, k) => JSON.stringify(got[k]) === JSON.stringify(w)), JSON.stringify(got));
+  }
+  ok("LT no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+// LTP. The pickers: the window picker's Grid row and the door picker's grid for its window.
+async function runLitesPickers(browser, rect) {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await stubSupabase(page, { config: CONFIG, fixtures: LTFIXTURES });
+  await openDesigner(page, CONFIG.clientId);
+  await page.waitForFunction(() => document.querySelector(".ssd-frame") !== null, null, { timeout: 40000 });
+  await pickStyle(page, "Door Test");
+  await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), L, { timeout: 20000 });
+  await settle(page, 500);
+  const clickWall = async (tool, west, frac, title) => {
+    await (await revealTool(page, tool)).click();
+    await settle(page, 300);
+    const p = await svgPoint(page, west ? rect.x + 0.4 * (rect.w / W) : rect.x + rect.w - 0.4 * (rect.w / W), rect.y + frac * rect.h);
+    await page.mouse.click(p.x, p.y);
+    await page.getByText(title).first().waitFor({ timeout: 5000 });
+    await settle(page, 300);
+  };
+  const ids = async () => new Set(((await readItems(page)) || []).map((i) => i.id));
+  const newest = async (seen) => ((await readItems(page)) || []).find((i) => !seen.has(i.id));
+  // The window picker: the 6-lite's Grid row reads its default; the rep picks No grid.
+  await clickWall(/Window wall$/, true, 0.3, "Choose a window");
+  await page.getByText("Six-lite window", { exact: true }).first().click();
+  await settle(page, 300);
+  const wrow = page.locator("[data-ss-window-lites-row]");
+  const wText = (await wrow.count()) ? (await wrow.innerText()).replace(/\s+/g, " ") : "";
+  ok("LTP the window picker has a Grid row: Default (6-lite), No grid, rows and lites across", /Grid/.test(wText) && /Default \(6-lite\)/.test(wText) && /No grid/.test(wText) && /across/.test(wText), wText || "no row");
+  ok("LTP ...drawing the default, 3 rows of 2", (await wrow.count()) > 0 && (await wrow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "3x2");
+  if (await wrow.count()) {
+    await wrow.locator('[data-ss-lites-chip="plain"]').click();
     await settle(page, 200);
-    await page.evaluate(() => window.__ss3dEngine.render());
-    await page.screenshot({ path: join(shots, `panes-${key}.png`), clip });
+    ok("LTP ...No grid draws one lite", (await wrow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "1x1");
   }
-  ok("PN no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}window-picker.png`) });
+  let seen = await ids();
+  await page.getByRole("button", { name: "Place window" }).click();
+  await settle(page, 700);
+  let placed = await newest(seen);
+  ok("LTP the placed window carries the rep's grid, 1 x 1", !!placed && placed.liteRows === 1 && placed.liteCols === 1, JSON.stringify(placed && [placed.liteRows, placed.liteCols]));
+  // A window placed at its default stamps nulls (it follows Settings).
+  await clickWall(/Window wall$/, true, 0.7, "Choose a window");
+  await page.getByText("Six-lite window", { exact: true }).first().click();
+  await settle(page, 300);
+  seen = await ids();
+  await page.getByRole("button", { name: "Place window" }).click();
+  await settle(page, 700);
+  placed = await newest(seen);
+  ok("LTP a window placed at its default stamps null, null (it follows Settings)", !!placed && placed.liteRows === null && placed.liteCols === null, JSON.stringify(placed && [placed.liteRows, placed.liteCols]));
+  // The door picker: a Classic with the 9-lite lite; the rep takes a row off: 2 rows of 3.
+  await clickWall(/^Door wall$/, false, 0.3, "Choose a door");
+  await page.getByText("classic single", { exact: true }).first().click();
+  await settle(page, 300);
+  await page.getByText(/^Nine-lite door lite/).first().click();
+  await settle(page, 300);
+  const drow = page.locator("[data-ss-door-window-lites]");
+  const dText = (await drow.count()) ? (await drow.innerText()).replace(/\s+/g, " ") : "";
+  ok("LTP the door picker shows the chosen window's grid, Default (9-lite)", /Default \(9-lite\)/.test(dText), dText || "no row");
+  if (await drow.count()) {
+    await drow.getByRole("button", { name: "Fewer rows" }).click();
+    await settle(page, 200);
+    ok("LTP ...one row fewer: 2 rows of 3", (await drow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "2x3");
+  }
+  await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}door-picker.png`) });
+  seen = await ids();
+  await page.getByRole("button", { name: "Place door" }).click();
+  await settle(page, 700);
+  placed = await newest(seen);
+  ok("LTP the placed door carries its window's grid, 2 x 3", !!placed && placed.doorWindowId === "w-nine" && placed.doorWindowLiteRows === 2 && placed.doorWindowLiteCols === 3,
+    JSON.stringify(placed && [placed.doorWindowId, placed.doorWindowLiteRows, placed.doorWindowLiteCols]));
+  ok("LTP no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
 
 async function main() {
   const { browser } = await launch({ width: 1280, height: 900 });
   const rect = await runPicker(browser);
+  if (ONLY_LITES) {
+    await runLites3D(browser, rect);
+    await runLitesPickers(browser, rect);
+    await browser.close();
+    const fl = failed();
+    console.log(fl.length ? `${fl.length} FAILED` : "ALL CHECKS PASSED");
+    process.exit(fl.length ? 1 : 0);
+  }
   const items = itemsFor(rect);
   // H's doors and the openings round them ride in the same design (not in BASELINE: PLANK_DIGEST was
   // recorded on a design without them).
@@ -1053,7 +1213,8 @@ async function main() {
   await runMoney(browser, rect);
   await runTransomPicker(browser, rect);
   await runTransom3D(browser, rect);
-  await runPanes3D(browser, rect);
+  await runLites3D(browser, rect);
+  await runLitesPickers(browser, rect);
   await browser.close();
   const fl = failed();
   console.log(fl.length ? `${fl.length} FAILED` : "ALL CHECKS PASSED");

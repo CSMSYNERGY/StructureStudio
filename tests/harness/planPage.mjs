@@ -8,8 +8,8 @@
 //   B1 every line of the list stays in its own column and inside the page's margins
 //   B2 no two texts of the band (name, contact, list) overlap
 //   B3 the list ends above the page's bottom margin, however long it is
-//   B4 a door with a transom says "with Transom Window" (and its pane count); a door with a panel
-//      window says "with <window> in the upper panel"
+//   B4 a door with a transom says "with Transom Window" (and its grid of lites, 335); a door with a panel
+//      window says "with <window> in the upper panel"; a wall window with a grid names it, "8-lite (2 rows of 4)"
 //   L1 no two wall labels overlap, and none runs into the plan's dimension text
 //   L2 the wall labels are drawn at 12px or more
 //   P  the quote's PDF carries the plan page (its JPEG and the PDF itself are written out)
@@ -59,9 +59,9 @@ const FIX = [
   { ...base, id: "d-tad", name: "TEST 3D American Double", planLabel: "TAD", price: 900, widthIn: 60, heightIn: 72, opDouble: true, doorStyle: "american" },
   { ...base, id: "d-xwc", name: "Extra Wide Classic Double Door With A Long Name", planLabel: "XWC", price: 950, widthIn: 60, heightIn: 72, opDouble: true, doorStyle: "classic" },
   { ...base, id: "d-walk", name: "Classic Walk Door", planLabel: "CWD", price: 500, widthIn: 36, heightIn: 80, doorStyle: "classic" },
-  win("w-top", "Transom", "TR", 24, 10, { inDoor: true, doorWindowAt: "top", panes: 3 }),
-  win("w-lite", "Door lite", "DL", 18, 24, { inDoor: true, panes: 2 }),
-  win("w-slider", "Slider Window", "SW", 48, 24),
+  win("w-top", "Transom", "TR", 24, 10, { inDoor: true, doorWindowAt: "top", liteRows: 1, liteCols: 3 }),
+  win("w-lite", "Door lite", "DL", 18, 24, { inDoor: true, liteRows: 3, liteCols: 2 }),
+  win("w-slider", "Slider Window", "SW", 48, 24, { liteRows: 2, liteCols: 4 }),
   win("w-small", "Small Fixed Window", "SFW", 18, 18),
 ];
 const FIXTURES = { items: FIX, windowColors: [], ramp: { mode: "simple", price: 0, method: "each", enabled: false, imageUrl: null, showImage: false } };
@@ -202,8 +202,11 @@ async function runDesign(browser, rect, key, extraOptions) {
     offPage.slice(0, 3).map((b) => `"${b.t.slice(0, 30)}"`).join(" | "));
   // Joined back into whole bullets: a wrapped bullet's later lines follow its first.
   const text = list.map((b) => b.t).join(" ");
-  ok(`B4 ${tag} the transom doors say "with Transom Window, 3 panes"; the walk door "with Door lite in the upper panel, 2 panes"`,
-    (text.match(/with Transom Window, 3 panes/g) || []).length === 2 && /with Door lite in the upper panel, 2 panes/.test(text), text.slice(0, 400));
+  // The grid of lites (335): each window names its grid, "3-lite (1 row of 3)"; one without a grid says nothing.
+  ok(`B4 ${tag} the transom doors say "with Transom Window, 3-lite (1 row of 3)"; the walk door "with Door lite in the upper panel, 6-lite (3 rows of 2)"`,
+    (text.match(/with Transom Window, 3-lite \(1 row of 3\)/g) || []).length === 2 && /with Door lite in the upper panel, 6-lite \(3 rows of 2\)/.test(text), text.slice(0, 400));
+  ok(`B4 ${tag} the slider says its grid, "8-lite (2 rows of 4)", and the small fixed window none`,
+    /Slider Window — 4'×2', 8-lite \(2 rows of 4\)/.test(text) && !/Small Fixed Window — [^—]*lite/.test(text), text.slice(0, 600));
   if (key === "long") {
     const more = list.find((b) => /^\+ \d+ more$/.test(b.t));
     const sep = band[0].y0 - 24;

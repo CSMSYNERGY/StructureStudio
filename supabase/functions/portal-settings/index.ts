@@ -2752,8 +2752,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // in_partition (313): "Allowed in interior walls". Same rule: 313 is applied first.
       // door_window_at (the transom in a door, 2026-10-21): where an in-door window sits. Same rule:
       // its migration is applied first.
-      // panes (324): a window's pane count in 3D, null = automatic. Same rule: 324 is applied first.
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, panes, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // lite_rows / lite_cols (335): a window's grid of lites in 3D, null = automatic. Same rule: 335 is
+      // applied first. (324's panes is no longer read: 335 replaced it.)
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, lite_rows, lite_cols, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -7164,21 +7165,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       rec.door_window_at = row?.doorWindowAt === "top" ? "top" : "panel";
       if (rec.door_window_at === "top" && !has("inDoor")) rec.in_door = true;
     }
-    // Panes (324): how many panes a window's glass is split into in 3D (Ahsan, 2026-10-21: "add the
-    // Panes setting"). Windows only, presence-guarded like the tick above, so a sheet without the
-    // column or an older portal leaves the builder's choice alone; every other category is forced to
-    // NULL (324's fixture_items_panes_window_chk says the same). Blank, null or "auto" is NULL, the
-    // automatic look by width; 1 is plain glass; 2, 3, 4 and 6 are refused as anything else would be
-    // by the column's check, with words instead of a database error.
+    // Grid (335; Carolyn, 2026-10-23, spec Ahsan 2026-10-24): a window's default grid of lites, ROWS x
+    // COLUMNS, which the rep can change per placed window in the designer. It replaced 324's Panes.
+    // Windows only, presence-guarded like the tick above (either key present writes both), so a sheet
+    // without the columns or an older portal leaves the builder's choice alone; every other category
+    // is forced to NULL (335's fixture_items_lites_window_chk says the same). Both blank, null or
+    // "auto" is NULL, the automatic look every window drew before 335; otherwise both must be whole
+    // numbers from 1 to 8 (1 x 1 = no grid), refused in words instead of a database error.
     if (category !== "window") {
-      rec.panes = null;
-    } else if (has("panes")) {
-      const raw = row?.panes;
-      if (raw === null || raw === undefined || String(raw).trim() === "" || String(raw).trim() === "auto") rec.panes = null;
+      rec.lite_rows = null; rec.lite_cols = null;
+    } else if (has("liteRows") || has("liteCols")) {
+      const blank = (v: unknown) => v === null || v === undefined || String(v).trim() === "" || String(v).trim() === "auto";
+      if (blank(row?.liteRows) && blank(row?.liteCols)) { rec.lite_rows = null; rec.lite_cols = null; }
       else {
-        const n = Number(raw);
-        if (![1, 2, 3, 4, 6].includes(n)) return { err: `${name}: panes must be 1, 2, 3, 4 or 6 (or blank for automatic)` };
-        rec.panes = n;
+        const r = Number(row?.liteRows), c = Number(row?.liteCols);
+        const ok = (n: number) => Number.isInteger(n) && n >= 1 && n <= 8;
+        if (!ok(r) || !ok(c)) return { err: `${name}: the grid must be 1 to 8 rows and 1 to 8 lites across (or automatic)` };
+        rec.lite_rows = r; rec.lite_cols = c;
       }
     }
     // Allowed in interior walls (313): doors and windows, presence-guarded the same way, so a sheet
@@ -7265,7 +7268,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     if (!("in_door" in rec)) rec.in_door = false;
     if (!("door_window_at" in rec)) rec.door_window_at = "panel";
-    if (!("panes" in rec)) rec.panes = null;
+    // A NEW window comes with no grid (1 x 1) unless one was sent (335): "every window shows grids
+    // although nobody asked for them". Only a window; the check refuses a grid on anything else.
+    if (!("lite_rows" in rec)) { const win = rec.category === "window"; rec.lite_rows = win ? 1 : null; rec.lite_cols = win ? 1 : null; }
     if (!("in_partition" in rec)) rec.in_partition = true;
     if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;

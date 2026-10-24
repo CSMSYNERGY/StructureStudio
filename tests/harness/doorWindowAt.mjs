@@ -13,8 +13,10 @@
 //      column's check both refuse 'top' on a window that is not in doors)
 //   E. a price-only edit of a panel window still sends inDoor true + doorWindowAt "panel", so the
 //      position rides every save as the tick always did
-//   F. PANES (324): the window editor's Panes select (Automatic, plain glass, 2, 3, 4, 6); a save sends
-//      the count, the list line says it, and Automatic sends null and says nothing
+//   F. THE GRID (335, in place of 324's Panes): the window editor's Grid (lites): Automatic or 1 to 8
+//      rows, then 1 to 8 across, with a drawing and its name; a save sends liteRows / liteCols, the list
+//      line says "6-lite" or "no grid", Automatic sends null and says nothing, and a new window starts
+//      at 1 x 1
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED. The
 // tenant and its windows are made up, per the public-repo rule.
@@ -92,7 +94,7 @@ async function run(browser) {
         saves.push(body);
         // The row as portal-settings would now read it back.
         const at = stored.findIndex((r) => r.id === body.id);
-        if (at >= 0) stored[at] = { ...stored[at], in_door: body.inDoor === true, door_window_at: body.inDoor === true && body.doorWindowAt === "top" ? "top" : "panel", price: Number(body.price), panes: body.panes ?? null };
+        if (at >= 0) stored[at] = { ...stored[at], in_door: body.inDoor === true, door_window_at: body.inDoor === true && body.doorWindowAt === "top" ? "top" : "panel", price: Number(body.price), lite_rows: body.liteRows ?? null, lite_cols: body.liteCols ?? null };
         return json(route, { ok: true, id: body.id });
       }
       default: return json(route, { ok: true });
@@ -161,32 +163,59 @@ async function run(browser) {
     await settle(page, 400);
     ok("E a price-only save still sends inDoor true and doorWindowAt \"panel\"", saves.length === n + 1 && String(saves[n].price) === "99"
       && saves[n].inDoor === true && saves[n].doorWindowAt === "panel", JSON.stringify(saves[n] && { price: saves[n].price, inDoor: saves[n].inDoor, doorWindowAt: saves[n].doorWindowAt }));
-    // F: Panes (324). The select, its choices, a save that sends the count, and the line that says it.
-    const panes = page.locator("select[data-ss-window-panes]");
+    // F: the grid of lites (335, in place of 324's Panes). Rows (or Automatic) and lites across, a little
+    // drawing, a save that sends both, and the line that names it.
+    const rowsSel = page.locator("select[data-ss-window-lite-rows]");
+    const colsSel = page.locator("select[data-ss-window-lite-cols]");
     await rowOf("Door lite").getByRole("button", { name: "Edit" }).click();
     await settle(page, 300);
-    ok("F the Panes select reads Automatic for a window that never set it", (await panes.count()) === 1 && (await panes.inputValue()) === "");
-    ok("F ...with Automatic, plain glass, 2, 3, 4 and 6", JSON.stringify(await panes.locator("option").allInnerTexts()) === JSON.stringify(["Automatic (by width)", "Plain glass (1 pane)", "2 panes", "3 panes", "4 panes", "6 panes"]),
-      JSON.stringify(await panes.locator("option").allInnerTexts()));
-    await panes.selectOption("4");
+    ok("F the Grid reads Automatic for a window that never set one, with no across select", (await rowsSel.count()) === 1 && (await rowsSel.inputValue()) === "" && (await colsSel.count()) === 0);
+    ok("F ...offering Automatic and 1 to 8 rows", JSON.stringify(await rowsSel.locator("option").allInnerTexts()) === JSON.stringify(["Automatic (as before)", "1 row", "2 rows", "3 rows", "4 rows", "5 rows", "6 rows", "7 rows", "8 rows"]),
+      JSON.stringify(await rowsSel.locator("option").allInnerTexts()));
+    ok("F ...and says what automatic is", (await bodyText()).includes("Automatic is the look windows had before"));
+    await rowsSel.selectOption("3");
     await settle(page, 200);
-    ok("F choosing 4 says so", (await bodyText()).includes("4 equal panes side by side in 3D."));
-    await page.screenshot({ path: join(shots, "F-panes.png") });
+    await colsSel.selectOption("2");
+    await settle(page, 200);
+    ok("F 3 rows x 2 across draws a 3 x 2 grid and says 6-lite", (await page.locator("[data-ss-window-lite-pic]").getAttribute("data-ss-window-lite-pic")) === "3x2"
+      && (await bodyText()).includes("6-lite: 3 rows of 2, all the same size."));
+    await page.screenshot({ path: join(shots, "F-lites.png") });
     n = saves.length;
     await page.getByRole("button", { name: "Save window", exact: true }).click();
     for (let i = 0; i < 20 && saves.length === n; i++) await settle(page, 200);
     await settle(page, 400);
-    ok("F the save sends panes 4", saves.length === n + 1 && saves[n].panes === 4, JSON.stringify(saves[n] && { panes: saves[n].panes }));
-    ok("F ...and the line says \"4 panes\"", (await sum("Door lite")).includes("4 panes"), await sum("Door lite"));
+    ok("F the save sends liteRows 3 and liteCols 2, and no panes", saves.length === n + 1 && saves[n].liteRows === 3 && saves[n].liteCols === 2 && !("panes" in saves[n]),
+      JSON.stringify(saves[n] && { liteRows: saves[n].liteRows, liteCols: saves[n].liteCols, panes: saves[n].panes }));
+    ok("F ...and the line says \"6-lite\"", (await sum("Door lite")).includes("6-lite"), await sum("Door lite"));
     await rowOf("Door lite").getByRole("button", { name: "Edit" }).click();
     await settle(page, 300);
-    await panes.selectOption("");
+    ok("F the editor reads the saved grid back", (await rowsSel.inputValue()) === "3" && (await colsSel.inputValue()) === "2");
+    await rowsSel.selectOption("1");
+    await settle(page, 200);
+    await colsSel.selectOption("1");
+    await settle(page, 200);
+    ok("F 1 x 1 says no grid", (await bodyText()).includes("No grid: one clear lite."));
     n = saves.length;
     await page.getByRole("button", { name: "Save window", exact: true }).click();
     for (let i = 0; i < 20 && saves.length === n; i++) await settle(page, 200);
     await settle(page, 400);
-    ok("F Automatic sends panes null, and the line says nothing of panes", saves.length === n + 1 && saves[n].panes === null && !(await sum("Door lite")).includes("panes"),
-      JSON.stringify(saves[n] && { panes: saves[n].panes }) + " " + (await sum("Door lite")));
+    ok("F ...saves 1 and 1, and the line says \"no grid\"", saves.length === n + 1 && saves[n].liteRows === 1 && saves[n].liteCols === 1 && (await sum("Door lite")).includes("no grid"),
+      JSON.stringify(saves[n] && { liteRows: saves[n].liteRows, liteCols: saves[n].liteCols }) + " " + (await sum("Door lite")));
+    await rowOf("Door lite").getByRole("button", { name: "Edit" }).click();
+    await settle(page, 300);
+    await rowsSel.selectOption("");
+    n = saves.length;
+    await page.getByRole("button", { name: "Save window", exact: true }).click();
+    for (let i = 0; i < 20 && saves.length === n; i++) await settle(page, 200);
+    await settle(page, 400);
+    ok("F Automatic sends null and null, and the line says nothing of a grid", saves.length === n + 1 && saves[n].liteRows === null && saves[n].liteCols === null
+      && !/lite|grid/.test((await sum("Door lite")).replace(/Door lite/g, "")),
+      JSON.stringify(saves[n] && { liteRows: saves[n].liteRows, liteCols: saves[n].liteCols }) + " " + (await sum("Door lite")));
+    // A NEW window starts at no grid.
+    await page.getByRole("button", { name: /^\+ Add window/ }).first().click().catch(() => {});
+    await settle(page, 300);
+    ok("F a new window starts at 1 row x 1 across (no grid)", (await rowsSel.count()) === 1 && (await rowsSel.inputValue()) === "1" && (await colsSel.inputValue()) === "1",
+      `${await rowsSel.inputValue().catch(() => "?")} x ${await colsSel.inputValue().catch(() => "?")}`);
     ok("no page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
   } finally {
     await ctx.close();

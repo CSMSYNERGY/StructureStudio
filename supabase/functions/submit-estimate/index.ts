@@ -2145,6 +2145,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (w && w.flowerBox) { const l = dressLabel(w.flowerBoxColorId, w.flowerBoxColorLabel); bits.push(l ? `flower box: ${l}` : "flower box"); }
       return bits.length ? bits.join(" · ") : null;
     };
+    // The window's grid of lites (migration 335; Carolyn, 2026-10-23), as the designer drew it:
+    // "6-lite (3 rows of 2)". Display text only, never priced: the designer sends the pair it resolved
+    // (the rep's override, else the row's default), and anything but two whole numbers from 1 to 8 is
+    // no words. A plain window (1 x 1) and an automatic one (none sent) say nothing, so a window whose
+    // look did not change keeps its line exactly (a changed line on a signed order is a change order).
+    // ⚠️ The designer's ssLitesWords says the same words; change both together.
+    const litesWords = (w: any): string | null => {
+      const r = Number(w?.liteRows), c = Number(w?.liteCols);
+      if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || c < 1 || r > 8 || c > 8 || r * c < 2) return null;
+      return `${r * c}-lite (${r} row${r === 1 ? "" : "s"} of ${c})`;
+    };
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null; rowKey: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -2164,6 +2175,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
       const dressText = dressDesc(w);
+      const litesText = litesWords(w);
       // WHERE IT IS. `wall` is one of front/back/left/right and a dormer window has none — its
       // face is not a wall, so the designer sends `wall: null` and `dormer: true` rather than
       // inventing a fifth value (2026-09-07). A client that predates the flag sends neither and
@@ -2181,7 +2193,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // but the exact "top" is the panel window it always was.
       const doorTop = !!doorName && w.doorWindowAt === "top";
       const place = w && w.dormer ? "in the dormer" : doorName ? `${doorTop ? "Transom in door" : "Window in door"}: ${doorName}` : (w && w.wall ? `${w.wall} wall` : null);
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, litesText, colorText, dressText, place].filter(Boolean).join(" · ");
       // The dressing joins the group key for the same reason the colour does: two otherwise
       // identical windows, one with shutters and one without, are two different products to
       // the shop, and collapsing them into one line would describe both by whichever arrived
@@ -2202,8 +2214,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // KEEPS the win: row key, unlike the dormer: the designer's Details folds it into that very row
       // (computeLayoutPricingRows' customWindows), so a rep's price on the row re-prices it too. A
       // transom adds its position, so it is never described as a panel window in the same door.
+      // The grid joins it last, and only when there is one, so every key without a grid is exactly
+      // what it was: a 6-lite and a 9-lite of one window are two products to the shop.
       const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : doorName ? `door:${doorName}${doorTop ? "|top" : ""}` : ""}`
-        + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
+        + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "") + (litesText ? `|lites:${litesText}` : "");
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null), rowKey };
       if (g.rowKey !== rowKey) g.rowKey = null;
       g.qty++; wg.set(key, g);

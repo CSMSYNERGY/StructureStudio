@@ -11,8 +11,9 @@
 //      both in one select).
 //   4. Presence-guarded: an older portal or a sheet that sends neither key leaves the stored position
 //      alone, on a save and on an import.
-//   5. Panes (324): a window's pane count, 1/2/3/4/6 or null (automatic), refused in words otherwise,
-//      forced null on every other category, and left alone by a save that does not send it.
+//   5. The grid (335, in place of 324's panes): a window's rows x columns of lites, each 1 to 8, or both
+//      null (automatic), refused in words otherwise, forced null on every other category, 1 x 1 on a new
+//      window that sends none, and left alone by a save that does not send it.
 //
 // HOW. portalSettingsPartitionWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts
 // is imported, the import map swaps supabase-js for supabase_stub.ts, and every table is answered from
@@ -151,35 +152,44 @@ Deno.test("import_fixtures: a sheet without the columns leaves the position alon
   assertEquals([ins.in_door, ins.door_window_at], [true, "top"]);
 });
 
-// ─── Panes (324): a window's pane count in 3D, null = automatic ─────────────────────────────────
-Deno.test("the catalog read selects panes", async () => {
+// ─── The grid (335): a window's rows x columns of lites in 3D, null = automatic ─────────────────
+Deno.test("the catalog read selects the grid, not panes", async () => {
   const r = await call({ action: "catalog" });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   const sel = r.trace.reads.filter((x) => x.table === "fixture_items").map((x) => String(argOf(x.ops, "select")[0] ?? ""));
-  assert(sel.some((s) => /\bdoor_window_at, panes, in_partition\b/.test(s)), JSON.stringify(sel));
+  assert(sel.some((s) => /\bdoor_window_at, lite_rows, lite_cols, in_partition\b/.test(s)), JSON.stringify(sel));
+  assert(!sel.some((s) => /\bpanes\b/.test(s)), "324's panes is no longer read");
 });
 
-Deno.test("save_fixture: panes is 1, 2, 3, 4 or 6 on a window, null for automatic, never on anything else", async () => {
-  const panesOf = async (category: string, extra: Record<string, unknown>) => {
+Deno.test("save_fixture: the grid is 1 to 8 rows by 1 to 8 across on a window, null for automatic, never on anything else", async () => {
+  const gridOf = async (category: string, extra: Record<string, unknown>) => {
     const r = await call({ action: "save_fixture", category, ...LINE, ...extra });
-    return { status: r.status, body: r.body, row: written(r.trace, "insert")[0] };
+    const row = written(r.trace, "insert")[0];
+    return { status: r.status, body: r.body, row, grid: row ? [row.lite_rows, row.lite_cols] : undefined };
   };
-  for (const n of [1, 2, 3, 4, 6]) assertEquals((await panesOf("window", { panes: n })).row.panes, n, String(n));
-  assertEquals((await panesOf("window", { panes: "3" })).row.panes, 3, "a number sent as text");
-  for (const blank of [null, "", "auto"]) assertEquals((await panesOf("window", { panes: blank })).row.panes, null, `automatic from ${JSON.stringify(blank)}`);
-  assertEquals((await panesOf("window", {})).row.panes, null, "a new line with no key: automatic, the column's default");
-  for (const bad of [0, 5, 7, "two"]) {
-    const r = await panesOf("window", { panes: bad });
+  for (const [rr, cc] of [[1, 1], [1, 5], [3, 2], [3, 3], [8, 8]]) assertEquals((await gridOf("window", { liteRows: rr, liteCols: cc })).grid, [rr, cc], `${rr} x ${cc}`);
+  assertEquals((await gridOf("window", { liteRows: "3", liteCols: "2" })).grid, [3, 2], "numbers sent as text");
+  for (const blank of [null, "", "auto"]) assertEquals((await gridOf("window", { liteRows: blank, liteCols: blank })).grid, [null, null], `automatic from ${JSON.stringify(blank)}`);
+  assertEquals((await gridOf("window", {})).grid, [1, 1], "a NEW window that sends no grid gets none: 1 x 1");
+  for (const bad of [[0, 1], [1, 9], [2, null], [null, 3], ["two", 2], [1.5, 2]]) {
+    const r = await gridOf("window", { liteRows: bad[0], liteCols: bad[1] });
     assertEquals(r.status, 400, `${JSON.stringify(bad)} is refused in words`);
-    assert(/panes must be 1, 2, 3, 4 or 6/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
+    assert(/the grid must be 1 to 8 rows and 1 to 8 lites across/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
     assertEquals(r.row, undefined, "...and nothing is written");
   }
-  for (const c of ["door", "ramp", "vent"]) assertEquals((await panesOf(c, { panes: 4 })).row.panes, null, c);
+  for (const c of ["door", "ramp", "vent"]) {
+    assertEquals((await gridOf(c, { liteRows: 3, liteCols: 2 })).grid, [null, null], c);
+    assertEquals((await gridOf(c, {})).grid, [null, null], `${c}, no key`);
+  }
+  const panes = await gridOf("window", { panes: 4 });
+  assert(panes.row && !("panes" in panes.row), "324's panes key is no longer written");
 });
 
-Deno.test("save_fixture on a saved window: an older portal that sends no panes leaves it alone", async () => {
+Deno.test("save_fixture on a saved window: an older portal that sends no grid leaves it alone", async () => {
   const older = await call({ action: "save_fixture", category: "window", id: WIN_ID, ...LINE, inDoor: true });
-  assert(!("panes" in written(older.trace, "update")[0]), "no key, no change");
-  const set = await call({ action: "save_fixture", category: "window", id: WIN_ID, ...LINE, panes: 4 });
-  assertEquals(written(set.trace, "update")[0].panes, 4);
+  const row = written(older.trace, "update")[0];
+  assert(!("lite_rows" in row) && !("lite_cols" in row), "no key, no change");
+  const set = await call({ action: "save_fixture", category: "window", id: WIN_ID, ...LINE, liteRows: 3, liteCols: 3 });
+  const up = written(set.trace, "update")[0];
+  assertEquals([up.lite_rows, up.lite_cols], [3, 3]);
 });

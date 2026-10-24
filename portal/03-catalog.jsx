@@ -6088,8 +6088,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     in_door: d.in_door === true,
     // Where in the door (the transom, 2026-10-21): "top" a transom, anything else the upper panel.
     door_window_at: d.door_window_at === "top" ? "top" : "panel",
-    // Panes (324): "" = automatic (by width, NULL); otherwise the count as text, for the select.
-    panes: d.panes != null ? String(d.panes) : "",
+    // Grid of lites (335): "" = automatic (NULL, today's look); otherwise rows and lites across as
+    // text, for the selects.
+    lite_rows: d.lite_rows != null ? String(d.lite_rows) : "",
+    lite_cols: d.lite_cols != null ? String(d.lite_cols) : "",
     // Allowed in interior walls (313): doors and windows; absent reads as YES, the column's default.
     in_partition: d.in_partition !== false,
     // null = offered on EVERY building style (the living default); an array = only those (272).
@@ -6155,8 +6157,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // forces it off for every other category, so sending it for a door would be a value it throws away.
     // Where in the door rides beside it, "top" only for a window that goes in doors at all.
     ...(isWindowCat ? { inDoor: r.in_door === true, doorWindowAt: r.in_door === true && r.door_window_at === "top" ? "top" : "panel" } : {}),
-    // Panes (324), windows only: null is automatic.
-    ...(isWindowCat ? { panes: r.panes ? Number(r.panes) : null } : {}),
+    // Grid of lites (335), windows only: both null is automatic.
+    ...(isWindowCat ? { liteRows: r.lite_rows ? Number(r.lite_rows) : null, liteCols: r.lite_rows && r.lite_cols ? Number(r.lite_cols) : null } : {}),
     // Allowed in interior walls (313): doors and windows only. Ticked on the Interior walls tab; it
     // rides every line save so the tick survives a price edit made here.
     ...((isWindowCat || isDoorCat) ? { inPartition: r.in_partition !== false } : {}),
@@ -6461,7 +6463,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, door_window_at: "panel", panes: "", in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, door_window_at: "panel", lite_rows: "1", lite_cols: "1", in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -6530,8 +6532,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     }
     // Can go inside a door (289): said on the row, only when ticked, and how (the transom, 2026-10-21).
     if (isWindowCat && r.in_door) parts.push(r.door_window_at === "top" ? "transom in doors" : "can go in a door");
-    // Panes (324): said only when set, so an automatic window's line is unchanged.
-    if (isWindowCat && r.panes) parts.push(r.panes === "1" ? "plain glass" : `${r.panes} panes`);
+    // Grid of lites (335): said only when set, so an automatic window's line is unchanged.
+    if (isWindowCat && r.lite_rows && r.lite_cols) parts.push(Number(r.lite_rows) * Number(r.lite_cols) < 2 ? "no grid" : `${Number(r.lite_rows) * Number(r.lite_cols)}-lite`);
     // A raised DOOR says so on its row. It is the one field that separates a loft door from a
     // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
     // one they got wrong should not have to open each row to find it. Only when set, so an
@@ -6687,31 +6689,50 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           </div>
         </div>
       )}
-      {/* Panes (migration 324; Ahsan, 2026-10-21: "add the Panes setting"). How many panes the glass is
-          split into in 3D, for this window on a wall, in a door's upper panel or as a transom. Automatic is
-          today's look (two or three by width). A double-hung window keeps its middle rail; this sets the
-          columns. A window with a photo shows the photo instead. Windows only. */}
-      {isWindowCat && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={fldLbl}>Panes</div>
-          <select data-ss-window-panes="1" value={edit.draft.panes || ""} onChange={(e) => setDraft({ panes: e.target.value })}
-            style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
-            <option value="">Automatic (by width)</option>
-            <option value="1">Plain glass (1 pane)</option>
-            <option value="2">2 panes</option>
-            <option value="3">3 panes</option>
-            <option value="4">4 panes</option>
-            <option value="6">6 panes</option>
-          </select>
-          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {!edit.draft.panes
-              ? "How the glass is split in 3D. Automatic draws two or three panes depending on the width."
-              : edit.draft.panes === "1"
-                ? "One clear pane in 3D, no bars (a double-hung window keeps its middle rail)."
-                : `${edit.draft.panes} equal panes side by side in 3D.`}
+      {/* Grid (migration 335; Carolyn, 2026-10-23: "every window shows grids although nobody asked for
+          them"; spec Ahsan, 2026-10-24). The window's DEFAULT grid of lites, ROWS x lites ACROSS, for this
+          window on a wall, in a door's upper panel and as a transom; the rep can change it per window in
+          the designer. 1 x 1 is no grid; a transom of five is 1 row of 5; a "6-lite" is 3 rows of 2.
+          Automatic is the look every window had before. A window with a photo shows the photo instead.
+          It replaced 324's Panes select. Windows only. */}
+      {isWindowCat && (() => {
+        const lr = edit.draft.lite_rows || "", lc = edit.draft.lite_cols || "1";
+        const R = Number(lr) || 0, Cn = Number(lc) || 1;
+        const nums = [1, 2, 3, 4, 5, 6, 7, 8];
+        return (
+          <div style={{ marginBottom: 12 }}>
+            <div style={fldLbl}>Grid (lites)</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select data-ss-window-lite-rows="1" value={lr} onChange={(e) => setDraft(e.target.value === "" ? { lite_rows: "", lite_cols: "" } : { lite_rows: e.target.value, lite_cols: lc })}
+                style={{ ...S.input, minWidth: 0, width: "auto" }}>
+                <option value="">Automatic (as before)</option>
+                {nums.map((n) => <option key={n} value={String(n)}>{n} {n === 1 ? "row" : "rows"}</option>)}
+              </select>
+              {R > 0 && <>
+                <span style={{ color: "#64748B" }}>×</span>
+                <select data-ss-window-lite-cols="1" value={lc} onChange={(e) => setDraft({ lite_cols: e.target.value })}
+                  style={{ ...S.input, minWidth: 0, width: "auto" }}>
+                  {nums.map((n) => <option key={n} value={String(n)}>{n} across</option>)}
+                </select>
+                <span aria-hidden="true" data-ss-window-lite-pic={`${R}x${Cn}`}
+                  style={{ width: 36, height: 28, boxSizing: "border-box", border: "2px solid #334155", background: "#F0F9FF", display: "grid",
+                    gridTemplateRows: `repeat(${R}, 1fr)`, gridTemplateColumns: `repeat(${Cn}, 1fr)` }}>
+                  {Array.from({ length: R * Cn }, (_, k) => (
+                    <span key={k} style={{ borderRight: (k % Cn) < Cn - 1 ? "1px solid #334155" : "none", borderBottom: Math.floor(k / Cn) < R - 1 ? "1px solid #334155" : "none" }} />
+                  ))}
+                </span>
+              </>}
+            </div>
+            <div data-ss-window-lite-hint="1" style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+              {R === 0
+                ? "Automatic is the look windows had before: two rows of two or three lites by width (one row in a transom). Pick rows to set this window's grid."
+                : R * Cn < 2
+                  ? "No grid: one clear lite. Reps can change the grid on each window in the designer."
+                  : `${R * Cn}-lite: ${R} ${R === 1 ? "row" : "rows"} of ${Cn}, all the same size. Reps can change the grid on each window in the designer.`}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
       {/* Offered on (272), for every category: the styles a customer can add this item to. A
           builder asked for louvered vents on greenhouses only (2026-10-02); the same ticks keep a
           garage door off a style sold without one. Only with two or more styles, since one style

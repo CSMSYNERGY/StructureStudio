@@ -1691,6 +1691,100 @@ function windowDressStamps(d) {
     flowerBoxColorId: fc ? fc.id : null, flowerBoxColorLabel: fc ? (fc.label || null) : null, flowerBoxColorHex: fc ? (fc.hex || null) : null,
   };
 }
+// ── WINDOW LITES (335) ──
+// WINDOW GRIDS (Carolyn, 2026-10-23 call; spec Ahsan, 2026-10-24).
+// "Every window shows grids although nobody asked for them." A grid is ROWS x COLUMNS of lites
+// (L-I-T-E): no grid is 1 x 1, her transom one row of 5 (vertical bars only), a "6-lite" window 3
+// rows of 2, a "9-lite" door window 3 x 3. Rows and columns say horizontal-only, vertical-only and
+// both without the words being misread.
+// Set in two places: a DEFAULT per window row in Settings (fixture_items.lite_rows / lite_cols,
+// migration 335, which replaced 324's Panes), read live off the catalog like the window's photo; and
+// the rep's OVERRIDE per placed window (liteRows / liteCols on a window item, doorWindowLiteRows /
+// doorWindowLiteCols on a door for the window in it). Null on the item follows the catalog; null on
+// the catalog row is AUTOMATIC, the grid every window drew before 335 (two rows of two or three by
+// width, a transom one row).
+const SS_LITES_MAX = 8;
+// A valid pair as { rows, cols }, or null.
+function ssLites(rows, cols) {
+  const r = Number(rows), c = Number(cols);
+  return Number.isInteger(r) && Number.isInteger(c) && r >= 1 && c >= 1 && r <= SS_LITES_MAX && c <= SS_LITES_MAX ? { rows: r, cols: c } : null;
+}
+// What a window draws: the placed override, else its catalog row's default, else null (automatic).
+// `fx` is the catalog row as get_fixtures sends it (liteRows / liteCols only when set).
+function ssLitesResolve(ov, fx) {
+  return ov || (fx ? ssLites(fx.liteRows, fx.liteCols) : null);
+}
+// The grid of a placed window or of the window in a placed door, resolved against the catalog.
+function ssItemLites(it, fixtures) {
+  if (!it) return null;
+  const door = it.type === "fixtureDoor";
+  const fid = door ? it.doorWindowId : it.fixtureItemId;
+  const fx = fid != null ? (Array.isArray(fixtures) ? fixtures : []).find((f) => f && String(f.id) === String(fid)) : null;
+  return ssLitesResolve(door ? ssLites(it.doorWindowLiteRows, it.doorWindowLiteCols) : ssLites(it.liteRows, it.liteCols), fx);
+}
+// In words where the window is listed (the plan page, the estimate line): "6-lite (3 rows of 2)".
+// A plain window and an automatic one say nothing, so a window whose look did not change never
+// changes its line (a changed line on a signed order reads as a change order).
+// ⚠️ submit-estimate's litesWords says the same words; change both together.
+function ssLitesWords(l) {
+  if (!l || l.rows * l.cols < 2) return "";
+  return `${l.rows * l.cols}-lite (${l.rows} row${l.rows === 1 ? "" : "s"} of ${l.cols})`;
+}
+// The two fields a placed window stamps for its grid, null for "the window's default". Written on
+// every placement path, like windowDressStamps, so a swap never keeps the old window's grid by
+// accident (the picker seeds itself from the window it replaces, so a kept grid is a choice).
+function windowLiteStamps(l) {
+  return { liteRows: l ? l.rows : null, liteCols: l ? l.cols : null };
+}
+// ── END WINDOW LITES ──
+// The grid chooser, in the window picker, the door picker's window row and the 3D footer. `value` is
+// the override ({ rows, cols } or null for the default), `dflt` what the default draws (null =
+// automatic). Default, No grid, then rows and columns of lites, with a little drawing of the grid and
+// its name. `dark` is the 3D footer's palette.
+function SSLitesPicker({ value, dflt, onChange, dark = false, accent = FIXTURE_WINDOW_COLOR, disabled = false, label = "Grid" }) {
+  const eff = value || dflt;
+  const base = eff || { rows: 1, cols: 1 };
+  const set = (rows, cols) => { const l = ssLites(rows, cols); if (l) onChange(l); };
+  const name = (l) => (!l ? "automatic" : l.rows * l.cols < 2 ? "no grid" : `${l.rows * l.cols}-lite`);
+  const ink = dark ? "#CBD5E1" : "#334155", line = dark ? "#334155" : "#E2E8F0";
+  const chip = (key, on, text, onClick, title) => (
+    <button key={key} type="button" title={title || text} onClick={onClick} disabled={disabled} data-ss-lites-chip={key}
+      style={{ padding: dark ? "5px 9px" : "6px 12px", borderRadius: dark ? 7 : 20, fontSize: 12, fontWeight: 700, cursor: disabled ? "default" : "pointer",
+        border: dark ? "1px solid #334155" : `2px solid ${on ? accent : line}`, background: on ? (dark ? accent : "#E0F2FE") : (dark ? "#1E293B" : "#FFF"),
+        color: on ? (dark ? ssOnFill(accent) : "#075985") : ink, opacity: disabled ? 0.5 : 1 }}>{text}</button>
+  );
+  const step = (key, n, onDown, onUp, unit) => (
+    <span key={key} data-ss-lites-step={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: ink, fontWeight: 600 }}>
+      <button type="button" onClick={onDown} disabled={disabled || n <= 1} aria-label={`Fewer ${unit}`}
+        style={{ width: 24, height: 24, borderRadius: 6, border: `1px solid ${line}`, background: dark ? "#1E293B" : "#FFF", color: ink, cursor: "pointer", padding: 0, fontWeight: 800 }}>−</button>
+      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{n}</span>
+      <button type="button" onClick={onUp} disabled={disabled || n >= SS_LITES_MAX} aria-label={`More ${unit}`}
+        style={{ width: 24, height: 24, borderRadius: 6, border: `1px solid ${line}`, background: dark ? "#1E293B" : "#FFF", color: ink, cursor: "pointer", padding: 0, fontWeight: 800 }}>+</button>
+      <span>{unit}</span>
+    </span>
+  );
+  const pic = eff || null;
+  return (
+    <div data-ss-lites="1" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: dark ? "center" : "flex-start" }}>
+      <span style={dark ? { color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" } : { fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 86 }}>{label}</span>
+      {chip("default", !value, `Default (${name(dflt)})`, () => onChange(null), "The grid this window comes with (Settings)")}
+      {chip("plain", !!value && value.rows === 1 && value.cols === 1, "No grid", () => set(1, 1))}
+      {step("rows", base.rows, () => set(base.rows - 1, base.cols), () => set(base.rows + 1, base.cols), base.rows === 1 ? "row" : "rows")}
+      <span style={{ color: ink, fontSize: 12 }}>×</span>
+      {step("cols", base.cols, () => set(base.rows, base.cols - 1), () => set(base.rows, base.cols + 1), "across")}
+      <span aria-hidden="true" data-ss-lites-pic={pic ? `${pic.rows}x${pic.cols}` : "auto"}
+        style={{ width: 30, height: 24, boxSizing: "border-box", border: `2px solid ${ink}`, background: dark ? "#0F172A" : "#F0F9FF",
+          display: "grid", gridTemplateRows: `repeat(${pic ? pic.rows : 1}, 1fr)`, gridTemplateColumns: `repeat(${pic ? pic.cols : 1}, 1fr)` }}>
+        {pic ? Array.from({ length: pic.rows * pic.cols }, (_, k) => (
+          <span key={k} style={{ borderRight: (k % pic.cols) < pic.cols - 1 ? `1px solid ${ink}` : "none", borderBottom: Math.floor(k / pic.cols) < pic.rows - 1 ? `1px solid ${ink}` : "none" }} />
+        )) : null}
+      </span>
+      <span data-ss-lites-name="1" style={{ fontSize: 12, color: dark ? "#94A3B8" : "#64748B" }}>
+        {!pic ? "as today (by width)" : pic.rows * pic.cols < 2 ? "1 lite, no bars" : ssLitesWords(pic)}
+      </span>
+    </div>
+  );
+}
 // How far off the interior FLOOR a catalog window sits, and whether the customer may slide
 // it (139). Stamped at placement like every other fixture field, so a design keeps the
 // height it was drawn with even if the builder later re-specs the window.
@@ -2718,6 +2812,10 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
   const [doorColor, setDoorColor] = useState(null);
   const [trimColor, setTrimColor] = useState(null);
   const [doorWindow, setDoorWindow] = useState(null);
+  // The grid of the window in the door (335): null = that window's default from Settings. A new
+  // window choice starts at its own default.
+  const [doorWinLites, setDoorWinLites] = useState(null);
+  useEffect(() => { setDoorWinLites(null); }, [doorWindow]);
   const colorList = Array.isArray(doorColors) ? doorColors : [];
   useEffect(() => {
     setDoorWindow(null);
@@ -2840,11 +2938,16 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
             {operation === "double" && pickedWin && (
               <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 6 }}>One in each door of the pair.</div>
             )}
+            {pickedWin && (
+              <div data-ss-door-window-lites="1" style={{ marginTop: 10 }}>
+                <SSLitesPicker value={doorWinLites} dflt={ssLites(pickedWin.liteRows, pickedWin.liteCols)} onChange={setDoorWinLites} accent={FIXTURE_DOOR_COLOR} />
+              </div>
+            )}
           </div>
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null, pickedWin))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place door"}</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null, pickedWin, pickedWin ? doorWinLites : null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place door"}</button>
         </div>
       </div>
     </div>
@@ -4100,12 +4203,15 @@ function ssDoorWindowCount(it, look, photo) {
 // onto the new one. Stamped, not looked up live, because the window's price is on the quote.
 // doorWindowAt is "top" for a transom and null for a panel window, so a panel window's door is
 // stamped exactly as before the transom apart from the one null.
-function doorWindowStamps(w) {
+// Plus the window's grid override (335), `l` ({ rows, cols }, from ssLites) or null for the window's
+// own default: two more fields on every path, so a new window never keeps the old one's grid.
+function doorWindowStamps(w, l) {
   return {
     doorWindowId: w ? w.id : null, doorWindowName: w ? (w.name || "Window") : null,
     doorWindowWidthIn: w ? (Number(w.widthIn) || null) : null, doorWindowHeightIn: w ? (Number(w.heightIn) || null) : null,
     doorWindowPrice: w ? (w.price != null ? w.price : null) : null,
     doorWindowAt: w && w.doorWindowAt === "top" ? "top" : null,
+    doorWindowLiteRows: w && l ? l.rows : null, doorWindowLiteCols: w && l ? l.cols : null,
   };
 }
 // The windows in placed doors as the window lines they price as: one per leaf, at the window's own
@@ -11212,14 +11318,14 @@ function buildShed3DModel(THREE, p) {
     if (!fx || !fx.imageUrl) return null;
     return d3FixtureTexture(THREE, fx.imageUrl);
   };
-  // A catalog window's pane count (324: fixture_items.panes, sent by get_fixtures only when set),
-  // resolved live beside its photo and for the same reason: 1, 2, 3, 4 or 6, or null for the
-  // automatic count d3WindowFill has always drawn. A window in a door asks with the window's id.
-  const d3WindowPanesOf = (it) => {
-    if (!it || it.fixtureItemId == null) return null;
-    const fx = fxById.get(String(it.fixtureItemId));
-    const n = fx ? Number(fx.panes) : NaN;
-    return [1, 2, 3, 4, 6].includes(n) ? n : null;
+  // A window's grid of lites (335): the placed window's own override, else its catalog row's default
+  // (fixture_items.lite_rows / lite_cols, sent by get_fixtures only when set) resolved live beside
+  // its photo and for the same reason, else null for the automatic grid d3WindowFill has always
+  // drawn. A window in a door asks with the window's id and the door's override (doorWindowIn's it).
+  const d3WindowLitesOf = (it) => {
+    if (!it) return null;
+    const fx = it.fixtureItemId != null ? fxById.get(String(it.fixtureItemId)) : null;
+    return ssLitesResolve(ssLites(it.liteRows, it.liteCols), fx);
   };
   // The 3D LOOK a builder picked for a catalog door (186: fixture_items.door_style),
   // resolved live from the catalog beside its photo and for exactly the same reason --
@@ -12443,7 +12549,9 @@ function buildShed3DModel(THREE, p) {
     }
     // No colour stamp: like the dormer window, a window in a door has no colour picker yet, so it
     // draws in the sash colour every colourless catalog window takes.
-    return { rect, at, it: { type: "window", fixtureItemId: it.doorWindowId, colorHex: null } };
+    // The door's grid override for its window (335) rides along, so d3WindowFill reads it the way it
+    // reads a wall window's.
+    return { rect, at, it: { type: "window", fixtureItemId: it.doorWindowId, colorHex: null, liteRows: it.doorWindowLiteRows, liteCols: it.doorWindowLiteCols } };
   };
   // What goes round one of these doors and round no other (migration 289): the HEADER BOARD over the
   // opening -- a drip cap 0.4 of the frame's board F tall (on the real doors it is a third to a half of
@@ -12736,28 +12844,38 @@ function buildShed3DModel(THREE, p) {
     if (winEntry) {
       d3PhotoLayer(og, wf, winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08, o.it.colorHex || null);
     } else {
-      // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
-      // by width, double-hung rail across the middle. Sash-colored so a black
-      // window reads black through the grid, not building-trim.
-      // PANES (migration 324; Ahsan, 2026-10-21: "add the Panes setting"): the window row's own
-      // count when it has one, read live off the catalog like its photo: 1 = plain glass, N = N equal
-      // panes. Unset (every window before 324) keeps the automatic 2-3 columns by width, so nothing
-      // already drawn moves. Only the columns follow it: a double-hung window keeps its middle rail.
-      const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
-      const pn = d3WindowPanesOf(o.it);
-      const cols = pn || Math.max(2, Math.min(3, Math.round(ww / 1.1)));
-      // A set count splits the GLASS inside the sash evenly, so its panes are truly equal; the
-      // automatic count keeps the spacing it has always had, across the whole opening.
-      const b0 = pn ? o.a0 + s : o.a0, bw = pn ? ww - 2 * s : ww;
-      for (let ci = 1; ci < cols; ci++) {
-        const a = b0 + (bw * ci) / cols;
-        og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
-      }
-      // A transom in a door (inset "top") has the vertical bars only: a double-hung rail across a
-      // band 10 in tall reads as a second window stacked in it.
-      if (inset !== "top") {
-        const midY = o.y0 + wh / 2;
-        og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+      // LITES (migration 335; Carolyn, 2026-10-23: grids on every window although nobody asked for
+      // them): the grid this window asks for, rows x columns of EQUAL lites over the glass inside the
+      // sash -- columns - 1 vertical bars and rows - 1 horizontal ones, and nothing else, so 1 x 1 is
+      // plain glass and a window set to one row has no double-hung rail. Sash-coloured, so a black
+      // window reads black through its grid.
+      const lt = d3WindowLitesOf(o.it);
+      if (lt) {
+        const gx0 = o.a0 + s, gx1 = o.a1 - s, gy0 = o.y0 + s, gy1 = o.y1 - s;
+        for (let ci = 1; ci < lt.cols; ci++) {
+          const a = gx0 + ((gx1 - gx0) * ci) / lt.cols;
+          og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, gy0, gy1, 0, 0.09));
+        }
+        for (let ri = 1; ri < lt.rows; ri++) {
+          const y = gy0 + ((gy1 - gy0) * ri) / lt.rows;
+          og.add(wallBox(sashMat, wf, gx0, gx1, y - 0.03, y + 0.03, 0, 0.09));
+        }
+      } else {
+        // AUTOMATIC (no grid set on the window or its row): the grid every window drew before 335,
+        // unchanged -- 2-3 columns by width across the opening, the double-hung rail across the
+        // middle (a lone cross read flat).
+        const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
+        const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
+        for (let ci = 1; ci < cols; ci++) {
+          const a = o.a0 + (ww * ci) / cols;
+          og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
+        }
+        // A transom in a door (inset "top") has the vertical bars only: a double-hung rail across a
+        // band 10 in tall reads as a second window stacked in it.
+        if (inset !== "top") {
+          const midY = o.y0 + wh / 2;
+          og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+        }
       }
     }
     // ── SHUTTERS AND FLOWER BOX (Carolyn 2026-09-03) ───────────────────────────────
@@ -16870,7 +16988,10 @@ function buildShed3DModel(THREE, p) {
         // exactly those) at this wall's thickness.
         trimOn(wallBox(pTrim, wf, a0 - f, a1 + f, y0 - f, y0, 0, cd));
         trimOn(wallBox(pTrim, wf, a0 - f - 0.03, a1 + f + 0.03, y0 - 0.06, y0 + 0.02, 0, PT + 0.12));
-        d3WindowFill(dg, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f, true, PT);
+        // Its catalog row's grid of lites (335), as an outside window takes it. Only the grid: the stand-in
+        // still carries no fixtureItemId, so an interior window never picks up the row's photo.
+        const pfx = o.fixtureItemId != null ? fxById.get(String(o.fixtureItemId)) : null;
+        d3WindowFill(dg, wf, { it: { type: "window", liteRows: pfx ? pfx.liteRows : null, liteCols: pfx ? pfx.liteCols : null }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f, true, PT);
         seat(dg);
         return;
       }
@@ -18024,6 +18145,19 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const doorWinTops = doorWinShown.filter((w) => doorWinAt(w) === "top").length;
   const doorWinHead = doorWinTops === 0 ? "Window in door" : doorWinTops === doorWinShown.length ? "Transom" : "Window or transom";
   const pickDoorWindow = (w) => { if (sel3dItem) commitDoorColors([{ id: sel3dItem.id, patch: doorWindowStamps(w) }]); };
+  // ── The grid of the selected window, or of the window in the selected door (335) ──
+  // The rep's per-window override, changed in place through the same recolorItems3 path: a window
+  // re-stamps liteRows / liteCols, a door its doorWindowLite* pair, and only that wall is rebuilt.
+  // Default is the window row's own grid from Settings. Not on a vent (a type:"window" item too).
+  const sel3dWin = sel3dItem && sel3dItem.type === "window" && !isVentItem(sel3dItem) ? sel3dItem : null;
+  const litesDoor = !sel3dWin && doorWinRowOn && sel3dItem && sel3dItem.doorWindowId ? sel3dItem : null;
+  const litesItem = sel3dWin || litesDoor;
+  const litesFx = litesItem ? (fixtures || []).find((f) => String(f.id) === String(sel3dWin ? sel3dWin.fixtureItemId : litesDoor.doorWindowId)) || null : null;
+  const litesCur = sel3dWin ? ssLites(sel3dWin.liteRows, sel3dWin.liteCols) : litesDoor ? ssLites(litesDoor.doorWindowLiteRows, litesDoor.doorWindowLiteCols) : null;
+  const pickLites = (l) => {
+    if (!litesItem) return;
+    commitDoorColors([{ id: litesItem.id, patch: sel3dWin ? windowLiteStamps(l) : { doorWindowLiteRows: l ? l.rows : null, doorWindowLiteCols: l ? l.cols : null } }]);
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -20051,6 +20185,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                 </button>
               );
             })}
+          </div>
+        )}
+        {/* The grid of the selected window, or of the window in the selected door (335). */}
+        {litesItem && (
+          <div data-ss-lites-3d="1">
+            <SSLitesPicker dark value={litesCur} dflt={litesFx ? ssLites(litesFx.liteRows, litesFx.liteCols) : null} onChange={pickLites}
+              accent={accent} disabled={phase !== "ready"} label={sel3dWin ? "Window grid" : litesDoor.doorWindowAt === "top" ? "Transom grid" : "Window grid"} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -23189,7 +23330,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
 
 // Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
 // item goes on a wall. "Choose a window" / "Place window".
-function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFrom, onCancel, onPlace, ro = false, onPlaceRo = null }) {
+function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFrom, onCancel, onPlace, ro = false, onPlaceRo = null, litesOn = true }) {
   const styles = useMemo(() => {
     const m = new Map();
     windows.forEach((d) => {
@@ -23234,6 +23375,11 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
   const [shutterColor, setShutterColor] = useState(() => (swapFrom ? byId(swapFrom.shutterColorId) : null));
   const [flowerBox, setFlowerBox] = useState(!!(swapFrom && swapFrom.flowerBox));
   const [flowerBoxColor, setFlowerBoxColor] = useState(() => (swapFrom ? byId(swapFrom.flowerBoxColorId) : null));
+  // The grid of lites (335): null = the window's own default from Settings, else the rep's rows x
+  // columns for this one window. Seeded from the window being swapped, as the dressing is, so
+  // changing a size keeps the grid the customer chose. Not offered for an interior wall's window
+  // (litesOn false): that one always takes its row's default.
+  const [lites, setLites] = useState(() => (swapFrom ? ssLites(swapFrom.liteRows, swapFrom.liteCols) : null));
   const pickStyle = (st) => { setRoOn(false); setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
@@ -23318,9 +23464,15 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
             ))}
           </div>
         )}
+        {/* The grid (335): Default is what the builder set for this window in Settings. */}
+        {sel && litesOn && (
+          <div data-ss-window-lites-row="1" style={{ marginBottom: 14 }}>
+            <SSLitesPicker value={lites} dflt={ssLites(sel.liteRows, sel.liteCols)} onChange={setLites} />
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor }))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place window"}</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor }, litesOn ? lites : null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place window"}</button>
         </div>
       </div>
     </div>
@@ -27460,7 +27612,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (r.refusal) { setToast(r.refusal); setTimeout(() => setToast(null), 4000); return; }
     setItems((p) => [...p, r.item]); setSelectedId(r.item.id); setActiveTool(null); setToast(null);
   };
-  const placePickedDoor = useCallback((fx, swing, operation, doorColor, trimColor, doorWindow) => {
+  const placePickedDoor = useCallback((fx, swing, operation, doorColor, trimColor, doorWindow, doorWinLites) => {
     // "+ Door" on a selected partition wall: the door goes IN that wall (addPartitionOpening).
     if (doorPick && doorPick.partitionId != null) { if (fx) addPartitionOpening(doorPick.partitionId, "door", fx, swing, operation); setDoorPick(null); return; }
     // Swap mode: replace the selected door in place with the chosen door — keeping its wall,
@@ -27531,7 +27683,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
           // The window picked for the NEW door, or all five fields null: the old door's window must
           // never survive a swap onto a door that may not take one (migration 289).
-          ...doorWindowStamps(doorWindow || null),
+          ...doorWindowStamps(doorWindow || null, doorWinLites),
           widthFt: wFt, swing: swing || it.swing || null, operation: operation || it.operation || null };
         // The re-clamp can shift the door; its ramp is derived geometry and must follow,
         // exactly like the drag path — else it detaches into the rasterized PDF.
@@ -27569,7 +27721,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       swing: swing || null, operation: operation || null,
       ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
       // The window the picker chose for it, if any (migration 289).
-      ...doorWindowStamps(doorWindow || null),
+      ...doorWindowStamps(doorWindow || null, doorWinLites),
       // Second of the four door placement paths that must stamp the sill — see the
       // included-chip branch in handleClick for the list and why it is a list.
       ...doorSillStamps(fx),
@@ -27599,7 +27751,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
-  const placePickedWindow = useCallback((fx, windowColor, dress) => {
+  const placePickedWindow = useCallback((fx, windowColor, dress, lites) => {
     // "+ Window" on a selected partition wall: the window goes IN that wall (addPartitionOpening).
     if (windowPick && windowPick.partitionId != null) { if (fx) addPartitionOpening(windowPick.partitionId, "window", fx, null, null); setWindowPick(null); return; }
     // Swap mode: same re-legalization as the door swap above — the new width is re-clamped
@@ -27644,7 +27796,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // all eight fields, so the window being swapped IN can never keep the dressing of the
         // one it replaced. The picker is the single source — whatever its two toggles say at
         // the moment of the swap is what the window gets.
-        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowSillStamps(fx), widthFt: wFt } : it));
+        // windowLiteStamps likewise: both grid fields, from the picker (seeded with the old window's).
+        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowLiteStamps(lites), ...windowSillStamps(fx), widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -27665,7 +27818,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-      ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowSillStamps(fx),
+      ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowLiteStamps(lites), ...windowSillStamps(fx),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("Something's already there — pick a different spot on the wall.");
@@ -28809,17 +28962,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (op) parts.push(op);
       if (d.colorLabel) parts.push(d.trimColorLabel ? `${d.colorLabel} / ${d.trimColorLabel} trim` : d.colorLabel);
       // Its glass, when the door really carries it (ssDoorWindowCount: the look can take it and it fits
-      // the leaf, the rule the 3D and the estimate follow), with the window's pane count when its row
-      // sets one (324). A transom says so; a panel window names itself.
+      // the leaf, the rule the 3D and the estimate follow), with its grid of lites when it has one
+      // (335: "5-lite (1 row of 5)"). A transom says so; a panel window names itself.
       const nGlass = ssDoorWindowCount(d, ssDoorLookOf(C.fixtures, d), ssDoorPhotoOf(C.fixtures, d));
       if (nGlass) {
         const wName = d.doorWindowName || "Window";
-        const wFx = (Array.isArray(C.fixtures) ? C.fixtures : []).find((f) => f && String(f.id) === String(d.doorWindowId));
-        const pn = wFx ? Number(wFx.panes) : NaN;
+        const lw = ssLitesWords(ssItemLites(d, C.fixtures));
         const glass = ssDoorWindowAtOf(d) === "top"
           ? `with Transom Window${/^transom( window)?$/i.test(wName.trim()) ? "" : ` (${wName})`}`
           : `with ${wName} in the upper panel${nGlass > 1 ? "s" : ""}`;
-        parts.push(glass + (pn === 1 ? ", plain glass" : [2, 3, 4, 6].includes(pn) ? `, ${pn} panes` : ""));
+        parts.push(glass + (lw ? `, ${lw}` : ""));
       }
       bullets.push(`${d.doorName || "Door"}${parts.length ? " — " + parts.join(", ") : ""}`);
     });
@@ -28828,6 +28980,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     items.filter((i) => i.type === "window" && i.fixtureItemId).forEach((w) => {
       const parts = [];
       if (w.widthIn && w.heightIn) parts.push(`${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}`);
+      // Its grid of lites (335), when it has one: "6-lite (3 rows of 2)".
+      const lw = ssLitesWords(ssItemLites(w, C.fixtures));
+      if (lw) parts.push(lw);
       if (w.colorLabel) parts.push(w.colorLabel);
       // Dressing joins the window's OWN spec bullet rather than getting one of its own: it is
       // a property of this window, and a floating "Shutters" line would not say which window
@@ -32050,6 +32205,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             flowerBox: !!w.flowerBox,
             flowerBoxColorId: w.flowerBoxColorId || null,
             flowerBoxColorLabel: w.flowerBoxColorLabel || null,
+            // The grid it is drawn with (335), resolved as the 3D resolves it, so the estimate line
+            // can say "6-lite (3 rows of 2)". Null when automatic. Display text only; never priced.
+            ...windowLiteStamps(ssItemLites(w, C.fixtures)),
           };
         }).concat((() => {
           // THE DORMER WINDOW, priced like any other catalog window (2026-09-07).
@@ -32100,6 +32258,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             flowerBox: false,
             flowerBoxColorId: null,
             flowerBoxColorLabel: null,
+            // Its row's grid of lites (335); a dormer window has no override.
+            ...windowLiteStamps(ssLitesResolve(null, fx)),
           }];
         })()).concat(
           // WINDOWS IN DOORS (migration 289): each one its OWN catalog window line, one per leaf (two
@@ -32131,6 +32291,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               flowerBox: false,
               flowerBoxColorId: null,
               flowerBoxColorLabel: null,
+              // The grid of the window in the door (335): the door's override, else the window's default.
+              ...windowLiteStamps(ssItemLites(w.door, C.fixtures)),
             };
           })),
         itemSummary: {
@@ -37031,7 +37193,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={doorPick.fixtures || (doorPick.partitionId != null ? partitionDoors : offeredDoors)} showPricing={!!C.showPricing} doorColors={doorPick.partitionId != null ? [] : doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && !doorPick.fixtures && doorPick.partitionId == null && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} doorWindows={doorPick.partitionId != null ? [] : offeredDoorWindows} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={offeredRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={windowPick.fixtures || offeredWindows} showPricing={!!C.showPricing} windowColors={windowPick.partitionId != null ? [] : windowColorList} dressColors={windowPick.partitionId != null ? [] : dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && !windowPick.fixtures && windowPick.partitionId == null && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={windowPick.fixtures || offeredWindows} showPricing={!!C.showPricing} windowColors={windowPick.partitionId != null ? [] : windowColorList} dressColors={windowPick.partitionId != null ? [] : dressColorList} litesOn={windowPick.partitionId == null} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && !windowPick.fixtures && windowPick.partitionId == null && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}

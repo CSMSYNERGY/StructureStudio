@@ -55,7 +55,10 @@ const HANDLER = handler as (req: Request) => Promise<Response>;
 const HELP_START = "// ── WINDOWS IN DOORS (migration 289) ──\n", HELP_END = "// ── END WINDOWS IN DOORS ──\n";
 const PAY_START = "ssDoorWindowLines(items, C.fixtures).map((w) => {", PAY_END = "\n          })),\n        itemSummary: {";
 const LABEL_START = "function getDisplayLabel(", LABEL_END = "// How to name a wall in a sentence";
+// The grid of lites (335): the window's rows x columns, which the payload block resolves per window.
+const LITES_START = "// ── WINDOW LITES (335) ──\n", LITES_END = "// ── END WINDOW LITES ──\n";
 const regions = (src: string, file: string) => ({
+  lites: lift(src, file, LITES_START, LITES_END),
   help: lift(src, file, HELP_START, HELP_END),
   pay: lift(src, file, PAY_START, PAY_END),
   label: lift(src, file, LABEL_START, LABEL_END),
@@ -64,10 +67,11 @@ const R_CMP = regions(CMP, "structure-studio.component.js"), R_JSX = regions(JSX
 Deno.test("the lifted door-window helpers and payload block are byte-identical in both twins", () => {
   assertEquals(R_JSX.help, R_CMP.help);
   assertEquals(R_JSX.pay, R_CMP.pay);
+  assertEquals(R_JSX.lites, R_CMP.lites);
 });
-const W = new Function(`${R_CMP.help}\n${R_CMP.label}\n; return {
+const W = new Function(`${R_CMP.lites}\n${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps, ssItemPlacesKey, ssRemoveFromRow,
-  ssDoorWindowLookOk, ssDoorPhotoOf,
+  ssDoorWindowLookOk, ssDoorPhotoOf, ssLites, ssLitesWords, ssItemLites,
   payload: (items, C, frontWall) => ${R_CMP.pay}\n          }),
 };`)() as {
   ssDoorWindowCount: (it: any, look: string, photo?: boolean) => number;
@@ -76,7 +80,10 @@ const W = new Function(`${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorPhotoOf: (fixtures: any[], it: any) => boolean;
   ssDoorLeafFt: (wi: any, hi: any, dbl: boolean) => { w: number; h: number } | null;
   ssDoorWindowLines: (items: any[], fixtures: any[]) => any[];
-  doorWindowStamps: (w: any) => Record<string, unknown>;
+  doorWindowStamps: (w: any, l?: { rows: number; cols: number } | null) => Record<string, unknown>;
+  ssLites: (r: unknown, c: unknown) => { rows: number; cols: number } | null;
+  ssLitesWords: (l: { rows: number; cols: number } | null) => string;
+  ssItemLites: (it: any, fixtures: any[]) => { rows: number; cols: number } | null;
   ssItemPlacesKey: (it: any, k: string, fixtures: any[]) => boolean;
   ssRemoveFromRow: (key: string, it: any) => any;
   payload: (items: any[], C: any, frontWall: string | null) => any[];
@@ -436,7 +443,8 @@ const TITEMS: any[] = [
 Deno.test("transom stamps: a sixth field, 'top' for a transom and null otherwise", () => {
   assertEquals(TOP.doorWindowAt, "top");
   assertEquals(LITE.doorWindowAt, null);
-  assertEquals(Object.keys(NONE).sort(), ["doorWindowAt", "doorWindowHeightIn", "doorWindowId", "doorWindowName", "doorWindowPrice", "doorWindowWidthIn"]);
+  // ...and since 335 the two grid fields, null when the window takes its row's default.
+  assertEquals(Object.keys(NONE).sort(), ["doorWindowAt", "doorWindowHeightIn", "doorWindowId", "doorWindowLiteCols", "doorWindowLiteRows", "doorWindowName", "doorWindowPrice", "doorWindowWidthIn"]);
   assert(Object.values(NONE).every((v) => v === null));
   // Anything but the exact "top" is a panel window.
   assertEquals(W.doorWindowStamps({ id: "x", name: "X", widthIn: 18, heightIn: 24, price: 1, doorWindowAt: "TOP" }).doorWindowAt, null);
@@ -532,4 +540,78 @@ Deno.test("change orders: a signed order resubmitted unchanged raises none; addi
   const text = changeOrderDescription(before.snap, a.snap) || "";
   assert(text.includes("Added: Transom Windows ×4 ($324.00)"), text);
   assert(text.includes("Added: Door lite ×2 ($190.00)"), text);
+});
+
+// ─── 6. THE GRID (335; Carolyn, 2026-10-23): a window's rows x columns of lites, in words ─────────
+// The designer sends the grid it draws on each windows[] line: the rep's override on the placed
+// window or door, else the window row's default (get_fixtures' liteRows / liteCols), else nothing
+// (automatic). The estimate says it on that window's line, "9-lite (3 rows of 3)", and keeps a 6-lite
+// and a plain window of one row apart; plain and automatic say nothing, so a design without a grid
+// keeps every line exactly as it was; and no grid moves any money.
+const GFIX = DESIGNER_FIXTURES.map((f: any) => (f.id === "fx-transom" ? { ...f, liteRows: 1, liteCols: 5 } : f));
+const GITEMS: any[] = [
+  door(30, fx("fx-classic"), "south", "right",
+    W.doorWindowStamps({ id: "fx-lite", name: "Door lite", widthIn: 18, heightIn: 24, price: 95 }, { rows: 3, cols: 3 })), // the rep's 9-lite
+  door(31, fx("fx-yoder2"), "east", "double", TOP),        // the transom row's default: 1 row of 5, one per leaf
+  door(32, fx("fx-american2"), "north", "double", LITE),   // no override, and the lite's row sets none: automatic
+];
+const gridPayload = (items: any[], wall: Record<string, unknown>[]) => {
+  const p: any = payloadFor([], {});
+  p.doors = payloadFor(items, {}).doors;
+  p.windows = wall.concat(W.payload(items, { ...C({}), fixtures: GFIX }, "south"));
+  return p;
+};
+const WALL_WIN = { name: "Door lite", widthIn: 18, heightIn: 24, price: 95, wall: "front", fixtureItemId: "fx-lite",
+  colorId: null, colorLabel: null, shutters: false, shutterColorId: null, shutterColorLabel: null, flowerBox: false, flowerBoxColorId: null, flowerBoxColorLabel: null };
+
+Deno.test("THE GRID: the words, and what counts as a grid", () => {
+  assertEquals(W.ssLitesWords(null), "", "automatic says nothing");
+  assertEquals(W.ssLitesWords(W.ssLites(1, 1)), "", "no grid says nothing");
+  assertEquals(W.ssLitesWords(W.ssLites(1, 5)), "5-lite (1 row of 5)");
+  assertEquals(W.ssLitesWords(W.ssLites(3, 2)), "6-lite (3 rows of 2)");
+  assertEquals(W.ssLitesWords(W.ssLites("3", "3")), "9-lite (3 rows of 3)");
+  for (const bad of [[0, 1], [9, 1], [1, 9], [1.5, 2], ["x", 2], [null, 2], [2, undefined]]) assertEquals(W.ssLites(bad[0], bad[1]), null, JSON.stringify(bad));
+});
+
+Deno.test("THE GRID: each window in a door sends the rep's override, else its row's default, else nothing", () => {
+  const lines = W.payload(GITEMS, { ...C({}), fixtures: GFIX }, "south");
+  assertEquals(lines.map((l: any) => [l.doorName, l.liteRows, l.liteCols]), [
+    ["Classic door", 3, 3],
+    ["Cross buck Double Doors", 1, 5], ["Cross buck Double Doors", 1, 5],
+    ["American double", null, null], ["American double", null, null],
+  ]);
+  assertEquals(W.ssItemLites(GITEMS[1], GFIX), { rows: 1, cols: 5 });
+  assertEquals(W.ssItemLites({ ...GITEMS[1], doorWindowLiteRows: 1, doorWindowLiteCols: 1 }, GFIX), { rows: 1, cols: 1 }, "the rep's No grid beats the row's default");
+  assertEquals(NONE.doorWindowLiteRows, null);
+  assertEquals(W.doorWindowStamps(null, { rows: 3, cols: 3 }).doorWindowLiteRows, null, "no window, no grid");
+});
+
+Deno.test("THE GRID: the estimate says it on each window's line, and nothing on a window without one", async () => {
+  const r = await submit(gridPayload(GITEMS, [{ ...WALL_WIN, liteRows: 3, liteCols: 2 }, { ...WALL_WIN }, { ...WALL_WIN, liteRows: 1, liteCols: 1 }]), {});
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(named(r.snap, "Door lite").map((l: any) => [l.qty, l.amount, l.desc]), [
+    [1, 95, "1'6\"×2' · 6-lite (3 rows of 2) · front wall"],
+    [2, 95, "1'6\"×2' · front wall"],
+    [1, 95, "1'6\"×2' · 9-lite (3 rows of 3) · Window in door: Classic door"],
+    [2, 95, "1'6\"×2' · Window in door: American double"],
+  ]);
+  assertEquals(named(r.snap, "Transom Windows").map((l: any) => [l.qty, l.amount, l.desc]), [
+    [2, 81, "2'5\"×10\" · 5-lite (1 row of 5) · Transom in door: Cross buck Double Doors"],
+  ]);
+});
+
+Deno.test("THE GRID: no money moves, a forged grid is no words, and an unchanged resubmit raises no change order", async () => {
+  const withGrid = await submit(gridPayload(GITEMS, [{ ...WALL_WIN, liteRows: 3, liteCols: 2 }]), {});
+  const plain = GITEMS.map((i) => ({ ...i, doorWindowLiteRows: null, doorWindowLiteCols: null }));
+  const p: any = payloadFor([], {});
+  p.doors = payloadFor(plain, {}).doors;
+  p.windows = [{ ...WALL_WIN }].concat(W.payload(plain, C({}), "south"));
+  const without = await submit(p, {});
+  assertEquals(withGrid.status, 200, JSON.stringify(withGrid.body));
+  assertEquals(linesTotal(withGrid.estimate.items), linesTotal(without.estimate.items), "the same total with and without grids");
+  assertEquals(withGrid.snap.lines.reduce((s: number, l: any) => s + l.qty, 0), without.snap.lines.reduce((s: number, l: any) => s + l.qty, 0), "the same count of everything");
+  const forged = await submit(gridPayload([], [{ ...WALL_WIN, liteRows: 99, liteCols: 2 }, { ...WALL_WIN, liteRows: "x", liteCols: "<b>" }]), {});
+  assertEquals(named(forged.snap, "Door lite").map((l: any) => [l.qty, l.desc]), [[2, "1'6\"×2' · front wall"]], "out-of-range or junk is no words");
+  const again = await submit(gridPayload(GITEMS, [{ ...WALL_WIN, liteRows: 3, liteCols: 2 }]), {});
+  assertEquals(changeOrderDescription(withGrid.snap, again.snap), null, "a design with grids resubmitted as it was");
 });
