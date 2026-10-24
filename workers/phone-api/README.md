@@ -126,7 +126,7 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /voice/notice` | The outbound whisper: the business's announcement, `<Say>` only. A read that fails still says the standard sentence. |
 | `POST /voice/recording` | A call recording's status callback (204): `in-progress`, `completed` (queues the transcript), `absent`. Taken only for the row's own recording. |
 | `GET /recordings/:id/audio` | A finished call recording, streamed from Twilio (one channel, both voices) after the voicemail rule for who may see the call. Bearer header only, Range passed through, never cached; 404 once retention deleted it. |
-| `GET /calls/:id/transcript` | The call's transcript, read when someone presses "Show transcript" (`GET /calls` never carries it: the apps save those rows on the device, where a copy would outlive the business's retention). Same rule. |
+| `GET /calls/:id/transcript` | The call's transcript, read when someone presses "Show transcript" (`GET /calls` never carries it: the apps save those rows on the device, where a copy would outlive the business's retention). Same rule. Our side's lines carry the team member's name instead of "Team" when one known person was on the call (DEVIATIONS 84). |
 | `POST /voice/after-dial` | Plan section 8 steps 1 to 4, decided by `DialBridged`. |
 | `POST /voice/screen` | The press-1 screen for forwarded cells. |
 | `POST /voice/status` | 204 first, then writes `phone_calls` in `waitUntil`. |

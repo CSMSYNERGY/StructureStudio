@@ -8,7 +8,7 @@ import worker from "../src/index";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
 import {
-  MAX_ATTEMPTS, requestCallSummary, runTranscriptions, sttCostMicros, transcriptOf, utterancesOf, utterancesToKeep,
+  MAX_ATTEMPTS, requestCallSummary, runTranscriptions, sttCostMicros, transcriptOf, utterancesOf, utterancesToKeep, withTeamName,
 } from "../src/cron/transcribe";
 import {
   CLIENT, FakeCtx, FakeNet, SUPABASE_URL, USER_A, USER_B, USER_C, allowed, jsonRes, makeEnv, serveConsent, type EventFixture, type Seen,
@@ -97,6 +97,17 @@ describe("from nova-3's answer to labelled lines", () => {
 
   it("a map that says the channels the other way round is followed (a correction never relabels old rows)", () => {
     expect(transcriptOf(utterancesOf(novaWords(), { 0: "team", 1: "customer" })).split("\n")[0]).toBe("Team: Hi, is the 12x24 ready?");
+  });
+
+  it("withTeamName puts a name on our side's line labels only, on read (Carolyn 2026-10-23)", () => {
+    const t = transcriptOf(utterancesOf(novaWords(), null));
+    expect(withTeamName(t, "Jordan Lee")).toBe(t.replace(/^Team: /gm, "Jordan Lee: "));
+    expect(withTeamName("Customer: Is the Team: page open?\nTeam: Yes.", "Jordan Lee")).toBe("Customer: Is the Team: page open?\nJordan Lee: Yes.");
+    expect(withTeamName("Team: Hi.", null)).toBe("Team: Hi.");
+    expect(withTeamName("Team: Hi.", "  ")).toBe("Team: Hi.");
+    expect(withTeamName("Team: Hi.", "Pat $& Co")).toBe("Pat $& Co: Hi."); // a name, never a replacement pattern
+    expect(withTeamName("Team: Hi.", " Jordan\n Lee ")).toBe("Jordan Lee: Hi."); // a name never breaks a line
+    expect(withTeamName("Teamwork: no.\nTeam:tight", "Jordan Lee")).toBe("Teamwork: no.\nTeam:tight");
   });
 
   it("whole-channel transcripts when there are no words; silence is empty", () => {
