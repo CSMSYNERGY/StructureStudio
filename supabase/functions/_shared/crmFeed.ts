@@ -578,7 +578,8 @@ export async function buildCrmFeed(
   // is "a former team member", the same fact the owner line states.
   const callerName = (v: string) =>
     nameByUser.get(v) ?? (knownUsers.has(v) ? "a team member" : "a former team member");
-  for (const e of callFeedEvents(callRows, callerName)) push(e);
+  // The transcript's "Team" lines take the person's own name, never the words above.
+  for (const e of callFeedEvents(callRows, callerName, (v) => nameByUser.get(v) ?? null)) push(e);
 
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
@@ -722,6 +723,28 @@ export function recordingMeta(c: any): Record<string, unknown> | null {
 }
 
 /**
+ * Who the "Team" lines of a call's transcript are, as a user id, or null to keep "Team"
+ * (Carolyn 2026-10-23, 24:13: show the person's name; "Customer" can stay). The phone-api Worker
+ * writes the transcript once, as "Customer: ..." / "Team: ..." lines from the recording's two
+ * channels (cron/transcribe.ts transcriptOf), and the team channel is EVERYONE on our side of the
+ * call. So it is one person only when one person was on it: whoever placed it (outbound) or
+ * answered it (inbound), with no transfer and no message.
+ *   a transfer (transferred_from)  → null: whoever handed it on, and whoever took it (a teammate
+ *                                    or a forward number), spoke on that channel too
+ *   a message left on the call     → null: the voicemail greeting played on it
+ *   nobody answered (a ring group nobody picked up, a forward number that did) → null
+ */
+// deno-lint-ignore no-explicit-any
+export function transcriptTeamUser(c: any): string | null {
+  if (!c || c.transferred_from) return null;
+  const vm = Array.isArray(c.phone_voicemails) ? (c.phone_voicemails[0] ?? null) : (c.phone_voicemails ?? null);
+  if (vm || String(c.status ?? "") === "voicemail") return null;
+  const who = c.direction === "out" ? c.placed_by : c.answered_by;
+  if (c.direction === "out" && c.answered_by && c.answered_by !== c.placed_by) return null;
+  return typeof who === "string" && who ? who : null;
+}
+
+/**
  * phone_calls rows (with their phone_voicemails embed) → timeline events.
  *
  * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
@@ -734,9 +757,14 @@ export function recordingMeta(c: any): Record<string, unknown> | null {
  *   inbound, anything else         → `call_missed`.
  *
  * The number is shown as the stored E.164, the same way the texting lines show theirs.
+ *
+ * `speakerName` (optional) is the person's REAL name or null: a recorded call's line then carries
+ * `teamSpeaker`, the name the portal puts on the transcript's "Team" lines (transcriptTeamUser
+ * above). `nameOf`'s "a former team member" is right in a sentence and wrong as a speaker, so
+ * someone with no name set or no longer on the team is null there, and the lines stay "Team".
  */
 // deno-lint-ignore no-explicit-any
-export function callFeedEvents(rows: any[], nameOf: (userId: string) => string): FeedEvent[] {
+export function callFeedEvents(rows: any[], nameOf: (userId: string) => string, speakerName?: (userId: string) => string | null): FeedEvent[] {
   const out: FeedEvent[] = [];
   for (const c of rows || []) {
     if (!c || !c.id) continue;
@@ -746,6 +774,8 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
     const status = String(c.status ?? "");
     const live = status === "ringing" || status === "in_progress";
     const dur = Number(c.duration_s) || 0;
+    const rec = recordingMeta(c);
+    const speaker = rec && speakerName ? transcriptTeamUser(c) : null;
     const base = {
       id: `pc:${c.id}`,
       at: iso(c.started_at),
@@ -757,7 +787,8 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
         voicemailDeleted: !!vm?.deleted_at,
         // The call's own recording, its summary and whether there is a transcript (migration
         // 263, recordingMeta above). Absent on a call that was not recorded.
-        ...(recordingMeta(c) ?? {}),
+        ...(rec ?? {}),
+        ...(rec && speakerName ? { teamSpeaker: (speaker && speakerName(speaker)) || null } : {}),
       } as Record<string, unknown>,
     };
     if (c.direction === "out") {

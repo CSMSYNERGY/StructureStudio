@@ -4060,7 +4060,9 @@ function SsRecordingPlayer({ recordingId, durationS }) {
 // The transcript is NOT in the feed: it is read from the Worker on the press
 // (ssPhoneFetchTranscript), which applies the same visibility rule as the audio. `canListen` is
 // the voicemail player's rule: phone access, calling on, not an operator in view-as (whose
-// sign-in is not on this builder's team, so the Worker would refuse it).
+// sign-in is not on this builder's team, so the Worker would refuse it). Our side's lines show
+// the team member's name (meta.teamSpeaker, ssTranscriptNamed) instead of "Team" when the feed
+// knows the one person who was on the call.
 function SsCallRecording({ callId, meta, canListen }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(null);
@@ -4107,7 +4109,7 @@ function SsCallRecording({ callId, meta, canListen }) {
           </button>
           {open && text && (
             <div data-ss-transcript style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
-              {text}
+              {ssTranscriptNamed(text, meta.teamSpeaker)}
             </div>
           )}
           {open && err && <div style={{ fontSize: 12, color: "#B91C1C", marginTop: 4 }}>{err}</div>}

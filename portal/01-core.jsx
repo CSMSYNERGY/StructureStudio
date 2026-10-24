@@ -1198,6 +1198,17 @@ async function ssPhoneFetchTranscript(callId, accessToken, fetchImpl) {
   if (!j || typeof j.transcript !== "string") throw new Error("The transcript couldn't be loaded. Try again.");
   return { transcript: j.transcript, summary: typeof j.summary === "string" ? j.summary : null };
 }
+// The transcript with the team member's name on our side's lines (Carolyn 2026-10-23, 24:13).
+// The Worker writes every line as "Customer: ..." or "Team: ...", one speaker turn per line; the
+// name is crmFeed's `teamSpeaker`, only when one known person was on our side of the call
+// (transcriptTeamUser). No name keeps "Team". Only a line's own label changes: "Team: " later
+// in a customer's line is their words.
+function ssTranscriptNamed(transcript, teamSpeaker) {
+  const text = String(transcript || "");
+  const name = String(teamSpeaker || "").replace(/\s+/g, " ").trim();
+  if (!name) return text;
+  return text.replace(/^Team: /gm, () => `${name}: `);
+}
 // YOUR CALLS (migration 264): the signed-in person's own phone settings, read and saved on the
 // Worker exactly as My Synergy Phone does (GET and POST /settings/me), with the sign-in in the
 // Authorization header, never the URL. GET /team is who may be chosen. They answer for the
