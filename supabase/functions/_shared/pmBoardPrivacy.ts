@@ -59,7 +59,8 @@ const BY_BOARD_ID = new Set([
   "create_item", "save_view",
   // Privacy itself. Reading or changing a private board's access list is something you can
   // only do from inside it — which is exactly the check this map performs.
-  "board_access", "set_board_visibility", "add_board_member", "remove_board_member",
+  "board_access", "set_board_visibility",
+  "add_board_member", "remove_board_member", "set_board_member_role",
 ]);
 
 /** Actions whose payload names the board as `id`. */

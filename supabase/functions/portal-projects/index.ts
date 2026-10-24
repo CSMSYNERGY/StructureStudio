@@ -992,6 +992,43 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
+      // HANDING A PRIVATE BOARD OVER. Without this, the only owner a board ever has is
+      // whoever created it: the last-owner rule in remove_board_member means the board can
+      // never be orphaned, but it also means it can never be passed on — somebody going on
+      // leave, changing role, or leaving altogether took their boards with them, and the
+      // only way out was an operator setting the board back to visible to everyone.
+      //
+      // Promoting is deliberately not the same action as adding. An upsert with role:'owner'
+      // would have done it, and would also silently promote somebody whose membership was
+      // removed a moment earlier by someone else — a write that reads as "change this
+      // person's role" must fail when there is no such person to change.
+      case "set_board_member_role": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ error: "That person is not on this board." }, 404);
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can change who owns it." }, 403);
+        }
+        if (target.role === role) return json({ ok: true });
+        // The same fence as removal, for the same reason: a private board with no owner is
+        // a board whose access list nobody can ever open again. An owner stepping down
+        // therefore promotes their replacement FIRST — two clicks, in a safe order.
+        if (role === "member" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .update({ role }).eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "set_board_member_role", { name: target.name, role });
+        return json({ ok: true });
+      }
+
       case "remove_board_member": {
         const boardId = str(payload.boardId, 40);
         const userId = str(payload.userId, 40);

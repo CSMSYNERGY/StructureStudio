@@ -647,6 +647,18 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
                     {p.via === "operator" ? "OPERATOR" : p.via === "team" ? "TEAM" : "NO PROJECTS ACCESS"}
                     {p.level ? (p.level === "edit" ? " · CAN EDIT" : " · READ ONLY") : ""}
                   </span>
+                  {/* Hand the board over. An owner stepping down promotes their replacement
+                      first and then demotes themselves — the server refuses the demotion
+                      while they are the last owner, so the two clicks can only happen in the
+                      order that cannot strand the board. */}
+                  {access.visibility === "private" && access.iOwn && (
+                    <button type="button"
+                      title={p.role === "owner" ? "Make them an ordinary member of this board" : "Let them add and remove people on this board"}
+                      onClick={() => runAccess({ action: "set_board_member_role", boardId: board.id, userId: p.user_id, role: p.role === "owner" ? "member" : "owner" })}
+                      style={{ background: "none", border: "1px solid #CBD5E1", borderRadius: 4, color: "#64748B", fontSize: 10.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "2px 6px", whiteSpace: "nowrap" }}>
+                      {p.role === "owner" ? "Step down" : "Make owner"}
+                    </button>
+                  )}
                   {access.visibility === "private" && access.iOwn && (
                     <button type="button" title="Remove from this board"
                       onClick={() => runAccess({ action: "remove_board_member", boardId: board.id, userId: p.user_id })}

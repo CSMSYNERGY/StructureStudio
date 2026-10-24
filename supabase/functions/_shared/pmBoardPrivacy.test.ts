@@ -69,6 +69,14 @@ Deno.test("the non-board actions resolve to no board", async () => {
   }
 });
 
+Deno.test("the privacy actions are themselves gated on the board they name", async () => {
+  for (const a of ["board_access", "set_board_visibility", "add_board_member", "remove_board_member", "set_board_member_role"]) {
+    const r = await boardsForAction(world(), a, { boardId: B_PRIV });
+    assert(r.ok, `${a} refused`);
+    assert(r.boardIds.includes(B_PRIV), `${a} is not checked against its own board`);
+  }
+});
+
 Deno.test("a board named directly", async () => {
   const a = await boardsForAction(world(), "get_board", { boardId: B_PRIV });
   assert(a.ok && a.boardIds.includes(B_PRIV));
