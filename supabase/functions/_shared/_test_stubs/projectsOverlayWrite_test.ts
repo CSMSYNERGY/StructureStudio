@@ -113,7 +113,13 @@ function answer(trace: Trace, table: string, ops: any[][]) {
   if (table === "pm_columns") return { data: COLUMNS[String(eqv("board_id"))] ?? [], error: null };
   if (table === "pm_people") return { data: [{ id: "p_1" }], error: null };
   if (table === "pm_activity") return { data: null, error: null };
+  // migration 334: the privacy door reads the private boards on every request, and the
+  // action resolver reads the board each row lives on. This stub has no private board —
+  // which is the world these overlay cases are about — so the door is a no-op here.
+  if (table === "pm_boards") return { data: [], error: null };
   if (table === "pm_items") {
+    const ids = ops.find((o) => o[0] === "in" && o[1] === "id")?.[2];
+    if (Array.isArray(ids)) return { data: ids.map((i: string) => ROWS[String(i)]).filter(Boolean), error: null };
     const row = ROWS[String(eqv("id"))] ?? null;
     if (has("update")) {
       trace.writes.push(arg("update"));

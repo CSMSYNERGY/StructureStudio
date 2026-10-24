@@ -8,6 +8,7 @@ import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 import { buildOverlayItems, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
+import { boardsForAction, loadBoardPrivacy, projectsAudience } from "../_shared/pmBoardPrivacy.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -377,7 +378,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = String(payload?.action || "");
 
-  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
+  // `board_access` reads: a view-only operator must be able to see who is on a board without
+  // being able to change it. The write half (set_board_visibility, add/remove_board_member)
+  // is not here and so falls under the writer check below, then the owner check at the action.
+  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "board_access", "setup_template", "setup_overview", "setup_client_items"]);
 
   // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
   //
@@ -412,6 +416,28 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const canWrite = op ? !!op.can_write : accCanEdit(teamAcc as Record<string, Level>, "projects");
   if (!READ_ACTIONS.has(action) && !canWrite) {
     return json({ error: op ? "This operator account is read-only." : "You have view-only access to Projects." }, 403);
+  }
+
+  // ── THE THIRD DOOR: A PRIVATE BOARD (migration 334) ─────────────────────────────────────
+  // The two doors above decide whether you may open Projects AT ALL, and whether you may
+  // write. This one decides which boards you may touch, and it has to run here rather than
+  // inside the handful of actions that mention a board: most of them do not. See
+  // _shared/pmBoardPrivacy.ts for why the resolver is fail-closed.
+  //
+  // Carolyn's rule is VISIBLE BUT LOCKED, so the refusal names who to ask. It deliberately
+  // does not say whether the id exists — a board you cannot see and a board that was never
+  // there read the same from outside.
+  const privacy = await loadBoardPrivacy(admin, user.id);
+  const touched = await boardsForAction(admin, action, payload);
+  if (!touched.ok) return json({ error: touched.error }, 400);
+  for (const bid of touched.boardIds) {
+    if (privacy.canSee(bid)) continue;
+    const owners = privacy.locked.get(bid) || [];
+    return json({
+      error: owners.length
+        ? `That board is private. Ask ${owners.join(" or ")} to add you to it.`
+        : "That board is private, and nobody on it can add you — an operator will have to reopen it.",
+    }, 403);
   }
 
   const actorEmail = (op && op.email) || user.email || user.id;
@@ -602,11 +628,25 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     switch (action) {
       // ── Reads ─────────────────────────────────────────────────────────────
       case "list_boards": {
-        const { data: boards, error } = await admin.from("pm_boards").select("*")
+        const { data: allBoards, error } = await admin.from("pm_boards").select("*")
           .is("archived_at", null).order("position");
         if (error) throw error;
+        // A LOCKED BOARD IS A STUB, and the stub is deliberately thin: the tab strip needs
+        // a name to draw a padlock on and the owners' names to say who to ask, and nothing
+        // else about it may leave this function. Rebuilt field by field rather than deleted
+        // from the row — a new column added to pm_boards later (an intake webhook key, a
+        // description) must not start riding along to people who cannot open the board.
+        const boards = (allBoards || []).map((b) => {
+          if (privacy.canSee(b.id)) return b;
+          return {
+            id: b.id, slug: b.slug, name: b.name, position: b.position,
+            visibility: "private", locked: true, owners: privacy.locked.get(b.id) || [],
+            settings: {}, archived_at: null,
+          };
+        });
         const counts: Record<string, number> = {};
-        for (const b of boards || []) {
+        for (const b of boards) {
+          if (b.locked) continue;   // an item count is a fact about the board's contents
           const { count } = await admin.from("pm_items")
             .select("id", { count: "exact", head: true })
             .eq("board_id", b.id).is("archived_at", null);
@@ -617,7 +657,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // you change the board dropdown. Keyed by board id; `people` is one global list
         // (pm_people has no client_id — see _shared/pmRoster.ts).
         const colsByBoard: Record<string, unknown[]> = {};
-        for (const b of boards || []) colsByBoard[b.id] = await boardColumns(b.id);
+        for (const b of boards) { if (!b.locked) colsByBoard[b.id] = await boardColumns(b.id); }
         const { data: people, error: pErr } = await admin.from("pm_people")
           .select("id, name, email, user_id, active").eq("active", true).order("position");
         if (pErr) throw pErr;
@@ -682,6 +722,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .select("id, slug, name").in("slug", ovSlugs).is("archived_at", null);
           const sources = [];
           for (const sbd of (srcBoards || [])) {
+            // ⚠️ AN OVERLAY IS A READ ACROSS BOARDS, so it is the one place a private board
+            // can leak without anybody opening it: point a public board's overlay_from at a
+            // private slug and every one of its cards appears on a table the whole team
+            // reads. Skipped PER VIEWER, not per board — someone who IS on the private board
+            // still sees its rows pulled in, which is the behaviour overlays exist for.
+            if (!privacy.canSee(sbd.id)) continue;
             const [sCols, sItems] = await Promise.all([
               boardColumns(sbd.id),
               admin.from("pm_items").select("*").eq("board_id", sbd.id).is("archived_at", null)
@@ -765,13 +811,33 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { data: clash } = await admin.from("pm_boards").select("id").eq("slug", slug).maybeSingle();
         if (clash || RESERVED_SLUGS.has(slug)) slug = `${slug}-${crypto.randomUUID().slice(0, 4)}`;
         const { data: maxRow } = await admin.from("pm_boards").select("position").order("position", { ascending: false }).limit(1).maybeSingle();
+        // Private from the first row, when that is what was asked for. A board created
+        // public and locked down a moment later is a board whose first few cards were
+        // readable by the whole team, and "a board for myself" is usually created because
+        // of what is about to go on it.
+        const visibility = payload.visibility === "private" ? "private" : "everyone";
         const { data: board, error } = await admin.from("pm_boards")
-          .insert({ slug, name, position: (maxRow?.position || 0) + 1024 }).select().single();
+          .insert({
+            slug, name, position: (maxRow?.position || 0) + 1024,
+            visibility, created_by: user.id,
+          }).select().single();
         if (error) throw error;
+        if (visibility === "private") {
+          const { error: mErr } = await admin.from("pm_board_members").insert({
+            board_id: board.id, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          });
+          // ⚠️ A private board whose owner row failed to write is a board NOBODY can open,
+          // including the person who just made it. Undo the board rather than leave it.
+          if (mErr) {
+            await admin.from("pm_boards").delete().eq("id", board.id);
+            throw mErr;
+          }
+        }
         const { error: gErr } = await admin.from("pm_groups")
           .insert({ board_id: board.id, name: "Items", color: "#3D3672", position: 1024 });
         if (gErr) throw gErr;
-        await act(board.id, null, "create_board", { name });
+        await act(board.id, null, "create_board", { name, visibility });
         return json({ board });
       }
 
@@ -795,6 +861,158 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .update({ archived_at: new Date().toISOString() }).eq("id", id);
         if (error) throw error;
         await act(id, null, "archive_board", {});
+        return json({ ok: true });
+      }
+
+      // ── Who can see this board (migration 334) ────────────────────────────
+      //
+      // Carolyn, 2026-10-23: "Somehow we need to easily see who all has access to see a
+      // board." The answer has two shapes, and conflating them is the mistake to avoid:
+      //
+      //   * an "everyone" board has NO access list of its own. Everyone who can open
+      //     Projects can read it, so the honest answer is the Projects roster — both doors,
+      //     enumerated, with how each person got in. Inventing a member list for a public
+      //     board would make it look as if removing somebody from it did anything.
+      //   * a "private" board's answer IS its member list.
+      //
+      // One action returns both, labelled, so the screen does not have to guess.
+      case "board_access": {
+        const boardId = str(payload.boardId, 40);
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility, created_by").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+
+        const audience = await projectsAudience(admin);
+        if (board.visibility !== "private") {
+          return json({ visibility: "everyone", board: board.name, people: audience, iOwn: canWrite });
+        }
+        const { data: mem, error: mErr } = await admin.from("pm_board_members")
+          .select("user_id, name, email, role, added_at").eq("board_id", boardId);
+        if (mErr) throw mErr;
+        // The member rows carry the name as it was when they were added; the roster is the
+        // current truth, so it wins where the two disagree (someone renamed on the Team
+        // screen should not read as their old name here).
+        const byUser = new Map(audience.map((a) => [a.user_id, a]));
+        const people = (mem || []).map((m: Record<string, unknown>) => {
+          const live = byUser.get(String(m.user_id));
+          return {
+            user_id: String(m.user_id),
+            name: live?.name || String(m.name || m.email || "Someone"),
+            email: live?.email ?? (m.email ? String(m.email) : null),
+            via: live?.via || null,     // null = they can no longer open Projects at all
+            level: live?.level || null,
+            role: String(m.role),
+            added_at: m.added_at,
+          };
+        });
+        people.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1));
+        // Everyone who could be added — the roster minus the people already on it.
+        const onIt = new Set(people.map((p) => p.user_id));
+        const addable = audience.filter((a) => !onIt.has(a.user_id));
+        const iOwn = people.some((p) => p.user_id === user.id && p.role === "owner");
+        return json({ visibility: "private", board: board.name, people, addable, iOwn });
+      }
+
+      case "set_board_visibility": {
+        const boardId = str(payload.boardId, 40);
+        const want = payload.visibility === "private" ? "private" : "everyone";
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility === want) return json({ ok: true });
+
+        // Who may flip it: on a board everyone can already see, any writer — there is
+        // nothing to protect yet. On a private board, only an owner, or the person who was
+        // shut out of a board yesterday could reopen it today.
+        if (board.visibility === "private") {
+          const { data: me } = await admin.from("pm_board_members")
+            .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+          if (!me || me.role !== "owner") {
+            return json({ error: "Only an owner of this board can make it visible to everyone." }, 403);
+          }
+        }
+
+        const { error } = await admin.from("pm_boards")
+          .update({ visibility: want, updated_at: new Date().toISOString() }).eq("id", boardId);
+        if (error) throw error;
+
+        if (want === "private") {
+          // Whoever made it private owns it. upsert, not insert: they may already be on an
+          // old member list from a previous private spell, and a duplicate key here would
+          // leave the board private with the person who locked it standing outside.
+          const { error: mErr } = await admin.from("pm_board_members").upsert({
+            board_id: boardId, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          }, { onConflict: "board_id,user_id" });
+          if (mErr) {
+            await admin.from("pm_boards").update({ visibility: board.visibility }).eq("id", boardId);
+            throw mErr;
+          }
+        }
+        // The member list is KEPT when a board goes public again — making it public for an
+        // afternoon and private again should not silently drop everyone who was on it.
+        await act(boardId, null, "set_board_visibility", { visibility: want });
+        return json({ ok: true });
+      }
+
+      case "add_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        if (!userId) return json({ error: "Pick somebody to add." }, 400);
+
+        const { data: board } = await admin.from("pm_boards")
+          .select("id, visibility").eq("id", boardId).maybeSingle();
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility !== "private") {
+          return json({ error: "This board is visible to everyone — there is no list to add to." }, 400);
+        }
+        const { data: me } = await admin.from("pm_board_members")
+          .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can add people to it." }, 403);
+        }
+        // ⚠️ THE ADDABLE SET IS THE PROJECTS ROSTER, AND IT IS CHECKED SERVER-SIDE. The
+        // browser only ever offers these people, but a user id posted straight at this
+        // action would otherwise hand a BUILDER'S login sight of a CSM board — the same
+        // escalation the people editor's tenant check closes from the other direction.
+        const audience = await projectsAudience(admin);
+        const person = audience.find((a) => a.user_id === userId);
+        if (!person) {
+          return json({ error: "That person can't open Projects at all, so adding them here would do nothing. Give them Projects access first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members").upsert({
+          board_id: boardId, user_id: userId, email: person.email, name: person.name,
+          role, added_by: user.id,
+        }, { onConflict: "board_id,user_id" });
+        if (error) throw error;
+        await act(boardId, null, "add_board_member", { name: person.name, role });
+        return json({ ok: true });
+      }
+
+      case "remove_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ ok: true });
+        // Leaving a board yourself is always allowed; removing somebody else is an owner's
+        // call. Both still have to clear the last-owner rule below.
+        if (userId !== user.id && (!me || me.role !== "owner")) {
+          return json({ error: "Only an owner of this board can remove people from it." }, 403);
+        }
+        if (target.role === "owner" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first, or set the board back to visible to everyone." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .delete().eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "remove_board_member", { name: target.name });
         return json({ ok: true });
       }
 

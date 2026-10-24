@@ -547,12 +547,26 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("text");
   const [labelCol, setLabelCol] = useState(null); // status/dropdown column being edited
+  // WHO CAN SEE THIS BOARD (migration 334). Loaded here rather than carried on `board`
+  // because the answer for a public board is the whole Projects roster, which has nothing
+  // to do with this board and should not ride along on every get_board.
+  const [access, setAccess] = useState(null);
+  const [addWho, setAddWho] = useState("");
 
   const run = async (body, after) => {
     setErr("");
     try { const d = await pmCall(body); if (after) after(d); onChanged(); }
     catch (e) { setErr(e.message); }
   };
+  const loadAccess = useCallback(() => {
+    pmCall({ action: "board_access", boardId: board.id })
+      .then(setAccess).catch((e) => setErr(e.message));
+  }, [board.id]);
+  useEffect(() => { loadAccess(); }, [loadAccess]);
+  // Every privacy write re-reads the list AND tells the page, so the tab strip's padlock
+  // and the board itself follow in the same click.
+  const runAccess = (body) => run(body, () => { setAddWho(""); loadAccess(); });
+
   const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
   const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
 
@@ -587,6 +601,78 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
           <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={!boardName.trim() || boardName === board.name}
             onClick={() => run({ action: "update_board", id: board.id, name: boardName.trim() })}>Save</button>
         </div>
+
+        {/* ── WHO CAN SEE THIS BOARD ─────────────────────────────────────────────────────
+            Carolyn 2026-10-23: "privacy settings so admins can create a board for themselves
+            that others can't see" + "we need to easily see who all has access to see a board".
+            Both halves are one section on purpose: the list under the switch always answers
+            "who can see it", whichever way the switch is set. On "everyone" that list is the
+            Projects roster (not a member list — there is nothing here to add or remove, and
+            pretending otherwise would make removing somebody look like it did something). */}
+        <span style={flabel}>Who can see this board</span>
+        {!access && <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Loading…</div>}
+        {access && (
+          <>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", fontSize: 12.8 }}>
+              {[["everyone", "Everyone on Projects"], ["private", "🔒 Only people I add"]].map(([v, lbl]) => (
+                <label key={v} style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: access.iOwn ? "pointer" : "default", color: access.iOwn ? "#334155" : "#94A3B8" }}>
+                  <input type="radio" name={"pm-vis-" + board.id} checked={access.visibility === v}
+                    disabled={!access.iOwn}
+                    onChange={() => runAccess({ action: "set_board_visibility", boardId: board.id, visibility: v })} />
+                  {lbl}
+                </label>
+              ))}
+            </div>
+            {!access.iOwn && access.visibility === "private" && (
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                You are on this board but do not own it, so you cannot change who else is.
+              </div>
+            )}
+            {access.visibility === "everyone" && (
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                Everyone who can open Projects — {access.people.length} {access.people.length === 1 ? "person" : "people"}. Make it private to choose.
+              </div>
+            )}
+            {access.people.map((p) => (
+              <div key={p.user_id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{p.name}</span>
+                <span style={{ color: "#94A3B8", fontSize: 11.5 }}>{p.email || ""}</span>
+                <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6, alignItems: "center" }}>
+                  {/* How they got here, which is the question behind "who all has access".
+                      On a private board `via` is null for somebody whose Projects access was
+                      taken away since they were added — they are on the list and still
+                      cannot open the console, and that is worth saying out loud. */}
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", background: "#F1F5F9", borderRadius: 4, padding: "2px 6px" }}>
+                    {p.role === "owner" ? "OWNER · " : ""}
+                    {p.via === "operator" ? "OPERATOR" : p.via === "team" ? "TEAM" : "NO PROJECTS ACCESS"}
+                    {p.level ? (p.level === "edit" ? " · CAN EDIT" : " · READ ONLY") : ""}
+                  </span>
+                  {access.visibility === "private" && access.iOwn && (
+                    <button type="button" title="Remove from this board"
+                      onClick={() => runAccess({ action: "remove_board_member", boardId: board.id, userId: p.user_id })}
+                      style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>✕</button>
+                  )}
+                </span>
+              </div>
+            ))}
+            {access.visibility === "private" && access.iOwn && (
+              <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <select style={{ ...S.input, maxWidth: 280, padding: "5px 8px", fontSize: 12.5 }}
+                  value={addWho} onChange={(e) => setAddWho(e.target.value)}>
+                  <option value="">Add somebody…</option>
+                  {(access.addable || []).map((a) => (
+                    <option key={a.user_id} value={a.user_id}>{a.name}{a.email ? ` — ${a.email}` : ""}</option>
+                  ))}
+                </select>
+                <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={!addWho}
+                  onClick={() => runAccess({ action: "add_board_member", boardId: board.id, userId: addWho })}>Add</button>
+                {!(access.addable || []).length && (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everyone with Projects access is already on it.</span>
+                )}
+              </div>
+            )}
+          </>
+        )}
 
         <span style={flabel}>Groups</span>
         {groups.map((g, gi) => (
@@ -1292,6 +1378,7 @@ function ProjectsTab({ sub, onSub }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState("");
+  const [newBoardPrivate, setNewBoardPrivate] = useState(false);
 
   const loadBoards = useCallback(() => {
     return pmCall({ action: "list_boards" }).then((d) => {
@@ -1305,10 +1392,17 @@ function ProjectsTab({ sub, onSub }) {
   // strip and the same /projects/<sub> routing, but has no pm_board behind it. A
   // real board can never take the slug — create_board suffixes it like any other clash.
   const setupMode = sub === "setup";
+  // A LOCKED board is one somebody made private and did not put you on (migration 334).
+  // list_boards still names it — Carolyn's call: you can see it exists and who to ask — but
+  // it answers a stub with no columns, no items and no count, and get_board would 403. So a
+  // locked board may be the ACTIVE tab (its slug is a real address somebody can be sent, and
+  // landing on a blank screen reads as a broken page) but it is never the FALLBACK: opening
+  // Projects must land you on a board you can actually work on.
   const activeBoard = useMemo(() => {
     if (setupMode || !boards || !boards.length) return null;
-    return boards.find((b) => b.slug === sub) || boards[0];
+    return boards.find((b) => b.slug === sub) || boards.find((b) => !b.locked) || boards[0];
   }, [boards, sub, setupMode]);
+  const lockedBoard = activeBoard && activeBoard.locked ? activeBoard : null;
   // NO BOARDS AT ALL: list_boards answered an empty list (a fresh project, or the last board was
   // just archived). There is no board to open, so get_board is never asked and `data` never
   // arrives; "Loading board…" used to wait for it forever. The board body is gated on this too:
@@ -1324,6 +1418,11 @@ function ProjectsTab({ sub, onSub }) {
   const boardReq = useRef({ seq: 0, boardId: null });
   const loadBoard = useCallback((b) => {
     if (!b) return;
+    // Never ask for a board the server has already said is not ours: the 403 would land in
+    // `err` above the strip and read as a fault rather than as a closed door. Retire any
+    // get_board still out, so a slower answer for the board we came FROM cannot repaint
+    // the table underneath the locked panel.
+    if (b.locked) { boardReq.current.seq++; boardReq.current.boardId = null; setData(null); setLoading(false); setErr(""); return; }
     const seq = ++boardReq.current.seq;
     boardReq.current.boardId = b.id;
     const latest = () => boardReq.current.seq === seq;
@@ -1616,34 +1715,51 @@ function ProjectsTab({ sub, onSub }) {
           style={{ display: "flex", gap: 2, alignItems: "flex-end", flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", margin: "-4px -4px 14px" }}>
           {(boards || []).map((b) => {
             const on = activeBoard && b.id === activeBoard.id;
+            // A private board you are not on still gets a tab — the padlock and the owners'
+            // names ARE the feature (ask the owner, rather than wonder). It carries no
+            // count, because an item count is a fact about the board's contents.
+            const owners = (b.owners || []).join(", ");
             return (
               <button key={b.id} type="button" role="tab" aria-selected={on ? "true" : "false"}
                 onClick={() => onSub(b.slug)}
+                title={b.locked ? (owners ? `Private board — ask ${owners} to add you.` : "Private board.") : undefined}
                 style={{ background: on ? "#FFF" : "none", border: "none", borderBottom: `3px solid ${on ? ACCENT : "transparent"}`,
                   marginBottom: -2, padding: "9px 16px", fontSize: 13.5, fontWeight: on ? 800 : 600,
-                  color: on ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                {b.name}
+                  color: on ? ACCENT : (b.locked ? "#94A3B8" : "#64748B"), cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                {b.locked ? "🔒 " : (b.visibility === "private" ? "🔒 " : "")}{b.name}
                 <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#94A3B8", opacity: 0.75 }}>
-                  {counts[b.id] != null ? counts[b.id] : ""}
+                  {b.locked ? "" : (counts[b.id] != null ? counts[b.id] : "")}
                 </span>
               </button>
             );
           })}
           {canWrite && (
             newBoardOpen ? (
-              <input autoFocus placeholder="Board name — Enter to create"
-                style={{ ...S.input, maxWidth: 220, padding: "5px 9px", fontSize: 12.5, margin: "0 0 4px 8px" }}
-                value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)}
-                onBlur={() => { setNewBoardOpen(false); setNewBoardName(""); }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && newBoardName.trim()) {
-                    pmCall({ action: "create_board", name: newBoardName.trim() })
-                      .then((d) => loadBoards().then(() => onSub(d.board.slug)))
-                      .catch((er) => setErr(er.message));
-                    setNewBoardOpen(false); setNewBoardName("");
-                  }
-                  if (e.key === "Escape") { setNewBoardOpen(false); setNewBoardName(""); }
-                }} />
+              /* The private tick is HERE, not only in Board settings, because "a board for
+                 myself" is usually private from the first card (Carolyn 2026-10-23) — made
+                 public and locked down a minute later, its first few rows were readable by
+                 the whole team. The blur that closes this now ignores a move INSIDE the
+                 wrapper, or ticking the box would cancel the board you are naming. */
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: "0 0 4px 8px" }}
+                onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) { setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false); } }}>
+                <input autoFocus placeholder="Board name — Enter to create"
+                  style={{ ...S.input, maxWidth: 220, padding: "5px 9px", fontSize: 12.5 }}
+                  value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newBoardName.trim()) {
+                      pmCall({ action: "create_board", name: newBoardName.trim(), visibility: newBoardPrivate ? "private" : "everyone" })
+                        .then((d) => loadBoards().then(() => onSub(d.board.slug)))
+                        .catch((er) => setErr(er.message));
+                      setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false);
+                    }
+                    if (e.key === "Escape") { setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false); }
+                  }} />
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 700, color: newBoardPrivate ? ACCENT : "#94A3B8", whiteSpace: "nowrap", cursor: "pointer" }}
+                  title="Only you, plus anyone you add in Board settings.">
+                  <input type="checkbox" checked={newBoardPrivate} onChange={(e) => setNewBoardPrivate(e.target.checked)} />
+                  🔒 Private
+                </label>
+              </span>
             ) : (
               <button type="button" onClick={() => setNewBoardOpen(true)} title="New board"
                 style={{ background: "none", border: "none", padding: "9px 12px", fontSize: 13, fontWeight: 700, color: "#94A3B8", cursor: "pointer", fontFamily: "inherit" }}>＋</button>
@@ -1686,7 +1802,20 @@ function ProjectsTab({ sub, onSub }) {
         {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
-        {!setupMode && boards && !noBoards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {!setupMode && boards && !noBoards && !data && !err && !lockedBoard && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {/* A private board you are not on. There is nothing to load and nothing to retry, so
+            this is a closed door rather than an error: it says whose board it is and what to
+            do about it. Without it the panel below would wait on "Loading board…" forever. */}
+        {!setupMode && lockedBoard && (
+          <div data-ss-projects-locked="" style={{ padding: "28px 4px", fontSize: 13, color: "#64748B", lineHeight: 1.6 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#334155", marginBottom: 4 }}>🔒 {lockedBoard.name} is private</div>
+            <div>
+              {(lockedBoard.owners || []).length
+                ? `Ask ${lockedBoard.owners.join(" or ")} to add you to it.`
+                : "Nobody is listed as its owner, so an operator will have to set it back to visible to everyone."}
+            </div>
+          </div>
+        )}
         {/* Not hidden behind `err`: a create_board that fails shows its message above, and this
             stays, so there is still a way to try again. The button opens the strip's own ＋ input,
             the one place boards are created. */}
@@ -1966,7 +2095,7 @@ function ProjectsTab({ sub, onSub }) {
       )}
       {settingsOpen && data && (
         <PMBoardSettings board={data.board} columns={data.columns} groups={data.groups}
-          onClose={() => setSettingsOpen(false)} onChanged={reload}
+          onClose={() => setSettingsOpen(false)} onChanged={() => { reload(); loadBoards(); }}
           onArchivedBoard={() => loadBoards().then((bs) => { if (bs && bs.length) onSub(bs[0].slug); })} />
       )}
     </div>
