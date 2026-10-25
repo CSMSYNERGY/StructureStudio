@@ -6528,7 +6528,7 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
 }
 
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null }) {
-  const [subState, setSubState] = useState("structures");
+  const [subState, setSubState] = useState("sheds");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
   // ssPhoneOffered answer, or the rail would offer a Phone tab the body clamps to Structures.
@@ -6566,7 +6566,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           build another block down here … underneath here that has the real time pricing in
           it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
           teaser with a Billing deep link, so the block is also the feature's shop window. */}
-      {sub === "structures" && (<>
+      {sub === "sheds" && (<>
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}

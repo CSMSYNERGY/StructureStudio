@@ -476,7 +476,7 @@ try {
     if (!e.locked) {
       await page.locator(".ss-designer-host").waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
       ok(`${tag}: …with the Designer actually mounted and showing (not a blank page)`, await page.locator(".ss-designer-host").isVisible());
-      ok(`${tag}: …and the topbar says Sheds`, (await page.locator(".ss-topbar .ttl").innerText()).startsWith("Sheds"));
+      ok(`${tag}: …and the topbar says Shed Designer`, (await page.locator(".ss-topbar .ttl").innerText()).startsWith("Shed Designer"));
     }
     ok(`${tag}: nothing was written`, writes(calls).length === 0);
     ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
@@ -712,7 +712,7 @@ try {
     await page.waitForFunction(() => location.pathname === "/designer", null, { timeout: 15000 }).catch(() => {});
     await settle(page, 1500);
     const s = await seen(page);
-    ok("I: a team member (Designer access, not owner/admin) has the Sheds item", await page.locator('.ss-nav a[href^="/designer"]').count() === 1);
+    ok("I: a team member (Designer access, not owner/admin) has the Shed Designer item", await page.locator('.ss-nav a[href^="/designer"]').count() === 1);
     ok("I: …but no Advanced item, and the page is never drawn", !s.nav && !s.page, JSON.stringify(s));
     ok("I: a cold /advanced ends on /designer", (await here(page)) === "/designer", s.paths.join(" → "));
     ok("I: nothing was written", writes(calls).length === 0);

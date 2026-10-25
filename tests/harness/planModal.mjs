@@ -130,7 +130,7 @@ async function portalRun(browser) {
   await page.route(`**/${REF}.functions.supabase.co/**`, shell);
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  await page.getByText("Sheds", { exact: true }).first().click();
+  await page.getByText("Shed Designer", { exact: true }).first().click();
   await page.waitForSelector(".ssd-frame.is-embedded", { timeout: 60000 });
   await page.waitForTimeout(1200);
   await page.locator("[data-ss-style]").first().click().catch(() => {});

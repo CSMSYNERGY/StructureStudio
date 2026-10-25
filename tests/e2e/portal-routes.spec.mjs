@@ -45,7 +45,7 @@ const ROUTES = [
   // a hub that lost its render branch would land people on Structures rather than erroring.
   // That is invisible from the outside and exactly what this list is for: EVERY slug, or the
   // suite stops proving anything about the ones it skips.
-  "/settings/structures", "/settings/designer", "/settings/online-inventory", "/settings/connection",
+  "/settings/sheds", "/settings/structures" /* alias → sheds until the Structures settings page takes it */, "/settings/designer", "/settings/online-inventory", "/settings/connection",
   "/settings/quickbooks", "/settings/email", "/settings/sms",
   // Customer Hub (2026-10-22). `pipelines` is the hub's own slug as well as its first tab's, so
   // this pair covers the rail item and both tabs inside it.

@@ -153,7 +153,7 @@ const run = async () => {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     // Designer is the FIRST nav item; the Settings sub-page of the same name is the last.
-    await page.getByText("Sheds", { exact: true }).first().click();
+    await page.getByText("Shed Designer", { exact: true }).first().click();
     await page.waitForSelector(".ssd-frame.is-embedded", { timeout: 60000 });
     await page.waitForTimeout(1200);
 

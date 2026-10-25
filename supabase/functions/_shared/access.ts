@@ -133,7 +133,7 @@ const RVE: Level[] = ["none", "view", "edit"];
 
 export const AREAS: Area[] = [
   // ── Workspace ────────────────────────────────────────────────────────────
-  { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
+  { key: "designer",          label: "Shed Designer",      group: "workspace", hint: "Build designs and quotes",            levels: RVE },
   // CHANGING A LINE'S PRICE IN THE DESIGNER (a builder's request, migration 277,
   // 2026-10-05). The builder's ask: "a sales person with the right permission can change the charge
   // on any line item right in the Designer" — raise it for an extra-large rough opening, lower it to

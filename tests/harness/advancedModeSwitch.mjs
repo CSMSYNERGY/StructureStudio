@@ -10,7 +10,7 @@
 // Scenarios, one fresh browser context each (nothing cached leaks between them):
 //   A  AN OWNER WITH 3D, switch off: the card sits above the 3D card, off, and there is no Advanced
 //      item. Turning it on sends save_advanced_mode {enabled: true} for their own account, the shell
-//      asks portal-billing again, and the item appears directly under Sheds, all without a reload.
+//      asks portal-billing again, and the item appears directly under Shed Designer, all without a reload.
 //      "Open Advanced" opens the page. Turning it off takes the item away again the same way.
 //   B  AN OWNER WITHOUT 3D: the switch is greyed with "Needs 3D" and points at Billing; pressing it
 //      sends nothing.
@@ -226,7 +226,7 @@ try {
     ok(`A${TAG}: pressing it sends save_advanced_mode {enabled: true} for their own account`,
       s1.length === 1 && s1[0].body.enabled === true && s1[0].body.targetClientId === null, JSON.stringify(s1.map((c) => c.body)));
     ok(`A${TAG}: the shell asked portal-billing again after the save`, s1.length === 1 && statusReads(calls, s1[0].at).length >= 1, `${s1.length && statusReads(calls, s1[0].at).length} status read(s) after`);
-    ok(`A${TAG}: the Advanced item appears, directly under Sheds`, sent && await itemUnderDesigner(page), (await navOrder(page)).join(" "));
+    ok(`A${TAG}: the Advanced item appears, directly under Shed Designer`, sent && await itemUnderDesigner(page), (await navOrder(page)).join(" "));
     ok(`A${TAG}: the switch now says on`, (await checked(page)) === "true");
     ok(`A${TAG}: …and the card says where to find it`, await page.getByText("Advanced is on. You'll find it in the menu, right under Designer.").count() === 1);
     ok(`A${TAG}: all without a reload`, (await page.evaluate(() => window.__harnessSamePage)) === "still here");

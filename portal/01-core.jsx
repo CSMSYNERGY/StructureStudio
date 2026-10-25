@@ -180,7 +180,7 @@ window.ssLoadDesigner = function () {
     // dead for the rest of the session, and the user's retry is a page-level refresh away
     // either way.
     ssDesignerLoad = null;
-    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Sheds tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
+    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Shed Designer does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
   });
   return ssDesignerLoad;
 };
@@ -564,7 +564,7 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 // operators still have a password-only way into the console.)
 
 const TAB_META = {
-  designer: ["Sheds", "Design a building and build an estimate"],
+  designer: ["Shed Designer", "Design a building and build an estimate"],
   // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
@@ -644,7 +644,10 @@ const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // Why it is worth the four lines: an unknown sub does not 404, it CLAMPS to the first tab. So
 // a renamed slug does not announce itself, it silently lands the reader on Structures, which
 // is the one failure mode nobody reports because it looks like they mis-clicked.
-const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
+// `structures` → `sheds` (2026-10-25): the shed catalog moved to /settings/sheds so that
+// /settings/structures can become the post-frame Structures settings page. DELETE this alias
+// the day that page ships; until then old bookmarks and the Client Setup links land on Sheds.
+const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile", structures: "sheds" };
 
 // THE ONE PAGE WHOSE ADDRESS IS NOT ITS ID. /admin has been admin.html, the standalone break-glass
 // operator console, since before the portal had pages of its own, and it stays that: so the
@@ -893,7 +896,7 @@ const TAB_AREA = {
 // Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
 // missing from this map is not access-controlled.
 const SETTINGS_TAB_AREA = {
-  structures: "settings_structures",
+  sheds: "settings_structures",
   // Designer -> 3D writes building_styles.d3 (save_style_d3 and friends), and every one of
   // those actions is gated settings_structures:edit server-side. Mirror that here or the
   // sub-tab shows up for someone the server will refuse.
@@ -1758,7 +1761,7 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
 function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
-    ["structures", "Sheds", "Shed styles, sizes, and base prices", null],
+    ["sheds", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
     ["colors", "Colors", "Paint, shingle, and metal palettes", null],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],

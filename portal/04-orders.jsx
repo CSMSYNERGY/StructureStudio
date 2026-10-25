@@ -5843,7 +5843,7 @@ function InventoryTable({
       )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-          Nothing on the lot yet. Design a building in the <strong>Sheds</strong> tab and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here. Put it on the <strong>Build Schedule</strong> when you're ready to make it.
+          Nothing on the lot yet. Design a building in the <strong>Shed Designer</strong> and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here. Put it on the <strong>Build Schedule</strong> when you're ready to make it.
         </p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
