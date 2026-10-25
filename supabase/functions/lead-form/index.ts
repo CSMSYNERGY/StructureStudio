@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { smsConsentSentence } from "../_shared/smsConsentText.ts";
-import { checkSubmission, cleanDefinition, cleanSettings, isUuid, submissionNote, type FormDefinition } from "../_shared/leadForms.ts";
+import { checkSubmission, cleanDefinition, cleanSettings, customPatch, isUuid, submissionNote, type CustomFieldDef, type FormDefinition } from "../_shared/leadForms.ts";
 import { companyTokens, loadTemplate, sendAutoreply, sendLeadAlert, teamEmails } from "../_shared/leadFormMail.ts";
 
 // lead-form: the PUBLIC side of website lead forms (migration 325, Settings → Customer Hub →
@@ -184,7 +184,7 @@ Deno.serve(withErrorLog("lead-form", async (req: Request) => {
       if (crmErr) throw crmErr;
       contactId = crmId || null;
       if (contactId) {
-        const { data: row } = await sb.from("crm_contacts").select("street, city, state, zip, company, owner_user_id, created_at").eq("id", contactId).maybeSingle();
+        const { data: row } = await sb.from("crm_contacts").select("street, city, state, zip, company, custom, owner_user_id, created_at").eq("id", contactId).maybeSingle();
         // Enrich, never blank, never clobber (crm_ensure_contact's own rule, for the fields it does not take).
         const patch: Record<string, unknown> = {};
         for (const k of ["street", "city", "state", "zip", "company"] as const) if (c[k] && !row?.[k]) patch[k] = c[k];
@@ -198,6 +198,36 @@ Deno.serve(withErrorLog("lead-form", async (req: Request) => {
           client_id: clientId, contact_id: contactId, body: submissionNote(form.name, checked.answers, pageUrl), pinned: false, created_by: null,
         });
         if (noteErr) await logEdgeError({ fn: "lead-form", req, clientId, code: "note", message: `lead form note failed: ${noteErr.message}` });
+
+        // ── THE BUILDER'S OWN CONTACT FIELDS (migration 330, Carolyn 2026-10-25) ───────────
+        // An answer to a question they wrote lands in the field they made for it, not only in the
+        // note above. Read AFTER the note on purpose: the note is the thing that must not be lost,
+        // and this is best-effort like everything else down here.
+        //
+        // The register is re-read live, because the form's PUBLISHED definition can be older than
+        // Settings → Fields — a field archived since publish stores nothing (the answer is still
+        // in the submission and in the note). customPatch applies the enrich-never-clobber rule,
+        // and crm_set_custom is the only write path: it re-checks every key against this tenant's
+        // own definitions and refuses anything that is not a scalar.
+        if (def.fields.some((f) => f.type === "custom")) {
+          try {
+            const { data: fieldDefs } = await sb.from("crm_field_defs")
+              .select("key, label, field_type, choices")
+              .eq("client_id", clientId).eq("entity", "contact").eq("source", "custom").is("archived_at", null)
+              .limit(200);
+            const existing = (row?.custom && typeof row.custom === "object") ? row.custom as Record<string, unknown> : {};
+            const patch = customPatch(def, checked.answers, (fieldDefs ?? []) as CustomFieldDef[], existing);
+            if (Object.keys(patch).length) {
+              const { error: cfErr } = await sb.rpc("crm_set_custom", {
+                p_client_id: clientId, p_entity: "contact", p_id: contactId, p_patch: patch, p_actor: null,
+              });
+              if (cfErr) throw cfErr;
+            }
+          } catch (e) {
+            await logEdgeError({ fn: "lead-form", req, clientId, code: "custom_fields", severity: "info",
+              message: `lead form custom fields not stored - lead and note saved: ${(e as Error).message}` });
+          }
+        }
         if (settings.pipelineId && settings.stageId) {
           const { data: stage } = await sb.from("crm_pipeline_stages").select("id, pipeline_id, archived_at")
             .eq("client_id", clientId).eq("id", settings.stageId).eq("pipeline_id", settings.pipelineId).maybeSingle();

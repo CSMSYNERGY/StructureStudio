@@ -9,7 +9,8 @@
 // The tenant is resolveTenant's; nothing here reads a client id from the body. Every row is
 // matched on (client_id, id), so an id from another builder simply finds nothing.
 
-import { cleanDefinition, cleanSettings, isUuid, recommendations, starterDefinition, STARTERS, FORM_NAME_MAX } from "../_shared/leadForms.ts";
+import { cleanDefinition, cleanSettings, isUuid, recommendations, starterDefinition, STARTERS, FORM_NAME_MAX, type CustomFieldDef } from "../_shared/leadForms.ts";
+import { CRM_FIELD_MAX_PER_ENTITY } from "../_shared/crmFields.ts";
 import { cleanDesign, EMAIL_STARTERS, MERGE_TAGS, renderEmailDesign, type Tokens } from "../_shared/emailBlocks.ts";
 import { companyTokens, loadTemplate, sendLeadAlert } from "../_shared/leadFormMail.ts";
 import { smsConsentSentence } from "../_shared/smsConsentText.ts";
@@ -34,6 +35,34 @@ export type LeadFormCtx = {
 };
 
 const SB_URL = () => Deno.env.get("SUPABASE_URL") ?? "";
+
+// ── A BUILDER'S OWN CONTACT FIELDS (migration 330) ────────────────────────────────────────
+// Carolyn 2026-10-25 asked whether the fields in the form designer are the actual Fields in
+// Structure Studio, and whether a field she adds shows up there. This is the join that makes the
+// answer yes: the designer's palette gets this list, and cleanDefinition validates a form's
+// `custom` fields against it.
+//
+// LIVE ONLY, and both halves of that matter: source='custom' because a `builtin` row is an
+// override on one of OUR fields and not a field of their own, and archived_at is null because a
+// deleted definition must not be offered (330 archives rather than destroys, so the row is still
+// there). `contact` only — a form makes a contact; the deal card it may also make carries no
+// answers of its own.
+// deno-lint-ignore no-explicit-any
+async function customContactFields(admin: any, clientId: string): Promise<CustomFieldDef[]> {
+  const { data } = await admin.from("crm_field_defs")
+    .select("key, label, field_type, choices, help, required, currency")
+    .eq("client_id", clientId).eq("entity", "contact").eq("source", "custom").is("archived_at", null)
+    .order("position").limit(CRM_FIELD_MAX_PER_ENTITY);
+  return (data ?? []).filter((d: { key?: string }) => !!d?.key);
+}
+
+/** The actions that read or rebuild a definition, and so need the register in hand. Anything else
+ *  passes null — which cleanDefinition reads as "cannot check, keep what is there", never as
+ *  "this tenant has no custom fields". An empty ARRAY would drop them all. */
+const NEEDS_FIELD_DEFS = new Set([
+  "crm_forms_list", "crm_form_create", "crm_form_get", "crm_form_save", "crm_form_publish",
+  "crm_form_unpublish", "crm_form_archive", "crm_form_duplicate",
+]);
 const name = (v: unknown, dflt: string) => (typeof v === "string" ? v.trim().slice(0, FORM_NAME_MAX) : "") || dflt;
 const FORM_COLS = "id, name, status, definition, published_definition, published_version, published_at, settings, created_at, updated_at";
 const SAMPLE: Tokens = {
@@ -45,6 +74,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
   const { admin, req, clientId, action, payload: p, json, dbFail, audit } = x;
   const sbUrl = SB_URL();
   const id = isUuid(p.id) ? p.id : null;
+  const customFields = NEEDS_FIELD_DEFS.has(action) ? await customContactFields(admin, clientId) : null;
 
   // ── Forms ─────────────────────────────────────────────────────────────────────────────────
   if (action === "crm_forms_list") {
@@ -91,6 +121,10 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
         // "Your brand" theme, while these are the builder's other colors, which no theme owns.
         colors: brandColorList(cfg.data?.brand_colors),
       },
+      // The builder's own contact fields, drawn as their own group in the designer's palette. A
+      // field they add in Settings → Customer Hub → Fields appears here next time this loads,
+      // which is the whole of what Carolyn asked for on 2026-10-25.
+      customFields: customFields ?? [],
     });
   }
 
@@ -102,7 +136,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     }).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "create that form", error);
     audit("crm_form_create", 1, `form=${data.id}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_get") {
@@ -110,19 +144,19 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     const { data, error } = await admin.from("lead_forms").select(FORM_COLS).eq("client_id", clientId).eq("id", id).maybeSingle();
     if (error) return dbFail(req, clientId, "load that form", error);
     if (!data) return json({ error: "That form no longer exists." }, 404);
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_save") {
     if (!id) return json({ error: "Which form?" }, 400);
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if ("name" in p) patch.name = name(p.name, "Untitled form");
-    if ("definition" in p) patch.definition = cleanDefinition(p.definition, sbUrl);
+    if ("definition" in p) patch.definition = cleanDefinition(p.definition, sbUrl, customFields);
     if ("settings" in p) patch.settings = cleanSettings(p.settings);
     const { data, error } = await admin.from("lead_forms").update(patch).eq("client_id", clientId).eq("id", id).select(FORM_COLS).maybeSingle();
     if (error) return dbFail(req, clientId, "save that form", error);
     if (!data) return json({ error: "That form no longer exists." }, 404);
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_publish") {
@@ -130,7 +164,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     const { data: cur, error: e1 } = await admin.from("lead_forms").select(FORM_COLS).eq("client_id", clientId).eq("id", id).maybeSingle();
     if (e1) return dbFail(req, clientId, "publish that form", e1);
     if (!cur) return json({ error: "That form no longer exists." }, 404);
-    const def = cleanDefinition(cur.definition, sbUrl);
+    const def = cleanDefinition(cur.definition, sbUrl, customFields);
     const blocking = recommendations(def, null).filter((r) => r.blocking);
     if (blocking.length) return json({ error: blocking.map((r) => r.text).join(" ") }, 400);
     const { data, error } = await admin.from("lead_forms").update({
@@ -139,7 +173,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     }).eq("client_id", clientId).eq("id", id).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "publish that form", error);
     audit("crm_form_publish", 1, `form=${id} v=${data.published_version}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_unpublish" || action === "crm_form_archive") {
@@ -152,7 +186,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
       .eq("client_id", clientId).eq("id", id).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "update that form", error);
     audit(action, 1, `form=${id} status=${status}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_duplicate") {
@@ -160,11 +194,11 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     const { data: cur } = await admin.from("lead_forms").select("name, definition, settings").eq("client_id", clientId).eq("id", id).maybeSingle();
     if (!cur) return json({ error: "That form no longer exists." }, 404);
     const { data, error } = await admin.from("lead_forms").insert({
-      client_id: clientId, name: `${cur.name} (copy)`.slice(0, FORM_NAME_MAX), definition: cleanDefinition(cur.definition, sbUrl),
+      client_id: clientId, name: `${cur.name} (copy)`.slice(0, FORM_NAME_MAX), definition: cleanDefinition(cur.definition, sbUrl, customFields),
       settings: cleanSettings(cur.settings), created_by: x.userId,
     }).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "copy that form", error);
-    return json({ ok: true, form: withRecs(data, sbUrl) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
   }
 
   if (action === "crm_form_delete") {
@@ -325,11 +359,11 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
 }
 
 // deno-lint-ignore no-explicit-any
-function withRecs(row: any, sbUrl: string) {
-  const def = cleanDefinition(row.definition, sbUrl);
+function withRecs(row: any, sbUrl: string, defs: CustomFieldDef[] | null) {
+  const def = cleanDefinition(row.definition, sbUrl, defs);
   return {
     ...row, definition: def, settings: cleanSettings(row.settings),
     // jsonb reorders keys, so the published copy is rebuilt the same way before comparing.
-    recommendations: recommendations(def, row.status === "published" && row.published_definition ? cleanDefinition(row.published_definition, sbUrl) : null),
+    recommendations: recommendations(def, row.status === "published" && row.published_definition ? cleanDefinition(row.published_definition, sbUrl, defs) : null),
   };
 }

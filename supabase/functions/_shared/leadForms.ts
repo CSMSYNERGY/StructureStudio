@@ -9,6 +9,10 @@
 //
 // Pure: no Deno, no network, no imports from jsr/npm, so leadForms.test.ts runs offline.
 
+import {
+  coerceFieldValue, CRM_FIELD_KEY_RE, CRM_FIELD_TYPE_IDS, CRM_PHONE_MAX, cleanUrl,
+} from "./crmFields.ts";
+
 export const FORM_NAME_MAX = 120;
 export const MAX_FIELDS = 60;
 export const MAX_OPTIONS = 50;
@@ -49,6 +53,18 @@ export const FIELD_TYPES: Record<string, { input: boolean; role?: ContactRole; g
   number: { input: true, group: "General", label: "Number" },
   date: { input: true, group: "General", label: "Date" },
   hidden: { input: true, group: "General", label: "Hidden value" },
+  // A BUILDER'S OWN CONTACT FIELD (migration 330's crm_field_defs), bound by `key`. Carolyn
+  // 2026-10-25: "are all the fields that are available in the designer connected to the actual
+  // Fields in Structure Studio? and if additional fields are added... do they show in the
+  // designer to add?" — they did not, and this type is the answer.
+  //
+  // ⛔ IT HAS NO `role`, AND THAT IS THE WHOLE DESIGN. `role` is assigned BY TYPE above so that
+  // "Email" always means the address the contact is matched and mailed on, and lead-form patches
+  // crm_contacts straight off those roles. Binding a builder's field onto the nearest existing
+  // type instead — their "site contact" onto `phone`, their "county website" onto `website` —
+  // would hand it that type's role and let a field somebody invented overwrite the contact's
+  // texting identity. A role-free type can only ever reach crm_contacts.custom[key].
+  custom: { input: true, group: "Your fields", label: "Your field" },
   building_style: { input: true, group: "StructureStudio", label: "Building style" },
   building_size: { input: true, group: "StructureStudio", label: "Building size" },
   delivery_zip: { input: true, role: "zip", group: "StructureStudio", label: "Delivery zip" },
@@ -76,7 +92,15 @@ export type FormField = {
   id: string; type: string; label: string; placeholder: string; help: string;
   required: boolean; width: "full" | "half"; options: string[];
   text?: string; imageUrl?: string; source?: string; value?: string; level?: 1 | 2;
+  /** `custom` only: the crm_field_defs key the answer is stored under, and that definition's own
+   *  type, copied in so the renderer knows which control to draw. Never free text — the key is
+   *  checked against the tenant's own definitions (see cleanDefinition's `defs`). */
+  key?: string; fieldType?: string;
 };
+
+/** One of the builder's own contact fields, as crm_field_defs holds it. The three members the
+ *  form side needs; portal-settings and lead-form both select them straight off the table. */
+export type CustomFieldDef = { key: string; field_type: string; choices?: string[] | null; label?: string };
 
 export type FormStyle = {
   layout: "single" | "two"; inputStyle: "box" | "underline" | "rounded";
@@ -153,8 +177,19 @@ export const formAssetUrl = (v: unknown, supabaseUrl: string) => {
 };
 const fieldId = (v: unknown) => typeof v === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(v) ? v : "";
 
-/** Rebuild a definition from whatever arrived, keeping only what a form may hold. */
-export function cleanDefinition(raw: unknown, supabaseUrl: string): FormDefinition {
+/** Rebuild a definition from whatever arrived, keeping only what a form may hold.
+ *
+ *  `defs` is the tenant's LIVE custom contact fields (crm_field_defs, source 'custom', not
+ *  archived). Supplied, it is authority: a `custom` field whose key is not in it is dropped, and
+ *  the ones that survive take their type and choices from the definition, so a field re-typed or
+ *  re-worded in Settings → Fields reaches every form that already uses it.
+ *
+ *  ⚠️ OMITTED IS NOT "NO CUSTOM FIELDS ALLOWED" — a shape-valid custom field is KEPT. This cleaner
+ *  is a whitelist rebuild called on the way OUT as well as in (crm_form_get and withRecs run it on
+ *  read), so a read path that forgot to pass `defs` would otherwise strip every custom field off a
+ *  form and the next save would write the stripped copy back. Existence is checked where the list
+ *  is in hand — every write path — and again by crm_set_custom at submit time. */
+export function cleanDefinition(raw: unknown, supabaseUrl: string, defs?: CustomFieldDef[] | null): FormDefinition {
   const d = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const theme = oneOf(d.theme, THEMES, "clean");
   const st = (d.style && typeof d.style === "object" ? d.style : {}) as Record<string, unknown>;
@@ -195,11 +230,28 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string): FormDefiniti
     const type = typeof r.type === "string" && FIELD_TYPES[r.type] ? r.type : "";
     const id = fieldId(r.id);
     if (!type || !id || seen.has(id)) continue;
+    // A custom field is resolved BEFORE its id is claimed, so one that gets dropped here does not
+    // burn the id for a later field of the same name.
+    let live: CustomFieldDef | null = null;
+    let customKey = "";
+    let customType = "";
+    if (type === "custom") {
+      const k = typeof r.key === "string" && CRM_FIELD_KEY_RE.test(r.key) ? r.key : "";
+      if (!k) continue;
+      live = defs ? (defs.find((d) => d && d.key === k) ?? null) : null;
+      // With the register in hand, a key it does not list is archived, deleted, or another
+      // tenant's. Dropped — never carried on trust from the payload.
+      if (defs && !live) continue;
+      const ft = String((live ? live.field_type : r.fieldType) ?? "");
+      if (!CRM_FIELD_TYPE_IDS.includes(ft as typeof CRM_FIELD_TYPE_IDS[number])) continue;
+      customKey = k;
+      customType = ft;
+    }
     seen.add(id);
     const meta = FIELD_TYPES[type];
     const field: FormField = {
       id, type,
-      label: s(r.label, LABEL_MAX) || meta.label,
+      label: s(r.label, LABEL_MAX) || (live ? s(live.label, LABEL_MAX) : "") || meta.label,
       placeholder: s(r.placeholder, LABEL_MAX),
       help: s(r.help, HELP_MAX),
       // Display blocks are never required; terms is required by definition (an unticked terms box
@@ -213,6 +265,17 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string): FormDefiniti
       const opts = Array.isArray(r.options) ? r.options.map((o) => s(o, OPTION_MAX)).filter(Boolean) : [];
       field.options = [...new Set(opts)].slice(0, MAX_OPTIONS);
       if (!field.options.length) field.options = type === "timeframe" ? [...TIMEFRAME_OPTIONS] : ["Option 1", "Option 2"];
+    }
+    if (type === "custom") {
+      field.key = customKey;
+      field.fieldType = customType;
+      if (customType === "select") {
+        // The definition's choices when we have it, so the drop-down can never offer a choice the
+        // Fields register would refuse; the stored copy only when we do not.
+        const src = live ? (live.choices ?? []) : (Array.isArray(r.options) ? r.options : []);
+        const opts = src.map((o) => s(o, OPTION_MAX)).filter(Boolean);
+        field.options = [...new Set(opts)].slice(0, MAX_OPTIONS);
+      }
     }
     if (type === "heading") { field.text = s(r.text, 200) || "Heading"; field.level = r.level === 2 ? 2 : 1; }
     if (type === "paragraph") field.text = s(r.text, TEXT_BLOCK_MAX);
@@ -289,6 +352,25 @@ export function checkSubmission(def: FormDefinition, raw: unknown, catalog: { st
     } else if (f.type === "select" || f.type === "radio" || f.type === "timeframe") {
       const t = s(v, OPTION_MAX);
       value = f.options.includes(t) ? t : "";
+    } else if (f.type === "custom") {
+      // The control a visitor saw is the one the definition's type asked for, so the value is held
+      // to that type here — a typed field never takes a value it cannot hold. The sentences are
+      // the form's own ("Enter a number."), not the Fields tab's, because a website visitor must
+      // not be shown a builder's internal field name.
+      const ft = f.fieldType || "text";
+      if (ft === "checkbox") {
+        value = v === true || v === "yes" || v === "on" || v === "true" ? "Yes" : "";
+      } else if (ft === "select") {
+        const t = s(v, OPTION_MAX);
+        value = f.options.includes(t) ? t : "";
+      } else {
+        value = s(v, ft === "textarea" ? ANSWER_MAX : ft === "phone" ? CRM_PHONE_MAX : SHORT_ANSWER_MAX);
+        // Commas are allowed on the way in and stripped by coerceFieldValue on the way to the
+        // jsonb (332: the comma is how a number is SHOWN, never what is stored).
+        if (value && ft === "number" && !/^-?\d+(\.\d+)?$/.test(value.replace(/,/g, ""))) errors[f.id] = "Enter a number.";
+        if (value && ft === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(value)) errors[f.id] = "Enter a date.";
+        if (value && ft === "url" && "error" in cleanUrl(value)) errors[f.id] = "Enter a website address.";
+      }
     } else if (f.type === "building_style" || f.type === "building_size") {
       const t = s(v, OPTION_MAX);
       const list = f.type === "building_style" ? catalog.styles : catalog.sizes;
@@ -314,6 +396,48 @@ export function checkSubmission(def: FormDefinition, raw: unknown, catalog: { st
   }
   if (!contact.name) contact.name = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || undefined;
   return { answers, contact, smsConsent, errors };
+}
+
+/** The custom-field values a submission puts on the contact, as the patch crm_set_custom takes.
+ *
+ *  ENRICH, NEVER BLANK, NEVER CLOBBER — the rule the role fields already follow in lead-form: a
+ *  key the contact already holds a value for is left alone, because a returning visitor filling in
+ *  a shorter form must not wipe what the builder's team typed on the card.
+ *
+ *  `defs` is the LIVE register again, so a field archived or deleted between publish and submit
+ *  stores nothing. The answer still rides in lead_form_submissions.answers and in the note either
+ *  way, so a lead is never lost to a field that went away.
+ *
+ *  ⚠️ This is a convenience, NOT the security boundary. crm_set_custom (330, PART 3) re-checks
+ *  every key against the tenant's own definitions and refuses anything that is not a scalar, and
+ *  it is the only write path — so a key from another tenant cannot land even if everything here
+ *  were wrong. */
+export function customPatch(
+  def: FormDefinition,
+  answers: Answer[],
+  defs: CustomFieldDef[],
+  existing: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const byId = new Map(def.fields.filter((f) => f.type === "custom" && f.key).map((f) => [f.id, f]));
+  const live = new Map((defs ?? []).filter((d) => d && d.key).map((d) => [d.key, d]));
+  const patch: Record<string, unknown> = {};
+  for (const a of answers) {
+    const f = byId.get(a.id);
+    if (!f?.key || patch[f.key] !== undefined) continue;
+    const d = live.get(f.key);
+    if (!d) continue;
+    const had = existing ? existing[f.key] : undefined;
+    if (had !== undefined && had !== null && had !== "") continue;
+    const out = coerceFieldValue(
+      { field_type: d.field_type, choices: d.choices ?? null, label: f.label || d.label || f.key },
+      d.field_type === "checkbox" ? a.value === "Yes" : a.value,
+    );
+    // checkSubmission has already held the value to this type and answered the visitor; a straggler
+    // here (the definition was retyped between publish and submit) is dropped, not raised at them.
+    if ("error" in out || out.value === null) continue;
+    patch[f.key] = out.value;
+  }
+  return patch;
 }
 
 /** The pinned CRM note a submission leaves on the contact. Plain text, one answer per line. */

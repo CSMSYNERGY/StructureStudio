@@ -6682,6 +6682,23 @@ const SSF_PALETTE = [
   ["Layout", [["heading", "Heading", "🔠"], ["paragraph", "Text", "¶"], ["divider", "Divider", "➖"], ["image", "Image", "🖼️"]]],
 ];
 const SSF_LABEL = Object.fromEntries(SSF_PALETTE.flatMap(([, items]) => items.map(([t, l]) => [t, l])));
+// `custom` is not in the list above: a builder's own fields are not a fixed palette, they are
+// whatever crm_field_defs holds for this tenant (ssfCustomGroup builds that group from the server's
+// `customFields`). It still needs a name for the inspector's header.
+SSF_LABEL.custom = "Your field";
+// The crm field types (migration 330/332), and the icon each gets in the palette. `number` covers
+// money too — 332 made currency and the comma a way of SHOWING a number, not a type of its own.
+const SSF_CF_ICON = { text: "✏️", textarea: "📝", number: "#️⃣", date: "📅", select: "🔽", checkbox: "☑️", phone: "📞", url: "🔗" };
+const SSF_CF_TYPE_LABEL = { text: "Text", textarea: "Long text", number: "Number", date: "Date", select: "Drop-down", checkbox: "Yes / no", phone: "Phone", url: "Hyperlink" };
+
+/** The palette group for this builder's own contact fields, or null when they have none. Built at
+ *  render time from crm_forms_list's `customFields`, so a field added in Settings → Customer Hub →
+ *  Fields is offered here the next time the Forms hub loads. */
+function ssfCustomGroup(meta) {
+  const list = (meta?.customFields || []).filter((d) => d && d.key && SSF_CF_ICON[d.field_type]);
+  if (!list.length) return null;
+  return ["Your fields", list.map((d) => [`custom:${d.key}`, d.label || d.key, SSF_CF_ICON[d.field_type]])];
+}
 const SSF_INPUT = (t) => !["heading", "paragraph", "divider", "image"].includes(t);
 const SSF_CHOICES = (t) => ["select", "radio", "checkboxes", "timeframe"].includes(t);
 const SSF_TIMEFRAME = ["As soon as possible", "Within 1 month", "1–3 months", "3–6 months", "Just looking"];
@@ -6693,11 +6710,30 @@ const SSF_THEMES = {
 };
 const SSF_FONTS = [["system", "System"], ["inter", "Inter"], ["georgia", "Georgia"], ["verdana", "Verdana"], ["trebuchet", "Trebuchet"], ["mono", "Monospace"]];
 
-function ssfNewField(type, fields) {
-  const base = type.replace(/[^a-z0-9_]/g, "_");
+function ssfNewField(type, fields, meta) {
+  // The palette sends "custom:<key>" for one of the builder's own fields. The TYPE is always
+  // `custom`; the key and the definition's own type ride alongside, and neither is editable
+  // afterwards — they belong to the Fields register, not to this form.
+  let cf = null;
+  if (type.startsWith("custom:")) {
+    const key = type.slice(7);
+    cf = (meta?.customFields || []).find((d) => d && d.key === key) || null;
+    if (!cf) return null;
+    type = "custom";
+  }
+  const base = (cf ? cf.key : type).replace(/[^a-z0-9_]/g, "_");
   let id = base, i = 1;
   while (fields.some((f) => f.id === id)) id = `${base}_${++i}`;
   const f = { id, type, label: SSF_LABEL[type] || "Field", placeholder: "", help: "", required: false, width: "full", options: [] };
+  if (cf) {
+    f.key = cf.key;
+    f.fieldType = cf.field_type;
+    f.label = cf.label || cf.key;
+    f.help = cf.help || "";
+    if (cf.field_type === "select") f.options = [...(cf.choices || [])];
+    if (cf.field_type === "textarea" || cf.field_type === "checkbox") f.width = "full";
+    return f;
+  }
   if (type === "select" || type === "radio" || type === "checkboxes") f.options = ["Option 1", "Option 2"];
   if (type === "timeframe") f.options = [...SSF_TIMEFRAME];
   if (type === "heading") { f.text = "Heading"; f.level = 1; }
@@ -6936,7 +6972,10 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
 
   const addField = (type, at) => {
     if (def.fields.length >= 60) { setErr("A form can hold up to 60 fields."); return; }
-    const f = ssfNewField(type, def.fields);
+    const f = ssfNewField(type, def.fields, meta);
+    // null = a "custom:<key>" whose definition is no longer in the register (deleted in another
+    // tab). Nothing is added and nothing is said: reopening the hub reloads the palette.
+    if (!f) return;
     const fields = [...def.fields];
     fields.splice(at == null ? fields.length : at, 0, f);
     setFields(fields); setSel(f.id);
@@ -7034,7 +7073,7 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
       {err && <div style={{ ...S.err, margin: "10px 14px 0" }}>{err}</div>}
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {tab === "edit" && (<>
-          <SsfPalette disabled={!canEdit} onAdd={(t) => addField(t)} />
+          <SsfPalette disabled={!canEdit} meta={meta} onAdd={(t) => addField(t)} />
           <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "24px 16px" }} onClick={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
             <SsfCanvas def={def} sel={sel} device={device} meta={meta} canEdit={canEdit}
               onSelect={setSel} onAdd={addField} onMove={moveField}
@@ -7059,15 +7098,19 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
   );
 }
 
-function SsfPalette({ onAdd, disabled }) {
+function SsfPalette({ onAdd, disabled, meta }) {
   const [q, setQ] = useState("");
   const match = (l) => !q.trim() || l.toLowerCase().includes(q.trim().toLowerCase());
+  // Their own fields go LAST, after ours: the built-ins are what most forms are made of, and a
+  // builder with forty custom fields should not have to scroll past them to reach Email.
+  const custom = ssfCustomGroup(meta);
+  const groups = custom ? [...SSF_PALETTE, custom] : SSF_PALETTE;
   return (
     <div style={{ width: 260, flexShrink: 0, background: "#FFF", borderRight: "1px solid #E2E8F0", overflow: "auto", padding: 12 }}>
       <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 8 }}>Form elements</div>
       <input placeholder="Search elements" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...S.input, marginBottom: 10 }} />
       {disabled && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>You can look, but only someone who can edit Customer Hub settings can change this form.</div>}
-      {SSF_PALETTE.map(([group, items]) => {
+      {groups.map(([group, items]) => {
         const shown = items.filter(([, l]) => match(l));
         if (!shown.length) return null;
         return (
@@ -7084,9 +7127,20 @@ function SsfPalette({ onAdd, disabled }) {
                 </button>
               ))}
             </div>
+            {group === "Your fields" && (
+              <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.4 }}>
+                Your own contact fields. An answer here is saved onto the contact's field, not just the note.
+              </div>
+            )}
           </div>
         );
       })}
+      {!custom && !q.trim() && (
+        <div style={{ fontSize: 11.5, color: "#64748B", borderTop: "1px solid #E2E8F0", paddingTop: 10, lineHeight: 1.45 }}>
+          <div style={{ fontWeight: 700, color: "#475569", marginBottom: 3 }}>Your own fields</div>
+          Add a field in Settings → Customer Hub → Fields and it appears here, ready to put on a form.
+        </div>
+      )}
     </div>
   );
 }
@@ -7397,10 +7451,16 @@ function SsfImagePick({ url, onUrl, disabled }) {
 
 function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }) {
   const t = f.type;
+  // A custom field's definition, when we still have it. `gone` is a field whose definition was
+  // deleted or archived after this form was built: it is shown and can be removed, but it stores
+  // nothing on submit, so saying so is the only honest thing to do.
+  const cfDef = t === "custom" ? (meta?.customFields || []).find((d) => d && d.key === f.key) || null : null;
+  const cfType = cfDef ? cfDef.field_type : f.fieldType;
+  const gone = t === "custom" && !cfDef;
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #E2E8F0" }}>
-        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{SSF_LABEL[t] || t}</div>
+        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{t === "custom" ? (cfDef?.label || f.label || "Your field") : (SSF_LABEL[t] || t)}</div>
         <button type="button" onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontSize: 12 }}>Form styles →</button>
       </div>
       <div style={{ padding: 14 }}>
@@ -7414,10 +7474,34 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
         {SSF_INPUT(t) && t !== "sms_consent" && (
           <SsfRow label={t === "terms" ? "Text before the links" : "Label"}><input disabled={disabled} value={f.label || ""} maxLength={200} onChange={(e) => onChange({ label: e.target.value })} style={S.input} /></SsfRow>
         )}
-        {SSF_INPUT(t) && !SSF_CHOICES(t) && !["hidden", "sms_consent", "terms", "radio", "checkboxes"].includes(t) && (
+        {t === "custom" && (
+          <div style={{ fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.45 }}>
+            {gone ? (
+              <>
+                <div style={{ fontWeight: 800, color: "#B91C1C", marginBottom: 3 }}>This field no longer exists</div>
+                It was deleted from Settings → Customer Hub → Fields, so an answer to it is kept with the
+                submission but is not saved onto the contact. Delete it from the form, or restore the field.
+              </>
+            ) : (
+              <>
+                <div style={{ fontWeight: 800, marginBottom: 3 }}>One of your own fields</div>
+                The answer is saved onto the contact's <b>{cfDef.label || f.key}</b> field
+                {SSF_CF_TYPE_LABEL[cfType] ? <> ({SSF_CF_TYPE_LABEL[cfType].toLowerCase()})</> : null}, as well as in the
+                submission. The field's type{cfType === "select" ? " and its choices" : ""} come from
+                Settings → Customer Hub → Fields, so they can only be changed there — and a change there reaches
+                every form using this field.
+                {cfType === "select" && (cfDef.choices || []).length > 0 && (
+                  <div style={{ marginTop: 6, color: "#64748B" }}>Choices: {(cfDef.choices || []).join(", ")}</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {SSF_INPUT(t) && !SSF_CHOICES(t) && !["hidden", "sms_consent", "terms", "radio", "checkboxes"].includes(t)
+          && !(t === "custom" && (cfType === "checkbox" || cfType === "select")) && (
           <SsfRow label={t === "building_style" || t === "building_size" ? "Prompt" : "Placeholder"}><input disabled={disabled} value={f.placeholder || ""} maxLength={200} onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>
         )}
-        {(t === "select" || t === "timeframe") && <SsfRow label="Prompt"><input disabled={disabled} value={f.placeholder || ""} maxLength={200} placeholder="Choose…" onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>}
+        {(t === "select" || t === "timeframe" || (t === "custom" && cfType === "select")) && <SsfRow label="Prompt"><input disabled={disabled} value={f.placeholder || ""} maxLength={200} placeholder="Choose…" onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>}
         {SSF_CHOICES(t) && (
           <SsfRow label="Choices" hint="One per line.">
             <textarea disabled={disabled} rows={Math.min(10, Math.max(3, (f.options || []).length + 1))} value={(f.options || []).join("\n")}
@@ -7453,7 +7537,7 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 12 }}><input type="checkbox" disabled={disabled} checked={!!f.required} onChange={(e) => onChange({ required: e.target.checked })} /> Required</label>
         )}
         {t !== "hidden" && <SsfRow label="Width"><SsfSeg disabled={disabled} value={f.width === "half" ? "half" : "full"} onChange={(v) => onChange({ width: v })} options={[["full", "Full"], ["half", "Half"]]} /></SsfRow>}
-        {["email", "phone", "full_name", "first_name", "last_name", "address", "city", "state", "postal_code", "delivery_zip", "organization"].includes(t) && (
+        {t !== "custom" && ["email", "phone", "full_name", "first_name", "last_name", "address", "city", "state", "postal_code", "delivery_zip", "organization"].includes(t) && (
           <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 12 }}>Saved onto the contact's {t === "full_name" ? "name" : (SSF_LABEL[t] || "").toLowerCase()} in your CRM.</div>
         )}
         {!disabled && <button type="button" onClick={onRemove} style={{ ...SSF_BTN(false), color: "#B91C1C", width: "100%" }}>Delete this field</button>}

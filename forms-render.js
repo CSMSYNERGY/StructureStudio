@@ -109,10 +109,26 @@
 
   function control(f, opts) {
     var t = f.type;
+    // A `custom` field is one of the builder's own contact fields (crm_field_defs). It has no type
+    // of its own here: it draws whatever that definition's type asks for, which is why cft is
+    // folded into the branches below rather than given a branch of its own.
+    var cft = t === "custom" ? (f.fieldType || "text") : "";
     var input;
-    if (t === "textarea") {
+    if (t === "textarea" || cft === "textarea") {
       input = el("textarea", "ssf-in");
-    } else if (t === "select" || t === "timeframe" || t === "building_style" || t === "building_size") {
+    } else if (cft === "checkbox") {
+      // A plain tick box labelled with the builder's own wording — NOT the consent branch below,
+      // whose sentence and links are ours and must stay ours.
+      var l3 = el("label", "ssf-opt");
+      var cb3 = el("input");
+      cb3.type = "checkbox";
+      cb3.name = f.id;
+      l3.appendChild(cb3);
+      var s3 = el("span", "", f.label || "Yes");
+      if (f.required) s3.appendChild(el("span", "ssf-req", "*"));
+      l3.appendChild(s3);
+      return l3;
+    } else if (t === "select" || cft === "select" || t === "timeframe" || t === "building_style" || t === "building_size") {
       input = el("select", "ssf-in");
       var first = el("option", "", f.placeholder || "Choose…");
       first.value = "";
@@ -157,7 +173,10 @@
       return l2;
     } else {
       input = el("input", "ssf-in");
-      input.type = t === "email" ? "email" : t === "phone" ? "tel" : t === "number" ? "number" : (t === "date" || t === "date_of_birth") ? "date" : t === "website" ? "url" : "text";
+      input.type = cft
+        ? (cft === "number" ? "number" : cft === "date" ? "date" : cft === "phone" ? "tel" : cft === "url" ? "url" : "text")
+        : t === "email" ? "email" : t === "phone" ? "tel" : t === "number" ? "number" : (t === "date" || t === "date_of_birth") ? "date" : t === "website" ? "url" : "text";
+      if (cft === "phone") input.setAttribute("inputmode", "tel");
       var ac = { full_name: "name", first_name: "given-name", last_name: "family-name", email: "email", phone: "tel", address: "street-address", city: "address-level2", state: "address-level1", postal_code: "postal-code", delivery_zip: "postal-code", country: "country-name", organization: "organization", website: "url" }[t];
       if (ac) input.setAttribute("autocomplete", ac);
       if (t === "phone") input.setAttribute("inputmode", "tel");
@@ -180,7 +199,7 @@
       } else if (f.type === "radio") {
         var r = form.querySelector('input[name="' + f.id + '"]:checked');
         out[f.id] = r ? r.value : "";
-      } else if (f.type === "sms_consent" || f.type === "terms") {
+      } else if (f.type === "sms_consent" || f.type === "terms" || (f.type === "custom" && f.fieldType === "checkbox")) {
         var c = form.querySelector('input[name="' + f.id + '"]');
         out[f.id] = !!(c && c.checked);
       } else {
@@ -200,6 +219,8 @@
       if (f.required && empty) errs[f.id] = f.type === "terms" ? "Please agree to continue." : "This field is required.";
       else if (!empty && f.type === "email" && !EMAIL.test(String(val).trim())) errs[f.id] = "Enter a valid email address.";
       else if (!empty && f.type === "phone") { var d = String(val).replace(/\D/g, ""); if (d.length < 10 || d.length > 15) errs[f.id] = "Enter a valid phone number."; }
+      else if (!empty && f.type === "custom" && f.fieldType === "number" && !/^-?\d+(\.\d+)?$/.test(String(val).replace(/,/g, "").trim())) errs[f.id] = "Enter a number.";
+      else if (!empty && f.type === "custom" && f.fieldType === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(String(val).trim())) errs[f.id] = "Enter a date.";
     }
     return errs;
   }
@@ -232,7 +253,8 @@
     var fieldEls = {};
     for (var i = 0; i < def.fields.length; i++) {
       var f = def.fields[i];
-      var wide = ["heading", "paragraph", "divider", "image", "textarea", "sms_consent", "terms", "checkboxes", "radio"].indexOf(f.type) >= 0;
+      var wide = ["heading", "paragraph", "divider", "image", "textarea", "sms_consent", "terms", "checkboxes", "radio"].indexOf(f.type) >= 0
+        || (f.type === "custom" && (f.fieldType === "textarea" || f.fieldType === "checkbox"));
       var box = el("div", "ssf-f" + (f.width === "half" ? " ssf-half" : "") + (wide ? " ssf-wide" : ""));
       box.setAttribute("data-field-id", f.id);
       if (f.type === "hidden") {
