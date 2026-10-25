@@ -179,7 +179,7 @@ async function run(surface, v, shots, ok) {
     if (surface === "portal") {
       await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
       await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-      await page.getByText("Designer", { exact: true }).first().click();
+      await page.getByText("Sheds", { exact: true }).first().click();
       await page.waitForFunction(() => document.querySelector(".ss-designer-host .ssd-frame") !== null, null, { timeout: 60000 });
     } else {
       await page.goto(`${BASE}/?client=${CLIENT}`, { waitUntil: "domcontentloaded" });

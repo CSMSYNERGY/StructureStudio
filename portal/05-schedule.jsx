@@ -4389,7 +4389,7 @@ function SerialNumbersCard() {
       {setup && (missS.length > 0 || missC.length > 0) && (
         <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#991B1B", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, marginTop: 12, lineHeight: 1.55 }}>
           <div style={{ fontWeight: 800, marginBottom: 4 }}>Missing serial codes — these print as XXX / XX on the serial number</div>
-          {missS.length > 0 && <div><strong>Styles</strong> (Settings → Structures → Edit): {missS.join(", ")}</div>}
+          {missS.length > 0 && <div><strong>Styles</strong> (Settings → Sheds → Edit): {missS.join(", ")}</div>}
           {missC.length > 0 && <div><strong>Colors</strong> (Settings → Colors, Code column): {missC.join(", ")}</div>}
           <div style={{ color: "#B91C1C", marginTop: 4 }}>Once you add a code, serials already issued with XX in that spot fill in automatically.</div>
         </div>

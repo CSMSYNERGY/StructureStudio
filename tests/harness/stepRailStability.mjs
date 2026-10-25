@@ -204,7 +204,7 @@ async function run(v, shots, ok) {
   try {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-    await page.getByText("Designer", { exact: true }).first().click();
+    await page.getByText("Sheds", { exact: true }).first().click();
     await page.waitForFunction(() => document.querySelector(".ss-designer-host .ssd-frame") !== null, null, { timeout: 60000 });
     const sel = page.locator("select").filter({ has: page.locator("option", { hasText: SIZE }) });
     if (await sel.count()) await sel.first().selectOption({ label: SIZE });

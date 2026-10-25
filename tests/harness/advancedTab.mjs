@@ -380,8 +380,8 @@ try {
     await page.getByRole("button", { name: "Save as a new style" }).click();
     await page.waitForFunction(() => { const m = document.querySelector('[data-ss-adv="msg"]'); return m && /Saved as|failed|Couldn|isn't/.test(m.innerText); }, null, { timeout: 60000 });
     const msg = await page.locator('[data-ss-adv="msg"]').innerText();
-    // Settings → Structures has no switch: a hidden style there has a Show button (review UX10).
-    ok("A: Save says where the style went, in plain words, naming the real button (Show)", msg === "Saved as “Harness Custom Barn”. Hidden from customers — add its sizes and prices in Settings → Structures, then press Show.", msg);
+    // Settings → Sheds has no switch: a hidden style there has a Show button (review UX10).
+    ok("A: Save says where the style went, in plain words, naming the real button (Show)", msg === "Saved as “Harness Custom Barn”. Hidden from customers — add its sizes and prices in Settings → Sheds, then press Show.", msg);
     const W3 = writes(calls);
     const seq = W3.map((c) => c.action);
     // Hidden straight after it is made (review 2026-09-29): create_style makes a style visible,
@@ -476,7 +476,7 @@ try {
     if (!e.locked) {
       await page.locator(".ss-designer-host").waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
       ok(`${tag}: …with the Designer actually mounted and showing (not a blank page)`, await page.locator(".ss-designer-host").isVisible());
-      ok(`${tag}: …and the topbar says Designer`, (await page.locator(".ss-topbar .ttl").innerText()).startsWith("Designer"));
+      ok(`${tag}: …and the topbar says Sheds`, (await page.locator(".ss-topbar .ttl").innerText()).startsWith("Sheds"));
     }
     ok(`${tag}: nothing was written`, writes(calls).length === 0);
     ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
@@ -712,7 +712,7 @@ try {
     await page.waitForFunction(() => location.pathname === "/designer", null, { timeout: 15000 }).catch(() => {});
     await settle(page, 1500);
     const s = await seen(page);
-    ok("I: a team member (Designer access, not owner/admin) has the Designer item", await page.locator('.ss-nav a[href^="/designer"]').count() === 1);
+    ok("I: a team member (Designer access, not owner/admin) has the Sheds item", await page.locator('.ss-nav a[href^="/designer"]').count() === 1);
     ok("I: …but no Advanced item, and the page is never drawn", !s.nav && !s.page, JSON.stringify(s));
     ok("I: a cold /advanced ends on /designer", (await here(page)) === "/designer", s.paths.join(" → "));
     ok("I: nothing was written", writes(calls).length === 0);
@@ -819,7 +819,7 @@ try {
     await msgIs(/customers can see it now|Saved as/);
     let msg = await page.locator('[data-ss-adv="msg"]').innerText();
     ok("L: a hide that fails says the style is showing to customers, and how to hide it",
-      msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide. (Something went wrong on our side.)", msg);
+      msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Sheds → Hide. (Something went wrong on our side.)", msg);
     ok("L: …after one create and the failed hide", writes(calls.slice(from)).map((c) => c.action).join(",") === "create_style,set_style_active", writes(calls.slice(from)).map((c) => c.action).join(","));
     await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-hide-failed.png") }).catch(() => {});
     // 2. An account switch remounts the page; back again, it still knows.
@@ -834,7 +834,7 @@ try {
     await settle(page, 600);
     msg = await page.locator('[data-ss-adv="msg"]').innerText().catch(() => "(no message)");
     ok("L: switched away and back (the page remounted), it still says the style is showing and how to hide it",
-      msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide.", msg);
+      msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Sheds → Hide.", msg);
     await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-hide-failed-after-remount.png") }).catch(() => {});
     // …and says it at the TOP of the page as well, where a builder coming back sees it without scrolling
     // 2,000 px down to Save.
@@ -854,7 +854,7 @@ try {
       W1.length === 3 && W1[0].body.styleId === sid && W1[0].body.active === false && W1[1].body.styleId === sid && W1[1].body.label === "Tri Home 2"
       && Object.keys(W1[1].body).sort().join(",") === "action,label,styleId,targetClientId" && W1[2].body.styleValue === "tri-home" && W1.every((c) => c.body.targetClientId === OURS),
       W1.map((c) => JSON.stringify(c.body).slice(0, 120)).join(" | "));
-    ok("L: …and it says it saved under the new name", msg === "Saved as “Tri Home 2”. Hidden from customers — add its sizes and prices in Settings → Structures, then press Show.", msg);
+    ok("L: …and it says it saved under the new name", msg === "Saved as “Tri Home 2”. Hidden from customers — add its sizes and prices in Settings → Sheds, then press Show.", msg);
     // 4. The shape fails: the next Save finishes it with one call.
     S.failOnce.save_style_d3 = 1;
     from = calls.length;

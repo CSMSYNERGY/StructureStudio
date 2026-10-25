@@ -137,7 +137,7 @@ async function openPortal(ctx) {
   await page.route(`**/${REF}.functions.supabase.co/**`, shell);
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  await page.getByText("Designer", { exact: true }).first().click();
+  await page.getByText("Sheds", { exact: true }).first().click();
   await page.waitForSelector(".ssd-frame.is-embedded", { timeout: 60000 });
   await settle(page, 1200);
   return { page, errors, calls };

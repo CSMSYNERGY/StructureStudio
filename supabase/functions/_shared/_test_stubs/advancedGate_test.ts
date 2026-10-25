@@ -198,9 +198,9 @@ Deno.test("the nav item and the page mount both ask advancedOn, never the held c
   // advancedClampOn is true while still asking; drawing from it would flash the item for everyone.
   assert(/\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL), "the nav item must be gated on advancedOn");
   assert(/\{advancedOpened && advancedOn && !gateLocked && \(/.test(SHELL), "the page mount must be gated on advancedOn");
-  // …and the item sits directly under Designer.
-  assert(/\{navItem\("designer", "Designer"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
-    "the Advanced item must come straight after Designer");
+  // …and the item sits directly under Sheds (the Designer nav item was relabelled Sheds on 2026-10-24).
+  assert(/\{navItem\("designer", "Sheds"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
+    "the Advanced item must come straight after Sheds");
 });
 
 Deno.test("both route clamps are handed the gate", () => {

@@ -343,7 +343,7 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
         </div>
       )}
       {canAdmin && !state.loading && !state.err && state.styles.length === 0 && (
-        <div style={{ fontSize: 13, color: "#64748B" }}>No building styles yet — add one in Settings → Structures first.</div>
+        <div style={{ fontSize: 13, color: "#64748B" }}>No building styles yet — add one in Settings → Sheds first.</div>
       )}
       {canAdmin && !state.loading && !state.err && state.styles.length > 0 && (
         <>
@@ -479,7 +479,7 @@ function AdvancedModeCard({ advanced, has3d = false }) {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_advanced_mode", enabled: want, targetClientId: target } });
       if (error || !data || data.error || !data.ok) throw new Error((error && error.message) || (data && data.error) || "Advanced mode wasn't saved. Try again.");
       setPending(want);
-      setMsg({ ok: want ? "Advanced is on. You'll find it in the menu, right under Designer." : "Advanced is off. It's gone from the menu." });
+      setMsg({ ok: want ? "Advanced is on. You'll find it in the menu, right under Sheds." : "Advanced is off. It's gone from the menu." });
       ssEntitlementChanged();
     } catch (e) { setMsg({ err: e.message || "Advanced mode wasn't saved. Try again." }); }
     setBusy(false);
@@ -492,7 +492,7 @@ function AdvancedModeCard({ advanced, has3d = false }) {
         <div style={{ flex: "1 1 260px", minWidth: 0 }}>
           <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Advanced mode</div>
           <p style={{ margin: 0, fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
-            Adds an Advanced page under Designer for designing a building from scratch with every shape control.
+            Adds an Advanced page under Sheds for designing a building from scratch with every shape control.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "0 0 auto" }}>

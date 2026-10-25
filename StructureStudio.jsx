@@ -21370,7 +21370,7 @@ const SSD_CSS = [
   '.ssd-main.ssd-foot{margin-top:20px;padding:14px 24px;border-top:1px solid var(--ss-line-card);background:var(--ss-panel)}',
   '.ssd-frame[data-ssd-bp="lg"] .ssd-main.ssd-foot{padding:14px 20px}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="sm"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="xs"] .ssd-main.ssd-foot{padding:14px 16px}',
-  // The portal's Designer tab floats a fixed "Feedback" pill in the bottom-right corner of the viewport
+  // The portal's Sheds tab floats a fixed "Feedback" pill in the bottom-right corner of the viewport
   // (right 20, bottom 20, 114x38, z-index 900). It takes two rules to keep the footer buttons out from under it.
   // The bar holds 72px under the buttons, so they come to rest above the pill at the end of the scroll; and the
   // buttons also stop short of the pill's column, because a page that is still scrolling carries them up through
@@ -21698,7 +21698,7 @@ function ssdFitS2(row) {
 // re-lays-out elements other observers already measured this frame, so the browser fires a window
 // "ResizeObserver loop completed with undelivered notifications" error on every breakpoint change,
 // and the global error hooks turn each one into an app_errors row.
-// `embedded` (the portal's Designer tab) adds is-embedded, which keeps the footer buttons clear of the
+// `embedded` (the portal's Sheds tab) adds is-embedded, which keeps the footer buttons clear of the
 // portal's fixed Feedback pill in the bottom-right corner.
 function SSDesignerFrame({ pal, embedded, children }) {
   const roRef = useRef(null);
@@ -24587,7 +24587,7 @@ function ssAdvMemo(clientId) {
 function ssAdvUnfinished(m, step, why, wanted) {
   const tail = why ? ` (${why})` : "";
   if (!m.hidden) {
-    return { ok: false, msg: `“${m.name}” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide.${tail}` };
+    return { ok: false, msg: `“${m.name}” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Sheds → Hide.${tail}` };
   }
   if (step === "rename") {
     return { ok: false, msg: `“${m.name}” is made and hidden from customers, but renaming it “${wanted}” didn't work. Press Save again to try again, or save it as “${m.name}”.${tail}` };
@@ -24873,7 +24873,7 @@ function SSAdvArt({ kind }) {
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
-  //   embedded = true  → the Designer tab inside portal.html: business users building
+  //   embedded = true  → the Sheds tab inside portal.html: business users building
   //                      quotes for customers (discounts, delivery fees, full tooling).
   //   embedded = false → the PUBLIC customer-facing page (index.html / tenant subdomains /
   //                      the "try it" link on marketing sites): anonymous shed-shoppers.
@@ -26083,7 +26083,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // PORTAL ONLY for now (Carolyn, 2026-08-20). index.html and portal.html load the SAME
   // compiled bundle, so without the `embedded` term the dock would also appear on the
   // anonymous public designer for any tenant holding a view_3d grant. `embedded` is true
-  // only when the portal's Designer tab is hosting us. Shipping it to the public page
+  // only when the portal's Sheds tab is hosting us. Shipping it to the public page
   // later is exactly this one term.
   //
   // ...and this is that one term. `open3d=1` is the embed asking for it explicitly, which is
@@ -26784,7 +26784,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, embedded]);
 
-  // ─── Open a design on demand (portal Designer tab) ───
+  // ─── Open a design on demand (portal Sheds tab) ───
   // The portal's Designs/Contacts "Open" buttons hand the persistent embedded designer an
   // { code, version } request instead of linking to the public page. Business users must
   // NEVER review a customer's design on the public page: it silently captures leads and
@@ -26808,7 +26808,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setAmendment(openDesign.amendment || null);
     if (openDesign.blank) {
       if (items.length > 0 || sel.style || sel.size) {
-        if (!window.confirm("Start a new building? This clears what's currently in the Designer tab.")) return;
+        if (!window.confirm("Start a new building? This clears what's currently in the Sheds tab.")) return;
       }
       setItems([]);
       setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
@@ -26839,12 +26839,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return;
     }
     if (!openDesign.code) return;
-    // The persistent Designer tab may hold in-progress work — hand-built, or a previously
+    // The persistent Sheds tab may hold in-progress work — hand-built, or a previously
     // opened design mid-edit. The old public links opened a NEW tab and could never
     // destroy it; this in-place load can, so it asks first (the same courtesy the
     // portal's openAccount extends before its remount discards the designer).
     if (items.length > 0 || sel.style || sel.size) {
-      if (!window.confirm("Opening this design will replace what's currently in the Designer tab. Continue?")) return;
+      if (!window.confirm("Opening this design will replace what's currently in the Sheds tab. Continue?")) return;
     }
     let cancelled = false;
     (async () => {
@@ -26888,7 +26888,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // what the in-designer "Design a new build instead" button does — the plan unlocks and
         // unitToLink resolves to null at submit, so the new version reads New rather than
         // inheriting the sold unit. No extra confirm here: openInDesigner already asked about
-        // replacing what is in the Designer tab, and the user clicked a button that says this.
+        // replacing what is in the Sheds tab, and the user clicked a button that says this.
         inventoryUnitRef.current = null;
         setNewBuildMode(true);
       } else {
@@ -31723,7 +31723,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         calShotRef.current = null;
         setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalAnswerSig({}); setAdminCalFix(null);
         setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
-        setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
+        setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Sheds tab to refresh it here." });
       } catch (e) {
         setAdminCalMsg({ ok: false, msg: e.message || "Save failed" });
       } finally { setAdminCalBusy(false); }
@@ -35121,7 +35121,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A SAVE THAT STOPS PART-WAY IS FINISHED, NEVER REPEATED (review ADV-1, 2026-09-29). The style it
   // made is remembered by id in SS_ADV_MADE, per account, for the life of the tab, and the next Save
   // (whatever the name) hides that style if it is still showing, renames it if the name changed
-  // (update_style, the rename Settings → Structures uses), then saves the shape onto it. A hide that
+  // (update_style, the rename Settings → Sheds uses), then saves the shape onto it. A hide that
   // fails says in plain words that customers can see the style and where to hide it by hand.
   //
   // A NAME ALREADY IN USE IS REFUSED (review ADV-2): the pricing import rejects a sheet row that more
@@ -35173,7 +35173,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Start from stops asking, and the portal stops warning before an account switch.
       advSeedRef.current = spec;
       setAdvName("");
-      setAdvMsg({ ok: true, msg: `Saved as “${made.name}”. Hidden from customers — add its sizes and prices in Settings → Structures, then press Show.`
+      setAdvMsg({ ok: true, msg: `Saved as “${made.name}”. Hidden from customers — add its sizes and prices in Settings → Sheds, then press Show.`
         + (made.name !== name ? " It kept its first name; rename it there if you like." : "") });
     } catch (e) {
       const why = (e && e.message) || "Save failed";
@@ -35528,7 +35528,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ))}
           </div>
         ) : (
-          <span className="ss-adv-note" style={{ marginTop: 0 }}>This style has no sizes yet, so the 3D is drawn on a {bldgW} × {bldgH}. Add its sizes in Settings → Structures.</span>
+          <span className="ss-adv-note" style={{ marginTop: 0 }}>This style has no sizes yet, so the 3D is drawn on a {bldgW} × {bldgH}. Add its sizes in Settings → Sheds.</span>
         )}
         <span className="ssd-plan-meta" style={{ display: "block", marginTop: 8 }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>
         <span className="ss-adv-note">Only what the 3D is drawn on. The size is not saved with the look.</span>

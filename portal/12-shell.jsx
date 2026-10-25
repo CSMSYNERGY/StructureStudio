@@ -1238,8 +1238,8 @@ function Dashboard({ session }) {
     // Switching account remounts the Designer, discarding anything in progress — and the Advanced
     // page, whose unsaved building (or save still going) is named too (review 2026-09-29).
     const advDirty = advancedDirtyRef.current;
-    const lose = designerOpened && advDirty ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page"
-      : advDirty ? "the building you haven't saved on the Advanced page" : "the design you have open in the Designer tab";
+    const lose = designerOpened && advDirty ? "the design you have open in the Sheds tab and the building you haven't saved on the Advanced page"
+      : advDirty ? "the building you haven't saved on the Advanced page" : "the design you have open in the Sheds tab";
     if ((designerOpened || advDirty) && !window.confirm(`Opening another account will discard ${lose}. Continue?`)) return;
     // A consumed Open request must not survive the switch: the remounted DesignerTab
     // would replay it on mount and silently rehydrate that customer's design (with its
@@ -1384,7 +1384,7 @@ function Dashboard({ session }) {
       const urlAsUser = (isOperator && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(rawAs)) ? rawAs : null;
       const crosses = urlView !== (viewing ? viewing.clientId : null);
       if (crosses && advancedDirtyRef.current) {
-        const lose = designerOpened ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page" : "the building you haven't saved on the Advanced page";
+        const lose = designerOpened ? "the design you have open in the Sheds tab and the building you haven't saved on the Advanced page" : "the building you haven't saved on the Advanced page";
         const ask = urlView ? `Opening another account will discard ${lose}. Continue?`
           : "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?";
         if (!window.confirm(ask)) {
@@ -2543,7 +2543,7 @@ function Dashboard({ session }) {
     // passes (NONADMIN_TABS holds "designer"), so nothing changes for owners, admins,
     // operators or a tenant predating migration 100.
     if (ssClampTab("designer", isOperator, canAdmin, myAccess, supportView) !== "designer") {
-      window.alert("Opening a design in the Designer isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
+      window.alert("Opening a design in Sheds isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
       return;
     }
     // `blank: true` (from "+ New inventory building") carries no code — the designer
@@ -2994,7 +2994,7 @@ function Dashboard({ session }) {
         <div className="ss-ws-nav">
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
-          {navItem("designer", "Designer")}
+          {navItem("designer", "Sheds")}
           {/* Directly under Designer (Carolyn 2026-09-28), and only where ssAdvancedOn says so —
               our own account, and a builder who turned Advanced mode on in Settings → Designer.
               `advancedOn` is false until the entitlement answers, so the item arrives late on a
@@ -3881,13 +3881,13 @@ function Dashboard({ session }) {
                 title="RealTime Pricing"
                 available
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>}
-                blurb="Bring your material costs into Structure Studio and build out every style and size with the exact materials each building needs. Update your costs each month or quarter and every building's price recalculates on its own — so you always know your true, current cost and profit margin. Set it up under Settings → Structures."
+                blurb="Bring your material costs into Structure Studio and build out every style and size with the exact materials each building needs. Update your costs each month or quarter and every building's price recalculates on its own — so you always know your true, current cost and profit margin. Set it up under Settings → Sheds."
                 bullets={[
                   "One material cost list; every building prices itself from it",
                   "Update costs monthly or quarterly — building prices refresh automatically",
                   "Know your real build cost and profit margin in real time",
                 ]}
-                cta={canAdmin ? { label: "Set it up — Settings → Structures", onClick: () => navigate("settings", "structures") } : null}
+                cta={canAdmin ? { label: "Set it up — Settings → Sheds", onClick: () => navigate("settings", "structures") } : null}
               />
             )}
             {/* Scheduling suite: live when schedUnlocked (operator, or the tenant's

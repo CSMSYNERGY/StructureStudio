@@ -5584,7 +5584,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
-          These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Structures</b> tab.
+          These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Sheds</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
         )}

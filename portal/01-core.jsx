@@ -180,7 +180,7 @@ window.ssLoadDesigner = function () {
     // dead for the rest of the session, and the user's retry is a page-level refresh away
     // either way.
     ssDesignerLoad = null;
-    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
+    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Sheds tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
   });
   return ssDesignerLoad;
 };
@@ -564,7 +564,7 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 // operators still have a password-only way into the console.)
 
 const TAB_META = {
-  designer: ["Designer", "Design a building and build an estimate"],
+  designer: ["Sheds", "Design a building and build an estimate"],
   // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
@@ -590,7 +590,7 @@ const TAB_META = {
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
   orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
-  settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
+  settings: ["Settings", "Sheds, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
   // Not "— coming soon" any more: RealTime Pricing shipped 2026-08-28 inside Settings →
   // Structures. This string is the page-header subtitle (12-shell.jsx), and it sits directly
@@ -1758,7 +1758,7 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
 function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
-    ["structures", "Structures", "Building styles, sizes, and base prices", null],
+    ["structures", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
     ["colors", "Colors", "Paint, shingle, and metal palettes", null],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],

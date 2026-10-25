@@ -1764,8 +1764,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                           <b>Show the building photo</b>
                           <span style={{ display: "block", color: "#64748B", fontSize: 12, marginTop: 1 }}>
                             {photo
-                              ? "The photo of the style they picked goes across the top when you haven't uploaded a top photo. It shows only for styles with “Image on estimate” ticked under Structures."
-                              : "The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures."}
+                              ? "The photo of the style they picked goes across the top when you haven't uploaded a top photo. It shows only for styles with “Image on estimate” ticked under Sheds."
+                              : "The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Sheds."}
                           </span>
                         </span>
                       </label>
@@ -1797,7 +1797,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       </div>
                       {pv.photo === "none" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
-                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
+                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Sheds.
                         </div>
                       )}
                       {/* "not_own": the photos ARE there and ticked, but were copied from another
@@ -1806,7 +1806,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                           where every tick is already on. */}
                       {pv.photo === "not_own" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
-                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
+                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Sheds.
                         </div>
                       )}
                       <iframe title={"Preview of your " + (tplKind === "invoice" ? "invoice" : "estimate") + " email"} sandbox="" srcDoc={pv.html}
@@ -4929,7 +4929,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
                           <span>All buildings</span>
                         </label>
                       ) : (
-                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Structures.</div>
+                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Sheds.</div>
                       ))}
                       {inGroup.map((t) => {
                         const mine = r.targets.indexOf(t.id) !== -1;
@@ -7363,7 +7363,7 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
         )}
         {(t === "building_style" || t === "building_size") && (
           <div style={{ fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12 }}>
-            The choices come from your catalog ({t === "building_style" ? "Structures → styles" : "Structures → sizes"}) every time the form loads, so they never go out of date.
+            The choices come from your catalog ({t === "building_style" ? "Sheds → styles" : "Sheds → sizes"}) every time the form loads, so they never go out of date.
             {((t === "building_style" ? meta?.catalog?.styles : meta?.catalog?.sizes) || []).length === 0 && " Your catalog has none yet."}
           </div>
         )}

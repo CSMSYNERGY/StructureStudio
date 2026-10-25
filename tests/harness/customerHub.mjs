@@ -209,7 +209,7 @@ try {
       active.length === 1 && active[0] === "Customer Hub", active.join(" | "));
     // The failure this guards is specific: a hub tab the rail does not recognise falls through
     // the clamp and lights Structures instead, on a perfectly valid URL.
-    ok("B: …not Structures", !active.includes("Structures"), active.join(" | "));
+    ok("B: …not Structures", !active.includes("Sheds"), active.join(" | "));
     await page.screenshot({ path: join(shots, "customer-hub-pipelines.png"), fullPage: true });
   }
 
@@ -281,7 +281,7 @@ try {
   if (narrow.length) {
     ok("E: no Customer Hub for someone without settings_crm", !narrow.includes("Customer Hub"), narrow.join(" | "));
     ok("E: no GHL Connection either", !narrow.includes("GHL Connection"), narrow.join(" | "));
-    ok("E: and they still have the areas they do hold", narrow.includes("Structures") && narrow.includes("My Profile"), narrow.join(" | "));
+    ok("E: and they still have the areas they do hold", narrow.includes("Sheds") && narrow.includes("My Profile"), narrow.join(" | "));
   }
 
   ok("Z: no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
