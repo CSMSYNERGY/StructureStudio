@@ -34,7 +34,12 @@ export const FIELD_TYPES: Record<string, { input: boolean; role?: ContactRole; g
   state: { input: true, role: "state", group: "Address", label: "State" },
   postal_code: { input: true, role: "zip", group: "Address", label: "Postal code" },
   country: { input: true, group: "Address", label: "Country" },
-  organization: { input: true, role: "company", group: "Address", label: "Organization" },
+  // "Organization", under Address, until 2026-10-25: Carolyn went looking for a company-name
+  // field on a form, didn't find one, and asked for it built — it was here all along, named
+  // after the contact column's old wording and filed with the postal fields. The TYPE KEY stays
+  // `organization` (changing it would orphan the field on every form already published); only
+  // what a builder reads changes. Personal, beside the name it sits next to on a real form.
+  organization: { input: true, role: "company", group: "Personal", label: "Company name" },
   website: { input: true, group: "Address", label: "Website" },
   text: { input: true, group: "General", label: "Short answer" },
   textarea: { input: true, group: "General", label: "Paragraph" },

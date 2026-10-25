@@ -13,6 +13,7 @@ import { cleanDefinition, cleanSettings, isUuid, recommendations, starterDefinit
 import { cleanDesign, EMAIL_STARTERS, MERGE_TAGS, renderEmailDesign, type Tokens } from "../_shared/emailBlocks.ts";
 import { companyTokens, loadTemplate, sendLeadAlert } from "../_shared/leadFormMail.ts";
 import { smsConsentSentence } from "../_shared/smsConsentText.ts";
+import { brandColorList } from "../_shared/brandColors.ts";
 
 export const LEAD_FORM_ACTIONS = new Set([
   "crm_forms_list", "crm_form_create", "crm_form_get", "crm_form_save", "crm_form_publish", "crm_form_unpublish",
@@ -56,7 +57,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
       admin.from("crm_pipelines").select("id, name, position").eq("client_id", clientId).is("archived_at", null).order("position"),
       admin.from("crm_pipeline_stages").select("id, pipeline_id, name, position, kind").eq("client_id", clientId).is("archived_at", null).order("position"),
       admin.from("client_settings").select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle(),
-      admin.from("client_configs").select("accent_color").eq("client_id", clientId).maybeSingle(),
+      admin.from("client_configs").select("accent_color, brand_colors").eq("client_id", clientId).maybeSingle(),
       admin.from("building_styles").select("label").eq("client_id", clientId).eq("active", true).order("sort_order"),
       admin.from("building_sizes").select("label, width_ft, length_ft").eq("client_id", clientId).eq("active", true).order("width_ft").order("length_ft"),
       companyTokens(admin, clientId),
@@ -85,6 +86,10 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
       brand: {
         companyName: company.name, logoUrl: company.logoUrl,
         accent: /^#[0-9a-fA-F]{6}$/.test(String(cfg.data?.accent_color ?? "")) ? cfg.data.accent_color : null,
+        // The brand palette (336), drawn as one-click swatches under every color control in the
+        // designer. Separate from `accent`: that one IS the designer's accent and drives the
+        // "Your brand" theme, while these are the builder's other colors, which no theme owns.
+        colors: brandColorList(cfg.data?.brand_colors),
       },
     });
   }
@@ -230,9 +235,16 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
   // ── Email templates ───────────────────────────────────────────────────────────────────────
   const TPL_COLS = "id, name, purpose, subject, preheader, design, created_at, updated_at";
   if (action === "crm_email_tpl_list") {
-    const { data, error } = await admin.from("email_templates").select("id, name, purpose, subject, updated_at").eq("client_id", clientId).order("updated_at", { ascending: false }).limit(200);
+    // The brand palette rides along (336). The email editor is its OWN hub with its own list
+    // call, so it never sees crm_forms_list's `brand` block — without this the swatches would
+    // appear under a form's colors and be missing under an email's, which is exactly the
+    // half-built version Carolyn asked not to have.
+    const [{ data, error }, cfg] = await Promise.all([
+      admin.from("email_templates").select("id, name, purpose, subject, updated_at").eq("client_id", clientId).order("updated_at", { ascending: false }).limit(200),
+      admin.from("client_configs").select("brand_colors").eq("client_id", clientId).maybeSingle(),
+    ]);
     if (error) return dbFail(req, clientId, "load your email templates", error);
-    return json({ ok: true, templates: data ?? [], starters: Object.entries(EMAIL_STARTERS).map(([key, v]) => ({ key, name: v.name, purpose: v.purpose })), mergeTags: MERGE_TAGS });
+    return json({ ok: true, templates: data ?? [], starters: Object.entries(EMAIL_STARTERS).map(([key, v]) => ({ key, name: v.name, purpose: v.purpose })), mergeTags: MERGE_TAGS, brandColors: brandColorList(cfg.data?.brand_colors) });
   }
 
   if (action === "crm_email_tpl_create") {

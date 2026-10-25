@@ -73,6 +73,40 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 // stricter they could not save a value the server would happily accept.
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
+// ssHexColor — any way a person can hand you a color, in; #RRGGBB, out; null when it isn't one.
+// Carolyn 2026-10-25: "in the form colors when I try to paste a color code from somewhere else
+// it doesn't let me paste." Every color control in the portal used to be a bare
+// <input type="color"> — an OS color well, with no text in it to paste into — so this exists to
+// let a hex BOX sit in front of the well and take whatever a brand kit, a screenshot tool or a
+// website's CSS puts on the clipboard: #D97706, d97706, #FFF, rgb(217 119 6), trailing comma.
+//
+// Six digits out, upper case, always, so one color has one spelling: "#fff" and "#FFFFFF" must
+// not be able to sit in a palette looking like two swatches. An 8-digit #RRGGBBAA is REFUSED
+// rather than truncated — these values are painted into emails, where no inbox honours alpha,
+// and a silently-dropped alpha is a color that looks right here and wrong in the inbox.
+// _shared/brandColors.ts normalizeHex is the server's copy of this (minus rgb(), which only a
+// paste produces); they are deliberately the same rule, so nothing the UI accepts is dropped.
+// How many brand colors a builder may keep (migration 336). The same number as
+// _shared/brandColors.ts BRAND_COLOR_MAX, which is the one that actually truncates: twelve
+// swatches still fit one row under a color control in the designer's side panel, and a palette
+// longer than that is a style guide, not a set of quick picks.
+const SS_BRAND_COLOR_MAX = 12;
+
+const ssHexColor = (raw) => {
+  const s = String(raw == null ? "" : raw).trim().replace(/[,;]+$/, "");
+  const m = s.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) {
+    const h = m[1];
+    return "#" + (h.length === 3 ? h[0] + h[0] + h[1] + h[1] + h[2] + h[2] : h).toUpperCase();
+  }
+  const rgb = s.match(/^rgba?\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})/i);
+  if (rgb) {
+    const p = [rgb[1], rgb[2], rgb[3]].map(Number);
+    if (p.every((n) => n >= 0 && n <= 255)) return "#" + p.map((n) => n.toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  return null;
+};
+
 const SS_ERR_SOURCE = "portal";
 // The tenant every row is filed under. This read `window.__SS_CLIENT_ID__`, which nothing in
 // the repo has ever assigned, and the portal's own URLs carry `?view=`, never `?client=` — so

@@ -27,6 +27,7 @@ import { cleanContactsView, mergePrefs } from "../_shared/savePrefs.ts";
 // Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
 import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
+import { brandColorList } from "../_shared/brandColors.ts";
 import { replyFromNumber, sendTenantSms } from "../_shared/smsSend.ts";
 // An opt-out read the way the send path reads it, and worded by its reason (crm_record, crm_record_consent).
 import { readSmsOptOut, smsOptOutFacts, smsOptOutRefusal } from "../_shared/smsOptOut.ts";
@@ -1876,7 +1877,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // fallback note below.
       admin
         .from("client_configs")
-        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
+        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row, brand_colors")
         .eq("client_id", clientId)
         .maybeSingle(),
       // The builder's default login-code channel (migration 231) — see the note below.
@@ -2071,6 +2072,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // Building styles per row on the designer (232). null = never chosen, which the card
         // shows as 8 and the designer treats as 8 — the same default, stated in two places.
         stylesPerRow: (cfg as { styles_per_row?: number | null } | null)?.styles_per_row ?? null,
+        // The brand palette (migration 336). Always an array here, so the Branding card can map
+        // over it without a null check on a tenant who has never saved one.
+        brandColors: brandColorList((cfg as { brand_colors?: unknown } | null)?.brand_colors),
       },
     });
   }
@@ -2593,6 +2597,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
       updates[col] = val;
     }
+    // BRAND PALETTE (migration 336). Carolyn 2026-10-25: "in the company settings I want to be
+    // able to add additional brand colors and then those colors to show in the forms as easy
+    // selections and also to show in the email as easy selection."
+    //
+    // Hex-only, unlike accentColor/headerBg above: a swatch is painted into a form's inline style
+    // and into an email's HTML, where a gradient is not a color any inbox can use. The list is
+    // REBUILT from scratch, never spread, and an entry whose hex doesn't pass is DROPPED rather
+    // than refusing the whole save — the card stops a bad hex at the control, so a drop here means
+    // something hand-rolled the request.
+    if ("brandColors" in payload) {
+      const raw = (payload as any).brandColors;
+      if (raw !== null && raw !== undefined && !Array.isArray(raw)) return json({ error: "Brand colors must be a list." }, 400);
+      updates.brand_colors = brandColorList(raw);
+    }
+
     // BUILDING STYLES PER ROW (migration 232). Carolyn 2026-09-14 @7:10: a ninth style wrapped to a
     // second row of the designer's style bar; the bar now scrolls, and each builder picks how many
     // photos sit side by side. 5..8 because below 5 a tile is wider than the photo is worth and
@@ -2636,7 +2655,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (Object.keys(updates).length === 0) return json({ error: "Nothing to save." }, 400);
     const { error: upErr } = await admin.from("client_configs").update(updates).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your branding", upErr);
-    return json({ ok: true, logoUrl: updates.logo_url ?? null });
+    // brandColors comes back so the Branding card shows what was STORED, not what was typed:
+    // a duplicate or an unusable hex is dropped by brandColorList, and the card would otherwise
+    // keep showing the row it just lost.
+    return json({ ok: true, logoUrl: updates.logo_url ?? null, brandColors: ("brand_colors" in updates ? updates.brand_colors : undefined) });
   }
 
   // Upload-only: store an image in the 'branding' bucket and return its public

@@ -115,10 +115,16 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
   // at 8 if the default ever moves. Same idea as the logo: the key is sent only when the owner
   // actually picked a different number, and save_branding leaves the column alone otherwise.
   const [brandSprStored, setBrandSprStored] = useState(null);
+  // The brand palette (336): its own state, not a key on `form`, because it is a LIST and the
+  // `set()` helper on this page edits strings. Staged like the logo — Save Branding sends it.
+  const [brandColors, setBrandColors] = useState([]);
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
-      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg,
+      // Rows with no usable color are dropped here as well as on the server, so what the card
+      // shows after a save is what was actually stored.
+      brandColors: brandColors.filter((c) => ssHexColor(c.hex)).map((c) => ({ name: String(c.name || "").trim(), hex: ssHexColor(c.hex) })) };
     if (form.brandStylesPerRow !== (brandSprStored || "8")) body.stylesPerRow = Number(form.brandStylesPerRow);
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
     else if (clearLogo) { body.logoUrl = ""; }
@@ -126,6 +132,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
     setBrandBusy(false);
     if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
     if ("stylesPerRow" in body) setBrandSprStored(String(body.stylesPerRow));
+    setBrandColors(Array.isArray(data.brandColors) ? data.brandColors : body.brandColors);
     setBrandMsg({ ok: clearLogo && !logoDataUrl ? "Branding saved — your logo was removed, so the designer shows your company initials." : "Branding saved — your designer link now reflects it." });
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
@@ -169,6 +176,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
       setBrandSprStored(b.stylesPerRow ? String(b.stylesPerRow) : null);
+      setBrandColors(Array.isArray(b.brandColors) ? b.brandColors.map((c) => ({ name: String(c.name || ""), hex: String(c.hex || "") })) : []);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
@@ -929,14 +937,17 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} onKeyDown={brandKeyDown} /></div>
           <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Estimate" /></div>
+          {/* Hex box first, well second (Carolyn 2026-10-25: "I want the HEX codes to show the
+              first"). The well can only hold a hex, so it falls back to black for the gradient
+              header_bg legitimately carries — the box is the control, the well is the picker. */}
           <div><span style={S.lbl}>Accent color</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} /></div></div>
+              <input style={{ ...S.input, flex: 1, fontFamily: "ui-monospace,Menlo,Consolas,monospace" }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} aria-label="Accent color hex code" spellCheck={false} />
+              <input type="color" value={ssHexColor(form.brandAccent) || "#000000"} onChange={set("brandAccent")} aria-label="Accent color picker" style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} /></div></div>
           <div><span style={S.lbl}>Header background</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
+              <input style={{ ...S.input, flex: 1, fontFamily: "ui-monospace,Menlo,Consolas,monospace" }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} aria-label="Header background hex code or gradient" spellCheck={false} />
+              <input type="color" value={ssHexColor(form.brandHeaderBg) || "#000000"} onChange={set("brandHeaderBg")} aria-label="Header background picker" style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} /></div></div>
           {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 232). A ninth style
               wrapped to a second row of her style bar; the bar now scrolls instead, and this is
               how many photos sit side by side before it does. Four buttons, not a number box:
@@ -992,6 +1003,60 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
               a public bucket onto the tenant's own designer page). The text used to offer
               it while both the input and the server refused it. */}
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / WebP, under 2MB. Preview shows it on your header color.</div>
+        </div>
+        {/* BRAND COLORS (migration 336, Carolyn 2026-10-25) —
+            "In the company settings I want to be able to add additional brand colors and then
+            those colors to show in the forms as easy selections and also to show in the email
+            as easy selection."
+
+            Accent and Header background above are the DESIGNER's two colors and keep their own
+            columns. These are the rest of the brand — the barn red, the cream, the one off the
+            truck wrap — and they exist to be PICKED somewhere else: every color control in the
+            form designer and the email editor draws this list as one-click swatches. So this
+            card is the one place a palette is typed, and nowhere else asks for it again.
+
+            Staged like the logo and styles-per-row: editing here changes nothing until
+            Save Branding. The hex box is the control and the well is the picker, in that order,
+            because a hex is what a brand kit gives you and a well has nothing to paste into. */}
+        <div style={{ marginBottom: 12 }}>
+          <span style={S.lbl}>Brand colors</span>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8, lineHeight: 1.45 }}>
+            Your other brand colors. They appear as one-click swatches on every color in the
+            form designer and the email editor. Up to {SS_BRAND_COLOR_MAX}.
+          </div>
+          {brandColors.length === 0 && (
+            <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 8 }}>No brand colors yet.</div>
+          )}
+          {brandColors.map((c, i) => {
+            const hex = ssHexColor(c.hex);
+            const upd = (patch) => setBrandColors((p) => p.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+            return (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, maxWidth: 520 }}>
+                <input style={{ ...S.input, flex: "0 0 130px", fontFamily: "ui-monospace,Menlo,Consolas,monospace", textTransform: "uppercase" }}
+                  value={c.hex} placeholder="#RRGGBB" spellCheck={false} aria-label={"Brand color " + (i + 1) + " hex code"}
+                  onChange={(e) => upd({ hex: e.target.value })} onKeyDown={brandKeyDown}
+                  onBlur={() => upd({ hex: hex || "" })} />
+                <input type="color" value={hex || "#000000"} aria-label={"Brand color " + (i + 1) + " picker"}
+                  onChange={(e) => upd({ hex: e.target.value.toUpperCase() })}
+                  style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} />
+                <input style={{ ...S.input, flex: 1 }} value={c.name} maxLength={40} placeholder="Name it (optional)"
+                  aria-label={"Brand color " + (i + 1) + " name"} onChange={(e) => upd({ name: e.target.value })} onKeyDown={brandKeyDown} />
+                <button type="button" aria-label={"Remove brand color " + (i + 1)} onClick={() => setBrandColors((p) => p.filter((_, j) => j !== i))}
+                  style={{ ...S.btn("#FEF2F2", "#DC2626"), flexShrink: 0 }}>✕</button>
+              </div>
+            );
+          })}
+          {/* A row with no usable hex is dropped on save (the server rebuilds the list), so the
+              hint says so rather than letting a blank row look saved. */}
+          {brandColors.some((c) => !ssHexColor(c.hex)) && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 2, marginBottom: 6 }}>
+              A row without a color like #D97706 is left out when you save.
+            </div>
+          )}
+          {brandColors.length < SS_BRAND_COLOR_MAX && (
+            <button type="button" onClick={() => setBrandColors((p) => [...p, { name: "", hex: "" }])}
+              style={{ ...S.btn("#F1F5F9", "#334155"), marginTop: 2 }}>+ Add a brand color</button>
+          )}
         </div>
         <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>

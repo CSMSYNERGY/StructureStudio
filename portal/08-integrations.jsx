@@ -6674,8 +6674,8 @@ function ssfRenderer() {
 // FIELD_TYPES (the server rebuilds every definition from that list, so a type missing there is
 // simply dropped on save).
 const SSF_PALETTE = [
-  ["Personal info", [["full_name", "Full name", "👤"], ["first_name", "First name", "🪪"], ["last_name", "Last name", "🪪"], ["phone", "Phone", "📞"], ["email", "Email", "✉️"], ["date_of_birth", "Date of birth", "🎂"]]],
-  ["Address", [["address", "Address", "📍"], ["city", "City", "🏙️"], ["state", "State", "🗺️"], ["postal_code", "Postal code", "📮"], ["country", "Country", "🌎"], ["organization", "Organization", "🏢"], ["website", "Website", "🔗"]]],
+  ["Personal info", [["full_name", "Full name", "👤"], ["first_name", "First name", "🪪"], ["last_name", "Last name", "🪪"], ["phone", "Phone", "📞"], ["email", "Email", "✉️"], ["date_of_birth", "Date of birth", "🎂"], ["organization", "Company name", "🏢"]]],
+  ["Address", [["address", "Address", "📍"], ["city", "City", "🏙️"], ["state", "State", "🗺️"], ["postal_code", "Postal code", "📮"], ["country", "Country", "🌎"], ["website", "Website", "🔗"]]],
   ["StructureStudio", [["building_style", "Building style", "🏠"], ["building_size", "Building size", "📐"], ["delivery_zip", "Delivery zip", "🚚"], ["timeframe", "Timeframe to buy", "⏱️"]]],
   ["General", [["text", "Short answer", "✏️"], ["textarea", "Paragraph", "📝"], ["select", "Dropdown", "🔽"], ["radio", "Single choice", "🔘"], ["checkboxes", "Multiple choice", "☑️"], ["number", "Number", "#️⃣"], ["date", "Date", "📅"], ["hidden", "Hidden value", "🙈"]]],
   ["Consent", [["sms_consent", "Text message consent", "💬"], ["terms", "Terms & privacy", "📄"]]],
@@ -6797,7 +6797,7 @@ function FormsHub({ clientId, canEdit }) {
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
     setErr("");
-    ssfCall("crm_forms_list").then(setData, (e) => setErr(e.message));
+    ssfCall("crm_forms_list").then((d) => { setData(d); ssfSetBrand(d?.brand?.colors); }, (e) => setErr(e.message));
   }, []);
   useEffect(() => { load(); }, [load]);
   const open = (id) => { ssfUrlParam("form", id); setEditId(id); };
@@ -7197,13 +7197,76 @@ function SsfSeg({ value, options, onChange, disabled }) {
     </div>
   );
 }
+// ══ COLOR CONTROLS ═══════════════════════════════════════════════════════════════════════════
+// Carolyn 2026-10-25, three asks about one control: "I want the HEX codes to show the first when
+// selecting a color option", "in the company settings I want to be able to add additional brand
+// colors and then those colors to show in the forms as easy selections and also to show in the
+// email as easy selection", and "in the form colors when I try to paste a color code from
+// somewhere else it doesn't let me paste".
+//
+// The last one was not a bug in anything we wrote — the control WAS a bare <input type="color">
+// and a read-only <code>, and an OS color well has no text to paste into. So the hex is now a
+// real text box, FIRST, and the well sits beside it as the picker. Paste anything a brand kit
+// hands you: #D97706, d97706, #FFF, rgb(217 119 6), or with a stray space or comma.
+
+// The hex a paste can look like lives in 01-core as ssHexColor — the Branding card's palette
+// editor needs the same rule, and two copies of "what counts as a color" is how one of them
+// drifts.
+const ssfHex = (raw) => ssHexColor(raw);
+
+// THE BRAND PALETTE, module-level on purpose. The swatches belong under every color control in
+// both editors, and the two editors are separate hubs with separate list calls (FormsHub reads
+// `brand.colors`, EmailTemplatesHub reads `brandColors`) — threading a prop from each hub down
+// through the style panel, the block panel and the field panel would mean touching eight
+// components to paint one row of swatches, and would still leave the next color control to
+// remember it. Each hub announces the palette as it loads; SsfColor subscribes.
+let SSF_BRAND = [];
+const ssfBrandSubs = new Set();
+function ssfSetBrand(list) {
+  SSF_BRAND = Array.isArray(list) ? list.filter((c) => c && ssfHex(c.hex)).map((c) => ({ name: String(c.name || ""), hex: ssfHex(c.hex) })) : [];
+  ssfBrandSubs.forEach((fn) => fn(SSF_BRAND));
+}
+function useSsfBrand() {
+  const [v, setV] = useState(SSF_BRAND);
+  useEffect(() => { ssfBrandSubs.add(setV); setV(SSF_BRAND); return () => { ssfBrandSubs.delete(setV); }; }, []);
+  return v;
+}
+
 function SsfColor({ label, value, onChange, disabled }) {
+  const brand = useSsfBrand();
+  // `draft` holds what is being TYPED, including the half-finished "#D9" nobody can use yet, so
+  // the box doesn't fight the person's cursor. null means "show the saved value". A draft that
+  // never becomes a color is dropped on blur rather than saved as garbage.
+  const [draft, setDraft] = useState(null);
+  const saved = ssfHex(value) || "";
+  const shown = draft == null ? (saved || String(value || "")) : draft;
+  const take = (raw) => { const h = ssfHex(raw); setDraft(raw); if (h) onChange(h); };
+  const sw = (hex, name, on) => (
+    <button key={hex + name} type="button" disabled={disabled} title={name ? `${name} · ${hex}` : hex}
+      aria-label={name ? `${name} ${hex}` : hex} onClick={() => { setDraft(null); onChange(hex); }}
+      style={{ width: 20, height: 20, borderRadius: 4, background: hex, cursor: disabled ? "default" : "pointer", padding: 0,
+        border: on ? "2px solid #0F172A" : "1px solid rgba(15,23,42,.25)", boxShadow: on ? "0 0 0 2px #FFF inset" : "none" }} />
+  );
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#334155", marginBottom: 6 }}>
-      <input type="color" disabled={disabled} value={/^#[0-9a-f]{6}$/i.test(value || "") ? value : "#000000"} onChange={(e) => onChange(e.target.value)} style={{ width: 34, height: 26, border: "1px solid #CBD5E1", borderRadius: 4, padding: 0, background: "none" }} />
-      <span style={{ flex: 1 }}>{label}</span>
-      <code style={{ fontSize: 11, color: "#64748B" }}>{value}</code>
-    </label>
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input type="text" disabled={disabled} value={shown} placeholder="#RRGGBB" spellCheck={false} aria-label={`${label} hex code`}
+          onChange={(e) => take(e.target.value)}
+          onPaste={(e) => { const t = e.clipboardData?.getData("text"); if (t && ssfHex(t)) { e.preventDefault(); setDraft(null); onChange(ssfHex(t)); } }}
+          onBlur={() => setDraft(null)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setDraft(null); } }}
+          style={{ ...S.input, flex: 1, minWidth: 0, fontFamily: "ui-monospace,Menlo,Consolas,monospace", fontSize: 12, textTransform: "uppercase" }} />
+        <input type="color" disabled={disabled} value={saved || "#000000"} aria-label={`${label} color picker`}
+          onChange={(e) => { setDraft(null); onChange(e.target.value.toUpperCase()); }}
+          style={{ width: 32, height: 30, border: "1px solid #CBD5E1", borderRadius: 4, padding: 0, background: "none", flexShrink: 0, cursor: disabled ? "default" : "pointer" }} />
+      </div>
+      {brand.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 5 }}>
+          {brand.map((c) => sw(c.hex, c.name, c.hex === saved))}
+        </div>
+      )}
+    </div>
   );
 }
 function SsfNum({ value, onChange, min, max, suffix = "px", disabled }) {
@@ -7734,7 +7797,7 @@ function EmailTemplatesHub({ canEdit }) {
   const [editId, setEditId] = useState(() => ssfReadParam("tpl"));
   const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState(false);
-  const load = useCallback(() => { setErr(""); ssfCall("crm_email_tpl_list").then(setData, (e) => setErr(e.message)); }, []);
+  const load = useCallback(() => { setErr(""); ssfCall("crm_email_tpl_list").then((d) => { setData(d); ssfSetBrand(d?.brandColors); }, (e) => setErr(e.message)); }, []);
   useEffect(() => { load(); }, [load]);
   const open = (id) => { ssfUrlParam("tpl", id); setEditId(id); };
   const close = () => { ssfUrlParam("tpl", null); setEditId(null); load(); };
