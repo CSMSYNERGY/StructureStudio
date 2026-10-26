@@ -293,6 +293,22 @@ Deno.test("ssDoorWindowCount: one per leaf on the four built looks, only when th
   assert(r.y0 > single.h * 0.42 && r.y1 < single.h, JSON.stringify(r));
 });
 
+// A door's own look (door looks P2, get_fixtures' doorLook on the row) is read by the same rule: glass of
+// the look's own in its top panel takes the lite's place, so it is neither drawn nor charged nor placed.
+Deno.test("a door look with glass up top charges no lite; the same row with a plain look or none does", () => {
+  const glassTop = { v: 1, base: "classic", src: { leaves: 1, hinge: "left" }, panels: [{ fill: "x" }, { fill: "lite", rows: 2, cols: 2 }] };
+  const plain = { v: 1, base: "classic", src: { leaves: 1, hinge: "left" } };
+  const withLook = (spec: any) => DESIGNER_FIXTURES.map((f: any) => (f.id === "fx-classic" ? { ...f, doorLook: { id: "look-1", v: 1, spec, thumbUrl: null } } : f));
+  const classic = [ITEMS[0]];
+  assertEquals(classic[0].fixtureItemId, "fx-classic");
+  assertEquals(W.ssDoorWindowLines(classic, DESIGNER_FIXTURES).length, 1, "no look");
+  assertEquals(W.ssDoorWindowLines(classic, withLook(plain)).length, 1, "a look that says nothing takes its base's lite");
+  assertEquals(W.ssDoorWindowLines(classic, withLook(glassTop)).length, 0, "glass of its own up top takes the lite's place");
+  assertEquals(W.ssDoorWindowLines(classic, withLook({ ...glassTop, base: "basic" })).length, 1, "a look whose base is not the row's is ignored");
+  assert(W.ssItemPlacesKey(classic[0], "fx-lite", withLook(plain)), "placed for the size's inclusion with a plain look");
+  assertFalse(W.ssItemPlacesKey(classic[0], "fx-lite", withLook(glassTop)), "and not with glass of its own up top");
+});
+
 Deno.test("the designer's payload: one inDoor window line per drawn leaf, naming its door, at the stamped price", () => {
   const lines = W.payload(ITEMS, C({}), "south");
   assertEquals(lines.map((l: any) => [l.name, l.fixtureItemId, l.price, l.inDoor, l.doorName, l.wall]), [

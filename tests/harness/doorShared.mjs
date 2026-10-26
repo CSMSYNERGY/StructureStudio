@@ -176,7 +176,7 @@ export const N_PAGE = ({ sel, yaws, reach }) => {
   // opening; and whether any sits in the room behind a door's glass.
   const leafSlab = meshesOf(grp).find((o) => o.geometry.parameters && Math.abs(o.geometry.parameters.depth - 0.16) < 1e-6 && !isPhoto(o));
   const slabC = leafSlab ? across(wbox(leafSlab).c) : 0;
-  const rooms = meshesOf(grp).filter((o) => o.userData && o.userData.ssDoorPart === "windowInterior").map(wbox);
+  const rooms = meshesOf(grp).filter((o) => o.userData && o.userData.ssGlassRoom).map(wbox);
   const gaps = meshesOf(grp).filter((o) => o.userData && o.userData.ssDoorGap).map((o) => {
     const b = wbox(o), xs = [], ns = [];
     for (let k = 0; k < 8; k++) { const p = [k & 1 ? b.mx[0] : b.mn[0], 0, k & 4 ? b.mx[2] : b.mn[2]]; xs.push(along(p)); ns.push(across(p) - slabC); }

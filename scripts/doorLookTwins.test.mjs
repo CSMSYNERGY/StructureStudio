@@ -6,7 +6,7 @@
 // BUILDER'S OWN 3D DOOR" and "END DOOR LOOKS"). These hold that block to doorLook.ts without a browser:
 //   - the block is the same text in both twins;
 //   - its table, base defaults, finishes and size limit are doorLook.ts's;
-//   - its cleaner gives exactly what sanitizeDoorLook gives, on hand-made specs and a seeded fuzz of them;
+//   - its cleaner gives exactly what sanitizeDoorLook gives, on hand-made specs and 3000 fuzzed ones (500+ distinct clean);
 //   - a spec that says nothing measures a leaf exactly as the base does (ssDoorLeafPlan), and takes exactly
 //     the windows and transoms its base takes (ssDoorWindowFit), at every catalog size here.
 // (doorLook.test.ts, under Deno, holds the twins' table to the server's too; this runs where Deno does not.)
@@ -97,28 +97,47 @@ test("the twins' cleaner gives what sanitizeDoorLook gives, on hand-made specs",
 });
 
 test("...and on a seeded fuzz of them: values swapped, dropped, stretched and retyped", () => {
+  // mulberry32: exact in 32-bit integer steps (an LCG done in floats loses its low bits past 2^53 and cycles).
   let seed = 20261027;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  const rnd = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
-  const NOISE = [null, undefined, -1, 0, 0.05, 0.5, 0.97, 1.4, 3, 12, 40, "0.3", "x", "rails", "hidden", "custom", "#123456", "door", [], [0.2, 0.6], {}, true];
-  const mutate = (v, depth) => {
-    if (Array.isArray(v)) return rnd() < 0.2 ? pick(NOISE) : v.filter(() => rnd() > 0.1).map((x) => mutate(x, depth + 1));
+  // Every word the table takes (a base, a fill, a part type, a hinge, a handle...), so a fuzzed value is as
+  // often another VALID choice as junk.
+  const words = new Set();
+  const walk = (n) => { if (!n || typeof n !== "object") return; if (Array.isArray(n.of)) n.of.forEach((x) => (typeof x === "string" ? words.add(x) : walk(x)));
+    if (n.of && !Array.isArray(n.of)) Object.values(n.of).forEach(walk); if (n.keys) Object.values(n.keys).forEach(walk); };
+  walk(DOOR_LOOK_FIELDS);
+  const WORDS = [...words, "left", "right", "door", "trim", "#123456", "Plank", " lite "];
+  const JUNK = [null, undefined, -1, 0, 0.05, 0.5, 0.97, 1.4, 3, 12, 40, "0.3", "x", [], [0.2, 0.6], [0.3, 0.33, 0.6, 0.9, 0.95], {}, true];
+  const noise = () => (rnd() < 0.5 ? pick(WORDS) : rnd() < 0.5 ? rnd() * 14 - 1 : pick(JUNK));
+  const mutate = (v, depth, key) => {
+    // The keys every spec needs are kept most of the time, or nearly every case would be refused at the door.
+    const keep = depth === 0 ? 0.97 : 0.92;
+    if (Array.isArray(v)) return rnd() < 0.15 ? noise() : v.filter(() => rnd() > 0.1).map((x) => mutate(x, depth + 1));
     if (v && typeof v === "object") {
-      if (rnd() < 0.05) return pick(NOISE);
+      if (rnd() < 0.04) return noise();
       const o = {};
-      for (const [k, x] of Object.entries(v)) if (rnd() > 0.08) o[k] = depth < 4 ? mutate(x, depth + 1) : x;
-      if (rnd() < 0.1) o[pick(["extra", "fIn", "count", "at", "t", "fill", "rows"])] = pick(NOISE);
+      for (const [k, x] of Object.entries(v)) if (rnd() < keep) o[k] = depth < 4 ? mutate(x, depth + 1, k) : x;
+      if (rnd() < 0.15) o[pick(["extra", "fIn", "rails", "count", "at", "t", "fill", "rows", "v", "type", "finish", "hex", "u1", "wIn"])] = noise();
       return o;
     }
-    return rnd() < 0.25 ? pick(NOISE) : v;
+    if (depth === 1 && (key === "v" || key === "base") && rnd() < 0.9) return v;
+    return rnd() < 0.3 ? noise() : typeof v === "number" && rnd() < 0.3 ? v * (0.5 + rnd()) : v;
   };
   let cleaned = 0;
-  for (let i = 0; i < 1500; i++) {
+  const distinct = new Set();
+  for (let i = 0; i < 3000; i++) {
     const raw = mutate(pick(HAND.slice(0, 7)), 0);
     same(raw);
-    if (sanitizeDoorLook(raw)) cleaned++;
+    const c = sanitizeDoorLook(raw);
+    if (c) { cleaned++; distinct.add(JSON.stringify(c)); }
   }
-  assert.ok(cleaned > 200, `the fuzz must reach clean specs too (${cleaned} did)`);
+  assert.ok(cleaned > 800 && distinct.size > 500, `the fuzz must reach many different clean specs too (${cleaned} clean, ${distinct.size} distinct)`);
 });
 
 // Catalog door sizes (inches), single and double leaves, as ssDoorLeafFt cuts them.
@@ -179,6 +198,11 @@ test("a look's own glass up top refuses a panel window, and a rail too high refu
   assert.ok(fit({ ...bare("basic"), parts: [{ t: "lite", u0: 0.2, v0: 0.1, u1: 0.8, v1: 0.35 }] }, "panel"), "a lite part below the mid rail leaves the top panel free");
   assert.ok(fit(bare("basic"), "top", 29, 10), "a plain Basic takes the transom");
   assert.equal(fit({ ...bare("basic"), frame: { rails: [0.8] } }, "top", 29, 10), null, "a rail at 80% leaves no room for the band");
+  // At the edge (this leaf: the band's bottom is 4.927 ft up, a rail's top is its centre + 0.145 ft): 74% fits, 75% does not.
+  assert.ok(fit({ ...bare("basic"), frame: { rails: [0.74] } }, "top", 29, 10), "a rail at 74% still leaves room");
+  assert.equal(fit({ ...bare("basic"), frame: { rails: [0.75] } }, "top", 29, 10), null, "a rail at 75% does not");
+  // A brace across the whole leaf would run across a panel window's glass: none there.
+  assert.equal(fit({ ...bare("basic"), brace: { t: "z" } }, "panel"), null, "a leaf brace takes the top panel");
   assert.equal(fit({ ...bare("basic"), parts: [{ t: "lite", u0: 0.2, v0: 0.5, u1: 0.8, v1: 0.9 }] }, "top", 29, 10), null, "nor does glass of its own up there");
   assert.ok(fit(bare("zbrace"), "top", 29, 10), "the board doors still take one");
 });

@@ -4335,12 +4335,14 @@ function ssDoorLeafPlan(base, spec, w, h) {
   const parts = spec && Array.isArray(spec.parts) ? spec.parts : [];
   return { trim, F, railH, rails, panels, parts, def };
 }
-// The top panel of a leaf drawn in a spec, and whether it has glass of its own (a lite fill, or a
-// lite part reaching into it): a panel window goes there only when it has none.
+// The top panel of a leaf drawn in a spec, and whether something of the look's own takes it: glass (a
+// lite fill, or a lite part reaching into it), or a brace across the whole leaf, which would run across
+// a window's glass. A panel window goes there only when nothing does.
 function ssDoorSpecTopPanel(spec, w, h) {
   const lp = ssDoorLeafPlan(spec.base, spec, w, h), p = lp.panels[lp.panels.length - 1];
-  const glass = p.fill === "lite" || lp.parts.some((q) => q.t === "lite" && q.v1 * h > p.y0 && q.v0 * h < p.y1);
-  return { x0: lp.F, x1: w - lp.F, y0: p.y0, y1: p.y1, glass, lp };
+  const braceT = (spec.brace && spec.brace.t) || lp.def.brace;
+  const taken = p.fill === "lite" || braceT !== "none" || lp.parts.some((q) => q.t === "lite" && q.v1 * h > p.y0 && q.v0 * h < p.y1);
+  return { x0: lp.F, x1: w - lp.F, y0: p.y0, y1: p.y1, taken, lp };
 }
 // Where a transom's band must end in a spec's leaf: above SS_DOOR_TOP_FLOOR as today, and above the
 // highest mid rail's top; with no glass of the look's own reaching up into it. Its rail is the look's
@@ -4407,7 +4409,7 @@ function ssTrimDoorFields(w, h) {
 // hold it. `at` "panel" (or absent): in the upper panel, centred, with its casing and a clearance all
 // round. `at` "top": a transom, centred across the leaf with its top under the top rail.
 // `spec` (a door look, ssDoorCustomLookOf) measures the leaf the look draws instead: its own frame, its
-// top panel (which must have no glass of its own) and, for a transom, its highest rail. Absent or null,
+// top panel (which must hold no glass or leaf brace of its own) and, for a transom, its highest rail. Absent or null,
 // today's built look.
 function ssDoorWindowFit(w, h, winWIn, winHIn, at, spec) {
   const ww = Number(winWIn) / 12, wh = Number(winHIn) / 12;
@@ -4420,7 +4422,7 @@ function ssDoorWindowFit(w, h, winWIn, winHIn, at, spec) {
     return { x0: (w - ww) / 2, x1: (w + ww) / 2, y0, y1 };
   }
   const tp = spec ? ssDoorSpecTopPanel(spec, w, h) : null;
-  if (tp && tp.glass) return null;
+  if (tp && tp.taken) return null;
   const u = tp || ssTrimDoorFields(w, h).upper, pad = SS_DOOR_WIN_CASE_FT + SS_DOOR_WIN_PAD_FT;
   if (ww + 2 * pad > u.x1 - u.x0 + 1e-9 || wh + 2 * pad > u.y1 - u.y0 + 1e-9) return null;
   const cx = (u.x0 + u.x1) / 2, cy = (u.y0 + u.y1) / 2;
@@ -12798,7 +12800,9 @@ function buildShed3DModel(THREE, p) {
     const tr0 = top ? hole.y0 - SS_DOOR_WIN_CASE_FT - F : y1;
     const f0 = a0 + F, f1 = a1 - F, fy0 = y0 + F, fy1 = top ? tr0 : y1 - F;
     const mids = lp.rails.map((r) => y0 + r);
-    const panels = lp.panels.map((p, i) => ({ ...p, x0: f0, x1: f1, y0: i ? mids[i - 1] + lp.railH / 2 : fy0, y1: i < mids.length ? mids[i] - lp.railH / 2 : fy1 }));
+    // (A look's panel never reaches past the field's top: a transom fitted over a high rail on a short leaf.)
+    const panels = lp.panels.map((p, i) => ({ ...p, x0: f0, x1: f1, y0: i ? mids[i - 1] + lp.railH / 2 : fy0,
+      y1: i < mids.length ? (spec ? Math.min(mids[i] - lp.railH / 2, fy1) : mids[i] - lp.railH / 2) : fy1 }));
     // A panel window takes the top panel's place (its fill is not drawn); a fill needs a panel to sit in.
     const fillOn = (p, i) => p.y1 - p.y0 > 0.05 && !(hole && !top && i === panels.length - 1);
     // A look's glass, vents and raised panels sit in the field, cut to it, and never where a shopper's
@@ -12836,7 +12840,7 @@ function buildShed3DModel(THREE, p) {
     if ((dir === "v" || dir === "h") && f1 - f0 > 0.12 && fy1 - fy0 > 0.2) {
       const across = dir === "v", span = across ? f1 - f0 : fy1 - fy0, s0 = across ? f0 : fy0;
       const pitchFt = spec && spec.field && spec.field.pitchIn ? spec.field.pitchIn / 12 : 0.55;
-      const stops = !spec ? [] : lites.map((l) => inset(l.hole, -c))
+      const stops = !spec ? [] : lites.map((l) => inset(l.hole, -c)).concat(hole && !top ? [inset(hole, -c)] : [])
         .concat(parts.filter((p) => p.q.t === "vent" || p.q.t === "raised").map((p) => p.r))
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "raised").map(raisedFill))
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "vent").map((p) => { const v = ventFill(p); return { x0: v.cx - v.vs / 2, x1: v.cx + v.vs / 2, y0: v.cy - v.vs / 2, y1: v.cy + v.vs / 2 }; }));
@@ -12860,7 +12864,13 @@ function buildShed3DModel(THREE, p) {
     if (!top) put(wallBox(frM, wf, f0, f1, y1 - F, y1, 0.13, 0.06), tag("frame"));
     else doorTransomFrame(put, frM, wf, hole, a0, a1, y1, F);
     mids.forEach((my) => {
-      if (!spec || (my + lp.railH / 2 < fy1 && my - lp.railH / 2 > fy0)) put(wallBox(frM, wf, f0, f1, my - lp.railH / 2, my + lp.railH / 2, 0.13, 0.06), tag("midRail"));
+      // A look's rail stops under a transom rail it would run into (a transom fitted against it), and one
+      // the transom covers is not drawn.
+      if (!spec) put(wallBox(frM, wf, f0, f1, my - lp.railH / 2, my + lp.railH / 2, 0.13, 0.06), tag("midRail"));
+      else {
+        const r0 = my - lp.railH / 2, r1 = Math.min(my + lp.railH / 2, fy1);
+        if (r0 > fy0 && r1 - r0 > 0.02) put(wallBox(frM, wf, f0, f1, r0, r1, 0.13, 0.06), tag("midRail"));
+      }
     });
     // A BRACE is ONE wallBox turned in the wall plane, not a new primitive. wallBox already
     // orients the box to its wall (rotation.y on the two end walls) and rotateZ then turns it
@@ -12986,14 +12996,20 @@ function buildShed3DModel(THREE, p) {
         // A SPLIT: a groove across the leaf, a shadow-dark line just past the frame's face (the door does
         // not open in two; a double's other leaf draws its own half).
         const gy = y0 + q.v * h;
-        if (gy > fy0 + 0.1 && gy < fy1 - 0.1) put(wallBox(doorShadeMat(m.slab, 0.5), wf, a0, a1, gy - 0.012, gy + 0.012, 0.13, 0.066), "part-split", j);
+        if (gy > fy0 + 0.1 && gy < fy1 - 0.1) {
+          let bits = [{ x0: a0, x1: a1, y0: gy - 0.012, y1: gy + 0.012 }];
+          if (hole && !top) bits = doorRectsMinus(bits, inset(hole, -c));
+          const gm = doorShadeMat(m.slab, 0.5);
+          bits.forEach((r) => put(wallBox(gm, wf, r.x0, r.x1, r.y0, r.y1, 0.13, 0.066), "part-split", j));
+        }
       }
     });
     // The window's own casing, in the window's colour, then the window itself (doorWindowIn); then the
     // look's own glass (doorLiteIn).
     if (hole) doorWindowIn(put, og, wf, hole, win);
     lites.forEach((l) => doorLiteIn(put, og, wf, l.hole, l.rows, l.cols, frM, l.part, l.ix, !lk.partition));
-    doorHardware(put, wf, { a0, a1, y0, y1, w, h, hinge, latch, trim, F, top, tr0, mids, spec, tag, railAt: y0 + h * lp.def.rails[0] },
+    doorHardware(put, wf, { a0, a1, y0, y1, w, h, hinge, latch, trim, F, top, tr0, mids, spec, tag, railAt: y0 + h * lp.def.rails[0],
+      win: spec && hole && !top ? inset(hole, -c) : null },
       spec ? m.hinge : ironMat, spec ? m.handle : ironMat);
   };
   // THE HINGES AND THE HANDLE of one leaf (door looks P2), the hardware both families drew as copies of
@@ -13033,6 +13049,8 @@ function buildShed3DModel(THREE, p) {
       const p0 = Math.min(he + dir * from, he + dir * to), p1 = Math.max(he + dir * from, he + dir * to);
       put(wallBox(hingeMat, wf, p0, p1, cy - half, cy + half, out, depth), tagH);
     };
+    // A look's hinge at the height of a shopper's panel window straps only up to the window's casing.
+    const reach = (cy) => (L.win && cy + plateH > L.win.y0 && cy - plateH < L.win.y1 ? (dir > 0 ? L.win.x0 - he : he - L.win.x1) - 0.03 : Infinity);
     let rows;
     if (!spec && trim) {
       // Under a transom the top row sits on the transom rail, never across the glass.
@@ -13069,14 +13087,16 @@ function buildShed3DModel(THREE, p) {
         return;
       }
       iron(0, 0.11, cy, plateH, 0.165, 0.03);
+      const rowLen = Math.min(sLen, reach(cy) - 0.11);
+      if (!(rowLen > 0.05)) return;
       if (type === "tstrap") {
-        iron(0.11, 0.11 + sLen * 0.55, cy, s1, 0.165, 0.03);
-        iron(0.11 + sLen * 0.55, 0.11 + sLen, cy, s2, 0.165, 0.03);
+        iron(0.11, 0.11 + rowLen * 0.55, cy, s1, 0.165, 0.03);
+        iron(0.11 + rowLen * 0.55, 0.11 + rowLen, cy, s2, 0.165, 0.03);
         return;
       }
       // strap, scroll and pintle: one even strap, a rounded end, and a scroll's curl past it.
-      const sw = s1 * 0.8, end = he + dir * (0.11 + Math.max(sw, sLen - sw));
-      iron(0.11, 0.11 + Math.max(sw, sLen - sw), cy, sw, 0.165, 0.03);
+      const sw = s1 * 0.8, end = he + dir * (0.11 + Math.max(sw, rowLen - sw));
+      iron(0.11, 0.11 + Math.max(sw, rowLen - sw), cy, sw, 0.165, 0.03);
       put(wallMesh(doorDisc(sw, 0.03), hingeMat, wf, end, cy, 0.165), tagH);
       if (type === "scroll") put(wallMesh(new THREE.TorusGeometry(sw * 1.3, sw * 0.35, 8, 24, Math.PI * 1.5), hingeMat, wf, end + dir * sw * 1.6, cy, 0.165), tagH);
       if (type === "pintle") {
@@ -13090,6 +13110,8 @@ function buildShed3DModel(THREE, p) {
     const se = hinge === "a0" ? a1 : a0, sd = hinge === "a0" ? -1 : 1;
     let hy = spec && typeof hd.v === "number" ? y0 + h * hd.v : midY;
     if (spec && top) hy = Math.min(hy, tr0 - 0.3);
+    // ...and never across a shopper's panel window: under it.
+    if (spec && L.win && hy + 0.35 > L.win.y0) hy = Math.max(y0 + 0.5, Math.min(hy, L.win.y0 - 0.35));
     const plate = (from, to, half, out, depth, cy = hy) => {
       const p0 = Math.min(se + sd * from, se + sd * to), p1 = Math.max(se + sd * from, se + sd * to);
       put(wallBox(handleMat, wf, p0, p1, cy - half, cy + half, out, depth), tagL);
@@ -13135,12 +13157,16 @@ function buildShed3DModel(THREE, p) {
         const tf = spec ? ssDoorSpecTopFloor(spec, lw, lh) : null;
         const F = tf ? tf.F : ssTrimDoorBoardFt(lw, lh), y1 = lh - F;
         const ww = Math.min(Number(it.doorWindowWidthIn) / 12, lw - 2 * SS_DOOR_TOP_SIDE_FT);
-        const wh = Math.min(Number(it.doorWindowHeightIn) / 12, lh * SS_DOOR_TOP_MAX_H, y1 - SS_DOOR_WIN_CASE_FT - F - (tf ? tf.floor : lh * SS_DOOR_TOP_FLOOR));
+        const room = (floor) => Math.min(Number(it.doorWindowHeightIn) / 12, lh * SS_DOOR_TOP_MAX_H, y1 - SS_DOOR_WIN_CASE_FT - F - floor);
+        // A look's high rail can leave a short leaf no room for the transom it is charged for: then the
+        // base's own floor, and the rails it covers give way to it (doorLeaf), as on the base look.
+        let wh = room(tf ? tf.floor : lh * SS_DOOR_TOP_FLOOR);
+        if (tf && !(wh > 0.2)) wh = room(lh * SS_DOOR_TOP_FLOOR);
         if (!(ww > 0.2) || !(wh > 0.2)) return null;
         rect = { x0: (lw - ww) / 2, x1: (lw + ww) / 2, y0: y1 - wh, y1 };
       } else {
         const tp = spec ? ssDoorSpecTopPanel(spec, lw, lh) : null;
-        if (tp && tp.glass) return null;
+        if (tp && tp.taken) return null;
         const u = tp || ssTrimDoorFields(lw, lh).upper, pad = SS_DOOR_WIN_CASE_FT + SS_DOOR_WIN_PAD_FT;
         const ww = Math.min(Number(it.doorWindowWidthIn) / 12, u.x1 - u.x0 - 2 * pad);
         const wh = Math.min(Number(it.doorWindowHeightIn) / 12, u.y1 - u.y0 - 2 * pad);
@@ -13275,7 +13301,8 @@ function buildShed3DModel(THREE, p) {
   // setLiveColors repaints both and shades them again by their ssShade.
   const doorShadeMat = (src, k) => {
     const gm = mat(ssShadeHex("#" + src.color.getHexString(), k));
-    const live = src.userData && src.userData.ssBodyPaint ? "ssBodyPaint" : src === trimMat ? "ssTrimPaint" : null;
+    const live = src.userData && src.userData.ssBodyPaint ? "ssBodyPaint"
+      : src === trimMat || (src.userData && src.userData.ssTrimPaint && !src.userData.ssShade) ? "ssTrimPaint" : null;
     if (live) { gm.userData[live] = true; gm.userData.ssShade = k; }
     return gm;
   };

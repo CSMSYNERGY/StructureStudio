@@ -14,9 +14,11 @@
 //      base is not the row's door_style, here; and with SS_BASE_OLD (a designer from before looks, e.g.
 //      origin/beta served on another port), a row WITH a look draws there exactly as this build draws the
 //      same row with none
-//   W. the window rules read the look: the 3D, the estimate and the Details rows agree on every door's
-//      windows; glass of the look's own in its top panel refuses a panel window; a rail too high refuses a
-//      transom; the bases that take one still do; and the door picker offers the same
+//   W. the window rules read the look: the 3D and the estimate agree on every door's windows, and the door
+//      picker offers the same (the Details rows price the estimate's own lines, ssDoorWindowLines, which
+//      submitEstimateDoorWindowWiring_test carries a look through); glass of the look's own, or a brace
+//      across the leaf, in its top panel refuses a panel window; a rail too high refuses a transom; the bases
+//      that take one still do; and nothing of a look crosses a window it takes
 //   S. a look never draws on a slide-up placement: the door is today's slide-up door, with and without a
 //      photo on the row
 //   NS. no see-through gap on a look's door either (block N's rays, doorShared.mjs), single and double,
@@ -81,7 +83,7 @@ const NO_COLOR = { colorId: null, colorLabel: null, colorHex: null, trimColorId:
 const NO_WIN = { doorWindowId: null, doorWindowName: null, doorWindowWidthIn: null, doorWindowHeightIn: null, doorWindowPrice: null, doorWindowAt: null };
 const LITE = { doorWindowId: "w-lite", doorWindowName: "Door lite", doorWindowWidthIn: 18, doorWindowHeightIn: 24, doorWindowPrice: 95, doorWindowAt: null };
 const TOPW = { doorWindowId: "w-top", doorWindowName: "Transom Windows", doorWindowWidthIn: 29, doorWindowHeightIn: 10, doorWindowPrice: 81, doorWindowAt: "top" };
-const WINDOWS = [winRow("w-lite", "Door lite", 18, 24), winRow("w-top", "Transom Windows", 29, 10, { price: 81, doorWindowAt: "top" })];
+const WINDOWS = [winRow("w-lite", "Door lite", 18, 24), winRow("w-top", "Transom Windows", 29, 10, { price: 81, doorWindowAt: "top" }), winRow("w-tiny", "Tiny lite", 6, 6, { price: 40 })];
 const paint = (door, trim) => ({ ...NO_COLOR, ...(door ? { colorId: "c-door", colorLabel: "Door", colorHex: door } : {}), ...(trim ? { trimColorId: "c-trim", trimColorLabel: "Trim", trimColorHex: trim } : {}) });
 
 // Where a door stands on the plan: `at` ft along its wall (x across the width on north/south, z down the
@@ -237,7 +239,7 @@ ${rows.map((r) => `<section><h2>${r.name} (${r.sizeIn.join(" x ")} in, ${r.op}${
   const name = process.env.SS_DOOR_SPEC_NAME || basename(file).replace(/(\.truth)?\.json$/i, "");
   const res = await renderOne(browser, rect, { name, spec, sizeIn, colors: colorsOf(process.env.SS_DOOR_SPEC_COLORS), outDir });
   console.log(JSON.stringify(res));
-  return !res.look || res.error || (res.rays && res.rays.open) || res.errors.length ? 1 : 0;
+  return !res.look || res.error || (res.rays && (res.rays.open || res.rays.inconsistent)) || res.errors.length ? 1 : 0;
 }
 
 async function main() {
@@ -282,8 +284,9 @@ const TRANSOM_H = look("basic", { hinges: { count: 3, at: [0.1, 0.5, 0.95] } });
 
 // One door of a block: its row (with or without its look) and where it stands.
 const L_DOORS = [
-  { key: "zb2", spec: ZB, style: "zbrace", w: 72, h: 80, wall: "south", at: 4.5, op: "double", c: paint("#4b5563", "#efe6d2") },
-  { key: "corners", spec: CORNERS, style: "basic", w: 72, h: 76, wall: "south", at: 14, op: "double", c: paint("#a3abb3", "#2d4f7c") },
+  { key: "zb2", spec: ZB, style: "zbrace", w: 72, h: 80, wall: "south", at: 4, op: "double", c: paint("#4b5563", "#efe6d2") },
+  { key: "corners", spec: CORNERS, style: "basic", w: 72, h: 76, wall: "south", at: 11.5, op: "double", c: paint("#a3abb3", "#2d4f7c") },
+  { key: "southRight", spec: look("basic", {}), style: "basic", w: 36, h: 80, wall: "south", at: 17, op: "right" },
   { key: "steel", spec: STEEL, style: "basic", w: 36, h: 80, wall: "north", at: 3, op: "left" },
   { key: "six", spec: SIX, style: "basic", w: 36, h: 81, wall: "north", at: 7.5, op: "right", c: paint("#eceff1", null) },
   { key: "strap", spec: STRAP, style: "basic", w: 36, h: 80, wall: "north", at: 12, op: "left" },
@@ -434,6 +437,14 @@ async function runL(browser, rect) {
     const cz = got.classicZ.meshes;
     ok("L2 classicZ: one Z in the lower panel and the octagon and diamond in the upper", cz.filter((m) => m.part === "z").length === 1 && cz.filter((m) => m.part === "octagon").length === 4
       && cz.filter((m) => m.part === "diamond").length === 1 && !cz.some((m) => m.part === "x"), JSON.stringify(countParts(cz.map((m) => ({ part: m.part })))));
+    const yOf = (ms, p) => { const xs = ms.filter((m) => m.part === p && !m.transparent); return xs.length ? (Math.min(...xs.map((m) => m.min[1])) + Math.max(...xs.map((m) => m.max[1]))) / 2 : NaN; };
+    const mz = got.classicZ.meshes, mids = mz.filter((m) => m.part === "midRail").map((m) => ctrOf(m, 1));
+    ok("L2 classicZ: the Z below the mid rail, the diamond above it", yOf(mz, "z") < mids[0] && yOf(mz, "diamond") > mids[0], `${yOf(mz, "z").toFixed(2)} / ${mids[0] && mids[0].toFixed(2)} / ${yOf(mz, "diamond").toFixed(2)}`);
+    ok("L2 fills: pickets in the bottom panel, the raised panel in the middle one, the glass on top", yOf(ms, "picket") < yOf(ms, "raised") && yOf(ms, "raised") < yOf(ms, "lite"),
+      `${yOf(ms, "picket").toFixed(2)} < ${yOf(ms, "raised").toFixed(2)} < ${yOf(ms, "lite").toFixed(2)}`);
+    const fd = L_DOORS.find((x) => x.key === "fills"), fk = along(fd.wall), lite = ms.filter((m) => m.part === "lite" && !m.transparent);
+    const vb = lite.filter((m) => near(m.max[fk] - m.min[fk], 0.06, 0.003) && m.max[1] - m.min[1] > 0.2), hb = lite.filter((m) => near(m.max[1] - m.min[1], 0.06, 0.003) && m.max[fk] - m.min[fk] > 0.1);
+    ok("L2 fills: its glass is the look's 2 rows of 3 (two bars up, one across)", vb.length === 2 && hb.length === 1, `${vb.length} up, ${hb.length} across`);
   }
   // L3. Hinges: type (what each row is made of), count and heights; under a transom, none above its rail.
   const hingeCases = [["zb2", "tstrap", 3, [0.12, 0.5, 0.88]], ["six", "butt", 3, [0.11, 0.5, 0.9]], ["corners", "butt", 2, [0.09, 0.92]],
@@ -442,11 +453,27 @@ async function runL(browser, rect) {
     const d = L_DOORS.find((x) => x.key === key);
     for (const side of d.op === "double" ? [-1, 1] : [0]) {
       const ms = side ? leafOf(got[key].meshes, d, side) : got[key].meshes, rows = hingeRows(ms), lb = leafBox(ms), h = lb.y1 - lb.y0;
-      const kitOk = type === "hidden" || rows.every((r) => sameKit(kitOf(r.ms), HINGE_KIT[type]));
+      // Butt and strap rows are both two plates and a cylinder: a butt's is its knuckle, standing the hinge's
+      // height; a strap's is the disc at its end, a strap's width. A pintle has both.
+      const tall = (m) => m.max[1] - m.min[1] > 0.2;
+      const cylOk = (r) => { const cs = r.ms.filter((m) => m.geom === "CylinderGeometry");
+        return type === "butt" ? cs.every(tall) : type === "pintle" ? cs.filter(tall).length === 1 : cs.every((m) => !tall(m)); };
+      const kitOk = type === "hidden" || rows.every((r) => sameKit(kitOf(r.ms), HINGE_KIT[type]) && cylOk(r));
       const atOk = !at || rows.every((r, i) => near((r.y - lb.y0) / h, at[i], 0.004));
       ok(`L3 ${key}${side ? (side < 0 ? " (a0 leaf)" : " (a1 leaf)") : ""}: ${count} ${type} hinge(s)${at && at.length ? ` at ${at.join("/")}` : ""}`, rows.length === count && kitOk && atOk,
         rows.map((r) => `${((r.y - lb.y0) / h).toFixed(3)}:${JSON.stringify(kitOf(r.ms))}`).join(" "));
     }
+  }
+  {
+    // Each hinge in its finish; a look's strap as long as it says (pivot to tip, 16 in on zb2).
+    const FIN = { zb2: "#23272e", six: "#9aa0a6", corners: "#9aa0a6", strap: "#5a4632", scroll: "#23272e", pintle: "#23272e" };
+    for (const [key, hex] of Object.entries(FIN)) {
+      const cs = [...new Set(got[key].meshes.filter((m) => m.part === "hinge").map((m) => m.color))];
+      ok(`L3 ${key}: its hinges in their finish (${hex})`, cs.length === 1 && cs[0] === hex, JSON.stringify(cs));
+    }
+    const zd = L_DOORS.find((x) => x.key === "zb2"), k = along(zd.wall);
+    const spans = [-1, 1].flatMap((s) => hingeRows(leafOf(got.zb2.meshes, zd, s)).map((r) => Math.max(...r.ms.map((m) => m.max[k])) - Math.min(...r.ms.map((m) => m.min[k]))));
+    ok("L3 zb2: each T-strap is the look's 16 in from pivot to tip", spans.length === 6 && spans.every((x) => near(x, 16 / 12, 0.005)), spans.map((x) => (x * 12).toFixed(2)).join(","));
   }
   {
     // On a built look, a count with no heights sits on the rails: the bottom rail's middle and the top rail's.
@@ -461,11 +488,17 @@ async function runL(browser, rect) {
   }
   // L4. The handle: on the latch leaf only, at the look's height, of its type.
   {
-    const HANDLE = { barn: 2, lever: 2, pull: 3, ring: 2, thumb: 3 };
+    // Each kind by its pieces: the barn latch's plate and 1 in lever; the lever's 2.4 in rose and its bar;
+    // the pull's 8 in grip; the thumb latch's 7 in plate and grip; the ring's ring.
+    const has = (hs, x) => hs.some((v) => near(v, x, 0.006));
+    const HANDLE = { barn: (hs, g) => hs.length === 2 && has(hs, 0.09) && hs.every((v) => v < 0.31), lever: (hs) => hs.length === 2 && has(hs, 0.2) && has(hs, 0.064),
+      pull: (hs) => hs.length === 3 && has(hs, 0.68), ring: (hs, g) => hs.length === 2 && g.includes("TorusGeometry"), thumb: (hs) => hs.length === 3 && has(hs, 0.6) && has(hs, 0.4) };
     for (const [key, type] of [["zb2", "barn"], ["corners", "lever"], ["strap", "ring"], ["scroll", "thumb"], ["pintle", "pull"], ["steel", "barn"]]) {
-      const ms = got[key].meshes.filter((m) => m.part === "latch");
-      ok(`L4 ${key}: a ${type} handle (${HANDLE[type]} pieces)`, ms.length === HANDLE[type], String(ms.length));
+      const ms = got[key].meshes.filter((m) => m.part === "latch"), hs = ms.map((m) => m.max[1] - m.min[1]);
+      ok(`L4 ${key}: a ${type} handle`, HANDLE[type](hs, ms.map((m) => m.geom)), JSON.stringify(ms.map((m) => [m.geom, +(m.max[1] - m.min[1]).toFixed(3)])));
     }
+    const sh = [...new Set(got.steel.meshes.filter((m) => m.part === "latch").map((m) => m.color))];
+    ok("L4 steel: its handle in its finish (galv)", sh.length === 1 && sh[0] === "#9aa0a6", JSON.stringify(sh));
     const d = L_DOORS.find((x) => x.key === "zb2"), lat = got.zb2.meshes.filter((m) => m.part === "latch");
     ok("L4 zb2: one handle, on one leaf of the double", lat.length > 0 && new Set(lat.map((m) => Math.sign(ctrOf(m, along(d.wall)) - doorMid(d)))).size === 1);
     const st = got.steel.meshes, lb = leafBox(st);
@@ -496,12 +529,28 @@ async function runL(browser, rect) {
       `right: low end ${braceLow(zr, got.zRight.meshes)}; left: ${braceLow(zl, got.zLeft.meshes)}`);
     const pt = L_DOORS.find((x) => x.key === "pintle"), sp = sideOf(pt, got.pintle.meshes);
     ok("L5 a Z the look says rises from the strike side does", sp !== 0 && braceLow(pt, got.pintle.meshes) === -sp, `hinges ${sp}, low end ${braceLow(pt, got.pintle.meshes)}`);
-    const sRightSide = sr;   // which way "right" hangs on these walls: the a1 end
+    const czd = L_DOORS.find((x) => x.key === "classicZ"), czm = got.classicZ.meshes, zMesh = czm.find((m) => m.part === "z");
+    const zLow = zMesh ? braceLow(czd, [{ ...zMesh, part: "brace" }]) : 0;
+    ok("L5 a panel's Z that rises from the strike side does (classicZ)", zLow !== 0 && zLow === -sideOf(czd, czm), `low end ${zLow}, hinges ${sideOf(czd, czm)}`);
+    const sRightSide = sr;   // which way "right" hangs on the west wall: its a1 end
+    const sr2 = sideOf(L_DOORS.find((x) => x.key === "southRight"), got.southRight.meshes);   // ...and on the south wall
     for (const key of ["zb2", "corners", "oneOnTwo"]) {
-      const d = L_DOORS.find((x) => x.key === key), ms = got[key].meshes;
-      const s0 = sideOf(d, leafOf(ms, d, -1)), s1 = sideOf(d, leafOf(ms, d, 1)), lat = ms.filter((m) => m.part === "latch");
-      const latSide = new Set(lat.map((m) => Math.sign(ctrOf(m, along(d.wall)) - doorMid(d))));
-      ok(`L5 ${key}: a double hinges on both outer edges, with the handle on the latch leaf only`, s0 === -1 && s1 === 1 && latSide.size === 1, `hinge sides ${s0}/${s1}, handle on ${[...latSide]}`);
+      const d = L_DOORS.find((x) => x.key === key), ms = got[key].meshes, k = along(d.wall), a1 = d.wall === "west" ? sRightSide : sr2;
+      // Each leaf's hinges against that leaf's OWN middle (its slab's): on its outer edge.
+      const outer = [-1, 1].map((s) => {
+        const lf = leafOf(ms, d, s), sl = lf.filter((m) => m.part === "infill"), mid = (Math.min(...sl.map((m) => m.min[k])) + Math.max(...sl.map((m) => m.max[k]))) / 2;
+        const hs = lf.filter((m) => m.part === "hinge");
+        return hs.length ? Math.sign(hs.reduce((t, m) => t + ctrOf(m, k) - mid, 0)) : 0;
+      });
+      const lat = ms.filter((m) => m.part === "latch"), latSide = [...new Set(lat.map((m) => Math.sign(ctrOf(m, k) - doorMid(d))))];
+      ok(`L5 ${key}: a double hinges each leaf on its outer edge, with the handle on the a1 leaf only`, a1 !== 0 && outer[0] === -1 && outer[1] === 1 && latSide.length === 1 && latSide[0] === a1,
+        `hinges ${outer.join("/")} of their leaves' middles, handle on ${latSide.join()} (a1 is ${a1})`);
+      if (d.spec.meet && d.spec.meet.type === "overlap") {
+        // The overlap strip runs from the latch leaf over the other: its middle is off the meeting line, away from the handle.
+        const a = ms.find((m) => m.gap === "astragal");
+        ok(`L5 ${key}: its overlap runs from the latch leaf over the other leaf`, !!a && Math.sign(ctrOf(a, k) - doorMid(d)) === -a1 && Math.abs(ctrOf(a, k) - doorMid(d)) > 0.02,
+          a ? (ctrOf(a, k) - doorMid(d)).toFixed(4) : "none");
+      }
       if (key === "oneOnTwo") {
         // The single-leaf look's vent (u 0.6-0.9, toward the latch edge) sits by the meeting line on BOTH leaves.
         const vs = ms.filter((m) => m.part === "part-vent" && m.geom === "BoxGeometry"), mid = doorMid(d), k = along(d.wall);
@@ -534,6 +583,16 @@ async function runL(browser, rect) {
       JSON.stringify(uniq(st1.filter((m) => m.part === "infill" || m.part === "frame" || m.part === "part-lite"))));
     await page.evaluate(() => window.__ss3dEngine.setLiveColors(null, null));
   }
+  // L7. Partitions: each door drawn in its look; `door` is the brown every partition door wears; a partition's
+  // glass shows the room really there, so no room box behind it.
+  for (const d of P_DOORS) {
+    const r = await page.evaluate(LOOK_MESHES, { part: d.partAt });
+    ok(`L7 ${d.key}: drawn in its look (${d.spec.base})`, !!r && r.look === d.spec.base, JSON.stringify(r && r.look));
+    if (!r) continue;
+    if (d.key === "part-steel") ok("L7 part-steel: its glass is there, with no room box behind it", r.meshes.some((m) => m.part === "part-lite" && m.transparent) && !r.meshes.some((m) => /Room$/.test(m.part || "")));
+    if (d.key === "part-classicZ") ok("L7 part-classicZ: its frame in its own colour, its members in the partition door's brown", [...new Set(r.meshes.filter((m) => m.part === "frame").map((m) => m.color))].join() === "#7c2d12"
+      && [...new Set(r.meshes.filter((m) => ["z", "octagon", "diamond"].includes(m.part)).map((m) => m.color))].join() === "#77664c");
+  }
   // NS. No see-through gap on a look's door: block N's rays, from both faces and at angles, through every
   // door above and the partition doors; and the closures each door gets.
   for (const d of [...L_DOORS, ...P_DOORS]) {
@@ -546,6 +605,15 @@ async function runL(browser, rect) {
     const trim = ["american", "basic", "classic", "dutch"].includes(d.spec.base);
     const want = { liner: 3, ...(trim ? {} : { sill: 1 }), ...(d.op === "double" ? { meet: 1, astragal: 1 } : {}) };
     ok(`NS2 ${d.key}: its gap closures ${JSON.stringify(want)}`, JSON.stringify(Object.entries(gotC).sort()) === JSON.stringify(Object.entries(want).sort()), JSON.stringify(gotC));
+    // Each spans the whole of its gap, through the wall line (block N's N2), lies inside the slab's depth, and is in no room.
+    const fr = r.frame, c = (fr.a0 + fr.a1) / 2, yb = fr.y0 + (trim ? 0.2 : 0.05), yt = fr.y1 - 0.05;
+    const spans = [["liner", fr.a0, fr.a0 + 0.05, yb, yt], ["liner", fr.a1 - 0.05, fr.a1, yb, yt], ["liner", fr.a0, fr.a1, yt, fr.y1]]
+      .concat(trim ? [] : [["sill", fr.a0, fr.a1, fr.y0, fr.y0 + 0.05]]).concat(d.op === "double" ? [["meet", c - 0.03, c + 0.03, yb, yt]] : []);
+    const covers = (g, [kind, a0, a1, y0, y1]) => g.kind === kind && g.a[0] <= a0 + 1e-4 && g.a[1] >= a1 - 1e-4 && g.y[0] <= y0 + 1e-4 && g.y[1] >= y1 - 1e-4 && g.n[0] < 0 && g.n[1] > 0;
+    const open = spans.filter((sp) => !r.gaps.some((g) => covers(g, sp)));
+    ok(`NS2 ${d.key}: each closure spans its whole gap, inside the slab's depth, in no room`, open.length === 0
+      && r.gaps.filter((g) => g.kind !== "astragal").every((g) => g.n[0] >= -0.08 - 1e-4 && g.n[1] <= 0.08 + 1e-4) && !r.gaps.some((g) => g.inRoom),
+      `${open.map((sp) => sp[0]).join(",")} ${r.gaps.map((g) => `${g.kind} ${g.n[0].toFixed(3)}..${g.n[1].toFixed(3)}${g.inRoom ? " IN A ROOM" : ""}`).join(", ")}`);
     if (d.op === "double" && d.spec.meet && d.spec.meet.type === "overlap") {
       const a = r.gaps.find((g) => g.kind === "astragal"), mid = (r.frame.a0 + r.frame.a1) / 2;
       ok(`NS2 ${d.key}: an overlap meet is ${d.spec.meet.wIn} in wide and runs past the meeting line from the latch leaf`, !!a && near(a.a[1] - a.a[0], d.spec.meet.wIn / 12, 1e-3)
@@ -587,18 +655,29 @@ async function runF(browser, rect) {
     { key: "fBase", spec: CLASSIC_Z, style: "basic", w: 36, h: 80, wall: "south", at: 8, op: "right" },
     { key: "fJunk", spec: "not a spec", style: "zbrace", w: 36, h: 80, wall: "south", at: 13, op: "right" },
     { key: "fLeaves", spec: { ...ZB, src: { leaves: 3, hinge: "left" } }, style: "zbrace", w: 72, h: 80, wall: "north", at: 5, op: "double" },
+    // The control: a look that cleans IS drawn, in this same design.
+    { key: "fGood", spec: STEEL, style: "basic", w: 36, h: 80, wall: "south", at: 17.5, op: "left", good: true },
+    // A look that says nothing (just its base) draws its base mesh for mesh (the digest leaves out the tags a look adds).
+    ...["plank", "zbrace"].map((b, i) => ({ key: `fBare-${b}`, spec: look(b, {}), style: b, w: 36, h: 80, wall: "north", at: 11 + i * 4.5, op: "right", good: true, bare: true })),
+    ...["xbrace", "american", "basic", "classic", "dutch"].map((b, i) => ({ key: `fBare-${b}`, spec: look(b, {}), style: b, w: 36, h: 80, wall: "east", at: 3 + i * 4.5, op: i % 2 ? "left" : "right", good: true, bare: true })),
   ];
   const a = await digestsOf(browser, rect, doors, { withLook: true, code: "SS-HARNLOOKF1" });
   const b = await digestsOf(browser, rect, doors, { withLook: false, code: "SS-HARNLOOKF2" });
-  for (const d of doors) {
+  for (const d of doors.filter((x) => !x.good)) {
     ok(`F1 ${d.key}: a look that does not clean (or whose base is not the row's) draws the base look, byte for byte`, a.out[d.key].look === null && a.out[d.key].n > 0 && a.out[d.key].digest === b.out[d.key].digest,
+      `${a.out[d.key].digest} vs ${b.out[d.key].digest} (look ${a.out[d.key].look})`);
+  }
+  ok("F1 ...while a look that cleans, in the same design, is drawn in its look", a.out.fGood.look === "basic" && a.out.fGood.digest !== b.out.fGood.digest, JSON.stringify(a.out.fGood));
+  for (const d of doors.filter((x) => x.bare)) {
+    ok(`F1 ${d.key}: a look that says nothing draws its base, mesh for mesh`, a.out[d.key].look === d.style && a.out[d.key].n > 0 && a.out[d.key].digest === b.out[d.key].digest,
       `${a.out[d.key].digest} vs ${b.out[d.key].digest} (look ${a.out[d.key].look})`);
   }
   ok("F1 no page errors", a.errors.length === 0 && b.errors.length === 0, [...a.errors, ...b.errors].slice(0, 3).join(" | "));
   // F2. A designer from before looks (SS_BASE_OLD) reads a row with a look as the row's door_style: exactly
   // what this build draws for the same row with no look.
   const OLD = process.env.SS_BASE_OLD;
-  if (!OLD) { console.log("SKIP  F2 needs SS_BASE_OLD (a designer from before looks, e.g. origin/beta served on another port)"); return; }
+  // Not run is not passed: without a designer from before looks there is no F2.
+  if (!OLD) { ok("F2 needs SS_BASE_OLD: a designer from before looks (origin/beta's root served on another port)", false); return; }
   const good = L_DOORS.filter((d) => d.wall === "south" || d.wall === "north").map((d) => ({ ...d }));
   const o = await digestsOf(browser, rect, good, { withLook: true, code: "SS-HARNLOOKF3", base: OLD });
   const n = await digestsOf(browser, rect, good, { withLook: false, code: "SS-HARNLOOKF4" });
@@ -622,6 +701,13 @@ const W_DOORS = [
   { key: "wZb2", spec: ZB, style: "zbrace", w: 72, h: 80, wall: "north", at: 5, op: "double", dw: TOPW, n: 2 },
   { key: "wClassic", spec: CLASSIC_Z, style: "classic", w: 36, h: 80, wall: "north", at: 12, op: "right", dw: TOPW, n: 1 },
   { key: "wSteelTop", spec: STEEL, style: "basic", w: 36, h: 80, wall: "north", at: 16.5, op: "left", dw: TOPW, n: 0 },
+  // A look's boards, split groove and long hinges beside a shopper's lite: the lite is drawn, and none of them crosses it.
+  { key: "wBoards", spec: look("american", { field: { dir: "v" }, parts: [{ t: "split", v: 0.75 }], hinges: { count: 3, at: [0.1, 0.5, 0.75], lenIn: 30 }, handle: { v: 0.7 } }),
+    style: "american", w: 36, h: 80, wall: "east", at: 4, op: "right", dw: LITE, n: 1 },
+  // A brace across the whole leaf would cross the lite's glass: no lite.
+  { key: "wBrace", spec: look("american", { brace: { t: "z" } }), style: "american", w: 36, h: 80, wall: "east", at: 9, op: "right", dw: LITE, n: 0 },
+  // A rail high under a transom: the transom fits over it, and the rail stays, under the transom rail.
+  { key: "wRailTop", spec: look("plank", { frame: { rails: [0.74] } }), style: "plank", w: 36, h: 80, wall: "east", at: 14, op: "right", dw: TOPW, n: 1 },
 ];
 async function runW(browser, rect) {
   const { rows, items } = designOf(rect, W_DOORS);
@@ -635,6 +721,15 @@ async function runW(browser, rect) {
   {
     const ms = (await page.evaluate(LOOK_MESHES, { itemId: W_DOORS.find((d) => d.key === "wLowLite").itemId })).meshes;
     ok("W wLowLite: the look's own glass below the mid rail and the shopper's lite above it, both drawn", ms.some((m) => m.part === "part-lite" && m.transparent) && ms.some((m) => m.part === "window" && m.transparent));
+    const wd = W_DOORS.find((d) => d.key === "wBoards"), k = along(wd.wall), bm = (await page.evaluate(LOOK_MESHES, { itemId: wd.itemId })).meshes;
+    const glass = bm.find((m) => m.part === "window" && m.transparent), cs = 0.08;
+    const across = glass ? bm.filter((m) => ["board", "part-split", "hinge", "latch"].includes(m.part) && m.max[k] > glass.min[k] - cs + 1e-3 && m.min[k] < glass.max[k] + cs - 1e-3
+      && m.max[1] > glass.min[1] - cs + 1e-3 && m.min[1] < glass.max[1] + cs - 1e-3) : [];
+    ok("W wBoards: the look's boards, split groove, hinges and handle all keep clear of the lite and its casing", !!glass && bm.some((m) => m.part === "board") && bm.some((m) => m.part === "part-split") && across.length === 0,
+      across.map((m) => `${m.part} ${m.min[1].toFixed(2)}..${m.max[1].toFixed(2)}`).join(", "));
+    const rd = W_DOORS.find((d) => d.key === "wRailTop"), rm = (await page.evaluate(LOOK_MESHES, { itemId: rd.itemId })).meshes;
+    const tr = rm.find((m) => m.part === "transomRail"), mr = rm.filter((m) => m.part === "midRail");
+    ok("W wRailTop: the look's high rail stays, under the transom rail", !!tr && mr.length === 1 && mr[0].max[1] <= tr.min[1] + 1e-3, `${mr.map((m) => m.max[1].toFixed(3))} vs ${tr ? tr.min[1].toFixed(3) : "none"}`);
   }
   // The estimate: one windows[] line per window drawn, naming its door.
   await page.evaluate(() => {
@@ -667,7 +762,8 @@ async function runW(browser, rect) {
   const pctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const pg = await pctx.newPage();
   const perr = collectErrors(pg);
-  await stubSupabase(pg, { config: CONFIG, fixtures: fixturesOf(rows) });
+  const pickRows = rows.concat([doorRow("d-wGlassBase", "wGlassBase door", 36, 80, "american", null), doorRow("d-wSteelBase", "wSteelBase door", 36, 80, "basic", null)]);
+  await stubSupabase(pg, { config: CONFIG, fixtures: fixturesOf(pickRows) });
   await pg.route(W_THUMB_URL, (route) => route.fulfill({ status: 200, contentType: "image/png", headers: { "access-control-allow-origin": "*" }, body: PNG_1x1 }));
   await openDesigner(pg, CONFIG.clientId);
   await pg.waitForFunction(() => document.querySelector(".ssd-frame") !== null, null, { timeout: 40000 });
@@ -693,14 +789,20 @@ async function runW(browser, rect) {
     const r = pg.locator("[data-ss-door-window-row]");
     return (await r.count()) ? (await r.innerText()).replace(/\s+/g, " ") : "";
   };
-  let t = await rowText("wGlass door");
-  ok("W the picker: a look with glass up top offers no panel lite", !/Door lite/.test(t), t || "no row");
+  // Each refusal beside a control that offers on the same click path: the same base with no look, or a
+  // window small enough for what the look leaves.
+  let t = await rowText("wGlassBase door");
+  ok("W the picker: the American with no look offers the lite (the control)", /Door lite/.test(t), t || "no row");
+  t = await rowText("wGlass door");
+  ok("W the picker: the same American with glass of its own up top offers no lite and no transom", !/Door lite|Tiny lite|Transom Windows/.test(t), t || "no row");
   t = await rowText("wHighRail door");
-  ok("W the picker: a look whose rail is too high offers no transom", !/Transom Windows/.test(t), t || "no row");
+  ok("W the picker: a look whose rail is too high offers no transom, but the tiny lite that fits over the rail", !/Transom Windows/.test(t) && /Tiny lite/.test(t), t || "no row");
   t = await rowText("wPlain door");
   ok("W the picker: a plain look offers the lite and the transom its base takes", /Door lite/.test(t) && /Transom Windows/.test(t), t || "no row");
+  t = await rowText("wSteelBase door");
+  ok("W the picker: the Basic with no look offers the lite (the control)", /Door lite/.test(t), t || "no row");
   t = await rowText("wSteelTop door");
-  ok("W the picker: a steel slab with its own glass up to the top offers neither", !/Door lite/.test(t) && !/Transom Windows/.test(t), t || "no row");
+  ok("W the picker: a steel slab with its own glass up to the top offers no window at all", !/Door lite|Tiny lite|Transom Windows/.test(t), t || "no row");
   await pg.screenshot({ path: join(shotsDir("door-look-specs"), "W-picker.png") });
   ok("W no page errors (picker)", perr.length === 0, perr.slice(0, 3).join(" | "));
   await pctx.close();
