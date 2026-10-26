@@ -35,7 +35,7 @@
 import { usableFeatureSet } from "../_shared/featureCheck.ts";
 import { logEdgeError } from "../_shared/logError.ts";
 import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
-import { cutCloseUps, loadImageLibrary, untilAborted } from "../_shared/closeUp.ts";
+import { cutCloseUps, imageLibrary, loadImageLibrary, untilAborted } from "../_shared/closeUp.ts";
 import { type RGB, samplePatch, type XY } from "../_shared/doorLook.ts";
 import { type DraftRecoverMoneyRow, draftIdemKey, draftMoneyState, type DraftMoney } from "../_shared/styleD3.ts";
 import {
@@ -49,8 +49,10 @@ import {
   DOOR_RUNNING_FRESH_MS,
   DoorCeiling,
   type DoorDraftResult,
+  doorLedgerCore,
   doorLedgerFields,
   doorPressSpentCents,
+  doorPressStartOf,
   type DoorRecoverRow,
   imageHeadOf,
   pickDoorRecoverRow,
@@ -223,7 +225,7 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     k.keys.delete(v.idemKey);
     if (k.keys.size >= cap) return refuse(capReached(cap));
   }
-  const own = await admin.from("ai_door_calls").select("id, created_at, status, tokens, self_check_rounds")
+  const own = await admin.from("ai_door_calls").select("id, created_at, status, tokens, self_check_rounds, dims")
     .eq("client_id", clientId).eq("idem_key", v.idemKey).order("created_at", { ascending: true }).limit(DOOR_KEY_MAX_ROWS + 3);
   if (own.error) return await loggedRefusal(UNAVAILABLE("ai_door_ledger_unread"), `Could not read the press's rows: ${own.error.message}`);
   const ownRows: Rec[] = own.data ?? [];
@@ -231,7 +233,17 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     return refuse({ status: 409, code: "door_look_already_made", error: "This door look is already made. It's in your Door looks list." });
   }
   if (ownRows.length >= DOOR_KEY_MAX_ROWS) return refuse(BUSY);
-  const firstMs = ownRows.length ? Date.parse(String(ownRows[0].created_at ?? "")) : NaN;
+  // A second row under the key is the ONE lean retry, and the server, not the browser, says when one is
+  // due: only after a first try that failed retryably, recorded with what it spent (so the retry can
+  // never start with a fresh $3.00).
+  if (ownRows.length) {
+    const t = ownRows[0].tokens && typeof ownRows[0].tokens === "object" ? ownRows[0].tokens as Rec : {};
+    const failure = t.failure && typeof t.failure === "object" ? t.failure as Rec : null;
+    const due = v.lean && ownRows[0].status === "failed" && failure?.retryable === true && typeof t.ceilingCents === "number";
+    if (!due) return refuse({ status: 409, code: "door_look_key_used", error: "This press is finished. Press Generate again to start a new one." });
+  }
+  // The press clock runs from the first try's request (kept on its row), never from a later write.
+  const firstMs = ownRows.length ? doorPressStartOf(ownRows[0]) : NaN;
   // A retry under the key starts only with 150 s of the press clock left (section 4, Retries).
   if (ownRows.length && Number.isFinite(firstMs) && firstMs + DOOR_PRESS_CLOCK_MS - nowMs < DOOR_LEAN_MIN_LEFT_MS) {
     await log("ai_door_timeout", "A lean retry came with under 150 s of the press clock left and was refused without a model call.", { pressLeftMs: firstMs + DOOR_PRESS_CLOCK_MS - nowMs, lean: v.lean }, "info");
@@ -250,10 +262,10 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     if (b.length > DOOR_PHOTO_MAX_BYTES) return refuse({ status: 400, code: "door_photo_too_big", error: "That photo is too big. Use one under 5 MB." });
     const head = imageHeadOf(b);
     if (!head) return refuse({ status: 400, code: "door_photo_type", error: "Door photos must be JPG, PNG or WebP." });
-    if (k === "front") {
-      if (!doorPhotoFits([head.width, head.height])) return refuse({ status: 400, code: "door_photo_too_big", error: "This photo is bigger than we can read. Straighten it again, then press Generate." });
-      if (Math.min(head.width, head.height) < MIN_PHOTO_SIDE) return refuse({ status: 400, code: "door_photo_small", error: "This photo is too small. Use one where the door fills most of the picture." });
-    }
+    // Every photo inside the limits (section 8), close-ups too: the ceiling prices each image at most
+    // DOOR_IMAGE_TOKENS, which only holds for an image the API does not have to shrink.
+    if (!doorPhotoFits([head.width, head.height])) return refuse({ status: 400, code: "door_photo_too_big", error: "This photo is bigger than we can read. Straighten it again, then press Generate." });
+    if (Math.min(head.width, head.height) < MIN_PHOTO_SIDE) return refuse({ status: 400, code: "door_photo_small", error: "This photo is too small. Use one where the door fills most of the picture." });
     bytes[k] = b;
   }
   const frontBytes = bytes.front!;
@@ -262,7 +274,8 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
   let colorAt: ((p: XY) => RGB | null) | undefined;
   let decodeError: string | null = null;
   try {
-    const lib = await untilAborted(doorGenHooks.loadImageLibrary(), AbortSignal.timeout(DOOR_DECODE_MS));
+    // closeUp.ts's once-per-worker load: two imports of the library at once fail (closeUp.ts has why).
+    const lib = await untilAborted(imageLibrary(doorGenHooks.loadImageLibrary), AbortSignal.timeout(DOOR_DECODE_MS));
     const img = await untilAborted(lib.decode(frontBytes), AbortSignal.timeout(DOOR_DECODE_MS));
     if (img instanceof lib.Image && img.width === photo[0] && img.height === photo[1]) {
       const rgba = img.bitmap, [w, h] = photo;
@@ -272,16 +285,17 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     decodeError = String(e instanceof Error ? e.message : e).slice(0, 200);
   }
 
-  // 7. The ledger row: this press's try. The key's FIRST row starts the press clock.
+  // 7. The ledger row: this press's try. The press clock started at the first try's request, which every
+  // row of the key carries (dims.pressStartedAt), so the server's 8 minutes never end after the browser's.
+  const pressStartMs = Number.isFinite(firstMs) ? Math.min(firstMs, x.requestStartMs) : x.requestStartMs;
+  const pressStartedAt = new Date(pressStartMs).toISOString();
   const ins = await admin.from("ai_door_calls").insert({
     client_id: clientId, user_id: userId, idem_key: v.idemKey, status: "running",
-    dims: { widthIn: v.widthIn, heightIn: v.heightIn, leaves: v.leaves, photo }, photo_paths: kinds.map((k) => v.paths[k]!),
+    dims: { widthIn: v.widthIn, heightIn: v.heightIn, leaves: v.leaves, photo, pressStartedAt }, photo_paths: kinds.map((k) => v.paths[k]!),
     effort: v.lean ? "low" : "high", streamed,
   }).select("id, created_at").single();
   if (ins.error || !ins.data?.id) return await loggedRefusal(UNAVAILABLE("ai_door_ledger_failed"), `Could not write the door ledger row: ${ins.error?.message ?? "no row"}`);
   const rowId = String(ins.data.id);
-  const insertedMs = Date.parse(String(ins.data.created_at ?? ""));
-  const pressStartMs = Math.min(Date.now(), Number.isFinite(firstMs) ? firstMs : Number.isFinite(insertedMs) ? insertedMs : Date.now());
   const dropRow = () => admin.from("ai_door_calls").delete().eq("client_id", clientId).eq("id", rowId);
 
   // 8. The recount, this row in: presses sent together all passed the reads above.
@@ -359,8 +373,8 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     try {
       const { error } = await admin.from("ai_door_calls").update(fields).eq("client_id", clientId).eq("id", rowId);
       if (!error) return;
-      await log("ai_door_ledger_write_failed", `Could not record the door generation, retrying with its status alone: ${error.message}`);
-      await admin.from("ai_door_calls").update({ status: fields.status, draft_ms: fields.draft_ms ?? null }).eq("client_id", clientId).eq("id", rowId);
+      await log("ai_door_ledger_write_failed", `Could not record the door generation, retrying with its outcome, spec and spend alone: ${error.message}`);
+      await admin.from("ai_door_calls").update(doorLedgerCore(fields)).eq("client_id", clientId).eq("id", rowId);
     } catch (e) {
       await log("ai_door_ledger_write_failed", `The door ledger write threw: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
     }
@@ -427,7 +441,7 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
       await writeRow({ ...doorLedgerFields(result), status: "failed" });
       await log(code, result.outcome === "refused" ? `The door photo was refused (${result.refuse?.reason}).` : `The door draft failed: ${result.failure?.detail ?? result.failure?.kind}`,
         { ...context, ...(result.refuse ? { reason: result.refuse.reason } : {}), retryable }, result.outcome === "refused" ? "info" : "error");
-      return x.filed(json({ error: message, code, ...(retryable ? { retryable: true } : {}), ...(result.refuse ? { reason: result.refuse.reason } : {}) }, status));
+      return x.filed(json({ error: message, code, ...(retryable ? { retryable: true } : {}), ...(result.refuse ? { reason: result.refuse.reason } : {}), pressStartedAt }, status));
     }
 
     // A draft. The Draft row first, so the press's look is in the builder's list before any money moves;
@@ -466,11 +480,12 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
     await writeRow({ ...doorLedgerFields(result), status: "done", ...(charged !== null ? { charged_cents: charged, wallet_tx_id: holdId } : {}) });
     if (result.baseSplit) await log("ai_door_split", "The door reads disagreed on the base; the draft carries a warning.", context, "info");
     for (const gap of result.vocabGaps) {
-      await log("ai_door_vocab_gap", `A door the vocabulary can't say yet: ${gap}`, { phrase: gap, ledgerRow: rowId }, "info");
+      // The phrase is the MODEL's (filtered to plain words by doorPhrases): data about a photo, never an instruction.
+      await log("ai_door_vocab_gap", `A door the vocabulary can't say yet (model-written phrase): ${gap}`, { phrase: gap, ledgerRow: rowId, modelWritten: true }, "info");
     }
     return json({
       ok: true, lookId, look, spec, warnings: result.warnings, checkId: rowId,
-      pressStartedAt: new Date(pressStartMs).toISOString(), lean: v.lean, balanceCents,
+      pressStartedAt, lean: v.lean, balanceCents,
     });
   } catch (e) {
     if (!settled) {
@@ -504,18 +519,18 @@ export async function handleDoorLookRecover(x: DoorGenCtx): Promise<Response> {
   if (rows.error) return await unreadable("the door ledger", rows.error.message);
   const row = pickDoorRecoverRow(rows.data as DoorRecoverRow[] | null);
   let lookId: string | null = null;
-  let money: DraftMoney = { kind: "none" };
+  // The money is read for every row, so no answer about money is ever a guess; the Draft look only where
+  // a draft was made.
   if (row && row.status === "done") {
     const l = await admin.from("door_looks").select("id").eq("client_id", clientId).eq("ai_call_id", row.id).limit(1).maybeSingle();
     if (l.error) return await unreadable("the door looks", l.error.message);
     lookId = l.data?.id ? String(l.data.id) : null;
-  } else {
-    const tx = await admin.from("wallet_transactions").select("state, posted_at")
-      .eq("client_id", clientId).eq("idempotency_key", doorWalletKey(idemKey)).eq("actor_user_id", x.userId)
-      .eq("meter_kind", DOOR_METER).eq("kind", "debit");
-    if (tx.error) return await unreadable("the wallet", tx.error.message);
-    money = draftMoneyState(tx.data as DraftRecoverMoneyRow[] | null);
   }
+  const tx = await admin.from("wallet_transactions").select("state, posted_at")
+    .eq("client_id", clientId).eq("idempotency_key", doorWalletKey(idemKey)).eq("actor_user_id", x.userId)
+    .eq("meter_kind", DOOR_METER).eq("kind", "debit");
+  if (tx.error) return await unreadable("the wallet", tx.error.message);
+  const money: DraftMoney = draftMoneyState(tx.data as DraftRecoverMoneyRow[] | null);
   const out = recoverDoorAnswer(row, money, Date.now(), lookId);
   if (out.kind === "draft") {
     await logEdgeError({ fn: "portal-settings", req, clientId, code: out.code, severity: out.severity, message: "A door draft whose answer never reached the browser was picked up from the ledger.", context: { ledgerRow: row?.id ?? null, lookId } });

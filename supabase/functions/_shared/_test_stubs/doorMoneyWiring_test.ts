@@ -41,6 +41,8 @@ const BODY = { action: "generate_door_look", idempotencyKey: KEY, widthIn: 36, h
 const READ = singleDoor().read;
 const GOOD: Script = { stageA: [READ, READ, READ], hinges: { type: "strap", finish: "black" }, handle: { type: "barn", finish: "black" } };
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+// What a first try that failed retryably leaves on its row (doorLedgerFields): the failure, and its spend.
+const RETRYABLE = { failure: { code: "ai_door_unparseable", retryable: true }, ceilingCents: 30, costCents: 12 };
 
 function seed(o: { settings?: Row; calls?: Row[] } = {}): FakeDb {
   const db = new FakeDb({
@@ -81,7 +83,9 @@ Deno.test("meter inactive: wallet_hold still asked (door meter, the press's key)
   assertEquals(steps(db), ["insert ai_door_calls", "wallet_hold", "insert door_looks", "update ai_door_calls:done"]);
   const row = db.rows("ai_door_calls")[0];
   assertEquals([row.client_id, row.user_id, row.idem_key, row.status, row.effort, row.photo_paths], [OWN, USER_ID, KEY, "done", "high", [FRONT]]);
-  assertEquals(row.dims, { widthIn: 36, heightIn: 80, leaves: 1, photo: [700, 1556] });
+  assertEquals([row.dims.widthIn, row.dims.heightIn, row.dims.leaves, row.dims.photo], [36, 80, 1, [700, 1556]]);
+  // The press clock runs from the request, which came before the row.
+  assert(Date.parse(row.dims.pressStartedAt) <= Date.parse(row.created_at) && r.body.pressStartedAt === row.dims.pressStartedAt);
   assert(row.tokens.costCents > 0 && row.tokens.prompt === "DOOR_LOOK_V1");
   assertEquals([row.charged_cents, row.wallet_tx_id], [undefined, undefined], "nothing charged");
   const look = db.rows("door_looks")[0];
@@ -213,7 +217,7 @@ Deno.test("the cap: distinct keys over 24 hours leaving this press's own out; re
 });
 
 Deno.test("the cap: a lean retry on the last slot goes ahead (its own key is not counted twice); 0 is unlimited and never counted", async () => {
-  const mine = { id: uuid(500), client_id: OWN, idem_key: KEY, status: "failed", created_at: ago(60_000) };
+  const mine = { id: uuid(500), client_id: OWN, idem_key: KEY, status: "failed", created_at: ago(60_000), tokens: RETRYABLE };
   const db = seed({ calls: [...others(9), mine] });
   const r = await press(db, { ...BODY, lean: true });
   assertEquals(r.status, 200, JSON.stringify(r.body));
@@ -277,12 +281,55 @@ Deno.test("one key: a third row is refused, a key that drafted is done, a retry 
   assertEquals([r.status, r.body.code, third.writesTo("ai_door_calls", "insert").length], [409, "door_look_busy", 0]);
   const done = seed({ calls: [{ ...two[0], status: "done" }] });
   assertEquals((await press(done)).body.code, "door_look_already_made");
-  const late = seed({ calls: [{ ...two[0], created_at: ago(480_000 - 140_000) }] });
+  const late = seed({ calls: [{ ...two[0], created_at: ago(480_000 - 140_000), tokens: RETRYABLE }] });
   const l = await press(late, { ...BODY, lean: true });
   assertEquals([l.status, l.body.code, l.body.error], [504, "ai_door_timeout", "This took too long. Please try again. You haven't been charged."]);
   assertEquals([late.writesTo("ai_door_calls", "insert").length, rpcs(late).length, l.m.sent.length], [0, 0, 0]);
   const info = late.errors.find((e) => e.code === "ai_door_timeout");
   assertEquals(info?.severity, "info");
+});
+
+Deno.test("the second row under a key is the server's call: only a lean retry, after a retryable failure that recorded its spend", async () => {
+  const row = (tokens: unknown, status = "failed") => ({ id: uuid(850), client_id: OWN, idem_key: KEY, status, created_at: ago(60_000), tokens });
+  const cases: [string, unknown, Record<string, unknown>][] = [
+    ["not lean", RETRYABLE, BODY],
+    ["after a refusal", { refuse: { code: "ai_door_refused", reason: "open" } }, { ...BODY, lean: true }],
+    ["after a failure that was not retryable", { failure: { code: "ai_door_unparseable", retryable: false }, ceilingCents: 30 }, { ...BODY, lean: true }],
+    ["after a row whose spend was never recorded", { failure: { code: "ai_door_failed" } }, { ...BODY, lean: true }],
+    ["after a row with no tokens at all", null, { ...BODY, lean: true }],
+  ];
+  for (const [what, tokens, body] of cases) {
+    const db = seed({ calls: [row(tokens)] });
+    const r = await press(db, body);
+    assertEquals([r.status, r.body.code], [409, "door_look_key_used"], what);
+    assertEquals([db.writesTo("ai_door_calls", "insert").length, rpcs(db).length, r.m.sent.length], [0, 0, 0], what);
+  }
+  assertEquals((await press(seed({ calls: [row(RETRYABLE)] }), { ...BODY, lean: true })).status, 200, "the one lean retry");
+});
+
+Deno.test("a ledger write that fails whole still records the outcome and the spend (a NUL from the model would otherwise lose it)", async () => {
+  const db = seed();
+  let n = 0;
+  db.failing.add("ai_door_calls.update");
+  const real = db.from.bind(db);
+  // Only the first update fails (the full row); the fallback lands.
+  db.from = (t: string) => {
+    if (t === "ai_door_calls" && db.failing.has("ai_door_calls.update")) {
+      const q = real(t) as any;
+      const update = q.update.bind(q);
+      q.update = (patch: any) => {
+        if (n++ > 0) db.failing.delete("ai_door_calls.update");
+        return update(patch);
+      };
+      return q;
+    }
+    return real(t);
+  };
+  const r = await press(db, BODY, { stageA: ["cutoff", "cutoff", "cutoff"] });
+  assertEquals([r.status, r.body.retryable], [502, true]);
+  const row = db.rows("ai_door_calls")[0];
+  assertEquals([row.status, row.tokens.failure.retryable, typeof row.tokens.ceilingCents], ["failed", true, "number"]);
+  assert(db.errorCodes().includes("ai_door_ledger_write_failed"));
 });
 
 Deno.test("another generation running (a row under 6 minutes) is a 409 before any row; one older is a dead worker and does not block", async () => {
@@ -298,7 +345,7 @@ Deno.test("another generation running (a row under 6 minutes) is a 409 before an
 
 // ─── 6. THE CEILING ACROSS A KEY'S ROWS ───────────────────────────────────────────────────────────
 Deno.test("the $3.00 ceiling counts what the key's first try already cost: a lean retry that cannot fit Stage A calls nothing and releases", async () => {
-  const first = { id: uuid(600), client_id: OWN, idem_key: KEY, status: "failed", created_at: ago(90_000), tokens: { ceilingCents: 280 } };
+  const first = { id: uuid(600), client_id: OWN, idem_key: KEY, status: "failed", created_at: ago(90_000), tokens: { ...RETRYABLE, ceilingCents: 280 } };
   const db = seed({ calls: [first] });
   hold(db, { hold_id: 31, price_cents: 500, balance_after: 2000, err: null });
   const r = await press(db, { ...BODY, lean: true });
@@ -328,7 +375,11 @@ Deno.test("photos: only this tenant's exact paths, read back and checked before 
   const huge = seed();
   huge.files[`door-refs/${FRONT}`] = pngHead(2400, 3200);
   assertEquals((await press(huge)).body.code, "door_photo_too_big");
-  for (const db of [missing, svg, huge]) assertEquals([db.writes.length, rpcs(db).length], [0, 0]);
+  // The close-ups are held to the same limits: the ceiling prices every image as one inside them.
+  const bigHinge = seed();
+  bigHinge.files[`door-refs/${HINGE}`] = pngHead(4000, 3000);
+  assertEquals((await press(bigHinge, { ...BODY, photos: { front: FRONT, hinge: HINGE } })).body.code, "door_photo_too_big");
+  for (const db of [missing, svg, huge, bigHinge]) assertEquals([db.writes.length, rpcs(db).length], [0, 0]);
   // With a hinge close-up: both read back, both signed for 600 s, both sent as URLs.
   const db = seed();
   const r = await press(db, { ...BODY, photos: { front: FRONT, hinge: HINGE } });

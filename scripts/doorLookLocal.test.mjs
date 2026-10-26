@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { insideRepo, main, parseArgs, preparedSize, REPO_ROOT } from "./doorLookLocal.mjs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { insideGitWorkTree, insideRepo, main, parseArgs, preparedSize, REPO_ROOT } from "./doorLookLocal.mjs";
 import { doorStageAPrompt } from "../supabase/functions/_shared/doorLookPrompt.ts";
 import { singleDoor, doubleDoor } from "../supabase/functions/_shared/_test_stubs/doorReads.ts";
 
@@ -79,6 +81,26 @@ test("prepare: a quad straightens the photo to the typed shape; outputs inside t
     w.done();
   }
   assert.ok(insideRepo(join(REPO_ROOT, "x")) && !insideRepo(tmpdir()));
+});
+
+test("outputs: refused inside ANY git checkout (another worktree of this repo too), and the photo's own path is never written", async () => {
+  assert.equal(insideGitWorkTree(join(REPO_ROOT, "not", "yet", "made")), true);
+  const w = workspace();
+  try {
+    const repo = join(w.dir, "some-checkout");
+    mkdirSync(repo);
+    assert.equal(spawnSync("git", ["init", "-q", repo]).status, 0);
+    assert.equal(insideGitWorkTree(join(repo, "prep")), true);
+    assert.equal(insideGitWorkTree(join(w.dir, "prep")), false);
+    const photo = join(w.dir, "Builder Name door.jpg");
+    writeFileSync(photo, JSON.stringify({ size: [900, 2000] }));
+    await assert.rejects(main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", join(repo, "prep")], async () => fakeOps()), /any git checkout/);
+    await main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", join(w.dir, "prep")], async () => fakeOps());
+    const req = readFileSync(join(w.dir, "prep", "request.json"), "utf8");
+    assert.ok(!req.includes("Builder Name") && !req.includes(w.dir.replace(/\\/g, "\\\\")), "no path to the builder's photo");
+  } finally {
+    w.done();
+  }
 });
 
 test("settle: three stub reads through the server's maths; close-ups and Stage B skipped with their warnings", async () => {

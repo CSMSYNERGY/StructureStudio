@@ -32,8 +32,9 @@
 // image work (decode, straighten, fit, the colour patches) runs in Playwright's headless Chromium, which
 // the repo already has for its harnesses; nothing here reaches the network.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { doorFitSize, doorRequestBody, doorStageAPrompt, doorStageBPrompt, DOOR_LOOK_PROMPT_ID } from "../supabase/functions/_shared/doorLookPrompt.ts";
 import { DOOR_READ_MAX_TOKENS, DOOR_READS, doorDraftFromReads } from "../supabase/functions/_shared/doorGenerate.ts";
@@ -41,12 +42,38 @@ import { samplePatch } from "../supabase/functions/_shared/doorLook.ts";
 import { AI_MODEL_V2 } from "../supabase/functions/_shared/styleD3.ts";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// The real path (junctions, symlinks and 8.3 short names resolved) of `p`, or of its nearest existing
+// folder with the rest of `p` joined on: a path that does not exist yet is judged by where it would land.
+export function realPathOf(p) {
+  let cur = resolve(p);
+  const rest = [];
+  while (!existsSync(cur)) {
+    const up = dirname(cur);
+    if (up === cur) break;
+    rest.unshift(basename(cur));
+    cur = up;
+  }
+  let real = cur;
+  try {
+    real = realpathSync.native(cur);
+  } catch { /* keep the resolved path */ }
+  return join(real, ...rest);
+}
 export function insideRepo(p, root = REPO_ROOT) {
-  const a = resolve(p).toLowerCase(), r = resolve(root).toLowerCase();
+  const a = realPathOf(p).toLowerCase(), r = realPathOf(root).toLowerCase();
   return a === r || a.startsWith(r.endsWith(sep) ? r : r + sep);
 }
+// Inside ANY git work tree: this repo's other checkouts and worktrees too, which a path test against this
+// checkout alone would miss. A builder's photo never goes into one.
+export function insideGitWorkTree(p) {
+  let cur = realPathOf(p);
+  while (!existsSync(cur) && dirname(cur) !== cur) cur = dirname(cur);
+  const r = spawnSync("git", ["-C", cur, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  return r.status === 0 && String(r.stdout).trim() === "true";
+}
+export const outsideRepos = (p) => !insideRepo(p) && !insideGitWorkTree(p);
 const outside = (p, what) => {
-  if (insideRepo(p)) throw new Error(`${what} must be outside the repo (it holds a builder's photo, and the repo is public): ${p}`);
+  if (!outsideRepos(p)) throw new Error(`${what} must be outside the repo and any git checkout (it holds a builder's photo, and the repo is public): ${p}`);
   return resolve(p);
 };
 
@@ -218,7 +245,8 @@ export async function prepare(o, ops) {
   const request = {
     prompt: DOOR_LOOK_PROMPT_ID, model: AI_MODEL_V2, effort: "high", maxTokens: DOOR_READ_MAX_TOKENS, reads: DOOR_READS,
     widthIn, heightIn, leaves, photo, expectSize: photo, images, closeUps,
-    source: { file: resolve(o.photo), size: src, ...(quad ? { quad } : {}) }, body,
+    // Not the photo's own path: a vault path can name the builder.
+    source: { size: src, ...(quad ? { quad } : {}) }, body,
   };
   writeFileSync(join(out, "prompt.txt"), text);
   writeFileSync(join(out, "request.json"), JSON.stringify(request, null, 2) + "\n");

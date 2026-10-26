@@ -24,6 +24,7 @@ import {
   type DoorConsensus,
   type DoorLook,
   type DoorLookBase,
+  doorLookFromMeasure,
   type DoorMeasureCtx,
   type DoorRefuseCode,
   type DoorWarning,
@@ -139,6 +140,10 @@ export class DoorCeiling {
     this.held.delete(id);
     this.spentCents += actualCents === null ? worst : Math.max(0, actualCents);
   }
+  // A cost found after the fact (a send that threw and was sent again: the first may have been billed).
+  charge(cents: number): void {
+    if (Number.isFinite(cents) && cents > 0) this.spentCents += cents;
+  }
 }
 
 // What a press's earlier ledger rows (a lean retry's first try) and self-check rounds already count
@@ -250,12 +255,15 @@ export function doorLookFeatures(spec: DoorLook): Set<Feature> {
   return out;
 }
 
-// Short phrases, trimmed, at most 80 characters, each once (case aside), at most DOOR_MAX_GAPS.
+// Short phrases, trimmed, at most 80 characters, each once (case aside), at most DOOR_MAX_GAPS. MODEL-WRITTEN
+// TEXT: it reaches the builder's warnings, the Stage B prompt and app_errors, and a photo can carry printed
+// words the model copies (a sign on a door). So only plain words survive: letters, digits, spaces and
+// , . ' - / ( ), everything else becomes a space.
 export function doorPhrases(v: unknown): string[] {
   const out: string[] = [];
   for (const s of Array.isArray(v) ? v.slice(0, 40) : []) {
     if (typeof s !== "string") continue;
-    const t = s.trim().replace(/\s+/g, " ").slice(0, 80);
+    const t = s.replace(/[^A-Za-z0-9 ,.'()/-]/g, " ").trim().replace(/\s+/g, " ").slice(0, 80).trim();
     if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
     if (out.length >= DOOR_MAX_GAPS) break;
   }
@@ -443,7 +451,7 @@ async function askDoor(deps: DoorDeps, body: string, callMs: number): Promise<As
   const now = deps.now ?? Date.now;
   const t0 = now();
   try {
-    const res = await deps.fetch(API_URL, { method: "POST", headers: headers(deps.apiKey), body, signal: AbortSignal.timeout(Math.max(1_000, callMs)) });
+    const res = await deps.fetch(API_URL, { method: "POST", headers: headers(deps.apiKey), body, signal: AbortSignal.timeout(Math.max(1, Math.floor(callMs))) });
     const text = await res.text();
     if (!res.ok) return { status: res.status, threw: false, answer: null, stop: null, usage: null, ms: now() - t0 };
     const r = readDoorReply(text);
@@ -487,6 +495,9 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
     known += doorCostCents(a.usage.input, a.usage.output);
   };
   const leftMs = () => input.deadlineAt - now();
+  // What the press had spent before this row: the row records only its own spend, so the rows of a key
+  // add up to the press's (doorPressSpentCents) without counting a first try twice.
+  const spentBefore = input.ceiling.spentCents;
   const result: DoorDraftResult = {
     outcome: "failed", spec: null, warnings: [], vocabGaps: [], refuse: null, failure: null, sideFrom: null, baseSplit: false,
     consensus: null, reads: [], closeUps: {}, stageB: { status: "not_needed" }, observed: [], unexplained: [], mismatches: [],
@@ -495,7 +506,7 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
   const done = (r: Partial<DoorDraftResult>): DoorDraftResult => {
     Object.assign(result, r);
     result.costCents = Math.round(known * 10_000) / 10_000;
-    result.ceilingCents = Math.round(input.ceiling.spentCents * 10_000) / 10_000;
+    result.ceilingCents = Math.round((input.ceiling.spentCents - spentBefore) * 10_000) / 10_000;
     if (input.ceiling.skipped) result.skipped.ceiling = true;
     result.ms = now() - t0;
     return result;
@@ -523,19 +534,33 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
   }
   const stageA = new AbortController();
   const timer = setTimeout(() => stageA.abort(), leftMs());
-  let drafted = 0, graceFired = false;
+  let drafted = 0, graceFired = false, netThrows = 0;
   let grace: ReturnType<typeof setTimeout> | undefined;
   let calls: DraftCall<DoorReading>[];
+  // A read counts toward the quorum (and starts the grace) only when doorLook.ts can use it: it measures,
+  // or it refuses. One that parses but is dropped (its size echo off the photo, no size) does not.
+  const usable = (answer: Rec | null) => {
+    if (!answer) return false;
+    const m = doorLookFromMeasure(answer, ctx);
+    return m.ok || "refuse" in m;
+  };
   try {
     calls = await runDraftCalls<DoorReading>({
       count: DOOR_READS,
       deadline: stageA.signal,
       graceMs: 0,
       retry: { ...DOOR_READ_RETRY, delaysMs: [...DOOR_READ_RETRY.delaysMs], deadlineAt: input.deadlineAt, ...(deps.random ? { random: deps.random } : {}) },
-      send: (signal) => deps.fetch(API_URL, { method: "POST", headers: headers(deps.apiKey), body, signal }),
+      send: async (signal) => {
+        try {
+          return await deps.fetch(API_URL, { method: "POST", headers: headers(deps.apiKey), body, signal });
+        } catch (e) {
+          if (!signal.aborted) netThrows++;
+          throw e;
+        }
+      },
       read: (b) => {
         const r = readDoorReply(b);
-        if (r.drafted && ++drafted === DOOR_READ_QUORUM && DOOR_READ_QUORUM < DOOR_READS) {
+        if (usable(r.answer) && ++drafted === DOOR_READ_QUORUM && DOOR_READ_QUORUM < DOOR_READS) {
           grace = setTimeout(() => {
             graceFired = true;
             stageA.abort();
@@ -554,6 +579,10 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
     // Never sent costs nothing; a non-2xx is not billed; a throw after the send may have been.
     input.ceiling.settle(holds[i], c.attempts === 0 ? 0 : c.threw ? null : reading ? (reading.usage ? doorCostCents(reading.usage.input, reading.usage.output) : null) : 0);
   });
+  // A send that threw on the network and was sent again: its cost, if any, is unknown, so its worst case
+  // counts too (a final throw already kept its own above).
+  const finalThrows = calls.filter((c) => c.threw && c.attempts > 0 && c.aborted === null && !c.replied).length;
+  input.ceiling.charge(Math.max(0, netThrows - finalThrows) * worst);
   result.reads = calls.map((c) => ({
     i: c.index, attempts: c.attempts, ms: c.ms, status: c.status, threw: c.threw, aborted: c.threw ? (graceFired && c.aborted === "deadline" ? "quorum" : c.aborted) : null,
     stop: c.httpOk ? c.reading.stop : null, input: c.httpOk ? c.reading.usage?.input ?? null : null, output: c.httpOk ? c.reading.usage?.output ?? null : null,
@@ -570,13 +599,18 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
     if (parsed < DOOR_READ_QUORUM && calls.some((c) => c.threw && c.aborted === "deadline" && !graceFired)) {
       return fail("timeout", true, DOOR_FAILURE_TEXT.timeout, `${parsed} of ${DOOR_READS} reads drafted before the deadline`);
     }
-    if (calls.every((c) => !c.httpOk)) {
-      const f = draftUpstreamFailure(calls[0], calls);
+    // The API failed the reads that would have made the quorum (all of them, or two of three): its failure,
+    // retryable when it was transient, never "we couldn't read this door".
+    const failed = calls.filter((c) => !c.httpOk && c.attempts > 0 && !(c.threw && c.aborted !== null));
+    if (failed.length && parsed + failed.length >= DOOR_READ_QUORUM && parsed < DOOR_READ_QUORUM) {
+      const f = draftUpstreamFailure(failed[0], calls);
       return fail("upstream", f.transient, f.kind === "overloaded" ? DOOR_FAILURE_TEXT.busy : DOOR_FAILURE_TEXT.upstream, f.message.slice(0, 300));
     }
     if (calls.some((c) => c.httpOk && !c.reading.drafted && c.reading.stop === "max_tokens")) {
       return fail("cutoff", true, DOOR_FAILURE_TEXT.unparseable, "a read was cut off at max_tokens");
     }
+    // Our own grace cut a read and the rest did not agree: another try may.
+    if (graceFired) return fail("unparseable", true, DOOR_FAILURE_TEXT.unparseable, `the grace cut a read; dropped: ${JSON.stringify(cons.dropped).slice(0, 200)}`);
     return fail("unparseable", false, DOOR_FAILURE_TEXT.unparseable, `dropped: ${JSON.stringify(cons.dropped).slice(0, 200)}`);
   }
   const c = cons;
@@ -634,7 +668,16 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
       p.crops = crops ? crops.slice(at, at + p.windows.length) : [];
       at += p.windows.length;
     }
+    // The cut took time: the 45 s rule again before any ask goes.
+    const late = leftMs() < DOOR_CLOSEUP_MIN_LEFT_MS;
     await Promise.all(plans.map(async (p) => {
+      if (late) {
+        for (const h of p.holds) input.ceiling.settle(h, 0);
+        ups2[p.ask] = { status: "skipped" };
+        result.closeUps[p.ask] = { status: "skipped", reason: "time" };
+        (result.skipped.closeUps ??= []).push(`${p.ask}:time`);
+        return;
+      }
       const imgs: DoorImageSource[] = [...p.crops.map((b) => ({ base64: b, mediaType: "image/jpeg" })), ...(p.builder ? [p.builder] : [])];
       if (!imgs.length || (!p.crops.length && p.windows.length && !p.builder)) {
         for (const h of p.holds) input.ceiling.settle(h, 0);
@@ -694,7 +737,31 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
 // The columns the server writes when a press's work ends, from its result. The spec, the warnings and
 // the money are what recover and the P7 scorer read back (tests/doorlooks/doorSim.mjs's
 // runFromDoorLedgerRow); the points, the reads and the notes stay here and never reach a shopper.
+// Every string made jsonb-safe: Postgres refuses a \u0000 and a lone surrogate in jsonb, and the model's
+// raw answers ride in `reads`, so one stray character would otherwise fail the whole ledger write.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+export function doorJsonSafe<T>(v: T): T {
+  if (typeof v === "string") return v.replace(/\u0000/g, "").replace(LONE_SURROGATE, "�") as T;
+  if (Array.isArray(v)) return v.map((x) => doorJsonSafe(x)) as T;
+  if (isRec(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [doorJsonSafe(k), doorJsonSafe(x)])) as T;
+  return v;
+}
 export function doorLedgerFields(r: DoorDraftResult): Rec {
+  return doorJsonSafe(doorLedgerRaw(r));
+}
+// The money and the outcome alone (numbers and our own codes): what a ledger write that failed whole
+// still records, so a retry under the key can never start with a fresh ceiling.
+export function doorLedgerCore(fields: Rec): Rec {
+  const t = isRec(fields.tokens) ? fields.tokens : {};
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const failure = isRec(t.failure) ? { code: String(t.failure.code ?? ""), message: String(t.failure.message ?? ""), retryable: t.failure.retryable === true } : null;
+  return {
+    // The cleaned spec holds only numbers, enums and hex: safe to keep, and what recover answers with.
+    status: fields.status, draft_ms: n(fields.draft_ms), drafted: isRec(fields.drafted) ? fields.drafted : null,
+    tokens: { costCents: n(t.costCents), ceilingCents: n(t.ceilingCents) ?? DOOR_PRESS_CEILING_CENTS, outcome: typeof t.outcome === "string" ? t.outcome : null, failure },
+  };
+}
+function doorLedgerRaw(r: DoorDraftResult): Rec {
   return {
     status: r.outcome === "draft" ? "done" : "failed",
     drafted: r.spec,
@@ -719,22 +786,30 @@ export function doorLedgerFields(r: DoorDraftResult): Rec {
 //   failed    not charged (or, if the wallet says captured, charged once and the draft is in the list)
 //   running   still working, until the press clock (plus a minute) says its worker is gone
 //   no row    not answered at once: the press's insert may not have landed (the browser keeps asking)
-export type DoorRecoverRow = { id: string; created_at: unknown; status: unknown; drafted: unknown; warnings: unknown; tokens: unknown };
-export const DOOR_RECOVER_COLUMNS = "id, created_at, status, drafted, warnings, tokens";
+export type DoorRecoverRow = { id: string; created_at: unknown; status: unknown; drafted: unknown; warnings: unknown; tokens: unknown; dims?: unknown };
+export const DOOR_RECOVER_COLUMNS = "id, created_at, status, drafted, warnings, tokens, dims";
+// When a press started: its first try's request, kept on each of its rows (dims.pressStartedAt), else the
+// row's own created_at (a row written before that key existed).
+export function doorPressStartOf(row: { created_at?: unknown; dims?: unknown } | null | undefined): number {
+  const d = row && isRec(row.dims) ? row.dims : {};
+  const ms = msOf(d.pressStartedAt);
+  return Number.isFinite(ms) ? ms : msOf(row?.created_at);
+}
 export const DOOR_RECOVER_STALE_MS = DOOR_PRESS_CLOCK_MS + 60_000;
 export const DOOR_RECOVER_TEXT = {
   notCharged: "We couldn't pick your door look up: it didn't finish, so you haven't been charged. Press Generate to try again.",
   chargedInList: "This door look was charged once, and its draft is in your Door looks list. Reload the page to see it.",
   unsure: "We couldn't pick your door look up. A door look is only ever charged once. Reload the page before pressing Generate again.",
+  inList: "Your door look's draft is in your Door looks list. Reload the page to see it.",
 } as const;
 export type DoorRecoverAnswer =
   | { kind: "draft"; code: string; severity: "info"; body: Rec }
   | { kind: "pending"; body: { ok: true; pending: true } }
-  | { kind: "lost"; code: string; severity: "info" | "error"; why: string; body: { ok: true; pending: false; reason: string; message: string; code?: string } };
-const msOf = (v: unknown) => {
+  | { kind: "lost"; code: string; severity: "info" | "error"; why: string; body: { ok: true; pending: false; reason: string; message: string; code?: string; retryable?: true } };
+function msOf(v: unknown): number {
   const ms = Date.parse(String(v ?? ""));
   return Number.isFinite(ms) ? ms : NaN;
-};
+}
 export function pickDoorRecoverRow(rows: readonly DoorRecoverRow[] | null | undefined): DoorRecoverRow | null {
   const list = (Array.isArray(rows) ? rows : []).filter((r): r is DoorRecoverRow => isRec(r));
   if (!list.length) return null;
@@ -745,21 +820,23 @@ export function recoverDoorAnswer(row: DoorRecoverRow | null, money: DraftMoney,
     money.kind === "captured" ? { message: DOOR_RECOVER_TEXT.chargedInList, severity: "info" }
     : money.kind === "released" || money.kind === "none" ? { message: DOOR_RECOVER_TEXT.notCharged, severity: "info" }
     : { message: DOOR_RECOVER_TEXT.unsure, severity: "error" };
-  const lost = (why: string, said = moneySaid(), code?: string): DoorRecoverAnswer => ({
+  const lost = (why: string, said = moneySaid(), code?: string, retryable = false): DoorRecoverAnswer => ({
     kind: "lost", code: "ai_door_recover_none", severity: said.severity, why,
-    body: { ok: true, pending: false, reason: why, message: said.message, ...(code ? { code } : {}) },
+    body: { ok: true, pending: false, reason: why, message: said.message, ...(code ? { code } : {}), ...(retryable ? { retryable: true as const } : {}) },
   });
   if (!row) return lost("no_row");
   const tokens = isRec(row.tokens) ? row.tokens : {};
   if (row.status === "done") {
     const clean = cleanDoorLook(row.drafted);
-    if (!clean.ok) return lost("unreadable", { message: moneySaid().message, severity: "error" });
+    // A done row whose draft did not reach the ledger: the Draft look is the answer when it exists (the
+    // server writes it before any capture), and the money's sentence otherwise.
+    if (!clean.ok) return lookId ? lost("in_list", { message: DOOR_RECOVER_TEXT.inList, severity: "info" }) : lost("unreadable", { message: moneySaid().message, severity: "error" });
     return {
       kind: "draft", code: "ai_door_recovered", severity: "info",
       body: {
         ok: true, recovered: true, lookId, spec: clean.spec,
         warnings: Array.isArray(row.warnings) ? row.warnings : [], checkId: row.id,
-        pressStartedAt: typeof row.created_at === "string" ? row.created_at : null,
+        pressStartedAt: Number.isFinite(doorPressStartOf(row)) ? new Date(doorPressStartOf(row)).toISOString() : null,
       },
     };
   }
@@ -768,7 +845,10 @@ export function recoverDoorAnswer(row: DoorRecoverRow | null, money: DraftMoney,
     const failure = isRec(tokens.failure) ? tokens.failure : isRec(tokens.refuse) ? tokens.refuse : null;
     const own = failure && typeof failure.message === "string" ? failure.message : failure && typeof failure.text === "string" ? failure.text : null;
     const code = failure && typeof failure.code === "string" ? failure.code : undefined;
-    if (own && (money.kind === "released" || money.kind === "none")) return lost("failed", { message: own, severity: "info" }, code);
+    // A retryable failure keeps its one lean retry after a dropped stream too, while the press clock has
+    // 150 s for it.
+    const retryable = isRec(tokens.failure) && tokens.failure.retryable === true && doorPressStartOf(row) + DOOR_PRESS_CLOCK_MS - nowMs >= DOOR_LEAN_MIN_LEFT_MS;
+    if (own && (money.kind === "released" || money.kind === "none")) return lost("failed", { message: own, severity: "info" }, code, retryable);
     return lost("failed", moneySaid(), code);
   }
   const age = nowMs - msOf(row.created_at);

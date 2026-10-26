@@ -43,15 +43,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkTruthCase, formatReport, loadRuns, loadTruth, scoreCorpus, scoreRun } from "./doorScore.mjs";
 import { cleanDoorLook, samplePatch } from "../../supabase/functions/_shared/doorLook.ts";
 import { DoorCeiling, DOOR_LEAN_MIN_LEFT_MS, DOOR_PRESS_CLOCK_MS, doorDraftFromReads, doorLedgerFields, runDoorDraft } from "../../supabase/functions/_shared/doorGenerate.ts";
-import { playwrightImageOps, preparedSize } from "../../scripts/doorLookLocal.mjs";
+import { insideGitWorkTree, insideRepo as insideRepoReal, playwrightImageOps, preparedSize } from "../../scripts/doorLookLocal.mjs";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const PRESS_CEILING_DOLLARS = 3;
 
-// True when `p` is the repo or anything under it (case-insensitive: Windows paths).
+// True when `p` is the repo or anything under it (case-insensitive: Windows paths), judged by its real
+// path (junctions, symlinks and short names resolved), or anywhere inside any git checkout.
 export function insideRepo(p, root = REPO_ROOT) {
-  const a = resolve(p).toLowerCase(), r = resolve(root).toLowerCase();
-  return a === r || a.startsWith(r.endsWith(sep) ? r : r + sep);
+  return insideRepoReal(p, root) || insideGitWorkTree(p);
 }
 
 // ─── THE MODES ────────────────────────────────────────────────────────────────────────────────────
