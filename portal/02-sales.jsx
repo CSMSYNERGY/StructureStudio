@@ -4473,7 +4473,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
       {hosts.length === 0 && (
         <div style={{ ...sub, marginBottom: 12 }}>
           Nobody on this account has a booking calendar yet. Set one up under{" "}
-          <strong>Settings → Meetings</strong> and this tab can book against it.
+          <strong>My Profile → My meetings</strong> and this tab can book against it.
         </div>
       )}
 
@@ -4508,7 +4508,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
           )}
           {host && host.accepting && !offered.length && (
             <div style={{ ...sub, marginBottom: 10 }}>
-              {host.publicName} hasn't picked any meeting types yet — that's under Settings → Meetings.
+              {host.publicName} hasn't picked any meeting types yet — that's in their My Profile → My meetings.
             </div>
           )}
 
@@ -4521,7 +4521,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
               {!avail && <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>}
               {avail && !flat.length && (
                 <div style={{ ...sub, marginBottom: 10 }}>
-                  Nothing open in the next three weeks. Their hours and days off are under Settings → Meetings.
+                  Nothing open in the next three weeks. Their hours and days off are in their My Profile → My meetings.
                 </div>
               )}
               {!!flat.length && (
