@@ -150,6 +150,9 @@ const ROLLBACK = () => {
   console.log("the pieces, cut the way the header cuts them");
   {
     const t = MIG();
+    // A Windows checkout has CRLF: without the strip no marker matches and every piece is empty.
+    ok(t.includes(`piece() { awk -v n="$1" '{sub(/\\r$/,"")} $0=="-- >>> "n{on=1;next}`), "the header's piece() drops carriage returns before it matches a marker");
+    ok(NAMES.every((n) => piece(n, t.replace(/\n/g, "\r\n").replace(/\r/g, "")) === piece(n, t)), "a CRLF copy cuts the same pieces");
     for (const n of NAMES) {
       const p = piece(n, t);
       ok(p.trim().length > 0, `${n}: found`);

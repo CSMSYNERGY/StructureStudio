@@ -5,7 +5,7 @@
 --    never `--file`, never inside begin;/commit;. Two inline calls, from the repo root in Git Bash:
 --
 --   F=supabase/migrations/338_get_fixtures_door_look.sql
---   piece() { awk -v n="$1" '$0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
+--   piece() { awk -v n="$1" '{sub(/\r$/,"")} $0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
 --   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 338, 338_get_fixtures_door_look
 --   "$SB" db query --linked "$(piece P1)"      # the splice and its checks: ONE do block
 --   "$SB" db query --linked "$(piece R1)"      # THE RECORD (see its comment)

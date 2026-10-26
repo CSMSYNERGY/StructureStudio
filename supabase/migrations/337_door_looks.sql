@@ -16,7 +16,9 @@
 --
 --   F=supabase/migrations/337_door_looks.sql
 --   SB=<the supabase.exe of the CLI, called directly, not through npx.cmd (8 KB line limit)>
---   piece() { awk -v n="$1" '$0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
+--   piece() { awk -v n="$1" '{sub(/\r$/,"")} $0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
+--   (The `sub` drops a Windows checkout's carriage returns; without it no marker matches, the piece
+--   comes out empty and the CLI refuses it. An empty piece is a stop, never a skip.)
 --   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 337, 337_door_looks
 --   "$SB" db query --linked "$(piece R0)"      # ...and so on through R7
 --

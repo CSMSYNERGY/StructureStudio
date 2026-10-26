@@ -226,6 +226,7 @@ const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise ex
   {
     const db = await fresh();
     ok(await lfMd5(db) === LIVE_MD5, "289 + 313 + 320 + 324 + 335 is the body 335 recorded live on 2026-10-24", await lfMd5(db));
+    ok(MIG().includes(`piece() { awk -v n="$1" '{sub(/\\r$/,"")} $0=="-- >>> "n{on=1;next}`), "the header's piece() drops carriage returns (a Windows checkout) before it matches a marker");
     for (const n of ["P0", "P1", "R1"]) {
       const p = piece(n, MIG());
       ok(p.trim() && !/^\s*--/.test(p) && Buffer.byteLength(p) < 30 * 1024, `${n}: cut cleanly, no leading comment, under 30 KB (${Buffer.byteLength(p)} bytes)`);
