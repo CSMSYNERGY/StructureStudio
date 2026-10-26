@@ -11,7 +11,8 @@ import { join } from "node:path";
 import {
   checkTruthCase, DOOR_RENDER_RULES, DOOR_SCORE_BARS, doorLeafFt, drawnDoorLook, formatReport, scoreCorpus,
 } from "./doorScore.mjs";
-import { insideRepo, liveGate, liveGenerate, main, recordedRuns, REPO_ROOT, truthRuns } from "./doorSim.mjs";
+import { insideRepo, liveGate, liveGenerate, main, recordedRuns, REPO_ROOT, runFromDoorLedgerRows, truthRuns } from "./doorSim.mjs";
+import { fakeModel } from "../../supabase/functions/_shared/_test_stubs/doorModel.ts";
 
 // ─── synthetic doors ──────────────────────────────────────────────────────────────────────────────
 const ZDOOR = {
@@ -431,13 +432,57 @@ test("sim: the corpus and every output must live outside the repo", async () => 
   await assert.rejects(main(["--corpus", dir, "--out", join(REPO_ROOT, "tmp-door-sim")]), /outside the repo/);
 });
 
-test("sim, live mode: refused without a named batch, Ahsan's yes for it, and a budget; and not built yet", async () => {
+test("sim, live mode: refused without a named batch, Ahsan's yes for it, a budget, and an API key", async () => {
   const dir = synthCorpus();
   assert.throws(() => liveGate({ presses: 3, env: {} }), /needs --batch/);
   assert.throws(() => liveGate({ batch: "b1", presses: 3, maxDollars: 100, env: {} }), /DOOR_SIM_LIVE_BATCH is not "b1"/);
   assert.throws(() => liveGate({ batch: "b1", presses: 3, maxDollars: 8, env: { DOOR_SIM_LIVE_BATCH: "b1" } }), /up to \$9\.00/);
   assert.doesNotThrow(() => liveGate({ batch: "b1", presses: 3, maxDollars: 9, env: { DOOR_SIM_LIVE_BATCH: "b1" } }));
-  await assert.rejects(liveGenerate(), /not built yet/);
+  await assert.rejects(liveGenerate(tcase("a", BASIC), 1, { corpusDir: dir, env: {} }), /needs ANTHROPIC_API_KEY/);
   await assert.rejects(main(["--corpus", dir, "--mode", "live", "--out", join(dir, "lv")], {}), /needs --batch/);
-  await assert.rejects(main(["--corpus", dir, "--mode", "live", "--batch", "b1", "--max-dollars", "100", "--out", join(dir, "lv")], { DOOR_SIM_LIVE_BATCH: "b1" }), /not built yet/);
+  await assert.rejects(main(["--corpus", dir, "--mode", "live", "--batch", "b1", "--max-dollars", "100", "--out", join(dir, "lv")], { DOOR_SIM_LIVE_BATCH: "b1" }), /needs ANTHROPIC_API_KEY/);
+});
+
+// The browser's image work, stood in for: a "photo" is any file, sized 360 x 800 (the synthetic READ's frame).
+const fakeOps = () => ({
+  size: async () => [360, 800],
+  render: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+  pixels: async () => ({ w: 360, h: 800, rgba: new Uint8Array(360 * 800 * 4).fill(128) }),
+  crop: async ({ windows }) => windows.map(() => "Y3JvcA=="),
+  close: async () => {},
+});
+test("sim, live mode: one press through P4's pipeline (the model stubbed), its ledger row mapped to a run", async () => {
+  const dir = synthCorpus();
+  const t = tcase("a", BASIC, { photo: { file: "a.jpg" } });
+  writeFileSync(join(dir, "a.jpg"), "x");
+  const m = fakeModel({ stageA: [READ, READ, READ], hinges: { type: "tstrap", finish: "black" }, handle: { type: "barn", finish: "black" } });
+  const run = await liveGenerate(t, 2, { corpusDir: dir, env: { ANTHROPIC_API_KEY: "test" }, fetchImpl: m.fetch, makeOps: async () => fakeOps() });
+  assert.equal(run.outcome, "draft", JSON.stringify(run));
+  assert.deepEqual([run.case, run.run, run.mode, run.spec.base, run.tries], ["a", 2, "live", "basic", 1]);
+  assert.ok(run.costCents > 0 && run.ms >= 0);
+  assert.equal(run.note, "not straightened (no photo.quad)");
+  assert.equal(m.count("stageA"), 3);
+  const sent = m.sent.find((x) => x.kind === "stageA").body.messages[0].content[0];
+  assert.deepEqual(sent.source.type, "base64", "the fitted photo itself, never a URL");
+  const res = scoreCorpus([t], [run]);
+  assert.ok(res.bars.find((b) => b.key === "base")?.ok !== false, formatReport(res));
+  // A cut-off first try gets its one lean retry, at effort low.
+  const cut = fakeModel({ stageA: (i) => (i < 3 ? "cutoff" : READ), hinges: { type: "tstrap" }, handle: { type: "barn" } });
+  const retried = await liveGenerate(t, 1, { corpusDir: dir, env: { ANTHROPIC_API_KEY: "test" }, fetchImpl: cut.fetch, makeOps: async () => fakeOps() });
+  assert.deepEqual([retried.outcome, retried.tries], ["draft", 2]);
+  assert.deepEqual(cut.sent.filter((x) => x.kind === "stageA").map((x) => x.body.output_config.effort), ["high", "high", "high", "low", "low", "low"]);
+});
+
+test("a press's ledger rows to its run record: the last row decides, costs and times add up, a self-check round is the final spec", () => {
+  const at = (s) => `2026-10-26T12:00:${String(s).padStart(2, "0")}Z`;
+  const failed = { created_at: at(0), status: "failed", drafted: null, warnings: [], draft_ms: 150_000, tokens: { costCents: 40, failure: { code: "ai_door_unparseable" }, skipped: {} } };
+  const done = { created_at: at(30), status: "done", drafted: BASIC, warnings: [{ code: "closeup_meet" }], draft_ms: 100_000, tokens: { costCents: 60, vocabGaps: ["a knob"], sideFrom: "hinges", skipped: { ceiling: true } } };
+  const r = runFromDoorLedgerRows([done, failed], { case: "a", run: 3 });
+  assert.deepEqual([r.outcome, r.spec, r.costCents, r.ms, r.tries, r.sideFrom, r.vocabGaps, r.skipped], ["draft", BASIC, 100, 250_000, 2, "hinges", ["a knob"], { ceiling: true }]);
+  const checked = runFromDoorLedgerRows([{ ...done, self_check_rounds: [{ spec: ZDOOR, costCents: 13 }] }], { case: "a", run: 1 });
+  assert.deepEqual([checked.spec, checked.preCheck, checked.costCents], [ZDOOR, BASIC, 73]);
+  const refused = runFromDoorLedgerRows([{ ...failed, tokens: { refuse: { code: "ai_door_unsupported", reason: "unsupported" } } }], { case: "g", run: 1 });
+  assert.deepEqual([refused.outcome, refused.refuse], ["refused", { code: "ai_door_unsupported", reason: "unsupported" }]);
+  assert.deepEqual([runFromDoorLedgerRows([failed], { case: "a", run: 1 }).error, runFromDoorLedgerRows([], { case: "a", run: 1 }).error], ["ai_door_unparseable", "no_row"]);
+  assert.equal(runFromDoorLedgerRows([{ ...failed, tokens: { ...failed.tokens, skipped: { leanRetryClock: true } } }], { case: "a", run: 1 }).skipped.leanRetryClock, true);
 });

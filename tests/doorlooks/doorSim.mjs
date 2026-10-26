@@ -10,14 +10,20 @@
 //                    exactly. Proves the truth files clean and the scorer agrees with them, and shows
 //                    which bars v1's vocabulary cannot reach on this corpus whatever the AI does.
 //   --mode replay    (free) score recorded runs: --runs <runs.jsonl | dir>.
-//   --mode recorded  (free) the real SERVER maths (doorLook.ts: stageADoorLook, settleCloseUps) over
-//                    recorded model answers in <corpus>/reads/<id>.json, so a maths change is re-scored
-//                    without paying for new reads. It cannot catch prompt drift: every prompt change
-//                    gets a live rerun.
-//   --mode live      the real pipeline (P4's generate_door_look). COSTS API MONEY. Refuses unless
+//   --mode recorded  (free) the real SERVER maths (doorGenerate.ts doorDraftFromReads: doorLook.ts's
+//                    Stage A consensus and close-up fallbacks, the agreement check, the vocabulary gaps)
+//                    over recorded model answers in <corpus>/reads/<id>.json, so a maths change is
+//                    re-scored without paying for new reads. It cannot catch prompt drift: every prompt
+//                    change gets a live rerun. scripts/doorLookLocal.mjs settle --record writes this file.
+//   --mode live      the real pipeline (P4's runDoorDraft: the same prompt, maths, close-ups, Stage B,
+//                    ceiling and lean retry as generate_door_look, run here against the API with
+//                    ANTHROPIC_API_KEY; no database and no money ladder). COSTS API MONEY. Refuses unless
 //                    --batch <name> matches DOOR_SIM_LIVE_BATCH (Ahsan's yes for that one batch) and
-//                    --max-dollars covers the batch at the $3.00 ceiling per press. P4 is not built yet,
-//                    so today it stops there.
+//                    --max-dollars covers the batch at the $3.00 ceiling per press. Each photo is
+//                    straightened to its truth file's photo.quad when it has one (TL, TR, BR, BL), else
+//                    sent as it is, and fitted to the photo limits in headless Chrome. A press's ledger
+//                    rows become its run record through runFromDoorLedgerRows, the same mapping a live
+//                    press in the app gets.
 //   --runs-per <n>   presses per photo (default 3)    --set tune|holdout|refuse   --source video|catalog
 //   --case a,b       only these photos                --out <dir> (default <corpus>/runs/<stamp>-<mode>)
 //
@@ -28,13 +34,16 @@
 //   { "photo": [w, h],                      the straightened photo's size in pixels
 //     "runs": [ { "reads": [<Stage A answer>, ...],   the model's own JSON, as doorLook.ts reads it
 //                 "closeUps"?: {hinges?, handle?, meet?},   {status:"ok", votes:[...]} | {status:"skipped"}
+//                 "stageB"?: <Stage B answer>,
 //                 "ms"?, "costCents"?, "skipped"?, "vocabGaps"? } ] }
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkTruthCase, formatReport, loadRuns, loadTruth, scoreCorpus, scoreRun } from "./doorScore.mjs";
-import { cleanDoorLook, DOOR_REFUSALS, settleCloseUps, stageADoorLook } from "../../supabase/functions/_shared/doorLook.ts";
+import { cleanDoorLook, samplePatch } from "../../supabase/functions/_shared/doorLook.ts";
+import { DoorCeiling, DOOR_LEAN_MIN_LEFT_MS, DOOR_PRESS_CLOCK_MS, doorDraftFromReads, doorLedgerFields, runDoorDraft } from "../../supabase/functions/_shared/doorGenerate.ts";
+import { playwrightImageOps, preparedSize } from "../../scripts/doorLookLocal.mjs";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const PRESS_CEILING_DOLLARS = 3;
@@ -79,18 +88,13 @@ export function recordedRuns(cases, corpusDir) {
     const rec = JSON.parse(readFileSync(file, "utf8"));
     const ctx = { widthIn: t.sizeIn[0], heightIn: t.sizeIn[1], leaves: t.leaves, photo: rec.photo };
     (rec.runs ?? []).forEach((r, k) => {
-      const base = { case: t.id, run: k + 1, mode: "recorded", ms: r.ms, costCents: r.costCents, skipped: r.skipped, vocabGaps: r.vocabGaps ?? [] };
-      const c = stageADoorLook(r.reads ?? [], ctx);
-      if (!c.ok) {
-        out.push("refuse" in c
-          ? { ...base, outcome: "refused", refuse: { code: DOOR_REFUSALS[c.refuse].code, reason: c.refuse } }
-          : { ...base, outcome: "failed", error: "ai_door_unparseable" });
-        return;
-      }
-      const d = settleCloseUps(c, r.closeUps ?? {});
-      out.push(d.ok
-        ? { ...base, outcome: "draft", spec: d.spec, warnings: d.warnings, sideFrom: c.sideFrom }
-        : { ...base, outcome: "failed", error: `spec_${d.error}`, warnings: d.warnings });
+      const d = doorDraftFromReads(r.reads ?? [], ctx, { closeUps: r.closeUps, stageB: r.stageB });
+      // The gaps the maths finds, and any the record carries.
+      const vocabGaps = [...new Set([...(d.vocabGaps ?? []), ...(r.vocabGaps ?? [])])];
+      const base = { case: t.id, run: k + 1, mode: "recorded", ms: r.ms, costCents: r.costCents, skipped: r.skipped, vocabGaps };
+      if (d.outcome === "refused") out.push({ ...base, outcome: "refused", refuse: { code: d.refuse.code, reason: d.refuse.reason } });
+      else if (d.outcome === "failed") out.push({ ...base, outcome: "failed", error: d.error, warnings: d.warnings });
+      else out.push({ ...base, outcome: "draft", spec: d.spec, warnings: d.warnings, sideFrom: d.sideFrom });
     });
   }
   return { runs: out, skipped };
@@ -107,10 +111,87 @@ export function liveGate({ batch, maxDollars, presses, env = process.env }) {
     throw new Error(`--mode live refuses: ${presses} presses can cost up to $${worst.toFixed(2)} at the $${PRESS_CEILING_DOLLARS.toFixed(2)} ceiling; --max-dollars is ${maxDollars ?? "not set"}.`);
   }
 }
-// One live press. P4 builds generate_door_look (and P6 the straightened upload); until then there is
-// nothing to call, and nothing here guesses at an API that does not exist.
-export async function liveGenerate() {
-  throw new Error("--mode live: the pipeline is not built yet (P4's generate_door_look, P6's upload). Nothing was called and nothing was charged.");
+// ─── A PRESS'S LEDGER ROWS TO ITS RUN RECORD ──────────────────────────────────────────────────────
+// What the scorer reads, from what a press leaves in ai_door_calls (P4's doorLedgerFields): the rows
+// of one key, its first try and its lean retry. The last row decides the outcome; the costs and the
+// times add up. Self-check rounds (P5) are `self_check_rounds: [{spec, costCents, skipped, ...}]`: the
+// last round's spec is the final one and the drafted spec is the pre-check one.
+export function runFromDoorLedgerRows(rows, { case: id, run }) {
+  const list = [...(Array.isArray(rows) ? rows : [rows])].filter(Boolean)
+    .sort((a, b) => (Date.parse(a.created_at ?? "") || 0) - (Date.parse(b.created_at ?? "") || 0));
+  if (!list.length) return { case: id, run, outcome: "failed", error: "no_row", warnings: [] };
+  const last = list[list.length - 1], t = last.tokens ?? {};
+  const rounds = Array.isArray(last.self_check_rounds) ? last.self_check_rounds : [];
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const roundsCost = (r) => (Array.isArray(r.self_check_rounds) ? r.self_check_rounds : []).reduce((a, x) => a + num(x?.costCents), 0);
+  const costCents = list.reduce((s, r) => s + num(r.tokens?.costCents) + roundsCost(r), 0);
+  const ms = list.reduce((s, r) => s + num(r.draft_ms), 0);
+  const skipped = {
+    ...(list.some((r) => r.tokens?.skipped?.ceiling) ? { ceiling: true } : {}),
+    ...(list.some((r) => r.tokens?.skipped?.leanRetryClock) ? { leanRetryClock: true } : {}),
+    ...(rounds.some((r) => r?.skipped === "clock") ? { selfCheckClock: true } : {}),
+  };
+  const base = {
+    case: id, run, ms: ms || undefined, costCents: Math.round(costCents * 100) / 100, warnings: Array.isArray(last.warnings) ? last.warnings : [],
+    vocabGaps: Array.isArray(t.vocabGaps) ? t.vocabGaps : [], ...(t.sideFrom ? { sideFrom: t.sideFrom } : {}), skipped, tries: list.length,
+  };
+  if (last.status === "done" && last.drafted) {
+    const checked = [...rounds].reverse().find((r) => r && r.spec)?.spec;
+    return { ...base, outcome: "draft", spec: checked ?? last.drafted, ...(checked ? { preCheck: last.drafted } : {}) };
+  }
+  if (t.refuse) return { ...base, outcome: "refused", refuse: { code: t.refuse.code, reason: t.refuse.reason } };
+  return { ...base, outcome: "failed", error: t.failure?.code ?? "unknown" };
+}
+export const runFromDoorLedgerRow = (row, at) => runFromDoorLedgerRows([row], at);
+
+// One live press, as generate_door_look runs it minus the database and the money: the photo straightened
+// and fitted, Stage A, the close-ups cut from it, the agreement check and Stage B, under the $3.00
+// ceiling, and the one lean retry when the first try asks for it and the press clock allows. COSTS API
+// MONEY: only main's live mode calls it, after liveGate. The options stand in for the API, the browser
+// and the clock in its tests.
+export async function liveGenerate(t, k, { corpusDir, env = process.env, fetchImpl = globalThis.fetch, makeOps = playwrightImageOps, now = Date.now } = {}) {
+  const apiKey = env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("--mode live needs ANTHROPIC_API_KEY. Nothing was called.");
+  if (!t.photo?.file) return { case: t.id, run: k, outcome: "failed", error: "no_photo", warnings: [] };
+  const leaves = t.leaves === 2 ? 2 : 1;
+  // A case with no real size (a refusal photo) is pressed at a typical door's size.
+  const [widthIn, heightIn] = Array.isArray(t.sizeIn) ? t.sizeIn : leaves === 2 ? [72, 80] : [36, 80];
+  const ops = await makeOps();
+  try {
+    const file = join(corpusDir, t.photo.file);
+    const quad = Array.isArray(t.photo.quad) ? t.photo.quad : null;
+    const photo = preparedSize({ src: await ops.size(file), quad, widthIn, heightIn });
+    const jpeg = await ops.render({ file, quad, out: photo });
+    const prepared = join(corpusDir, "runs", ".live-photo.jpg");
+    mkdirSync(dirname(prepared), { recursive: true });
+    writeFileSync(prepared, jpeg);
+    const px = await ops.pixels(prepared);
+    const colorAt = px.w === photo[0] && px.h === photo[1] ? (p) => samplePatch(px.rgba, px.w, px.h, p) : undefined;
+    const deps = {
+      fetch: (url, init) => fetchImpl(url, init), apiKey,
+      cut: (windows, zoom) => ops.crop({ file: prepared, windows, zoom }), ...(colorAt ? { colorAt } : {}),
+    };
+    const input = { widthIn, heightIn, leaves, photo, front: { base64: Buffer.from(jpeg).toString("base64"), mediaType: "image/jpeg" } };
+    const pressStart = now();
+    const rows = [];
+    const tryOnce = async (lean) => {
+      const at = now();
+      const r = await runDoorDraft(deps, {
+        ...input, lean, ceiling: new DoorCeiling(rows.reduce((s, x) => s + (x.tokens?.ceilingCents ?? 0), 0)),
+        deadlineAt: at + Math.max(0, Math.min(300_000, pressStart + DOOR_PRESS_CLOCK_MS - 15_000 - at)),
+      });
+      rows.push({ ...doorLedgerFields(r), created_at: new Date(at).toISOString() });
+      return r;
+    };
+    const first = await tryOnce(false);
+    if (first.outcome === "failed" && first.failure?.retryable) {
+      if (pressStart + DOOR_PRESS_CLOCK_MS - now() >= DOOR_LEAN_MIN_LEFT_MS) await tryOnce(true);
+      else rows[0].tokens.skipped = { ...rows[0].tokens.skipped, leanRetryClock: true };
+    }
+    return { ...runFromDoorLedgerRows(rows, { case: t.id, run: k }), mode: "live", ...(quad ? {} : { note: "not straightened (no photo.quad)" }) };
+  } finally {
+    await ops.close?.();
+  }
 }
 
 // ─── THE CONTACT SHEET ────────────────────────────────────────────────────────────────────────────
@@ -186,7 +267,7 @@ export async function main(argv, env = process.env) {
   } else if (mode === "live") {
     liveGate({ batch: arg(argv, "--batch"), maxDollars: arg(argv, "--max-dollars"), presses: cases.length * perPhoto, env });
     runs = [];
-    for (const t of cases) for (let k = 1; k <= perPhoto; k++) runs.push(await liveGenerate(t, k));
+    for (const t of cases) for (let k = 1; k <= perPhoto; k++) runs.push(await liveGenerate(t, k, { corpusDir: corpus, env }));
   } else throw new Error(`unknown --mode ${mode}`);
 
   for (const r of runs) if (r.outcome === "draft" && !cleanDoorLook(r.spec).ok) notes.push(`${r.case}#${r.run}: spec does not clean`);

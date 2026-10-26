@@ -242,6 +242,8 @@ import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./
 import {
   doorLookForFixture, doorLookImportRow, doorLookImportState, handleDoorLookAction, isUuid as isDoorLookId, lookSchemaMissing, readDoorLooksFlag,
 } from "./doorLooks.ts";
+// ...and generating one from a photo (P4): the press, its money and its ledger, in ./doorGenerate.ts.
+import { handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
@@ -381,6 +383,11 @@ const GATES: GateTable = {
   archive_door_look:              { area: "settings_options", level: "edit" },
   door_ref_upload_url:            { area: "settings_options", level: "edit" },
   door_look_thumb_upload_url:     { area: "settings_options", level: "edit" },
+  // P4 (./doorGenerate.ts): the press that calls the model and can charge, and the pickup of its draft
+  // after a dropped stream. Both refuse without the tenant flag; the press also refuses while the kill
+  // switch DOOR_LOOK_AI_ENABLED is off (unset is off).
+  generate_door_look:             { area: "settings_options", level: "edit" },
+  generate_door_look_recover:     { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   set_layout_item_taxable:        { area: "settings_options", level: "edit" },
@@ -921,6 +928,32 @@ function draftAnswer(
       fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
       message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
       context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, requestDeadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
+    }),
+  });
+}
+
+// generate_door_look's answer (P4): draftAnswer's twin for the door press. Streamed when the new shell
+// asks (`stream: true`, the lean retry included, since both can outlast the gateway's 150 s of silence),
+// with the same error-wrapper replay and the same watchdog, whose row is coded for doors. Kept apart from
+// draftAnswer so the building press's request rules, which its tests pin line by line, stay untouched.
+function doorDraftAnswer(
+  req: Request,
+  payload: unknown,
+  at: { requestStartMs: number; clientId: string },
+  work: (streamed: boolean) => Promise<Response>,
+): Promise<Response> | Response {
+  if (!wantsStreamedDoorDraft(payload)) return work(false);
+  const ua = req.headers.get("user-agent");
+  const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
+  const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  const deadlineMs = streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS });
+  return heartbeatJsonResponse(() => filed(replay), {
+    headers: { ...cors, "Content-Type": "application/json" },
+    deadlineMs,
+    onDeadline: () => logEdgeError({
+      fn: "portal-settings", req, clientId: at.clientId, code: "ai_door_stream_deadline",
+      message: "The streamed door draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, workerAgeMs: Date.now() - WORKER_BORN_MS },
     }),
   });
 }
@@ -7591,6 +7624,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin, req, clientId, userId: userId ?? null, action,
       payload: (payload ?? {}) as Record<string, unknown>, json, dbFail,
     });
+  }
+
+  // Generating a door look from a photo (P4), and picking its draft up after a dropped stream. The press
+  // answers behind the heartbeat when it streams (doorDraftAnswer); ./doorGenerate.ts has its order of
+  // checks, its money and its ledger.
+  if (action === "generate_door_look" || action === "generate_door_look_recover") {
+    const doorCtx = {
+      admin, req, clientId, userId: userId ?? null, payload: (payload ?? {}) as Record<string, unknown>, json,
+      filed: (res: Response) => { filedAtReturnSite.add(res); return res; }, requestStartMs, workerBornMs: WORKER_BORN_MS,
+    };
+    if (action === "generate_door_look_recover") return await handleDoorLookRecover(doorCtx);
+    return await doorDraftAnswer(req, payload, { requestStartMs, clientId }, (streamed: boolean) => handleGenerateDoorLook(doorCtx, streamed));
   }
 
   // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =

@@ -271,6 +271,9 @@ const ROLLBACK = () => {
     ok(call.status === "running" && call.self_check_round === 0, "a new row is running, round 0", JSON.stringify(call));
     ok(await refused(db, `insert into public.ai_door_calls (client_id, status) values ('${A}', 'paused')`), "a status outside running / done / failed is refused");
     ok(await refused(db, `insert into public.ai_door_calls (client_id, photo_paths) values ('${A}', array['a','b','c','d','e'])`), "more than 4 photos is refused");
+    // P4 writes the hold's wallet_transactions.id here on a capture, and that id is a bigint (128).
+    ok((await one(db, "select data_type from information_schema.columns where table_name = 'ai_door_calls' and column_name = 'wallet_tx_id'")).data_type === "bigint", "wallet_tx_id holds a wallet_transactions id (bigint)");
+    ok(!(await refused(db, `update public.ai_door_calls set wallet_tx_id = 9007199254740 where id = '${call.id}'`)), "...and takes one");
     await db.exec(`update public.door_looks set ai_call_id = '${call.id}' where id = '${LOOK_A}'`);
     await db.exec(`delete from public.ai_door_calls where id = '${call.id}'`);
     ok((await one(db, `select ai_call_id from public.door_looks where id = '${LOOK_A}'`)).ai_call_id === null, "a deleted ledger row clears the look's ai_call_id");

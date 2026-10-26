@@ -1,6 +1,5 @@
 {
   "imports": {
-    "jsr:@supabase/supabase-js@2": "./supabase_stub.ts",
-    "../doorLook.ts": "./doorLook_stub.ts"
+    "jsr:@supabase/supabase-js@2": "./supabase_stub.ts"
   }
 }

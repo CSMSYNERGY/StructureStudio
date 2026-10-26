@@ -1,0 +1,404 @@
+// deno test --allow-read supabase/functions/_shared/doorGenerate.test.ts
+// One Generate press's model work (doorGenerate.ts runDoorDraft), with the model STUBBED: no call here
+// reaches the network. Stage A's three reads (quorum, refusals, the grace cut, the one transient retry,
+// timeouts, cut-offs and upstream failures), the close-ups and what stands in when one is skipped, the
+// agreement check and Stage B, the 6-panel draft, the $3.00 ceiling and the press clock; then the pure
+// pieces: reads from files (the local path), the ledger row, recover's answers, the photo header.
+import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
+import {
+  DOOR_CLOSEUP_MIN_LEFT_MS,
+  DOOR_PRESS_CEILING_CENTS,
+  DOOR_PRESS_CLOCK_MS,
+  DOOR_RECOVER_STALE_MS,
+  DOOR_RECOVER_TEXT,
+  DOOR_SIX_PANEL_TEXT,
+  DOOR_STAGEB_MIN_LEFT_MS,
+  DoorCeiling,
+  doorCallWorstCents,
+  doorCostCents,
+  doorDraftFromReads,
+  type DoorDraftInput,
+  doorInputTokensEst,
+  doorLedgerFields,
+  doorObservedMismatches,
+  doorPressLeftMs,
+  doorPressSpentCents,
+  doorWorkDeadline,
+  imageHeadOf,
+  recoverDoorAnswer,
+  runDoorDraft,
+} from "./doorGenerate.ts";
+import { DOOR_CLOSEUP_LABELS, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
+import type { DoorLook, DoorMeasureCtx } from "./doorLook.ts";
+import { doubleDoor, inches, singleDoor } from "./_test_stubs/doorReads.ts";
+import { fakeModel, pngHead, type Script } from "./_test_stubs/doorModel.ts";
+
+type Rec = Record<string, unknown>;
+const HINGES_OK = { type: "strap", finish: "galv" };
+const HANDLE_OK = { type: "pull", finish: "black" };
+const MEET_OK = { type: "astragal", wIn: 2 };
+
+function press(script: Script, over: Partial<DoorDraftInput> & { ctx?: DoorMeasureCtx } = {}) {
+  const m = fakeModel(script);
+  const ctx = over.ctx ?? singleDoor().ctx;
+  const cuts: number[] = [];
+  const input: DoorDraftInput = {
+    widthIn: ctx.widthIn, heightIn: ctx.heightIn, leaves: ctx.leaves, photo: ctx.photo,
+    front: { url: "https://stub.supabase.co/storage/v1/object/sign/door-refs/x/door-ref-1.jpg?token=t" },
+    lean: false, deadlineAt: Date.now() + 300_000, ceiling: new DoorCeiling(0), ...over,
+  };
+  const run = runDoorDraft({
+    fetch: m.fetch, apiKey: "test-key", random: () => 0,
+    cut: (windows) => {
+      cuts.push(windows.length);
+      return Promise.resolve(windows.map((_, i) => `crop${i}`));
+    },
+  }, input);
+  return { run, m, cuts, input };
+}
+const codes = (ws: { code: string }[]) => ws.map((w) => w.code);
+
+// ─── STAGE A ──────────────────────────────────────────────────────────────────────────────────────
+Deno.test("a single door: three reads at effort high, the close-ups decide the hardware, nothing else asked", async () => {
+  const { read } = singleDoor();
+  const { run, m, cuts } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK });
+  const r = await run;
+  assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+  const spec = r.spec as Rec;
+  assertEquals([spec.base, (spec.src as Rec).hinge, (spec.hinges as Rec).type, (spec.hinges as Rec).finish, (spec.handle as Rec).type], ["zbrace", "left", "strap", "galv", "pull"]);
+  assertEquals([m.count("stageA"), m.count("hinges"), m.count("handle"), m.count("meet"), m.count("stageB")], [3, 3, 3, 0, 0]);
+  const a = m.sent.find((s) => s.kind === "stageA")!;
+  assertEquals([a.body.model, a.body.max_tokens, (a.body.output_config as Rec).effort, (a.body.thinking as Rec).type], ["claude-opus-5-5", 12000, "high", "adaptive"]);
+  assertEquals(a.images, 1, "the front photo alone");
+  assertEquals(cuts, [4], "one cut: three hinge crops and the handle's");
+  const h = m.sent.find((s) => s.kind === "hinges")!;
+  assertEquals([h.body.max_tokens, (h.body.output_config as Rec).effort, h.images], [4000, "high", 3]);
+  assertEquals(codes(r.warnings), [], "hinges seen, close-ups decided: nothing to warn about");
+  assertEquals(r.sideFrom, "hinges");
+  assertEquals(r.usage, { input: 3000 * 9, output: 1500 * 9 });
+  assertEquals(r.costCents, Math.round(9 * doorCostCents(3000, 1500) * 10_000) / 10_000);
+  assertEquals(r.ceilingCents, r.costCents, "every call answered with its usage: nothing kept at its worst case");
+  assertEquals(r.stageB.status, "not_needed");
+});
+
+Deno.test("the builder's own close-ups ride in Stage A as labelled images, and in their own close-up ask", async () => {
+  const { read } = singleDoor();
+  const hinge = { url: "https://stub.supabase.co/sign/hinge" };
+  const { run, m } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK }, { builder: { hinge } });
+  const r = await run;
+  assertEquals(r.outcome, "draft");
+  const a = m.sent.find((s) => s.kind === "stageA")!;
+  assertEquals(a.images, 2);
+  assert(a.text.includes(DOOR_CLOSEUP_LABELS.hinge) && a.text.includes("never give a point on them"), "labelled, and never measured");
+  assertEquals(m.sent.find((s) => s.kind === "hinges")!.images, 4, "three crops and the builder's own");
+});
+
+Deno.test("a double door: the meeting-edge strips are asked about, and decide the meet", async () => {
+  const { read, ctx } = doubleDoor();
+  const { run, m, cuts } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK, meet: MEET_OK }, { ctx });
+  const r = await run;
+  assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+  assertEquals((r.spec as Rec).meet, { type: "astragal", wIn: 2 });
+  assertEquals(m.count("meet"), 3);
+  assertEquals(cuts, [3 + 1 + 2], "three hinges, the handle, two strips");
+});
+
+Deno.test("refusals: two of three reads refusing refuses; one read saying unsupported refuses at once; never charged work after", async () => {
+  const { read } = singleDoor();
+  const notDoor = { measure: {}, refuse: "not_door", leaves: 1 };
+  const a = await press({ stageA: [notDoor, notDoor, read] }).run;
+  assertEquals([a.outcome, a.refuse?.code, a.refuse?.reason], ["refused", "ai_door_refused", "not_door"]);
+  const unsupported = { measure: {}, refuse: "unsupported", leaves: 1 };
+  const { run, m } = press({ stageA: [read, unsupported, read] });
+  const b = await run;
+  assertEquals([b.outcome, b.refuse?.code], ["refused", "ai_door_unsupported"]);
+  assertEquals(m.count("hinges") + m.count("handle") + m.count("stageB"), 0, "no close-up or Stage B after a refusal");
+  const three = await press({ stageA: [{ ...read, leaves: 3 }, read, read] }).run;
+  assertEquals([three.outcome, three.refuse?.reason], ["refused", "leaves"], "3 leaves is refused, never clamped to 2");
+  // One read refusing on its own is left out; the other two draft.
+  const c = await press({ stageA: [notDoor, read, read], hinges: HINGES_OK, handle: HANDLE_OK }).run;
+  assertEquals(c.outcome, "draft");
+});
+
+Deno.test("the third read is cut off once two have drafted and the grace is over", async () => {
+  const { read } = singleDoor();
+  const t0 = Date.now();
+  const { run } = press({ stageA: [read, read, "hang"], hinges: HINGES_OK, handle: HANDLE_OK }, { graceMs: 30 });
+  const r = await run;
+  assertEquals(r.outcome, "draft");
+  assert(Date.now() - t0 < 5_000);
+  assertEquals(r.reads.map((x) => x.aborted), [null, null, "quorum"]);
+});
+
+Deno.test("a read the API could not serve is sent once more; a second failure stands", async () => {
+  const { read } = singleDoor();
+  let n = 0;
+  const { run } = press({ stageA: () => (n++ === 0 ? { status: 529 } : read), hinges: HINGES_OK, handle: HANDLE_OK });
+  const r = await run;
+  assertEquals(r.outcome, "draft");
+  assertEquals(r.reads.map((x) => x.attempts).sort(), [1, 1, 2]);
+  const all = await press({ stageA: () => ({ status: 529 }) }).run;
+  assertEquals([all.outcome, all.failure?.kind, all.failure?.retryable], ["failed", "upstream", true]);
+  assertEquals(all.reads.map((x) => x.attempts), [2, 2, 2], "one retry each, never two");
+  assertEquals(all.ceilingCents, 0, "a 529 is not billed: nothing counts against the ceiling");
+  const bad = await press({ stageA: () => ({ status: 400, body: '{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: bad"}}' }) }).run;
+  assertEquals([bad.failure?.kind, bad.failure?.retryable], ["upstream", false], "a real invalid request would fail the same way again");
+});
+
+Deno.test("failures: a timeout and a cut-off are retryable; a reply we cannot read is not", async () => {
+  const t = await press({ stageA: ["hang", "hang", "hang"] }, { deadlineAt: Date.now() + 150 }).run;
+  assertEquals([t.outcome, t.failure?.kind, t.failure?.code, t.failure?.retryable], ["failed", "timeout", "ai_door_timeout", true]);
+  const worst = doorCallWorstCents(12000, doorInputTokensEst(doorStageAPrompt({ widthIn: 36, heightIn: 80, leaves: 1, photo: singleDoor().ctx.photo }), 1));
+  const sent = t.reads.filter((x) => x.attempts > 0).length;
+  assert(sent >= 1);
+  assertEquals(t.ceilingCents, Math.round(sent * worst * 10_000) / 10_000, "a read we aborted mid-reply keeps its worst case; one never sent costs nothing");
+  const c = await press({ stageA: ["cutoff", "cutoff", "cutoff"] }).run;
+  assertEquals([c.failure?.kind, c.failure?.code, c.failure?.retryable], ["cutoff", "ai_door_unparseable", true]);
+  const u = await press({ stageA: [{ text: "It's a lovely door." }, { text: "no" }, { text: "{not json" }] }).run;
+  assertEquals([u.failure?.kind, u.failure?.code, u.failure?.retryable], ["unparseable", "ai_door_unparseable", false]);
+  assertEquals(u.failure?.message, "We couldn't read this door. Try a straight-on photo of the closed door.");
+});
+
+// ─── CLOSE-UPS ────────────────────────────────────────────────────────────────────────────────────
+Deno.test("close-ups: skipped with under 45 s left, or failed asks: Stage A's vote stands in, and it always warns", async () => {
+  const { read } = singleDoor();
+  const late = press({ stageA: [read, read, read] }, { deadlineAt: Date.now() + DOOR_CLOSEUP_MIN_LEFT_MS - 5_000 });
+  const r = await late.run;
+  assertEquals(r.outcome, "draft");
+  assertEquals(late.m.count("hinges") + late.m.count("handle"), 0);
+  assertEquals([(r.spec as Rec).hinges && ((r.spec as Rec).hinges as Rec).type, ((r.spec as Rec).handle as Rec).type], ["tstrap", "barn"], "Stage A's own votes");
+  assert(codes(r.warnings).includes("closeup_hinges") && codes(r.warnings).includes("closeup_handle"));
+  assertEquals(r.skipped.closeUps, ["hinges:time", "handle:time"]);
+  const failed = await press({ stageA: [read, read, read], hinges: { status: 500 }, handle: { text: "a handle" } }).run;
+  assertEquals([failed.closeUps.hinges?.status, failed.closeUps.handle?.status], ["failed", "failed"]);
+  assert(codes(failed.warnings).includes("closeup_hinges"));
+  // Asks that split 1-1-1 decide nothing: Stage A's vote, with the warning.
+  let k = 0;
+  const split = await press({ stageA: [read, read, read], hinges: () => [{ type: "butt" }, { type: "strap" }, { type: "scroll" }][k++ % 3], handle: HANDLE_OK }).run;
+  assertEquals(((split.spec as Rec).hinges as Rec).type, "tstrap");
+  // No cut library: the crops fail, so only asks with the builder's own photo can run.
+  const m = fakeModel({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK });
+  const noCut = await runDoorDraft({ fetch: m.fetch, apiKey: "k" }, {
+    widthIn: 36, heightIn: 80, leaves: 1, photo: singleDoor().ctx.photo, front: { url: "u" }, builder: { hinge: { url: "h" } },
+    lean: false, deadlineAt: Date.now() + 300_000, ceiling: new DoorCeiling(0),
+  });
+  assertEquals([noCut.closeUps.hinges?.status, noCut.closeUps.handle?.status], ["ok", "failed"]);
+  assertEquals(m.sent.find((s) => s.kind === "hinges")!.images, 1, "the builder's close-up alone");
+});
+
+// ─── THE CEILING ──────────────────────────────────────────────────────────────────────────────────
+Deno.test("the $3.00 ceiling: the class, and the plan's worst cases fit under it", () => {
+  const c = new DoorCeiling(250);
+  const a = c.reserve(40), b = c.reserve(20);
+  assert(a !== null && b === null, "250 + 40 fits; + 20 more would pass 300");
+  assertEquals(c.skipped, 1);
+  c.settle(a, 5);
+  assertEquals(c.spentCents, 255, "the real cost replaces the worst case");
+  const d = c.reserve(45)!;
+  c.settle(d, null);
+  assertEquals(c.spentCents, 300, "a cost we cannot know keeps its worst case");
+  assertEquals(DOOR_PRESS_CEILING_CENTS, 300);
+  // Section 8: Stage A about $0.81 at worst, one close-up kind about $0.34, Stage B about $0.27.
+  const p = singleDoor().ctx.photo;
+  const stageA = 3 * doorCallWorstCents(12000, doorInputTokensEst(doorStageAPrompt({ widthIn: 72, heightIn: 80, leaves: 2, photo: p, closeUps: ["hinge", "handle", "meet"] }), 4));
+  const closeUps = 3 * doorCallWorstCents(4000, doorInputTokensEst(doorCloseUpPrompt("hinges", { crops: 4, builderPhoto: true }), 5)) +
+    3 * doorCallWorstCents(4000, doorInputTokensEst(doorCloseUpPrompt("handle", { crops: 1, builderPhoto: true }), 2)) +
+    3 * doorCallWorstCents(4000, doorInputTokensEst(doorCloseUpPrompt("meet", { crops: 2, builderPhoto: true, widthIn: 72 }), 3));
+  const spec = { v: 1, base: "zbrace", src: { leaves: 2, hinge: "right" } } as DoorLook;
+  const stageB = doorCallWorstCents(12000, doorInputTokensEst(doorStageBPrompt({ photo: p, widthIn: 72, heightIn: 80, spec, missing: ["a window"], unexplained: [] }), 1));
+  assert(stageA < 90, `Stage A worst ${stageA}`);
+  assert(closeUps < 110, `close-ups worst ${closeUps}`);
+  assert(stageB < 30, `Stage B worst ${stageB}`);
+  assert(stageA + closeUps + stageB + 78 <= 300, "one try plus three self-check rounds (about $0.78) fits");
+});
+
+Deno.test("the ceiling skips close-ups and Stage B that would pass it, and says so", async () => {
+  const { read } = singleDoor();
+  const worstA = doorCallWorstCents(12000, doorInputTokensEst(doorStageAPrompt({ widthIn: 36, heightIn: 80, leaves: 1, photo: singleDoor().ctx.photo }), 1));
+  // Stage A just fits; its reads cost nearly their worst case, so nothing after it does.
+  const { run, m } = press({ stageA: [read, read, read], usage: { input_tokens: 3000, output_tokens: 11_000 } }, { ceiling: new DoorCeiling(0, 3 * worstA + 1) });
+  const r = await run;
+  assertEquals(r.outcome, "draft");
+  assertEquals(m.count("hinges") + m.count("handle"), 0);
+  assertEquals(r.skipped.ceiling, true);
+  assertEquals(r.skipped.closeUps, ["hinges:ceiling", "handle:ceiling"]);
+  assert(codes(r.warnings).includes("closeup_hinges"));
+  // A press already near the ceiling (its first try, its self-check rounds) cannot even start Stage A.
+  const fp = press({ stageA: [read, read, read] }, { ceiling: new DoorCeiling(DOOR_PRESS_CEILING_CENTS - 10) });
+  const full = await fp.run;
+  assertEquals([full.outcome, full.failure?.kind], ["failed", "ceiling"]);
+  assertEquals(fp.m.sent.length, 0, "nothing is sent");
+});
+
+// ─── THE AGREEMENT CHECK AND STAGE B ──────────────────────────────────────────────────────────────
+const withLite = singleDoor({ lite: true }).read;
+const seenWindow = (r: Rec) => ({ ...r, observed: ["one leaf", "a Z brace", "a window high in the door"] });
+const stageBLite = (ctx: DoorMeasureCtx) => {
+  const d = inches(36, 80);
+  void ctx;
+  return { measure: { size: d.size, parts: [{ t: "lite", box: [d.p(10, 52), d.p(26, 70)], rows: 3, cols: 2 }] }, refuse: null, unexplained: [] };
+};
+
+Deno.test("the agreement check: a window the reads saw and the draft lost asks Stage B, whose part is kept because a Stage A read had it", async () => {
+  const { read, ctx } = singleDoor();
+  const { run, m } = press({ stageA: [seenWindow(withLite), seenWindow(read), seenWindow(read)], hinges: HINGES_OK, handle: HANDLE_OK, stageB: stageBLite(ctx) });
+  const r = await run;
+  assertEquals(r.outcome, "draft");
+  assertEquals(m.count("stageB"), 1);
+  const b = m.sent.find((s) => s.kind === "stageB")!;
+  assertEquals([(b.body.output_config as Rec).effort, b.body.max_tokens, b.images], ["high", 12000, 1]);
+  assert(b.text.includes('"a window high in the door"'), "it is told what is missing");
+  assertEquals(((r.spec as Rec).parts as Rec[]).map((p) => p.t), ["lite"]);
+  assertEquals([r.stageB.status, r.stageB.added], ["ok", 1]);
+  assertEquals(r.mismatches, []);
+  assertFalse(codes(r.warnings).includes("observed_mismatch"));
+});
+
+Deno.test("Stage B: a part no Stage A read had becomes a warning; skipped with under 120 s left, on the lean retry, or by the ceiling", async () => {
+  const { read, ctx } = singleDoor();
+  const lone = await press({ stageA: [seenWindow(read), seenWindow(read), seenWindow(read)], hinges: HINGES_OK, handle: HANDLE_OK, stageB: stageBLite(ctx) }).run;
+  assertEquals((lone.spec as Rec).parts, undefined, "Stage B alone cannot add a part");
+  assert(codes(lone.warnings).includes("stageb_part") && codes(lone.warnings).includes("observed_mismatch"), codes(lone.warnings).join());
+  const late = press({ stageA: [seenWindow(read), seenWindow(read), seenWindow(read)], hinges: HINGES_OK, handle: HANDLE_OK, stageB: stageBLite(ctx) },
+    { deadlineAt: Date.now() + DOOR_STAGEB_MIN_LEFT_MS - 10_000 });
+  const l = await late.run;
+  assertEquals([late.m.count("stageB"), l.stageB.status, l.stageB.reason, l.skipped.stageB], [0, "skipped", "time", "time"]);
+  assert(codes(l.warnings).includes("stageb_skipped"));
+  const lean = press({ stageA: [seenWindow(read), seenWindow(read), seenWindow(read)], hinges: HINGES_OK, handle: HANDLE_OK, stageB: stageBLite(ctx) }, { lean: true });
+  const n = await lean.run;
+  assertEquals([lean.m.count("stageB"), n.stageB.reason, (lean.m.sent[0].body.output_config as Rec).effort], [0, "lean", "low"]);
+  assertEquals(lean.m.count("hinges"), 3, "the lean retry still runs its close-ups");
+});
+
+Deno.test("6-panel doors are drafted, not refused: basic, smooth, six raised parts, the warning and one gap, and no Stage B", async () => {
+  const d = inches(36, 80);
+  const boxes = [[4, 4, 16, 24], [20, 4, 32, 24], [4, 28, 16, 50], [20, 28, 32, 50], [4, 54, 16, 76], [20, 54, 32, 76]];
+  const six = {
+    measure: {
+      size: d.size, leaves: [[d.p(0, 0), d.p(36, 0), d.p(36, 80), d.p(0, 80)]], braces: [], hinges: [], handle: d.p(33, 38),
+      parts: boxes.map(([x0, y0, x1, y1]) => ({ t: "raised", box: [d.p(x0, y0), d.p(x1, y1)] })),
+    },
+    refuse: null, base: "basic", leaves: 1, hingeSide: "left", field: "smooth", brace: "none", panels: [],
+    hinges: { type: "hidden" }, handle: { type: "lever" }, observed: ["one leaf", "six raised panels"], unexplained: ["6-panel door"],
+  };
+  const { run, m } = press({ stageA: [six, six, six], handle: HANDLE_OK });
+  const r = await run;
+  assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+  const spec = r.spec as Rec;
+  assertEquals([spec.base, (spec.field as Rec).dir, (spec.parts as Rec[]).length, (spec.parts as Rec[]).every((p) => p.t === "raised")], ["basic", "smooth", 6, true]);
+  assertEquals(m.count("stageB"), 0, "a known gap is no reason for a second look");
+  assertEquals(r.vocabGaps, ["6-panel"]);
+  assertEquals(r.warnings.find((w) => w.code === "six_panel")?.text, DOOR_SIX_PANEL_TEXT);
+  assertEquals(DOOR_SIX_PANEL_TEXT, "This door's look isn't fully supported yet, so we drew the closest match. Check it against your photo before you save.");
+});
+
+Deno.test("anything still unexplained is a vocabulary gap with a plain warning", async () => {
+  const { read } = singleDoor();
+  const arched = { ...read, unexplained: ["an arched top"] };
+  const r = await press({ stageA: [arched, arched, read], hinges: HINGES_OK, handle: HANDLE_OK, stageB: { measure: { size: singleDoor().ctx.photo, parts: [] }, unexplained: ["an arched top"] } }).run;
+  assertEquals(r.vocabGaps, ["an arched top"]);
+  assertEquals(r.warnings.find((w) => w.code === "vocab_gap")?.text, 'We can\'t draw "an arched top" yet. We\'ve noted it so we can add it.');
+});
+
+Deno.test("the observed check reads the draft as drawn: the base's own fills count, a negation never does", () => {
+  const plank = { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } } as DoorLook;
+  assertEquals(doorObservedMismatches(["a Z brace", "an X in the lower panel"], plank), ["a Z brace", "an X in the lower panel"]);
+  assertEquals(doorObservedMismatches(["a Z brace"], { ...plank, base: "zbrace" } as DoorLook), []);
+  assertEquals(doorObservedMismatches(["an X brace"], { ...plank, base: "xbrace" } as DoorLook), [], "xbrace's lower X is its base default");
+  assertEquals(doorObservedMismatches(["pickets in the lower panel", "a louvred vent"], { ...plank, base: "american" } as DoorLook), ["a louvred vent"]);
+  assertEquals(doorObservedMismatches(["no window", "no braces", "a fiberglass skin"], plank), []);
+  assertEquals(doorObservedMismatches(["a 6-panel door"], plank), [], "a 6-panel door is a known gap, not a mismatch");
+});
+
+// ─── READS FROM FILES (the local path, the sim's recorded mode) ───────────────────────────────────
+Deno.test("doorDraftFromReads: the press's own maths over saved answers, close-ups and Stage B skipped with their warnings", () => {
+  const { read, ctx } = singleDoor();
+  const r = doorDraftFromReads([read, JSON.stringify(read), "```json\n" + JSON.stringify(read) + "\n```"], ctx);
+  assertEquals(r.outcome, "draft");
+  assertEquals((r.spec as Rec).base, "zbrace");
+  assert(codes(r.warnings).includes("closeup_hinges") && codes(r.warnings).includes("closeup_handle"));
+  const seen = doorDraftFromReads([seenWindow(read), seenWindow(read), seenWindow(read)], ctx);
+  assert(codes(seen.warnings).includes("stageb_skipped") && codes(seen.warnings).includes("observed_mismatch"));
+  const withB = doorDraftFromReads([seenWindow(withLite), seenWindow(read), seenWindow(read)], ctx, { stageB: stageBLite(ctx), closeUps: { hinges: { status: "ok", votes: [HINGES_OK, HINGES_OK, HINGES_OK] } } });
+  assertEquals((withB.spec as Rec).parts && ((withB.spec as Rec).parts as Rec[]).length, 1);
+  assertEquals(((withB.spec as Rec).hinges as Rec).type, "strap");
+  const refused = doorDraftFromReads([{ refuse: "open" }, { refuse: "open" }, read], ctx);
+  assertEquals([refused.outcome, refused.refuse?.code, refused.refuse?.reason], ["refused", "ai_door_refused", "open"]);
+  assertEquals(doorDraftFromReads(["junk", "junk"], ctx).error, "ai_door_unparseable");
+});
+
+// ─── THE LEDGER ROW, AND RECOVER ──────────────────────────────────────────────────────────────────
+Deno.test("the ledger row keeps the spec, the warnings and the money for recover and the scorer", async () => {
+  const { read } = singleDoor();
+  const r = await press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK }).run;
+  const f = doorLedgerFields(r);
+  assertEquals([f.status, (f.drafted as Rec).base], ["done", "zbrace"]);
+  const t = f.tokens as Rec;
+  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V1", "claude-opus-5-5", "high", "draft", "hinges"]);
+  assertEquals([t.costCents, t.ceilingCents], [r.costCents, r.ceilingCents]);
+  assertEquals((f.reads as Rec[]).length, 3);
+  assert(typeof f.draft_ms === "number");
+  assertEquals(doorPressSpentCents([{ tokens: t }, { tokens: { costCents: 7 }, self_check_rounds: [{ costCents: 4 }, { ceilingCents: 9 }] }, null, { tokens: "x" }]), (t.ceilingCents as number) + 7 + 4 + 9);
+});
+
+Deno.test("recover: by the newest row's status, the money's sentence when nothing came", () => {
+  const now = Date.parse("2026-10-26T12:00:00Z");
+  const at = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const spec = { v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" } };
+  const done = { id: "r1", created_at: at(60_000), status: "done", drafted: spec, warnings: [{ code: "closeup_meet", text: "t" }], tokens: {} };
+  const d = recoverDoorAnswer(done, { kind: "none" }, now, "look-1");
+  assertEquals(d.kind, "draft");
+  const body = d.body as Rec;
+  assertEquals([body.lookId, body.checkId, body.recovered, (body.spec as Rec).base], ["look-1", "r1", true, "zbrace"]);
+  assertEquals(recoverDoorAnswer({ ...done, drafted: { base: "nope" } }, { kind: "none" }, now, null).kind, "lost");
+  const failed = { ...done, status: "failed", drafted: null, tokens: { failure: { code: "ai_door_timeout", message: "This took too long. Please try again. You haven't been charged." } } };
+  const f = recoverDoorAnswer(failed, { kind: "released" }, now, null);
+  assertEquals([f.kind, (f.body as Rec).message, (f.body as Rec).code], ["lost", "This took too long. Please try again. You haven't been charged.", "ai_door_timeout"]);
+  assertEquals((recoverDoorAnswer(failed, { kind: "captured", postedMs: now }, now, null).body as Rec).message, DOOR_RECOVER_TEXT.chargedInList);
+  const running = { ...done, status: "running", drafted: null };
+  assertEquals(recoverDoorAnswer(running, { kind: "held" }, now, null).kind, "pending");
+  const stale = recoverDoorAnswer({ ...running, created_at: at(DOOR_RECOVER_STALE_MS + 1) }, { kind: "none" }, now, null);
+  assertEquals([stale.kind, stale.kind === "lost" ? stale.severity : "", (stale.body as Rec).reason], ["lost", "error", "stale"]);
+  assertEquals((recoverDoorAnswer(null, { kind: "none" }, now, null).body as Rec).reason, "no_row");
+  assertEquals((recoverDoorAnswer(null, { kind: "unknown" }, now, null).body as Rec).message, DOOR_RECOVER_TEXT.unsure);
+});
+
+Deno.test("the press clock: 8 minutes from the key's first row, 15 s kept to answer", () => {
+  assertEquals(DOOR_PRESS_CLOCK_MS, 480_000);
+  assertEquals(doorPressLeftMs(1_000_000, 1_000_000), 465_000);
+  assertEquals(doorPressLeftMs(1_000_000, 1_000_000 + 400_000), 65_000);
+});
+
+Deno.test("⚠️ the work's deadline never passes the press clock less 15 s, nor the draft's own budget (300 s streamed, 125 s not)", () => {
+  const REQ = 10_000_000;
+  for (const streamed of [true, false]) {
+    for (let age = 0; age < 200_000; age += 10_000) {
+      for (let pressAgo = 0; pressAgo <= DOOR_PRESS_CLOCK_MS; pressAgo += 15_000) {
+        for (const setup of [0, 5_000, 25_000]) {
+          const t0 = REQ + setup, pressStartMs = REQ - pressAgo;
+          const end = doorWorkDeadline({ t0, requestStartMs: REQ, workerBornMs: REQ - age, streamed, pressStartMs });
+          assert(end >= t0, "never before it starts");
+          assert(end <= pressStartMs + DOOR_PRESS_CLOCK_MS - 15_000 || end === t0, `press ${pressAgo} ago, worker ${age}: ends at ${end - t0} past t0`);
+          assert(end - t0 <= (streamed ? 300_000 : 125_000));
+          if (streamed) assert(end <= REQ - age + 400_000 - 75_000 || end - t0 <= 60_000, "75 s before the worker's end");
+        }
+      }
+    }
+  }
+  // A first try on a fresh worker: the whole 300 s. A lean retry 200 s into its press: what is left (265 s).
+  assertEquals(doorWorkDeadline({ t0: REQ, requestStartMs: REQ, workerBornMs: REQ, streamed: true, pressStartMs: REQ }) - REQ, 300_000);
+  assertEquals(doorWorkDeadline({ t0: REQ, requestStartMs: REQ, workerBornMs: REQ, streamed: true, pressStartMs: REQ - 200_000 }) - REQ, 265_000);
+});
+
+// ─── THE PHOTO'S HEADER ───────────────────────────────────────────────────────────────────────────
+Deno.test("imageHeadOf: PNG, JPEG and WebP sizes from their headers; anything else is null", () => {
+  assertEquals(imageHeadOf(pngHead(700, 1556)), { type: "png", width: 700, height: 1556 });
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, ...new Array(14).fill(0), 0xff, 0xc0, 0, 17, 8, 0x06, 0x14, 0x02, 0xbc, 3, ...new Array(12).fill(0)]);
+  assertEquals(imageHeadOf(jpeg), { type: "jpeg", width: 700, height: 1556 });
+  const webp = new Uint8Array(40);
+  webp.set([...new TextEncoder().encode("RIFF"), 0, 0, 0, 0, ...new TextEncoder().encode("WEBPVP8X"), 10, 0, 0, 0, 0, 0, 0, 0]);
+  webp.set([0xbb, 0x02, 0x00, 0x23, 0x06, 0x00], 24);
+  assertEquals(imageHeadOf(webp), { type: "webp", width: 700, height: 1572 });
+  assertEquals(imageHeadOf(new TextEncoder().encode("<svg xmlns=...>")), null);
+  assertEquals(imageHeadOf(new Uint8Array([0xff, 0xd8])), null);
+});

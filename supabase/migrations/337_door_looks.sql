@@ -129,7 +129,8 @@ begin
     self_check_rounds jsonb,
     self_check_at     timestamptz,
     charged_cents     integer,
-    wallet_tx_id      uuid,
+    -- The hold's wallet_transactions.id, which is a bigint (128), as ai_style_calls.wallet_tx_id is (129).
+    wallet_tx_id      bigint,
     constraint ai_door_calls_status_chk check (status in ('running', 'done', 'failed')),
     constraint ai_door_calls_idem_key_chk check (idem_key is null or char_length(idem_key) between 1 and 120),
     constraint ai_door_calls_photo_paths_chk check (photo_paths is null or cardinality(photo_paths) <= 4),
