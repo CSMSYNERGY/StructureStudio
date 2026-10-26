@@ -7487,9 +7487,10 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
                 <div style={{ fontWeight: 800, marginBottom: 3 }}>One of your own fields</div>
                 The answer is saved onto the contact's <b>{cfDef.label || f.key}</b> field
                 {SSF_CF_TYPE_LABEL[cfType] ? <> ({SSF_CF_TYPE_LABEL[cfType].toLowerCase()})</> : null}, as well as in the
-                submission. The field's type{cfType === "select" ? " and its choices" : ""} come from
-                Settings → Customer Hub → Fields, so they can only be changed there — and a change there reaches
-                every form using this field.
+                submission. {cfType === "select"
+                  ? "The field's type and its choices come from Settings → Customer Hub → Fields, so they can only be changed there"
+                  : "The field's type comes from Settings → Customer Hub → Fields, so it can only be changed there"}
+                — and a change there reaches every form using this field.
                 {cfType === "select" && (cfDef.choices || []).length > 0 && (
                   <div style={{ marginTop: 6, color: "#64748B" }}>Choices: {(cfDef.choices || []).join(", ")}</div>
                 )}
