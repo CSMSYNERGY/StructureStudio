@@ -587,8 +587,28 @@ __ssFunctions.invoke = async (name, opts) => {
   } else if (armedAtIssue === ssTargetClientId && SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 && res && res.data && res.data.clientId) {
     ssResolvedClientId = String(res.data.clientId);
   }
+  // A Settings write tells any open designer to look again (2026-10-27). The portal keeps its
+  // designer mounted for the whole session, so without this a door's new 3D look, a window's grid
+  // or a library pick reached the designer only on a page reload (Carolyn, 10-26 call). The
+  // designer side is the "settings saved" effect in StructureStudio's config loader. Sent for the
+  // tenant the call was for, so a designer showing another account ignores it.
+  if (name === "portal-settings" && res && !res.error && !(res.data && res.data.error)
+      && opts && opts.body && typeof opts.body === "object" && SS_SETTINGS_WRITE_RE.test(String(opts.body.action || ""))) {
+    ssSettingsSaved((res.data && res.data.clientId) || opts.body.targetClientId || ssResolvedClientId || null);
+  }
   return res;
 };
+// Which portal-settings actions change something a designer reads. Over-matching costs a designer
+// two read RPCs; under-matching is the bug this exists for, so it errs wide.
+const SS_SETTINGS_WRITE_RE = /^(save_|delete_|reorder_|import_|set_|library_(add|rename|remove|seed_mine))/;
+// Same tab: a window event. Other tabs of this browser: a BroadcastChannel (a channel object also
+// delivers to other objects on the same name in this tab, so the designer here may hear both; it
+// coalesces them).
+function ssSettingsSaved(clientId) {
+  const detail = { clientId: clientId ? String(clientId) : null, at: Date.now() };
+  try { window.dispatchEvent(new CustomEvent("ss:settings-saved", { detail })); } catch (_e) { /* old browser */ }
+  try { const bc = new BroadcastChannel("ss-settings"); bc.postMessage(detail); bc.close(); } catch (_b) { /* no BroadcastChannel */ }
+}
 // Pin the wrapped instance. An own data property shadows the class getter, so every
 // later `sb.functions` access returns THIS client instead of minting an unwrapped one.
 Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: true });
