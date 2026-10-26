@@ -3,9 +3,9 @@
 // Every section 9 bar, shown to trigger: a run just inside its bar passes and one just outside fails.
 // Synthetic doors only: no corpus photo, truth file or builder name comes into this public repo.
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -369,8 +369,11 @@ const READ = {
   refuse: null, base: "basic", leaves: 1, field: "grooved", brace: "none", panels: ["none", "none"],
   hinges: { type: "tstrap" }, handle: { type: "barn" }, observed: ["a mid rail"], unexplained: [],
 };
+const made = [];
+after(() => made.forEach((d) => rmSync(d, { recursive: true, force: true })));
 function synthCorpus() {
   const dir = mkdtempSync(join(tmpdir(), "doorsim-"));
+  made.push(dir);
   writeFileSync(join(dir, "a.truth.json"), JSON.stringify(tcase("a", BASIC)));
   writeFileSync(join(dir, "g.truth.json"), JSON.stringify(REFUSE("g")));
   mkdirSync(join(dir, "reads"));
