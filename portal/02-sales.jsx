@@ -2608,11 +2608,11 @@ const CRM_TABS = [
   // leaves Email disabled, so leading with "pick a deal" would be a lie by omission and send
   // the reader off doing something that changes nothing. Ordered this way the hint always
   // names a reason that is STILL TRUE once the reader has acted on every reason above it.
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit && !c.needsPick,
+  { key: "activity", label: "Create Task", enabled: (c) => c.canEdit && !c.needsPick,
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canEdit ? "You don't have permission to log activities."
       : CRM_PICK_HINT("activity")) },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit && !c.needsPick,
+  { key: "note", label: "Write Note", enabled: (c) => c.canEdit && !c.needsPick,
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canEdit ? "You don't have permission to add notes."
       : CRM_PICK_HINT("note")) },
@@ -2626,7 +2626,7 @@ const CRM_TABS = [
   // books. `needsPick` is deliberately NOT a condition: a meeting is with the PERSON, not
   // about one quote, the same reasoning the Call tab's comment gives. A deal that IS picked
   // gets filed against the booking anyway (shortCode), so nothing is lost by not requiring one.
-  { key: "scheduler", label: "Meeting scheduler",
+  { key: "scheduler", label: "Schedule Meeting",
     enabled: (c) => c.crmUnlocked && !!c.canMeet && !!(c.contact && c.contact.id),
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canMeet ? "You don't have permission to book meetings."
@@ -2644,7 +2644,7 @@ const CRM_TABS = [
   // Hint order: view-as first (nothing on the page can fix it), then permission, then the
   // account's switch, then the contact's own data — each still true once the ones above it
   // are acted on.
-  { key: "call", label: "Call",
+  { key: "call", label: "Make Call",
     enabled: (c) => !c.viewing && !!c.canCall && !!(c.phone && c.phone.on) && !!(c.contact && c.contact.phone),
     hint: (c) => (c.viewing
       ? CRM_VIEWING_CALL_HINT
@@ -2685,7 +2685,7 @@ const CRM_TABS = [
   // fallback for everyone else. Its gates are unchanged — the extension's send runs the same
   // registration, consent and STOP rules — except the operator view-as, which now greys it.
   {
-    key: "sms", label: "SMS",
+    key: "sms", label: "Send SMS",
     enabled: (c) => !c.viewing && c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
     hint: (c) => (c.viewing
       ? CRM_VIEWING_TEXT_HINT
@@ -2714,7 +2714,7 @@ const CRM_TABS = [
   // email address" while the address sat rendered directly above it. A tooltip that blames
   // the data for a permissions problem sends someone off editing a contact that is fine.
   {
-    key: "email", label: "Email",
+    key: "email", label: "Send Email",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.email) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
@@ -2751,7 +2751,7 @@ const CRM_TABS = [
   // promise, and this is it kept. Only a contact record has somewhere to put a file: a
   // design's uploads belong to the person, not to one of their quotes.
   {
-    key: "files", label: "Uploads",
+    key: "files", label: "Upload File",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.id) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
@@ -2789,11 +2789,17 @@ const CRM_CHIPS = [
   // Texts, both directions, one chip — the Emails-chip precedent, and for the same reason.
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
-  { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
+  { key: "messages", label: "SMS", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
   // Calls, voicemails and missed calls — My Synergy Phone. Mirrors CRM_FEED_TYPES.call in
   // _shared/crmFeed.ts; keep the two identical. Shown once the account can call, OR once this
   // record has any call on it, so switching calling off later never hides history that exists.
   { key: "calls", label: "Calls", types: ["call", "call_missed", "voicemail"], when: (c) => !!(c.phone && c.phone.on) || !!c.hasCalls },
+  // MEETINGS — booked, cancelled, and how it went (Carolyn 2026-10-26, "Add Meetings").
+  // What is still ahead of you is Planned; this is the same meeting's history. Mirrors
+  // CRM_FEED_TYPES.meeting in _shared/crmFeed.ts; keep the two identical. No `when`: unlike
+  // SMS and Calls this needs nothing switched on for the account, and the chip prints its
+  // own (0) when a customer has never been booked.
+  { key: "meetings", label: "Meetings", types: ["meeting_booked", "meeting_cancelled", "meeting_done"] },
   // Where the documents live now — ours AND theirs, one list, because "I don't want it all
   // mixed together" was about the two NAMES being interchangeable, not about them being far
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.

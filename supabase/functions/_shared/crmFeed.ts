@@ -74,6 +74,11 @@ export const CRM_FEED_TYPES = {
   // Read from phone_calls (migration 254) with the voicemail embedded; see the slot-14 read.
   // Mirrors CRM_CHIPS' "calls" in portal/02-sales.jsx; keep the two identical.
   call: ["call", "call_missed", "voicemail"],
+  // MEETINGS (Carolyn 2026-10-26, "Add Meetings" on the chip row). What is still AHEAD of you
+  // is Planned; this chip is what HAPPENED — booked, cancelled, and how it went. Three types
+  // under one chip, the email/message/call precedent: one meeting's life is one story.
+  // Mirrors CRM_CHIPS' "meetings" in portal/02-sales.jsx; keep the two identical.
+  meeting: ["meeting_booked", "meeting_cancelled", "meeting_done"],
   // DOCUMENTS ARE HISTORY, NOT AN ACTION. Carolyn, 2026-08-26 24:01, having found the same
   // documents listed in two places: "the top part is about things to do. The bottom part is
   // about history … instead of in two places." So the record page's Documents TAB is gone
@@ -180,7 +185,8 @@ export async function buildCrmFeed(
   //   5 change_orders  6 invoice_sends    7 captured_leads 8 crm_notes
   //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
   //  13 crm_field_changes                14 phone_calls (+ its voicemail)
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls] = await Promise.all([
+  //  15 meetings
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls, meets] = await Promise.all([
     // image_url is the floor-plan PDF the `floor_plan` event below carries. It was missing from
     // this list, so `d.image_url` was always undefined and no floor plan ever reached History.
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact, image_url").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
@@ -301,6 +307,14 @@ export async function buildCrmFeed(
           return r?.data ?? [];
         })().catch(() => [])
       : Promise.resolve([]),
+    // MEETINGS — scoped like crm_notes: the PERSON on a contact record (a meeting is with
+    // them, and most are about no one design), the design's own on a design record. Cancelled
+    // ones are read too: "they cancelled" is the part of the story you most need later.
+    q(opts.contactId
+      ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).eq("contact_id", opts.contactId)
+      : (codes.length
+        ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).in("short_code", codes)
+        : Promise.resolve({ data: [] }))),
   ]);
 
   for (const d of designs as any[]) {
@@ -426,6 +440,21 @@ export async function buildCrmFeed(
   // which reads as broken rather than as early.
   for (const l of leads as any[]) {
     push({ id: `cl:${l.id}`, type: "lead_captured", at: iso(l.created_at), title: `Enquired on the design page${l.source ? ` (${l.source})` : ""}`, icon: "lead" });
+  }
+  // MEETINGS. Up to two events each: it was booked, and then what became of it. The booking
+  // is at created_at, NOT at starts_at — History is what has happened, and dating a booking
+  // in the future would file next week's meeting above today's call. What is ahead of you is
+  // the record's Planned section (CLAUDE.md, "Planned"); this is its history.
+  for (const m of meets as any[]) {
+    const name = (m.meeting_types && m.meeting_types.name) || "Meeting";
+    const when = m.starts_at ? new Date(m.starts_at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : null;
+    push({ id: `mt:${m.id}`, type: "meeting_booked", at: iso(m.created_at), title: `${name} booked`, body: when ? `for ${when}` : null, code: m.short_code, icon: "meeting" });
+    if (m.status === "cancelled") {
+      push({ id: `mtx:${m.id}`, type: "meeting_cancelled", at: iso(m.cancelled_at || m.updated_at), title: `${name} cancelled`, body: m.cancel_reason || null, code: m.short_code, icon: "meeting" });
+    } else if (m.status === "completed" || m.status === "no_show") {
+      // updated_at is the only timestamp either of these writes (set_status).
+      push({ id: `mtd:${m.id}`, type: "meeting_done", at: iso(m.updated_at), title: m.status === "completed" ? `${name} took place` : `${name} — no-show`, code: m.short_code, icon: "meeting" });
+    }
   }
   for (const n of notes as any[]) {
     push({ id: `n:${n.id}`, type: "note", at: iso(n.created_at), title: "Note", body: n.body, code: n.short_code, pinned: !!n.pinned, actor: n.created_by, icon: "note" });

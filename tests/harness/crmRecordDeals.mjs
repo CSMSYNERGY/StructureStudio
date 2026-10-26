@@ -373,7 +373,7 @@ try {
 
       // The lead is PICKED, so the write tabs are open: a lead has no design, and what is written
       // on it is filed against the customer alone (integration review 2026-10-13).
-      const tabsOff = await page.evaluate(() => Object.fromEntries(["Notes", "Activity", "Email", "Uploads"].map((name) => {
+      const tabsOff = await page.evaluate(() => Object.fromEntries(["Write Note", "Create Task", "Send Email", "Upload File"].map((name) => {
         const b = [...document.querySelectorAll("button")].find((x) => x.innerText.trim() === name);
         return [name, b ? b.disabled : "missing"];
       })));

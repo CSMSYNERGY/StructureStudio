@@ -184,7 +184,7 @@ async function repView(label, accessMap, artifact = null, role = "user") {
     return !!b;
   });
   await r.page.waitForTimeout(800);
-  out.tabs = await r.page.evaluate(() => Object.fromEntries(["Activity", "Notes", "SMS", "Email", "Uploads"].map((t) => {
+  out.tabs = await r.page.evaluate(() => Object.fromEntries(["Create Task", "Write Note", "Send SMS", "Send Email", "Upload File"].map((t) => {
     const b = [...document.querySelectorAll("button")].find((x) => (x.innerText || "").trim() === t);
     return [t, b ? { disabled: b.disabled, title: b.getAttribute("title") || "" } : null];
   })));
@@ -299,7 +299,7 @@ try {
     ok("E1 the note is there without the view-only sentence",
       !!v.note && !/not change them/.test(v.note), v.note);
     ok("E2 with the deal picked, Activity, Notes, SMS, Email and Uploads are all live",
-      ["Activity", "Notes", "SMS", "Email", "Uploads"].every((t) => v.tabs[t] && !v.tabs[t].disabled), JSON.stringify(v.tabs));
+      ["Create Task", "Write Note", "Send SMS", "Send Email", "Upload File"].every((t) => v.tabs[t] && !v.tabs[t].disabled), JSON.stringify(v.tabs));
     ok("E3 ✎ Edit is offered", v.editOffered === true);
     ok("E4 the Focus box is live", !!v.focusBox && !v.focusBox.disabled, JSON.stringify(v.focusBox));
   }
@@ -312,7 +312,7 @@ try {
     ok("A1 the admin's list says why it is short, and that they can look but not change",
       !!v.note && /You can view their details but not change them\./.test(v.note), v.note);
     ok("A2 with the deal picked, Activity, Notes, SMS, Email and Uploads are all greyed",
-      v.picked === true && ["Activity", "Notes", "SMS", "Email", "Uploads"].every((t) => v.tabs[t] && v.tabs[t].disabled), JSON.stringify(v.tabs));
+      v.picked === true && ["Create Task", "Write Note", "Send SMS", "Send Email", "Upload File"].every((t) => v.tabs[t] && v.tabs[t].disabled), JSON.stringify(v.tabs));
     ok("A3 no ✎ Edit on the contact", v.editOffered === false);
     ok("A4 the Focus complete box is disabled", !!v.focusBox && v.focusBox.disabled, JSON.stringify(v.focusBox));
     ok("A5 no uncaught page errors", v.pageErrors.length === 0, v.pageErrors.join(" | "));
@@ -322,7 +322,7 @@ try {
     if (!ok(`A6 (${role}) rendered`, v.booted && v.recordRendered)) throw new Error(`${label}: nothing rendered`);
     ok(`A6 (${role}) no row-scope note`, v.note === null, v.note);
     ok(`A6 (${role}) with the deal picked, every write tab is live, ✎ Edit offered, the Focus box live`,
-      ["Activity", "Notes", "SMS", "Email", "Uploads"].every((t) => v.tabs[t] && !v.tabs[t].disabled) && v.editOffered === true
+      ["Create Task", "Write Note", "Send SMS", "Send Email", "Upload File"].every((t) => v.tabs[t] && !v.tabs[t].disabled) && v.editOffered === true
       && !!v.focusBox && !v.focusBox.disabled, JSON.stringify({ tabs: v.tabs, edit: v.editOffered, focus: v.focusBox }));
   }
 
