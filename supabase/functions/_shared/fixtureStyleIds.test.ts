@@ -117,7 +117,10 @@ Deno.test("save_fixture and import_fixtures keep only this tenant's styles", () 
 });
 
 Deno.test("the catalog read returns style_ids, so the portal can show the ticks", () => {
-  const sel = PS.match(/admin\.from\("fixture_items"\)\.select\("([^"]+)"\)\.eq\("client_id", clientId\)\.order\("sort_order"\)/);
-  assert(sel, "the catalog's fixture_items select moved");
+  // Since 337 the column list is FIXTURE_COLUMNS, read with door_look_id and again without it on a
+  // database before 337 (fixturesRead): style_ids must be in the list both reads share.
+  const sel = PS.match(/const FIXTURE_COLUMNS = "([^"]+)";/);
+  assert(sel, "the catalog's fixture_items column list moved");
+  assert(/admin\.from\("fixture_items"\)\.select\(cols\)\.eq\("client_id", clientId\)\.order\("sort_order"\)/.test(PS), "the catalog's fixture_items read moved");
   assertStrictEquals(sel![1].split(", ").includes("style_ids"), true);
 });
