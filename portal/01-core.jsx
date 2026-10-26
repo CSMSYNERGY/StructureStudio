@@ -600,7 +600,7 @@ __ssFunctions.invoke = async (name, opts) => {
 };
 // Which portal-settings actions change something a designer reads. Over-matching costs a designer
 // two read RPCs; under-matching is the bug this exists for, so it errs wide.
-const SS_SETTINGS_WRITE_RE = /^(save_|delete_|reorder_|import_|set_|library_(add|rename|remove|seed_mine))/;
+const SS_SETTINGS_WRITE_RE = /^(save_|delete_|reorder_|import_|set_|library_(add|edit|remove|seed_mine))/;
 // Same tab: a window event. Other tabs of this browser: a BroadcastChannel (a channel object also
 // delivers to other objects on the same name in this tab, so the designer here may hear both; it
 // coalesces them).

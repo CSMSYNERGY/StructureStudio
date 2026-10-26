@@ -56,6 +56,8 @@ import {
 // Workstream 2, phase 8 (review 2026-10-09): an open "Bring your number" request's overlap with
 // another builder's numbers or requests, shown to the operator instead of refused to the builder.
 import { requestFlags } from "../_shared/numberRequestFlags.ts";
+// The StructureStudio library and the builders' library requests (migration 339): ./library.ts.
+import { handleAdminLibraryAction } from "./library.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -516,6 +518,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Workstream 2, phase 8: the open "Bring your number" requests (a builder's numbers and who may
     // approve the move; no PIN, bill or account number exists to show).
     "number_requests_list",
+    // The StructureStudio library's templates and the request queue (339): reads; the queue's photo
+    // links are one-hour signed URLs made per request.
+    "library_items_list", "library_requests_list",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -563,6 +568,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // sub too, with TWILIO_SUBACCOUNTS "on" only (twilioAtCreate.ts). An empty sub costs nothing,
     // and with the switch "on" the builder's own number search or purchase makes the same sub with
     // no operator at all; buying a number in it needs the money grant wherever that happens.
+    // A library request refund (339) credits a builder's wallet: the money grant, like wallet_credit.
+    if (String(action ?? "") === "library_request_refund" && !identity.canBill) {
+      return json({ error: "This operator account cannot refund a builder." }, 403);
+    }
     if ((String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill) {
       return json({ error: "This operator account cannot create or close a builder's phone account." }, 403);
     }
@@ -2284,6 +2293,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // console lists every open one (and the last month's finished ones) across builders, newest
       // first, and moves it on. The move itself is workers/phone-api/PORTING.md; landing the number
       // is portal-settings phone_adopt_number, which marks the request done by itself.
+      // ── The StructureStudio library and the request queue (migration 339) ─────────────────────
+      case "library_items_list":
+      case "library_item_save":
+      case "library_items_reorder":
+      case "library_requests_list":
+      case "library_request_set":
+      case "library_request_refund":
+        return await handleAdminLibraryAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
+
       case "number_requests_list": {
         const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
         const cols = "id, client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at";

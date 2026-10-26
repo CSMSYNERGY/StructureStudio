@@ -58,9 +58,10 @@
 --   P5  client_settings.library_beta (the tenant flag, default off), the request meter
 --       'library_request' at 200 cents, INACTIVE (requests are free until Ahsan arms it, outside any
 --       migration), and the private bucket library-refs (5 MB, JPEG/PNG/WebP) for request photos.
---   P6  the seed: today's code as templates. The 5 claddings, the 9 door looks with the Doors
---       editor's own words, and 6 window grids. Generic words only: the repo is public, so no
---       builder, supplier or brand names. Operators add search terms from Admin → Master Catalog.
+--   P6  the seed: today's code as templates, under the names builders already see. The 5 claddings
+--       (SS_CLADDING_ROWS' names, so seeding a builder's library changes no label a customer reads),
+--       the 9 door looks with the Doors editor's own words, and 6 window grids. No builder or
+--       supplier names: the repo is public. Operators add search terms from Admin → Master Catalog.
 --   P7  apply-time assertions (RAISE on anything wrong).
 --
 -- ── RLS AND GRANTS ───────────────────────────────────────────────────────────────────────
@@ -545,46 +546,46 @@ do $m339_p6$
 begin
   perform set_config('lock_timeout', '5s', true);
   insert into public.library_items (category, slug, name, description, search_terms, look, recolourable, sort_order) values
-    ('cladding', 'lap', 'Lap siding',
+    ('cladding', 'lap', '7" LP Lap Siding',
      'Horizontal boards, each lapping the one below. The course (how much of each board shows) is set per entry, 3 to 12 inches; 6 inches when left blank.',
-     array['lap', 'lap siding', 'clapboard', 'horizontal', 'engineered wood', 'wood lap', 'cement board', 'beveled'], '{"profile":"lap"}', true, 10),
-    ('cladding', 'vinyl', 'Vinyl siding',
+     array['lap', 'lap siding', 'LP', 'clapboard', 'horizontal', 'engineered wood', 'wood lap', 'cement board', 'beveled'], '{"profile":"lap"}', true, 10),
+    ('cladding', 'vinyl', '4.5" Vinyl Siding',
      'Horizontal vinyl siding with its double-course profile.',
      array['vinyl', 'vinyl siding', 'dutch lap', 'double 4', 'horizontal', 'plastic'], '{"profile":"vinyl"}', true, 20),
-    ('cladding', 'panel', 'Panel siding',
+    ('cladding', 'panel', 'Panel Siding',
      'Flat sheet siding with vertical grooves.',
      array['panel', 'panel siding', 'sheet', 'plywood', 'T1-11', 't111', 'grooved', 'smooth panel', 'vertical groove'], '{"profile":"panel"}', true, 30),
-    ('cladding', 'batten', 'Board and batten',
+    ('cladding', 'batten', 'Board & Batten',
      'Wide vertical boards with narrow battens over the seams.',
      array['board and batten', 'batten', 'b&b', 'vertical boards', 'barn siding', 'farmhouse'], '{"profile":"batten"}', true, 40),
-    ('cladding', 'agpanel', 'Metal ribbed panel',
+    ('cladding', 'agpanel', 'AG Panel',
      'Ribbed metal wall panel (the same rib as an agricultural metal roof).',
      array['metal', 'steel', 'ag panel', 'agricultural', 'ribbed', 'corrugated', 'tin', 'post frame'], '{"profile":"agpanel"}', true, 50),
     ('door', 'photo', 'Use the door''s photo',
      'The door''s photo is laid onto the door in 3D. Photos taken at an angle look stretched on the building; switch to one of the built looks if the door looks skewed.',
      array['photo', 'picture', 'image', 'custom', 'auto'], '{"doorStyle":"auto"}', false, 10),
-    ('door', 'plank', 'Board-and-batten door',
+    ('door', 'plank', 'Board-and-batten (built in 3D)',
      'Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks.',
      array['plank', 'board and batten', 'barn door', 'wood door', 'strap hinges'], '{"doorStyle":"plank"}', true, 20),
-    ('door', 'zbrace', 'Board-and-batten door with a Z brace',
+    ('door', 'zbrace', 'Board-and-batten with a Z brace',
      'The board-and-batten door with a single diagonal brace, rising from the hinge side.',
      array['z brace', 'z-brace', 'barn door', 'diagonal brace', 'wood door'], '{"doorStyle":"zbrace"}', true, 30),
-    ('door', 'xbrace', 'Board-and-batten door with an X brace',
+    ('door', 'xbrace', 'Board-and-batten with an X brace',
      'The board-and-batten door with a crossed X brace across the lower panel.',
      array['x brace', 'x-brace', 'crossbuck', 'barn door', 'wood door'], '{"doorStyle":"xbrace"}', true, 40),
-    ('door', 'rollup', 'Roll-up door',
+    ('door', 'rollup', 'Roll-up / garage door',
      'Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch.',
      array['roll up', 'roll-up', 'garage door', 'overhead', 'rollup', 'metal door'], '{"doorStyle":"rollup"}', true, 50),
-    ('door', 'american', 'American door',
+    ('door', 'american', 'American (built in 3D)',
      'A trim frame with a mid rail and vertical pickets across the lower panel, panels in the door colour, with a window in the upper panel if the customer picks one.',
      array['american', 'pickets', 'trim frame', 'shed door', 'barn door'], '{"doorStyle":"american"}', true, 60),
-    ('door', 'basic', 'Basic door',
+    ('door', 'basic', 'Basic (built in 3D)',
      'A trim frame with a mid rail and plain panels in the door colour, with a window in the upper panel if the customer picks one.',
      array['basic', 'plain', 'trim frame', 'shed door', 'barn door'], '{"doorStyle":"basic"}', true, 70),
-    ('door', 'classic', 'Classic door',
+    ('door', 'classic', 'Classic (built in 3D)',
      'A trim frame with an octagon and a diamond in the upper panel and an X in the lower one; a window, if the customer picks one, takes the octagon''s place.',
      array['classic', 'octagon', 'diamond', 'x', 'trim frame', 'shed door', 'barn door'], '{"doorStyle":"classic"}', true, 80),
-    ('door', 'dutch', 'Dutch door',
+    ('door', 'dutch', 'Dutch (built in 3D)',
      'A trim frame with a mid rail and a small dark louvred vent in the lower panel, with a window in the upper panel if the customer picks one.',
      array['dutch', 'vent', 'louvre', 'louver', 'trim frame', 'shed door', 'barn door'], '{"doorStyle":"dutch"}', true, 90),
     ('window', 'automatic', 'Standard window',
