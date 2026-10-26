@@ -278,7 +278,7 @@ export const AREAS: Area[] = [
   // the CRM, not a plan of its own), which is a BILLING check and deliberately not expressed
   // here — an area says what a person may do, never what the account has bought.
   { key: "meetings",          label: "Meetings",           group: "workspace",
-    hint: "Booking pages and meetings — 'Own' is just this person's own calendar; 'Team' adds everyone's; Edit also changes the meeting types",
+    hint: "Booking pages and meetings — 'Own' is just this person's own calendar; 'View' also sees the whole team and books with anyone; 'Edit' also changes the meeting types, the booking pages and other people's hours",
     levels: ["none", "own", "view", "edit"], ownWrites: true },
   // MY SYNERGY PHONE (migration 254, 2026-09-29): making and taking calls, voicemail, the team's call
   // history and the Calls report. Plan: _Extras/Structure Studio Phone Plan 2026-09-28.md §7.
